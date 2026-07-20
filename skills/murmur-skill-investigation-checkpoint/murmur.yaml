@@ -1,0 +1,4 @@
+name: murmur-skill-investigation-checkpoint
+version: 0.1.0
+runtime: skill
+description: "Skill artifact: the investigations convention for checkpoints/decisions.json — record and reuse investigative verdicts (ruled-out/confirmed/uncertain) across a session"

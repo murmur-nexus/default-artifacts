@@ -1,0 +1,218 @@
+name: murmur-tool-git
+version: 0.1.0
+runtime: tool
+implementation: native
+description: |
+  Structured git interface for Murmur capsules. Replaces adding `git` to
+  `capabilities.shell.allow`. Returns typed JSON for all operations. Use `bash`
+  for anything not listed below.
+
+  | op          | sub              | inputs                             | outputs                          |
+  |-------------|------------------|------------------------------------|----------------------------------|
+  | status      |                  | repo                               | entries:[{path,status_code}]     |
+  | add         |                  | repo, paths[]                      | staged:[]                        |
+  | diff        |                  | repo, staged?, path?               | diff:string                      |
+  | restore     |                  | repo, paths[], staged?             | restored:[]                      |
+  | stash       | push/pop/list    | repo, message?, index?             | stash_ref / entries:[]           |
+  | log         |                  | repo, n?, author?, since?, path?   | commits:[{hash,short_hash,...}]  |
+  | show        |                  | repo, ref?                         | commit:{...}, diff:string        |
+  | symbol_history |               | repo, symbol_id, n?                | symbol_id, file, start_line, end_line, commits:[{hash,short_hash,...}] |
+  | commit      |                  | repo, message, allow_empty?        | hash, short_hash, subject        |
+  | cherry_pick |                  | repo, ref                          | hash, short_hash, subject        |
+  | branch      | list/create/del  | repo, name?, from?, force?         | branches:[] / name               |
+  | checkout    |                  | repo, ref, create?                 | branch, detached                 |
+  | switch      |                  | repo, branch, create?              | branch                           |
+  | reset       |                  | repo, mode(soft/mixed/hard), ref?  | ref                              |
+  | fetch       |                  | repo, remote?, branch?             | remote, updated_refs:[]          |
+  | pull        |                  | repo, remote?, branch?, rebase?    | remote, branch, fast_forward     |
+  | push        |                  | repo, remote?, branch?, force?,    | remote, branch, remote_ref       |
+  |             |                  | set_upstream?                      |                                  |
+  | clone       |                  | url, dest, branch?, depth?         | dest, default_branch             |
+  | remote      | list/add/remove  | repo, name?, url?                  | remotes:[] / name                |
+  | tag         | list/create      | repo, name?, ref?, message?        | tags:[] / name,ref               |
+  | merge       |                  | repo, branch, message?, ff_only?   | merged_commit, fast_forward      |
+  | worktree    | add/list/remove  | repo, path?, branch?, force?       | path / worktrees:[]              |
+
+  All responses: {ok:bool, message:string, error_kind?:string, ...fields}
+  repo: absolute path to repo root. Resolved automatically if omitted.
+
+input_schema:
+  type: object
+  properties:
+    operation:
+      type: string
+      enum:
+        - status
+        - add
+        - diff
+        - restore
+        - stash
+        - log
+        - show
+        - symbol_history
+        - commit
+        - cherry_pick
+        - branch
+        - checkout
+        - switch
+        - reset
+        - fetch
+        - pull
+        - push
+        - clone
+        - remote
+        - tag
+        - merge
+        - worktree
+        - create_worktree
+      description: "Operation to perform."
+    repo:
+      type: string
+      description: "Absolute path to the git repository root. Auto-discovered from CWD if omitted."
+    subcommand:
+      type: string
+      description: "Required for multi-subcommand operations — branch (list|create|delete), stash (push|pop|list), remote (list|add|remove), tag (list|create), worktree (add|list|remove). See tool description for per-subcommand fields."
+    message:
+      type: string
+      description: "Required for commit. Optional for merge (no-ff commit message) and stash/push (stash description)."
+    paths:
+      type: array
+      items:
+        type: string
+      description: "Required for add and restore. Array of file paths relative to the repo root."
+    ref:
+      type: string
+      description: "Required for cherry_pick and checkout. Optional (defaults to HEAD) for show, reset, and tag/create."
+    branch:
+      type: string
+      description: "Required for switch, merge, and worktree/add. Optional for fetch, pull, and push (uses current branch if omitted)."
+    name:
+      type: string
+      description: "Required for branch/create, branch/delete, remote/add, remote/remove, and tag/create. Not used for list subcommands."
+    mode:
+      type: string
+      description: "Required for reset. Values: soft | mixed | hard."
+    url:
+      type: string
+      description: "Required for clone and remote/add."
+    dest:
+      type: string
+      description: "Required for clone. Destination directory path."
+    path:
+      type: string
+      description: "Required for worktree/add and worktree/remove. Absolute path for the worktree directory."
+    symbol_id:
+      type: string
+      description: "Required for symbol_history. Stable symbol id from murmur-tool-code-graph (rust://<package>/<module>#<qualified_name>(<signature>)); resolved verbatim against the indexed symbols table to find the symbol's current file and line range."
+    n:
+      type: integer
+      description: "Optional. For log: number of commits to return (default 20). For symbol_history: number of most-recent commits to return that touched the symbol's current line range (default 1)."
+  required:
+    - operation
+
+# allowed_flags and denied_flags declare the tool's input contract.
+# The runtime does not currently enforce these at the WASI layer.
+# Enforcement is implemented in the tool binary — see resolve_repo() in
+# src/main.rs for implementation details.
+denied_flags:
+  - "--interactive"
+  - "-i"
+  - "--patch"
+  - "-p"
+  - "--edit"
+  - "-e"
+
+allowed_flags:
+  status:
+    flags: []
+    positionals: []
+  add:
+    flags: []
+    positionals: ["paths"]
+  diff:
+    flags: ["--staged", "--cached"]
+    positionals: ["path"]
+  restore:
+    flags: ["--staged"]
+    positionals: ["paths"]
+  stash:
+    subcommands: ["push", "pop", "list"]
+    flags: ["-m", "--message"]
+    positionals: ["index"]
+  log:
+    flags: ["--author", "--since", "--until", "-n", "--format"]
+    positionals: ["path"]
+  show:
+    flags: []
+    positionals: ["ref"]
+  symbol_history:
+    flags: ["-n"]
+    positionals: ["symbol_id"]
+  commit:
+    flags: ["-m", "--message", "--allow-empty"]
+    positionals: []
+  cherry_pick:
+    flags: []
+    positionals: ["ref"]
+  branch:
+    subcommands: ["list", "create", "delete"]
+    flags: ["-d", "-D", "--delete", "--force", "--format", "-vv"]
+    positionals: ["name", "from"]
+  checkout:
+    flags: ["-b", "--create"]
+    positionals: ["ref"]
+  switch:
+    flags: ["-c", "--create"]
+    positionals: ["branch"]
+  reset:
+    flags: ["--soft", "--mixed", "--hard"]
+    positionals: ["ref"]
+  fetch:
+    flags: []
+    positionals: ["remote", "branch"]
+  pull:
+    flags: ["--rebase", "--no-rebase"]
+    positionals: ["remote", "branch"]
+  push:
+    flags: ["--force", "-f", "--set-upstream", "-u"]
+    positionals: ["remote", "branch"]
+  clone:
+    flags: ["--branch", "-b", "--depth"]
+    positionals: ["url", "dest"]
+  remote:
+    subcommands: ["list", "add", "remove"]
+    flags: []
+    positionals: ["name", "url"]
+  tag:
+    subcommands: ["list", "create"]
+    flags: ["-a", "--annotate", "-m", "--message"]
+    positionals: ["name", "ref"]
+  merge:
+    flags: ["--ff-only", "--no-edit", "-m", "--message"]
+    positionals: ["branch"]
+  worktree:
+    subcommands: ["add", "list", "remove"]
+    flags: ["--force"]
+    positionals: ["path", "branch"]
+  create_worktree:
+    flags: []
+    positionals: ["path", "branch"]
+
+capabilities:
+  shell:
+    allow:
+      - git
+  filesystem:
+    # Declares which path prefixes this tool is permitted to operate on.
+    # This mirrors the capabilities.network.allow concept for filesystem paths.
+    #
+    # Runtime-level enforcement is not yet implemented: the capsule runtime enforces
+    # network.allow inside Wasmtime and shell.allow at subprocess spawn time, but has
+    # no equivalent mechanism for validating path arguments passed to subprocess calls.
+    # This field is therefore declarative intent only — the tool itself enforces it via
+    # the MURMUR_FILESYSTEM_ALLOW environment variable (see src/main.rs: resolve_repo).
+    #
+    # Future runtime-level enforcement would intercept path arguments at spawn time,
+    # making the tool-level check in resolve_repo() redundant but harmless.
+    allow:
+      - "."   # resolved at runtime to the capsule workdir; real paths are task-provided

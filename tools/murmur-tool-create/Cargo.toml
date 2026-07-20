@@ -1,0 +1,21 @@
+[package]
+name = "murmur-tool-create"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde_json.workspace = true
+wit-bindgen.workspace = true
+
+# Host-target-only. `tempfile` backs the scaffold unit tests; `wasmtime`/`wasmtime-wasi`
+# back tests/wasm_component.rs, which instantiates the compiled wasm32-wasip2 component to
+# prove the scaffold operation runs end-to-end through `murmur:tool/run`. None of these
+# become build-time dependencies of the wasm target itself.
+[dev-dependencies]
+tempfile = "3"
+wasmtime = "46"
+wasmtime-wasi = "46"

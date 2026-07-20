@@ -1,0 +1,73 @@
+name: murmur-tool-code-coverage
+version: 0.1.0
+runtime: tool
+implementation: native
+description: |
+  Spectrum-based fault localization (Ochiai / Tarantula) over a Rust repository
+  already indexed by murmur-tool-code-graph. Input is a directory of per-test
+  LCOV `.info` coverage reports the agent already produced via its own
+  `cargo llvm-cov --lcov` shell calls (this tool never runs tests or coverage
+  itself) plus the list of failing test names. For every indexed symbol whose
+  line range overlaps a covered line, it computes ef/ep (failing/passing tests
+  touching it) and derives Ochiai and Tarantula suspicion, writing all four onto
+  code-graph's existing `symbols` table (columns suspicion_ef, suspicion_ep,
+  suspicion_ochiai, suspicion_tarantula) so static reachability and dynamic
+  suspicion are queryable in one SELECT. MVP language scope is Rust only.
+
+  | op       | inputs                                        | outputs                                              |
+  |----------|-----------------------------------------------|------------------------------------------------------|
+  | localize | repo_path?, coverage_dir, failing_tests,      | failing_test_count, passing_test_count,              |
+  |          | limit?                                         | scored_symbols, truncated, top_suspects:[{symbol_id, |
+  |          |                                               | qualified_name,kind,file,start_line,ef,ep,           |
+  |          |                                               | suspicion_ochiai,suspicion_tarantula}],              |
+  |          |                                               | failing_test_stable_ids, failing_tests_without_      |
+  |          |                                               | coverage, skipped_files, data_path                   |
+
+  Defaults: limit=50 (clamped to [1,10000]); repo_path defaults to the current
+  working directory. The db at <repo_path>/.murmur/code-graph.db must already
+  exist (run murmur-tool-code-graph index_repository first) — this tool never
+  creates it. Ochiai = ef/sqrt(F*(ef+ep)) (0 when ef==0); Tarantula =
+  (ef/F)/((ef/F)+(ep/P)) with the ep/P term 0 when P==0. Symbols no coverage
+  touched stay NULL in all four columns (distinct from a computed 0). Every
+  localize run first resets all four columns repo-wide. A failing test with no
+  matching <name>.info is listed in failing_tests_without_coverage; an
+  unparseable .info is listed in skipped_files; both are non-fatal unless zero
+  failing coverage remains (F==0), which fails. A failing test's own symbol
+  trivially self-covers (ef>=1) — expected SBFL behavior, not filtered.
+  All responses: {ok:bool, message:string, status, summary, data, ...fields}.
+
+input_schema:
+  type: object
+  properties:
+    operation:
+      type: string
+      enum:
+        - localize
+      description: "Operation to perform. Only 'localize' is supported."
+    repo_path:
+      type: string
+      description: "Optional. Absolute path to the repository root containing .murmur/code-graph.db. Defaults to the current working directory. This tool never creates the db — it must already exist (run murmur-tool-code-graph index_repository first)."
+    coverage_dir:
+      type: string
+      description: "Required. Directory of per-test LCOV `.info` files (one per test, e.g. produced by `cargo llvm-cov --lcov --output-path <dir>/<test>.info -- --exact <test>`). Each file's stem is its test name; files whose stem is not in failing_tests are treated as passing tests."
+    failing_tests:
+      type: array
+      items:
+        type: string
+      description: "Required, non-empty. Names of the tests that failed (matching the `.info` file stems in coverage_dir). Each also gets a best-effort stable_id resolved against the code graph."
+    limit:
+      type: integer
+      description: "Optional. Maximum suspects to return inline in top_suspects. Default 50, clamped to [1,10000]. When the scored-symbol count exceeds it, truncated is true and the full sorted list is written to data_path."
+  required:
+    - operation
+    - coverage_dir
+    - failing_tests
+
+capabilities:
+  filesystem:
+    # Declarative intent only — the runtime does not yet enforce path prefixes at
+    # the spawn layer for native tools. This tool reads the LCOV files under
+    # coverage_dir, reads+writes the code graph db under repo_path/.murmur, and
+    # writes its full-suspects payload under repo_path/.murmur/coverage.
+    allow:
+      - "."

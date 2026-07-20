@@ -1,0 +1,14 @@
+[package]
+name = "murmur-hook-diff-summary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+wit-bindgen.workspace = true
+similar = { version = "2", default-features = false, features = ["text"] }

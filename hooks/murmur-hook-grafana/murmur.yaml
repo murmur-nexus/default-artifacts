@@ -1,0 +1,4 @@
+name: murmur-hook-grafana
+version: 0.1.0
+runtime: hook
+description: Emits OTel spans to a Grafana Tempo OTLP/HTTP endpoint for each capsule lifecycle event.

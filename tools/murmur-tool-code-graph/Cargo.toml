@@ -1,0 +1,23 @@
+[package]
+name = "murmur-tool-code-graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "murmur-tool-code-graph"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+tree-sitter.workspace = true
+tree-sitter-rust.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+# Used by the schema-migration integration test to hand-build a pre-slice-shape
+# database (the b5159e36 schema, lacking the new columns) and to inspect columns.
+rusqlite.workspace = true
+sha2.workspace = true

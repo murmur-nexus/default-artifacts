@@ -1,0 +1,12 @@
+[package]
+name = "murmur-hook-grafana"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde_json.workspace = true
+wit-bindgen.workspace = true

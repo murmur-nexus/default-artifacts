@@ -1,0 +1,60 @@
+name: murmur-tool-test-report
+version: 0.1.0
+runtime: tool
+implementation: native
+description: |
+  Parses a raw test-runner output file (already captured on disk by the agent's
+  own shell call — this tool never runs a test process) into a structured list
+  of failures, replacing a wall of traceback text with a handful of addressable
+  facts. Supports four console formats, selected explicitly or auto-detected.
+
+  | op    | inputs                                | outputs                                              |
+  |-------|---------------------------------------|------------------------------------------------------|
+  | parse | input_path, format?, repo_path?       | format_used, total, passed, failed, truncated,       |
+  |       |                                       | failures:[{test_name,file,line,exception,message,    |
+  |       |                                       | stable_id}], data_path                                |
+
+  format: auto (default) | cargo_test | pytest | go_test | jest. `auto` detects
+  from the text's own markers; a failed detection asks for an explicit format.
+  repo_path (optional): a Rust repo with `.murmur/code-graph.db`; cargo_test
+  failures then get a best-effort `stable_id` (the code-graph symbol identity).
+  Other formats always report `stable_id: null` (code-graph MVP is Rust-only).
+  Above 50 failures the inline `failures` array is capped, `truncated` is true,
+  and the full list is written to `data_path`.
+  All responses: {ok:bool, message:string, status, summary, data, ...fields}.
+
+input_schema:
+  type: object
+  properties:
+    operation:
+      type: string
+      enum:
+        - parse
+      description: "Operation to perform. Only 'parse' is supported."
+    input_path:
+      type: string
+      description: "Required. Path to the raw test-runner output file to parse (the agent captured it beforehand via its own shell command)."
+    format:
+      type: string
+      enum:
+        - auto
+        - cargo_test
+        - pytest
+        - go_test
+        - jest
+      description: "Optional. Runner output format. Default 'auto' detects it from signature markers; a failed detection returns a 'failed' result asking for an explicit format."
+    repo_path:
+      type: string
+      description: "Optional. Absolute path to a Rust repository containing .murmur/code-graph.db. When present, cargo_test failures get a best-effort stable_id resolved read-only from that db. Ignored for other formats. Missing db or no unique match degrades to stable_id: null."
+  required:
+    - operation
+    - input_path
+
+capabilities:
+  filesystem:
+    # Declarative intent only — the runtime does not yet enforce path prefixes at
+    # the spawn layer for native tools. This tool reads input_path and an optional
+    # read-only code-graph db under repo_path, and writes the full-failures
+    # payload next to input_path when the inline cap is exceeded.
+    allow:
+      - "."

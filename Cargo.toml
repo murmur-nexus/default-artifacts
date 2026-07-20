@@ -1,0 +1,42 @@
+[workspace]
+members = [
+  "drivers/murmur-driver-anthropic",
+  "drivers/murmur-driver-deepseek",
+  "drivers/murmur-driver-openai",
+  "hooks/murmur-hook-compact",
+  "hooks/murmur-hook-debug",
+  "hooks/murmur-hook-diff-summary",
+  "hooks/murmur-hook-eval",
+  "hooks/murmur-hook-grafana",
+  "hooks/murmur-hook-memory-jsonl",
+  "hooks/murmur-hook-shell-desc",
+  "tools/murmur-tool-create",
+  "tools/murmur-tool-editor",
+  "tools/murmur-tool-code-coverage",
+  "tools/murmur-tool-code-graph",
+  "tools/murmur-tool-git",
+  "tools/murmur-tool-test-report",
+  "tools/murmur-tool-registry-search",
+  "tools/murmur-tool-request-input",
+  "tools/murmur-tool-git/validate",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "Apache-2.0"
+# MSRV. At or below the toolchain pinned in rust-toolchain.toml (currently 1.95.0).
+rust-version = "1.95"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wit-bindgen = "0.59"
+# Native-only dependencies for murmur-tool-code-graph. These pull in C sources
+# (SQLite via `bundled`, and tree-sitter's C runtime + grammar), which do not
+# cross-compile to wasm32-wasip2 — hence the tool is native, like murmur-tool-git.
+rusqlite = { version = "0.31", features = ["bundled"] }
+tree-sitter = "0.22"
+tree-sitter-rust = "0.21"
+sha2 = "0.10"

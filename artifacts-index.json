@@ -1,0 +1,293 @@
+{
+  "schema_version": "1",
+  "updated_at": "2026-07-19T22:03:05Z",
+  "artifacts": [
+    {
+      "name": "murmur-driver-anthropic",
+      "version": "0.1.0",
+      "runtime": "driver",
+      "description": "Anthropic Messages API inference driver for Murmur agent capsules.",
+      "tags": [
+        "driver",
+        "inference",
+        "anthropic"
+      ],
+      "platforms": [
+        "darwin-aarch64",
+        "linux-x86_64"
+      ]
+    },
+    {
+      "name": "murmur-driver-deepseek",
+      "version": "0.1.0",
+      "runtime": "driver",
+      "description": "DeepSeek inference driver \u2014 deepseek-v4-flash and deepseek-v4-pro with thinking mode",
+      "tags": [
+        "driver",
+        "inference",
+        "deepseek"
+      ],
+      "platforms": [
+        "darwin-aarch64",
+        "linux-x86_64"
+      ]
+    },
+    {
+      "name": "murmur-driver-openai",
+      "version": "0.1.0",
+      "runtime": "driver",
+      "description": "OpenAI inference driver for Murmur agent capsules \u2014 Chat Completions, with Responses API for gpt-5 and later models.",
+      "tags": [
+        "driver",
+        "inference",
+        "openai"
+      ],
+      "platforms": [
+        "darwin-aarch64",
+        "linux-x86_64"
+      ]
+    },
+    {
+      "name": "murmur-hook-compact",
+      "version": "0.1.0",
+      "runtime": "hook",
+      "description": "Summarises conversation history when the session token threshold is reached.",
+      "tags": [
+        "hook",
+        "compact"
+      ],
+      "platforms": [
+        "darwin-aarch64",
+        "linux-x86_64"
+      ]
+    },
+    {
+      "name": "murmur-hook-debug",
+      "version": "0.1.0",
+      "runtime": "hook",
+      "description": "Writes hook lifecycle events to hook-debug.jsonl in the capsule workdir.",
+      "tags": [
+        "hook",
+        "debug"
+      ],
+      "platforms": [
+        "darwin-aarch64",
+        "linux-x86_64"
+      ]
+    },
+    {
+      "name": "murmur-hook-diff-summary",
+      "version": "0.1.0",
+      "runtime": "hook",
+      "description": "Snapshots files before each editor tool call and emits a structured unified-diff summary as an artifact event at end of turn.",
+      "tags": [
+        "hook",
+        "diff",
+        "summary"
+      ],
+      "platforms": [
+        "darwin-aarch64",
+        "linux-x86_64"
+      ]
+    },
+    {
+      "name": "murmur-hook-eval",
+      "version": "0.1.0",
+      "runtime": "hook",
+      "description": "Structured evaluation hook \u2014 scores capsule sessions against configured scorers and writes eval.jsonl.",
+      "tags": [
+        "hook",
+        "eval"
+      ],
+      "platforms": [
+        "darwin-aarch64",
+        "linux-x86_64"
+      ]
+    },
+    {
+      "name": "murmur-hook-grafana",
+      "version": "0.1.0",
+      "runtime": "hook",
+      "description": "Emits OTel spans to a Grafana Tempo OTLP/HTTP endpoint for each capsule lifecycle event.",
+      "tags": [
+        "hook",
+        "grafana"
+      ],
+      "platforms": [
+        "darwin-aarch64",
+        "linux-x86_64"
+      ]
+    },
+    {
+      "name": "murmur-hook-memory-jsonl",
+      "version": "0.1.0",
+      "runtime": "hook",
+      "description": "Durable per-Turn Memory Log \u2014 appends each Turn to a JSONL file in the capsule workdir, reloads prior Turns at task start, and writes a close-out marker at task end.",
+      "tags": [
+        "hook",
+        "memory",
+        "jsonl"
+      ],
+      "platforms": [
+        "darwin-aarch64",
+        "linux-x86_64"
+      ]
+    },
+    {
+      "name": "murmur-hook-shell-desc",
+      "version": "0.1.0",
+      "runtime": "hook",
+      "description": "Returns enriched tool manifests for common shell binaries at staging time.",
+      "tags": [
+        "hook",
+        "shell",
+        "desc"
+      ],
+      "platforms": [
+        "darwin-aarch64",
+        "linux-x86_64"
+      ]
+    },
+    {
+      "name": "murmur-tool-create",
+      "version": "0.1.0",
+      "runtime": "tool",
+      "description": "Scaffolds a new tool artifact directory with murmur.yaml, stub implementation, and README.md.",
+      "tags": [
+        "tool",
+        "create"
+      ],
+      "platforms": [
+        "darwin-aarch64",
+        "linux-x86_64"
+      ]
+    },
+    {
+      "name": "murmur-tool-editor",
+      "version": "0.1.0",
+      "runtime": "tool",
+      "description": "Structured file editing interface for Murmur capsules.",
+      "tags": [
+        "tool",
+        "editor"
+      ],
+      "platforms": [
+        "darwin-aarch64",
+        "linux-x86_64"
+      ]
+    },
+    {
+      "name": "murmur-tool-code-coverage",
+      "version": "0.1.0",
+      "runtime": "tool",
+      "description": "Spectrum-based fault localization (Ochiai / Tarantula) over a Rust repository",
+      "tags": [
+        "tool",
+        "code",
+        "coverage"
+      ],
+      "platforms": [
+        "darwin-aarch64",
+        "linux-x86_64"
+      ]
+    },
+    {
+      "name": "murmur-tool-code-graph",
+      "version": "0.1.0",
+      "runtime": "tool",
+      "description": "Indexes a Rust repository into a SQLite-backed symbol/edge graph and answers",
+      "tags": [
+        "tool",
+        "code",
+        "graph"
+      ],
+      "platforms": [
+        "darwin-aarch64",
+        "linux-x86_64"
+      ]
+    },
+    {
+      "name": "murmur-tool-git",
+      "version": "0.1.0",
+      "runtime": "tool",
+      "description": "Structured git interface for Murmur capsules.",
+      "tags": [
+        "tool",
+        "git"
+      ],
+      "platforms": [
+        "darwin-aarch64",
+        "linux-x86_64"
+      ]
+    },
+    {
+      "name": "murmur-tool-test-report",
+      "version": "0.1.0",
+      "runtime": "tool",
+      "description": "Parses a raw test-runner output file (already captured on disk by the agent's",
+      "tags": [
+        "tool",
+        "test",
+        "report"
+      ],
+      "platforms": [
+        "darwin-aarch64",
+        "linux-x86_64"
+      ]
+    },
+    {
+      "name": "murmur-tool-request-input",
+      "version": "0.1.0",
+      "runtime": "tool",
+      "description": "Pauses the agent loop and requests external input via A2A.",
+      "tags": [
+        "tool",
+        "request",
+        "input"
+      ],
+      "platforms": [
+        "darwin-aarch64",
+        "linux-x86_64"
+      ]
+    },
+    {
+      "name": "murmur-tool-registry-search",
+      "version": "0.1.0",
+      "runtime": "tool",
+      "description": "Search the Murmur artifact registry for artifacts matching a keyword.",
+      "tags": [
+        "tool",
+        "registry",
+        "search"
+      ],
+      "platforms": [
+        "darwin-aarch64",
+        "linux-x86_64"
+      ]
+    },
+    {
+      "name": "murmur-skill-create-manifest",
+      "version": "0.1.0",
+      "runtime": "skill",
+      "description": "Skill artifact: complete knowledge for generating valid murmur manifest files",
+      "tags": [
+        "skill",
+        "create",
+        "manifest"
+      ],
+      "platforms": []
+    },
+    {
+      "name": "murmur-skill-investigation-checkpoint",
+      "version": "0.1.0",
+      "runtime": "skill",
+      "description": "Skill artifact: the investigations convention for checkpoints/decisions.json \u2014 record and reuse investigative verdicts (ruled-out/confirmed/uncertain) across a session",
+      "tags": [
+        "skill",
+        "investigation",
+        "checkpoint"
+      ],
+      "platforms": []
+    }
+  ]
+}

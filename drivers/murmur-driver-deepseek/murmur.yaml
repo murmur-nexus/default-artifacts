@@ -1,0 +1,4 @@
+name: murmur-driver-deepseek
+version: 0.1.0
+runtime: driver
+description: "DeepSeek inference driver — deepseek-v4-flash and deepseek-v4-pro with thinking mode"

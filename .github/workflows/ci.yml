@@ -1,0 +1,139 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Release on tag push is handled by build.yml.
+# This workflow runs tests and version verification on every push and PR.
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned toolchain. rust-toolchain.toml is the source of truth; this
+      # `toolchain:` input pre-installs/caches the matching version and adds the
+      # wasm target. Keep it in sync with rust-toolchain.toml's `channel`.
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.95.0"
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm32-wasip2
+
+      # Pinned wasm-tools for component validation (see "Validate built components").
+      - name: Install wasm-tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-tools@1.247.0
+
+      - name: Verify version surfaces match artifacts.toml
+        run: |
+          chmod +x scripts/apply-versions.sh
+          ./scripts/apply-versions.sh
+          # artifacts-index.json is excluded: its updated_at timestamp is always regenerated
+          # with the current time, so it would produce a spurious diff on every CI run.
+          # Validate it separately below.
+          if ! git diff --exit-code -- ':!artifacts-index.json'; then
+            echo ""
+            echo "error: one or more version surfaces are out of sync with artifacts.toml." >&2
+            echo "Run ./scripts/apply-versions.sh locally, commit the changes, then re-push the tag." >&2
+            exit 1
+          fi
+
+      - name: Validate artifacts-index.json
+        run: |
+          python3 -c "
+          import json, sys
+          with open('artifacts-index.json') as f:
+              idx = json.load(f)
+          assert idx.get('schema_version') == '1', f\"schema_version must be '1', got {idx.get('schema_version')!r}\"
+          assert isinstance(idx.get('artifacts'), list), 'artifacts must be an array'
+          assert len(idx['artifacts']) > 0, 'artifacts array must not be empty'
+          for a in idx['artifacts']:
+              for field in ('name', 'version', 'runtime', 'description'):
+                  assert field in a, f\"entry missing required field '{field}': {a}\"
+          print(f\"OK: {len(idx['artifacts'])} artifacts, schema_version={idx['schema_version']!r}\")
+          "
+
+      # artifacts.toml is the source of truth for what ships; the build.yml matrices
+      # are hand-maintained. Without this check a new artifact silently misses every
+      # release while still appearing in artifacts-index.json, so `mur install` fails
+      # on an entry with no .mur.zip behind it.
+      - name: Verify every artifact is covered by a build matrix
+        run: |
+          chmod +x scripts/check-build-coverage.sh
+          ./scripts/check-build-coverage.sh
+
+      - name: Cargo test
+        run: cargo test --workspace
+
+      # Native tools (`implementation: native` in their murmur.yaml) are excluded:
+      # they are host binaries, not components, and their C dependencies
+      # (libsqlite3-sys, tree-sitter) do not cross-compile to wasm32-wasip2.
+      # Keep this list in sync with the `build-native` matrix in build.yml.
+      - name: Cargo build (wasm)
+        run: |
+          cargo build --workspace --target wasm32-wasip2 --release \
+            --exclude murmur-tool-registry-search \
+            --exclude murmur-tool-git \
+            --exclude murmur-tool-git-validate \
+            --exclude murmur-tool-code-graph \
+            --exclude murmur-tool-code-coverage \
+            --exclude murmur-tool-test-report
+
+      # Every built .wasm must be a well-formed component whose world-level
+      # imports/exports match its category (hooks export murmur:hook/lifecycle
+      # with no murmur:* import; drivers/tools export murmur:tool/run and import
+      # only murmur:text/chunks and/or murmur:task/task). Native command
+      # components (murmur-tool-{create,editor,git,...}) are skipped by name.
+      # A malformed or mis-bound component fails here instead of at `mur run`.
+      - name: Validate built components
+        run: |
+          rc=0
+          for wasm in target/wasm32-wasip2/release/*.wasm; do
+            bash scripts/validate-component.sh "$wasm" || rc=1
+          done
+          exit "$rc"
+
+  # Verify the artifact-facing WIT trees (wit/guest, wit/hook) stay byte-identical
+  # to murmur/crates/capsule-runtime/wit. murmur is pinned to a literal SHA so an
+  # unrelated murmur merge can't turn this repo's CI red without a deliberate bump here.
+  #
+  # Both repos are checked out into sibling subdirectories of $GITHUB_WORKSPACE
+  # (default-artifacts/, murmur/) so that check-wit-sync.sh's hard-coded
+  # MURMUR_WIT="$SCRIPT_DIR/../../murmur/crates/capsule-runtime/wit" resolves.
+  # (actions/checkout rejects a path that escapes $GITHUB_WORKSPACE, so murmur
+  # cannot be checked out to `../murmur`; nesting both under the workspace is the
+  # equivalent sibling layout that passes that validation.)
+  wit-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out default-artifacts
+        uses: actions/checkout@v4
+        with:
+          path: default-artifacts
+
+      - name: Check out murmur (pinned) as a sibling directory
+        uses: actions/checkout@v4
+        with:
+          repository: murmur-nexus/murmur
+          # Always a literal SHA — never main/HEAD/a branch ref — so an unrelated
+          # murmur merge cannot turn this repo's CI red without a deliberate bump.
+          #
+          # To re-pin after a WIT change: check out the new murmur beside this
+          # repo, copy its wit/{guest,hook} over this repo's wit/, run
+          # ./scripts/check-wit-sync.sh until it exits 0, then set `ref:` to that
+          # same commit. The mirror and the pin must always move together —
+          # moving one without the other is what turns this job red.
+          ref: 84d544a58e5d2dd7aba526f560387489c3fc3cac
+          path: murmur
+
+      - name: Check artifact-facing WIT files are in sync with murmur
+        working-directory: default-artifacts
+        run: ./scripts/check-wit-sync.sh

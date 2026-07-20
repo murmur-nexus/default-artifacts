@@ -1,0 +1,4 @@
+name: murmur-driver-openai
+version: 0.1.0
+runtime: driver
+description: OpenAI inference driver for Murmur agent capsules — Chat Completions, with Responses API for gpt-5 and later models. Optional stateful continuation via previous_response_id, gated behind an explicit inference.driver.config store grant.

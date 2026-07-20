@@ -1,0 +1,6 @@
+name: murmur-hook-debug
+version: 0.1.0
+runtime: hook
+execution_mode: async
+commit_policy: none
+description: Writes hook lifecycle events to hook-debug.jsonl in the capsule workdir.

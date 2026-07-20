@@ -1,0 +1,255 @@
+name: build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to re-publish (e.g. v0.1.0)'
+        required: true
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+# Publish a GitHub Release for every version tag.
+#
+# Pipeline:
+#   1. verify-versions  — runs apply-versions.sh; fails if any version surface
+#                         is out of sync with artifacts.toml.
+#   2. build-wasm       — matrix over all WASM artifacts (drivers, hooks, and the
+#                         wasm tools: request-input, create, editor).
+#   3. build-native     — matrix over the remaining native tool artifacts
+#                         (git, registry-search).
+#   4. build-skills     — matrix over skill artifacts (zip-only; no Rust compile).
+#   5. release          — collects all .mur.zip outputs and creates the release.
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Step 1: verify all version surfaces match artifacts.toml
+  # ---------------------------------------------------------------------------
+  verify-versions:
+    name: Verify version surfaces
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Apply versions and check for drift
+        run: |
+          chmod +x scripts/apply-versions.sh
+          ./scripts/apply-versions.sh
+          # artifacts-index.json excluded: its updated_at timestamp is always regenerated
+          # with the current time, so it produces a spurious diff on every CI run.
+          if ! git diff --exit-code -- ':!artifacts-index.json'; then
+            echo ""
+            echo "error: one or more version surfaces are out of sync with artifacts.toml." >&2
+            echo "Run ./scripts/apply-versions.sh locally, commit the changes, then re-push the tag." >&2
+            exit 1
+          fi
+          echo "All version surfaces match artifacts.toml."
+
+      - name: Validate artifacts-index.json
+        run: |
+          python3 -c "
+          import json
+          with open('artifacts-index.json') as f:
+              idx = json.load(f)
+          assert idx.get('schema_version') == '1', f\"schema_version must be '1', got {idx.get('schema_version')!r}\"
+          assert isinstance(idx.get('artifacts'), list) and len(idx['artifacts']) > 0
+          for a in idx['artifacts']:
+              for field in ('name', 'version', 'runtime', 'description'):
+                  assert field in a, f\"entry missing required field '{field}': {a}\"
+          print(f\"OK: {len(idx['artifacts'])} artifacts, schema_version={idx['schema_version']!r}\")
+          "
+
+  # ---------------------------------------------------------------------------
+  # Step 2: build WASM artifacts (drivers/ and hooks/)
+  # ---------------------------------------------------------------------------
+  build-wasm:
+    name: Build WASM — ${{ matrix.artifact.name }}
+    needs: verify-versions
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        artifact:
+          - { name: murmur-driver-anthropic,    path: drivers/murmur-driver-anthropic    }
+          - { name: murmur-driver-deepseek,     path: drivers/murmur-driver-deepseek     }
+          - { name: murmur-driver-openai,       path: drivers/murmur-driver-openai       }
+          - { name: murmur-hook-compact,        path: hooks/murmur-hook-compact          }
+          - { name: murmur-hook-debug,          path: hooks/murmur-hook-debug            }
+          - { name: murmur-hook-diff-summary,   path: hooks/murmur-hook-diff-summary     }
+          - { name: murmur-hook-eval,           path: hooks/murmur-hook-eval             }
+          - { name: murmur-hook-grafana,        path: hooks/murmur-hook-grafana          }
+          - { name: murmur-hook-memory-jsonl,   path: hooks/murmur-hook-memory-jsonl     }
+          - { name: murmur-hook-shell-desc,     path: hooks/murmur-hook-shell-desc       }
+          - { name: murmur-tool-request-input,  path: tools/murmur-tool-request-input    }
+          - { name: murmur-tool-create,         path: tools/murmur-tool-create           }
+          - { name: murmur-tool-editor,         path: tools/murmur-tool-editor           }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # Pinned toolchain (source of truth: rust-toolchain.toml). Keep the
+      # `toolchain:` input in sync with that file's `channel`.
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.95.0"
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm32-wasip2
+
+      # Pinned wasm-tools for component validation below.
+      - name: Install wasm-tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-tools@1.247.0
+
+      - name: Build
+        run: cargo build -p ${{ matrix.artifact.name }} --target wasm32-wasip2 --release
+
+      # Validate the freshly-built component against its category's expected world
+      # (drivers/tools export murmur:tool/run; hooks export murmur:hook/lifecycle)
+      # and report its file size (visibility only — no size gate). A malformed or
+      # mis-bound component fails the release job here instead of shipping.
+      - name: Validate component and report size
+        run: |
+          wasm="target/wasm32-wasip2/release/$(echo '${{ matrix.artifact.name }}' | tr '-' '_').wasm"
+          ls -lh "$wasm"
+          du -h "$wasm"
+          bash scripts/validate-component.sh "$wasm"
+
+      - name: Package
+        run: |
+          name="${{ matrix.artifact.name }}"
+          path="${{ matrix.artifact.path }}"
+          version=$(grep '^version:' "$path/murmur.yaml" | awk '{print $2}')
+          wasm="$(echo "$name" | tr '-' '_').wasm"
+          cp "target/wasm32-wasip2/release/$wasm" "$path/"
+          zip_name="${name}-${version}.mur.zip"
+          (cd "$path" && zip -j "$GITHUB_WORKSPACE/$zip_name" murmur.yaml "$wasm")
+          echo "Packaged: $zip_name"
+
+      - name: Upload zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: zip-${{ matrix.artifact.name }}
+          path: "*.mur.zip"
+
+  # ---------------------------------------------------------------------------
+  # Step 3: build native tool artifacts (tools/) — one runner per platform
+  # ---------------------------------------------------------------------------
+  build-native:
+    name: Build native — ${{ matrix.artifact.name }} (${{ matrix.platform.name }})
+    needs: verify-versions
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { name: linux-x86_64,   runner: ubuntu-latest  }
+          - { name: darwin-aarch64, runner: macos-latest   }
+        artifact:
+          - { name: murmur-tool-git,              path: tools/murmur-tool-git              }
+          - { name: murmur-tool-registry-search,  path: tools/murmur-tool-registry-search  }
+          - { name: murmur-tool-code-graph,       path: tools/murmur-tool-code-graph       }
+          - { name: murmur-tool-code-coverage,    path: tools/murmur-tool-code-coverage    }
+          - { name: murmur-tool-test-report,      path: tools/murmur-tool-test-report      }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # Pinned toolchain (source of truth: rust-toolchain.toml). Native tools are
+      # built with the same pin as the wasm artifacts for build consistency; no
+      # wasm-tools step here since this job produces native binaries, not .wasm.
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.95.0"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build and package
+        run: |
+          chmod +x "${{ matrix.artifact.path }}/package.sh"
+          (cd "${{ matrix.artifact.path }}" && ./package.sh "${{ matrix.platform.name }}")
+          zip_file=$(find "${{ matrix.artifact.path }}" -maxdepth 1 -name "*.mur.zip" | head -1)
+          if [ -z "$zip_file" ]; then
+            echo "error: package.sh produced no .mur.zip in ${{ matrix.artifact.path }}" >&2
+            exit 1
+          fi
+          cp "$zip_file" "$GITHUB_WORKSPACE/"
+          echo "Packaged: $(basename "$zip_file")"
+
+      - name: Upload zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: zip-${{ matrix.artifact.name }}-${{ matrix.platform.name }}
+          path: "*.mur.zip"
+
+  # ---------------------------------------------------------------------------
+  # Step 4: build skill artifacts (zip-only — no Rust compile required)
+  # ---------------------------------------------------------------------------
+  build-skills:
+    name: Build skill — ${{ matrix.artifact.name }}
+    needs: verify-versions
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        artifact:
+          - { name: murmur-skill-create-manifest,          path: skills/murmur-skill-create-manifest          }
+          - { name: murmur-skill-investigation-checkpoint, path: skills/murmur-skill-investigation-checkpoint }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Package
+        run: |
+          name="${{ matrix.artifact.name }}"
+          path="${{ matrix.artifact.path }}"
+          version=$(grep '^version:' "$path/murmur.yaml" | awk '{print $2}')
+          zip_name="${name}-${version}.mur.zip"
+          (cd "$path" && zip -j "$GITHUB_WORKSPACE/$zip_name" murmur.yaml skill.md)
+          echo "Packaged: $zip_name"
+
+      - name: Upload zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: zip-${{ matrix.artifact.name }}
+          path: "*.mur.zip"
+
+  # ---------------------------------------------------------------------------
+  # Step 5: collect all zips and publish the GitHub Release
+  # ---------------------------------------------------------------------------
+  release:
+    name: Create GitHub Release
+    needs: [build-wasm, build-native, build-skills]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build zips
+        uses: actions/download-artifact@v4
+        with:
+          pattern: zip-*
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -lh *.mur.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: "*.mur.zip"
+          fail_on_unmatched_files: true
+          files_exists_behavior: overwrite

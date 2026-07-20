@@ -1,0 +1,33 @@
+name: murmur-tool-registry-search
+version: 0.1.0
+runtime: tool
+implementation: native
+description: |
+  Search the Murmur artifact registry for artifacts matching a keyword. Returns ranked results
+  with name, version, runtime type, description, and published date.
+
+  Supports the public default-artifacts index (default), the local artifact store
+  (registry: "local"), and custom registry URLs or absolute file paths.
+
+input_schema:
+  type: object
+  properties:
+    query:
+      type: string
+      description: "Search keyword — matched case-insensitively against artifact name, description, and tags."
+    registry:
+      type: string
+      description: 'Registry to search. Omit for the public index; "local" for the local store; a URL or absolute path for a custom registry.'
+    limit:
+      type: integer
+      description: "Maximum number of results to return. Default: 10."
+  required:
+    - query
+
+capabilities:
+  network:
+    allow:
+      - "https://raw.githubusercontent.com"
+  filesystem:
+    allow:
+      - "~/.murmur/artifacts"

@@ -1,0 +1,35 @@
+PASS src/adder.test.js
+FAIL src/math.test.js
+  math
+    ✓ adds numbers (2 ms)
+    ✕ subtracts numbers (3 ms)
+    ✕ throws on bad input (1 ms)
+
+  ● math › subtracts numbers
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: 1
+    Received: 2
+
+       9 |   test('subtracts numbers', () => {
+    > 10 |     expect(sub(3, 1)).toBe(1);
+         |                       ^
+      11 |   });
+
+      at Object.<anonymous> (src/math.test.js:10:23)
+
+  ● math › throws on bad input
+
+    TypeError: Cannot read properties of undefined (reading 'value')
+
+      14 |   test('throws on bad input', () => {
+    > 15 |     parse(undefined).value;
+         |                      ^
+
+      at Object.<anonymous> (src/math.test.js:15:22)
+
+Test Suites: 1 failed, 1 passed, 2 total
+Tests:       2 failed, 2 passed, 4 total
+Snapshots:   0 total
+Time:        1.23 s

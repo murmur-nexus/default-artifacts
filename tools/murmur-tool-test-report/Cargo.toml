@@ -1,0 +1,21 @@
+[package]
+name = "murmur-tool-test-report"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "murmur-tool-test-report"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+# Used only by the integration suite to hand-build a code-graph fixture db
+# matching murmur-tool-code-graph's schema (scenarios 7–9), since that tool's
+# branch was not merged to main when this slice was implemented.
+serde_json.workspace = true
+rusqlite.workspace = true

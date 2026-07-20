@@ -1,0 +1,105 @@
+name: murmur-tool-code-graph
+version: 0.1.0
+runtime: tool
+implementation: native
+description: |
+  Indexes a Rust repository into a SQLite-backed symbol/edge graph and answers
+  structured queries over it. Symbols are addressed by a stable identity —
+  `rust://<package>/<module>#<qualified-name>(<signature>)` — that survives
+  unrelated edits elsewhere in the repo, not by `file:line`. The graph is stored
+  at `<repo_path>/.murmur/code-graph.db`; re-indexing an unchanged repo is a fast
+  no-op via per-file content-hash comparison. MVP language scope is Rust only.
+
+  | op               | inputs                                        | outputs                                              |
+  |------------------|-----------------------------------------------|------------------------------------------------------|
+  | index_repository | repo_path                                     | changed_files, unchanged_files, removed_files,       |
+  |                  |                                               | total_symbols, total_edges                           |
+  | find_symbol      | repo_path, query, limit?                      | count, matches:[{symbol_id,qualified_name,kind,      |
+  |                  |                                               | signature,module,file,start_line,doc_comment}]       |
+  | get_symbol       | repo_path, symbol_id                          | full symbol detail + callees:[] + callers:[]         |
+  | slice_symbol     | repo_path, symbol_id, max_depth?, max_nodes?, | root, node_count, edge_count, truncated,             |
+  |                  | direction?                                    | nodes:[{symbol_id,qualified_name,depth}], data_path  |
+  | explain_path     | repo_path, from, to, max_depth?               | found:bool, depth, path:[symbol_id]                  |
+  | impact_analysis  | repo_path, file, start_line, end_line,        | roots, callers, tests, routes,                       |
+  |                  | max_depth?, max_nodes?                         | persistence_operations, public_apis, truncated,      |
+  |                  |                                               | data_path (each node: {symbol_id,qualified_name,     |
+  |                  |                                               | kind,file,start_line,depth,confidence})              |
+
+  Defaults: limit=20, max_depth=3 (slice / impact_analysis) / 6 (explain_path),
+  max_nodes=50 (slice / impact_analysis), direction="callees" (use "callers" to
+  walk the reverse call graph).
+  All responses: {ok:bool, message:string, status, summary, data, ...fields}.
+  find_symbol returns an empty match list (not an error) when nothing matches;
+  explain_path reports "no path found within depth N" as a passed result;
+  impact_analysis returns an empty (passed) result when the line range overlaps
+  no symbol, but fails when `file` was never indexed.
+  impact_analysis resolves the edited line range to the symbol(s) it overlaps,
+  walks the reverse call graph (calls edges only), and classifies every touched
+  symbol into tests / routes / persistence_operations / public_apis. The first
+  three are best-effort name/attribute heuristics; public_apis is bare `pub`.
+  Each node's `confidence` (definite|possible|heuristic) is the weakest signal
+  among the call edges used to reach it (method calls and ambiguous names are
+  never definite at Level 1 — no type inference).
+
+input_schema:
+  type: object
+  properties:
+    operation:
+      type: string
+      enum:
+        - index_repository
+        - find_symbol
+        - get_symbol
+        - slice_symbol
+        - explain_path
+        - impact_analysis
+      description: "Operation to perform."
+    repo_path:
+      type: string
+      description: "Absolute path to the repository root. Required for every operation. Defaults to the current working directory if omitted."
+    query:
+      type: string
+      description: "Required for find_symbol. FTS5 search string matched (prefix, ranked) against qualified_name and doc_comment."
+    limit:
+      type: integer
+      description: "Optional for find_symbol. Maximum matches to return. Default 20, clamped to [1,500]."
+    symbol_id:
+      type: string
+      description: "Required for get_symbol and slice_symbol. The stable symbol identity, e.g. rust://mycrate/graph#Foo::bar(&self,usize)->bool."
+    max_depth:
+      type: integer
+      description: "Optional for slice_symbol and impact_analysis (default 3) and explain_path (default 6). Bounds traversal depth; the depth bound is the termination guarantee for cyclic graphs."
+    max_nodes:
+      type: integer
+      description: "Optional for slice_symbol and impact_analysis. Caps the number of nodes returned; the result's truncated flag is set when the cap is hit. Default 50."
+    direction:
+      type: string
+      enum:
+        - callees
+        - callers
+      description: "Optional for slice_symbol. 'callees' (default) walks outgoing call edges; 'callers' walks the reverse call graph."
+    from:
+      type: string
+      description: "Required for explain_path. Source symbol_id."
+    to:
+      type: string
+      description: "Required for explain_path. Target symbol_id."
+    file:
+      type: string
+      description: "Required for impact_analysis. Repo-relative path (leading ./ and absolute repo prefixes are normalized away) of the edited file."
+    start_line:
+      type: integer
+      description: "Required for impact_analysis. 1-based first line of the edited range; symbols overlapping [start_line, end_line] are the impact roots."
+    end_line:
+      type: integer
+      description: "Required for impact_analysis. 1-based last line of the edited range; must be >= start_line."
+  required:
+    - operation
+
+capabilities:
+  filesystem:
+    # Declarative intent only — the runtime does not yet enforce path prefixes at
+    # the spawn layer for native tools. This tool reads Rust sources under
+    # repo_path and writes its graph db + slice payloads under repo_path/.murmur.
+    allow:
+      - "."

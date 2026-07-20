@@ -1,0 +1,57 @@
+name: murmur-tool-editor
+version: 0.1.0
+runtime: tool
+implementation: wasm
+description: |
+  Structured file editing interface for Murmur capsules. Provides read, write,
+  surgical patch, and search operations without requiring shell capability grants.
+
+  | op              | inputs                           | outputs                         |
+  |-----------------|----------------------------------|---------------------------------|
+  | read_file       | path                             | content: string                 |
+  | write_file      | path, content                    | (file created/updated)          |
+  | replace_in_file | path, old_string, new_string     | count: N replacements           |
+  | find_in_files   | pattern, dir, recursive?         | matches: [{path, line, text}]   |
+
+  All responses: {ok:bool, message:string, error_kind?:string}
+  Paths are relative to the capsule workdir (the binary's CWD at dispatch time).
+
+input_schema:
+  type: object
+  properties:
+    operation:
+      type: string
+      enum:
+        - read_file
+        - write_file
+        - replace_in_file
+        - find_in_files
+      description: "Operation to perform."
+    path:
+      type: string
+      description: "File path relative to capsule workdir. Required for read_file, write_file, replace_in_file."
+    content:
+      type: string
+      description: "File content to write. Required for write_file."
+    old_string:
+      type: string
+      description: "Literal string to search for. Required for replace_in_file."
+    new_string:
+      type: string
+      description: "Replacement string. Required for replace_in_file."
+    pattern:
+      type: string
+      description: "Regex pattern to search for. Required for find_in_files."
+    dir:
+      type: string
+      description: "Directory to search in (relative to workdir). Required for find_in_files."
+    recursive:
+      type: boolean
+      description: "Whether to search recursively. Optional for find_in_files. Defaults to true."
+  required:
+    - operation
+
+capabilities:
+  filesystem:
+    allow:
+      - "."

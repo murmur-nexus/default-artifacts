@@ -1,0 +1,16 @@
+# Pin the Rust toolchain for reproducible component builds.
+#
+# Every `.wasm` this repo ships embeds a WASI import set drawn from the toolchain's
+# bundled wasm32-wasip2 sysroot. Letting `dtolnay/rust-toolchain@stable` float means
+# a later rustc release can silently change those embedded wasi:*@x.y.z versions from
+# one CI run to the next. Pinning here fixes the build-to-build-over-time drift axis;
+# `wasm-tools component wit`'s per-category import check (scripts/validate-component.sh)
+# is what catches any drift that ever produces a host-unlinkable import.
+#
+# rustup honours this file at every cargo invocation and auto-installs the channel
+# plus the listed targets, so it is the single source of truth. The `toolchain:`
+# inputs in .github/workflows/*.yml only pre-install/cache the matching toolchain;
+# keep them in sync with `channel` below when advancing the pin.
+[toolchain]
+channel = "1.95.0"
+targets = ["wasm32-wasip2"]

@@ -1,0 +1,23 @@
+[package]
+name = "murmur-tool-code-coverage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "murmur-tool-code-coverage"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+# Used by the integration suite to hand-build a code-graph fixture db matching
+# murmur-tool-code-graph's documented schema (this tool cannot link that
+# binary-only crate as a library) and to reopen the db and inspect the four new
+# suspicion_* columns after a localize run.
+serde_json.workspace = true
+rusqlite.workspace = true

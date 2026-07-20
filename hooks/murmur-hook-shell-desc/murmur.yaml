@@ -1,0 +1,7 @@
+name: murmur-hook-shell-desc
+version: 0.1.0
+runtime: hook
+binding: on-stage
+execution_mode: blocking
+commit_policy: write-manifests
+description: "Returns enriched tool manifests for common shell binaries at staging time."

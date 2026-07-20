@@ -1,0 +1,115 @@
+# Single source of truth for all publishable artifact names, paths, and versions.
+#
+# Bump workflow: edit versions here → run ./scripts/apply-versions.sh → commit → push tag.
+#
+# workspace_version drives [workspace.package] version in the root Cargo.toml.
+# All crates inherit it via `version.workspace = true`.
+#
+# Each [[artifact]] version drives that artifact's murmur.yaml and, for native
+# tools that have a package.sh, the VERSION= variable inside it.
+# An artifact's version may differ from workspace_version when needed.
+#
+# Only publishable artifacts (those with a murmur.yaml) are listed here.
+# Internal-only crates (e.g. murmur-tool-git-validate) must not appear.
+
+workspace_version = "0.1.0"
+
+[[artifact]]
+name = "murmur-driver-anthropic"
+path = "drivers/murmur-driver-anthropic"
+version = "0.1.0"
+
+[[artifact]]
+name = "murmur-driver-deepseek"
+path = "drivers/murmur-driver-deepseek"
+version = "0.1.0"
+
+[[artifact]]
+name = "murmur-driver-openai"
+path = "drivers/murmur-driver-openai"
+version = "0.1.0"
+
+[[artifact]]
+name = "murmur-hook-compact"
+path = "hooks/murmur-hook-compact"
+version = "0.1.0"
+
+[[artifact]]
+name = "murmur-hook-debug"
+path = "hooks/murmur-hook-debug"
+version = "0.1.0"
+
+[[artifact]]
+name = "murmur-hook-diff-summary"
+path = "hooks/murmur-hook-diff-summary"
+version = "0.1.0"
+
+[[artifact]]
+name = "murmur-hook-eval"
+path = "hooks/murmur-hook-eval"
+version = "0.1.0"
+
+[[artifact]]
+name = "murmur-hook-grafana"
+path = "hooks/murmur-hook-grafana"
+version = "0.1.0"
+
+[[artifact]]
+name = "murmur-hook-memory-jsonl"
+path = "hooks/murmur-hook-memory-jsonl"
+version = "0.1.0"
+
+[[artifact]]
+name = "murmur-hook-shell-desc"
+path = "hooks/murmur-hook-shell-desc"
+version = "0.1.0"
+
+[[artifact]]
+name = "murmur-tool-create"
+path = "tools/murmur-tool-create"
+version = "0.1.0"
+
+[[artifact]]
+name = "murmur-tool-editor"
+path = "tools/murmur-tool-editor"
+version = "0.1.0"
+
+[[artifact]]
+name = "murmur-tool-code-coverage"
+path = "tools/murmur-tool-code-coverage"
+version = "0.1.0"
+
+[[artifact]]
+name = "murmur-tool-code-graph"
+path = "tools/murmur-tool-code-graph"
+version = "0.1.0"
+
+[[artifact]]
+name = "murmur-tool-git"
+path = "tools/murmur-tool-git"
+version = "0.1.0"
+
+[[artifact]]
+name = "murmur-tool-test-report"
+path = "tools/murmur-tool-test-report"
+version = "0.1.0"
+
+[[artifact]]
+name = "murmur-tool-request-input"
+path = "tools/murmur-tool-request-input"
+version = "0.1.0"
+
+[[artifact]]
+name = "murmur-tool-registry-search"
+path = "tools/murmur-tool-registry-search"
+version = "0.1.0"
+
+[[artifact]]
+name = "murmur-skill-create-manifest"
+path = "skills/murmur-skill-create-manifest"
+version = "0.1.0"
+
+[[artifact]]
+name = "murmur-skill-investigation-checkpoint"
+path = "skills/murmur-skill-investigation-checkpoint"
+version = "0.1.0"

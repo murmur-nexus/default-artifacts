@@ -1,0 +1,6 @@
+name: murmur-hook-diff-summary
+version: 0.1.0
+runtime: hook
+execution_mode: blocking
+commit_policy: none
+description: Snapshots files before each editor tool call and emits a structured unified-diff summary as an artifact event at end of turn.

@@ -1,0 +1,17 @@
+=== RUN   TestAddOk
+--- PASS: TestAddOk (0.00s)
+=== RUN   TestSubtractWrong
+--- FAIL: TestSubtractWrong (0.00s)
+	sub_test.go:12: expected 4, got 3
+=== RUN   TestPanics
+--- FAIL: TestPanics (0.00s)
+panic: boom: something went wrong
+
+goroutine 21 [running]:
+example/pkg.TestPanics(0xc0000e6340)
+	/home/user/proj/pkg/panic_test.go:20 +0x1d
+testing.tRunner(0xc0000e6340, 0x10c9a10)
+	/usr/local/go/src/testing/testing.go:1690 +0xf4
+created by testing.(*T).Run in goroutine 1
+	/usr/local/go/src/testing/testing.go:1743 +0x390
+FAIL	example/pkg	0.008s
