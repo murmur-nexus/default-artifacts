@@ -1,5 +1,5 @@
 name: murmur-hook-compact
-version: 0.1.0
+version: 0.2.0
 runtime: hook
 binding: on-compaction
 execution_mode: blocking

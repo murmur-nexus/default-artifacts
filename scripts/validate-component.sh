@@ -125,11 +125,20 @@ fi
 
 # ---- 4. murmur:* import check ------------------------------------------------
 if [ "$category" = "hook" ]; then
-  # Hooks import no murmur:* interface at all.
+  # Hooks may import only murmur:runtime/inference (the one-completion capability a
+  # compaction hook uses); most hooks import no murmur:* interface at all.
+  # murmur:hook/lifecycle rides along as a *type-only* instance whenever inference is
+  # imported, because inference.wit does `use murmur:hook/lifecycle.{message}`. It
+  # carries no functions, so wasmtime never asks the linker to satisfy it.
   while IFS= read -r i; do
     [ -n "$i" ] || continue
-    echo "FAIL: $base (hook): unexpected import '$i' — hook components must import no murmur:* interface" >&2
-    fail=1
+    case "$i" in
+      murmur:runtime/inference|murmur:hook/lifecycle) ;;
+      *)
+        echo "FAIL: $base (hook): unexpected import '$i' — hook components may import only murmur:runtime/inference" >&2
+        fail=1
+        ;;
+    esac
   done <<< "$murmur_imports"
 else
   # Tools/drivers may import only murmur:text/chunks and/or murmur:task/task.
