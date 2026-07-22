@@ -17,7 +17,9 @@ the summarised history replaces the session context.
    any other driver inference failure. No checkpoint file or deterministic
    summary is ever produced.
 
-`event.system-prompt` is not yet applied; the hook always uses its own built-in
-summarisation prompt.
+When the host supplies `event.system-prompt`, it fully replaces the hook's built-in
+summarisation prompt for the compaction inference call (a replacement, not a
+concatenation), and applies identically to both the primary attempt and the
+`model: none` fallback. When it is absent, the hook uses its own built-in default.
 
 See [murmur.yaml](./murmur.yaml) for the full manifest and configuration.
