@@ -1,24 +1,50 @@
-//! Compaction hook: when the session token threshold is reached, replace the earlier
-//! conversation history with a summary header and a pointer to the on-disk checkpoint
-//! files, keeping the most recent turns verbatim.
+//! Compaction hook: when the session token threshold is reached, ask the model to
+//! summarise the conversation and hand that summary back as the replacement context.
 //!
-//! The logic that builds the `replace-context` output is deliberately split into a
-//! `cfg`-independent [`logic`] module so it can be unit-tested on the host without the
-//! `wasm32` target. The `wasm_hook` module (compiled only for `wasm32`) is a thin
-//! adapter: it converts the WIT `Message` bindings to/from the plain [`logic::PlainMessage`]
-//! type, calls the pure functions, and performs the checkpoint file I/O.
+//! There is no deterministic fallback. The hook makes one `murmur:runtime/inference`
+//! call with the model the host resolved for compaction (`event.model`); if that call
+//! fails *and* it named a distinct model, it retries exactly once with `model: none`
+//! (the capsule's primary model). If that also fails, compaction fails hard — the same
+//! observable outcome as any other driver inference failure.
+//!
+//! The logic is deliberately split into a `cfg`-independent [`logic`] module so the
+//! whole control flow (including the retry) is unit-testable on the host without the
+//! `wasm32` target: [`logic::compact_with`] takes the "call inference" step as a
+//! closure. The `wasm_hook` module (compiled only for `wasm32`) is a thin adapter that
+//! converts the WIT bindings to/from [`logic::PlainMessage`] and supplies the real
+//! `run-inference` import as that closure.
 
 // ── Pure, host-testable logic (no WASM bindings, no `cfg`) ────────────────────
 pub mod logic {
     use serde_json::Value;
 
-    /// Minimum number of recent messages kept verbatim after the summary header.
-    pub const PRESERVE_LAST_N: usize = 8;
+    /// The hook's own summarisation system prompt. `event.system-prompt` is *never*
+    /// applied in this slice — see [`build_request`], which ignores it by construction
+    /// (it takes no system-prompt parameter at all). A later slice
+    /// (`compaction-system-prompt-in-hook`) wires the override up.
+    pub const DEFAULT_SYSTEM_PROMPT: &str = "You are compacting an agent session so it can \
+        continue in a fresh, smaller context window. Read the conversation transcript and \
+        write a summary that lets the agent resume without re-reading any of it.\n\n\
+        Cover, in this order and only where the transcript supports it:\n\
+        1. The task the agent was given, in the user's own terms.\n\
+        2. What has already been done, including files created or modified and commands run.\n\
+        3. Decisions taken and the reasons for them, so they are not re-litigated.\n\
+        4. Facts discovered about the codebase or environment that were expensive to find.\n\
+        5. What is still outstanding, and the immediate next step.\n\n\
+        Be specific: name files, symbols, commands and identifiers exactly as they appeared. \
+        Do not invent anything the transcript does not state, and do not address the user — \
+        write it as notes for the agent's own future self.";
 
-    /// The fixed pointer prepended to the replaced context. Keeping this as a plain
-    /// `&str` (rather than a `format!` with no arguments) is both correct and clippy-clean.
-    pub const CHECKPOINT_NOTICE: &str = "Previous session summary:\n\n\
-         [Checkpoints written to workdir/checkpoints/: summary.md, plan.json, decisions.json]";
+    /// The instruction appended as the final transcript message, so the request always
+    /// ends on a `user` turn and always names the task explicitly.
+    pub const SUMMARY_INSTRUCTION: &str =
+        "The conversation above is the session to compact. Write the summary now.";
+
+    /// Marker the host folds into a `"tool"`-role message's `content` before dispatching
+    /// a compaction event, because the WIT `message` record has no room for the sibling
+    /// `tool_call_id`/`is_error` fields every inference driver requires. Kept in sync with
+    /// `TOOL_MARKER` in murmur's `capsule-runtime/src/agent.rs`.
+    pub const TOOL_MARKER: &str = "__murmur_tool_msg__";
 
     /// A role-tagged message, independent of the WIT bindings so it can be constructed
     /// and asserted on in host tests.
@@ -32,6 +58,15 @@ pub mod logic {
         pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
             PlainMessage { role: role.into(), content: content.into() }
         }
+    }
+
+    /// One `run-inference` request, in bindings-free form. The adapter maps this
+    /// field-for-field onto the generated `InferenceRequest`.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct InferenceCall {
+        pub messages: Vec<PlainMessage>,
+        pub system_prompt: String,
+        pub model: Option<String>,
     }
 
     /// Extract readable text from a message's content field. The content is stored as its
@@ -58,100 +93,144 @@ pub mod logic {
         content.to_string()
     }
 
-    /// Build the text summary of the session — message counts, threshold, and a snippet
-    /// of the last assistant response. Included both in `checkpoints/summary.md` and as
-    /// the summary message of the replace-context output.
-    pub fn build_summary(messages: &[PlainMessage], session_tokens: u64, threshold: f64) -> String {
-        let user_count = messages.iter().filter(|m| m.role == "user").count();
-        let assistant_count = messages.iter().filter(|m| m.role == "assistant").count();
+    /// Render one incoming event message into a transcript message safe to forward to a
+    /// driver.
+    ///
+    /// A `"tool"`-role message arrives as the host's [`TOOL_MARKER`] envelope — its real
+    /// `tool_call_id`/`is_error`/`body` live inside the JSON, and forwarding it as-is
+    /// would reach the driver as a `"tool"` message with no `tool_call_id` (a hard driver
+    /// error). It is therefore unwrapped into readable text, tagged with its
+    /// `tool_call_id` so the model can still tell tool results apart, and re-roled to
+    /// `"user"`. Anything that is not an `assistant` turn also becomes `"user"`, so the
+    /// transcript only ever contains the two roles every driver accepts.
+    pub fn render_message(message: &PlainMessage) -> PlainMessage {
+        let role = if message.role == "assistant" { "assistant" } else { "user" };
 
-        let last_assistant_snippet = messages
-            .iter()
-            .rev()
-            .find(|m| m.role == "assistant")
-            .map(|m| {
-                let text = extract_text(&m.content);
-                if text.len() > 300 {
-                    // Slice on a char boundary so multi-byte text can't panic.
-                    let end = text
-                        .char_indices()
-                        .take_while(|(i, _)| *i <= 300)
-                        .last()
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    format!("{}…", &text[..end])
-                } else {
-                    text
-                }
-            })
-            .unwrap_or_default();
-
-        let mut summary = format!(
-            "Session compacted at {pct:.0}% of context window ({session_tokens} tokens).\n\
-             Original history: {total} messages ({user} user, {asst} assistant).\n\
-             The {keep} most recent turns are preserved verbatim below.",
-            pct = threshold * 100.0,
-            total = messages.len(),
-            user = user_count,
-            asst = assistant_count,
-            keep = PRESERVE_LAST_N.min(messages.len()),
-        );
-
-        if !last_assistant_snippet.is_empty() {
-            summary.push_str("\n\nLast assistant response:\n");
-            summary.push_str(&last_assistant_snippet);
+        if message.role == "tool" {
+            if let Some(text) = render_tool_envelope(&message.content) {
+                return PlainMessage::new(role, text);
+            }
         }
 
-        summary
+        PlainMessage::new(role, extract_text(&message.content))
     }
 
-    /// Build the full replace-context message list that seeds the next context window:
-    ///
-    /// 1. a `user` message pointing at the checkpoint files ([`CHECKPOINT_NOTICE`]),
-    /// 2. an `assistant` message carrying the session summary, then
-    /// 3. the last [`PRESERVE_LAST_N`] messages, verbatim.
-    ///
-    /// This is the exact content committed via `HookOutput::ReplaceContext`.
-    pub fn build_replace_context(
-        messages: &[PlainMessage],
-        session_tokens: u64,
-        threshold: f64,
-    ) -> Vec<PlainMessage> {
-        let summary_text = build_summary(messages, session_tokens, threshold);
-        let preserve_from = messages.len().saturating_sub(PRESERVE_LAST_N);
+    /// Unwrap a [`TOOL_MARKER`] envelope into readable text. Returns `None` when the
+    /// content is not an envelope (not JSON, not an object, or marker absent/false), so
+    /// the caller falls back to plain [`extract_text`] handling.
+    fn render_tool_envelope(content: &str) -> Option<String> {
+        let parsed: Value = serde_json::from_str(content).ok()?;
+        if parsed.get(TOOL_MARKER).and_then(Value::as_bool) != Some(true) {
+            return None;
+        }
 
-        let mut out = Vec::with_capacity(2 + (messages.len() - preserve_from));
-        // The checkpoint pointer is the first message, so re-orientation to the
-        // checkpoint files is the natural first move after compaction.
-        out.push(PlainMessage::new("user", CHECKPOINT_NOTICE));
-        out.push(PlainMessage::new("assistant", summary_text));
-        out.extend(messages[preserve_from..].iter().cloned());
+        let tool_call_id = parsed.get("tool_call_id").and_then(Value::as_str).unwrap_or("unknown");
+        let failed = parsed.get("is_error").and_then(Value::as_bool) == Some(true);
+        let body = match parsed.get("body") {
+            None | Some(Value::Null) => String::new(),
+            Some(body) => extract_text(&body.to_string()),
+        };
+
+        let status = if failed { " (error)" } else { "" };
+        Some(format!("[tool result for call {tool_call_id}{status}]\n{body}"))
+    }
+
+    /// Build the transcript handed to `run-inference`: every event message rendered by
+    /// [`render_message`], then [`SUMMARY_INSTRUCTION`] as a final `user` turn.
+    ///
+    /// Content here is plain text, *not* JSON-encoded: the host forwards a hook's
+    /// `run-inference` messages to the driver with `{"role": role, "content": content}`
+    /// verbatim, with no parse step. (The replace-context path is the opposite — see
+    /// [`build_replace_context`].)
+    pub fn build_transcript(messages: &[PlainMessage]) -> Vec<PlainMessage> {
+        let mut out: Vec<PlainMessage> = messages.iter().map(render_message).collect();
+        out.push(PlainMessage::new("user", SUMMARY_INSTRUCTION));
         out
     }
 
-    /// Render the `checkpoints/summary.md` file body for a given summary.
-    pub fn checkpoint_markdown(summary: &str, original_count: usize) -> String {
-        format!(
-            "# Compaction Summary\n\n\
-             {summary}\n\n\
-             ## Original Message Count\n\n\
-             {original_count} messages\n"
-        )
+    /// Build the request for one summarisation attempt. `system_prompt` is always
+    /// [`DEFAULT_SYSTEM_PROMPT`]; there is no parameter through which an
+    /// `event.system-prompt` could reach it.
+    pub fn build_request(messages: &[PlainMessage], model: Option<String>) -> InferenceCall {
+        InferenceCall {
+            messages: build_transcript(messages),
+            system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
+            model,
+        }
+    }
+
+    /// Build the replace-context output: a single `user` message carrying the model's
+    /// summary.
+    ///
+    /// One message, not a header/tail pair — the summary *is* the new context, and
+    /// keeping recent turns verbatim is precisely the deterministic strategy this slice
+    /// removes. `user` rather than `assistant` because the replacement seeds the next
+    /// window and must not read as something the model already said.
+    ///
+    /// The content is the JSON serialization of the summary text, because the host parses
+    /// a returned message's content back out of JSON (falling back to a raw text block).
+    /// Encoding it means a summary that happens to look like JSON (`42`, `[...]`) still
+    /// arrives as text.
+    pub fn build_replace_context(summary: &str) -> Vec<PlainMessage> {
+        let content = serde_json::to_string(summary).unwrap_or_else(|_| summary.to_string());
+        vec![PlainMessage::new("user", content)]
+    }
+
+    /// The whole compaction control flow, with the inference call injected so it is
+    /// testable on the host.
+    ///
+    /// * one call with `model`;
+    /// * on failure, exactly one retry with `model: none` — but only when `model` was
+    ///   `Some`, since retrying a `None` request would be a byte-identical repeat;
+    /// * both failed (or the only attempt failed) → `Err`. No deterministic fallback.
+    pub fn compact_with<F>(
+        messages: &[PlainMessage],
+        model: Option<String>,
+        mut call: F,
+    ) -> Result<Vec<PlainMessage>, String>
+    where
+        F: FnMut(InferenceCall) -> Result<String, String>,
+    {
+        let primary = model.clone();
+        let first = call(build_request(messages, primary.clone()));
+
+        let summary = match first {
+            Ok(text) => text,
+            Err(first_err) => {
+                let Some(requested) = primary else {
+                    return Err(format!("compaction inference failed: {first_err}"));
+                };
+                // The failed attempt named a distinct model, so falling back to the
+                // capsule's primary model is a genuinely different request.
+                match call(build_request(messages, None)) {
+                    Ok(text) => text,
+                    Err(fallback_err) => {
+                        return Err(format!(
+                            "compaction inference failed with model '{requested}' \
+                             ({first_err}) and with the capsule's primary model \
+                             ({fallback_err})"
+                        ))
+                    }
+                }
+            }
+        };
+
+        Ok(build_replace_context(&summary))
     }
 }
 
-// ── WASM adapter: WIT bindings + checkpoint file I/O (wasm32 only) ─────────────
+// ── WASM adapter: WIT bindings ↔ pure logic (wasm32 only) ─────────────────────
 #[cfg(target_arch = "wasm32")]
 mod wasm_hook {
-    use std::fs;
-
-    use crate::logic::{self, PlainMessage};
+    use crate::logic::{self, InferenceCall, PlainMessage};
 
     wit_bindgen::generate!({
         path: "../../wit/hook",
         world: "hook",
         generate_all,
     });
+
+    use murmur::runtime::inference::{run_inference, InferenceRequest, Message as InferenceMessage};
 
     pub struct MurmurCompact;
 
@@ -182,9 +261,22 @@ mod wasm_hook {
         }
 
         fn on_compaction(event: CompactionEvent) -> Result<HookOutput, String> {
-            compact(event)
-                .map(HookOutput::ReplaceContext)
-                .map_err(|e| format!("compact failed: {e}"))
+            // `event.system_prompt` is deliberately not read: this slice always uses the
+            // hook's own `DEFAULT_SYSTEM_PROMPT`.
+            let plain: Vec<PlainMessage> = event
+                .messages
+                .iter()
+                .map(|m| PlainMessage::new(m.role.clone(), m.content.clone()))
+                .collect();
+
+            let new_messages = logic::compact_with(&plain, event.model, dispatch)?;
+
+            Ok(HookOutput::ReplaceContext(
+                new_messages
+                    .into_iter()
+                    .map(|m| Message { role: m.role, content: m.content })
+                    .collect(),
+            ))
         }
 
         fn on_session_end(_event: SessionEndEvent) -> Result<HookOutput, String> {
@@ -200,130 +292,258 @@ mod wasm_hook {
         }
     }
 
-    fn compact(event: CompactionEvent) -> Result<Vec<Message>, String> {
-        // Convert WIT messages to the plain, host-testable representation.
-        let plain: Vec<PlainMessage> = event
-            .messages
-            .iter()
-            .map(|m| PlainMessage::new(m.role.clone(), m.content.clone()))
-            .collect();
-        let original_count = plain.len();
-
-        let summary_text = logic::build_summary(&plain, event.session_tokens, event.threshold);
-        write_checkpoints(&summary_text, original_count)
-            .map_err(|e| format!("checkpoint write failed: {e}"))?;
-
-        // Build the replace-context list with the pure logic, then map back to WIT.
-        let new_messages = logic::build_replace_context(&plain, event.session_tokens, event.threshold);
-        Ok(new_messages
-            .into_iter()
-            .map(|m| Message { role: m.role, content: m.content })
-            .collect())
-    }
-
-    // Writes checkpoint files to workdir/checkpoints/. Files: summary.md (compaction
-    // summary), plan.json and decisions.json (populated by LLM-powered compaction once
-    // the runtime supports wasi:http in hooks; stubs written now for schema compliance).
-    // These are the files referenced by the replace-context pointer.
-    fn write_checkpoints(summary: &str, original_count: usize) -> Result<(), std::io::Error> {
-        fs::create_dir_all("checkpoints")?;
-        fs::write("checkpoints/summary.md", logic::checkpoint_markdown(summary, original_count))?;
-        fs::write("checkpoints/plan.json", "{\"tasks\":[]}")?;
-        fs::write("checkpoints/decisions.json", "{\"decisions\":[]}")?;
-        Ok(())
+    /// The one impure step of the control flow: hand a built request to the host's
+    /// `murmur:runtime/inference` import and return just the completion text.
+    fn dispatch(call: InferenceCall) -> Result<String, String> {
+        let request = InferenceRequest {
+            messages: call
+                .messages
+                .into_iter()
+                .map(|m| InferenceMessage { role: m.role, content: m.content })
+                .collect(),
+            system_prompt: Some(call.system_prompt),
+            model: call.model,
+        };
+        run_inference(&request).map(|response| response.text)
     }
 
     export!(MurmurCompact);
 }
 
-// ── Host-runnable unit tests for the pure replace-context logic ───────────────
+// ── Host-runnable unit tests for the pure compaction logic ────────────────────
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use super::logic::{
-        self, build_replace_context, build_summary, extract_text, PlainMessage, CHECKPOINT_NOTICE,
-        PRESERVE_LAST_N,
+        build_replace_context, build_request, build_transcript, compact_with, extract_text,
+        render_message, InferenceCall, PlainMessage, DEFAULT_SYSTEM_PROMPT, SUMMARY_INSTRUCTION,
+        TOOL_MARKER,
     };
 
     fn msg(role: &str, content: &str) -> PlainMessage {
         PlainMessage::new(role, content)
     }
 
+    fn history() -> Vec<PlainMessage> {
+        vec![msg("user", "\"do the thing\""), msg("assistant", "\"done\"")]
+    }
+
+    /// Records every request it is handed and replies from a scripted list of outcomes.
+    struct FakeInference {
+        calls: RefCell<Vec<InferenceCall>>,
+        replies: RefCell<Vec<Result<String, String>>>,
+    }
+
+    impl FakeInference {
+        fn new(replies: Vec<Result<String, String>>) -> Self {
+            FakeInference { calls: RefCell::new(Vec::new()), replies: RefCell::new(replies) }
+        }
+
+        fn call(&self, request: InferenceCall) -> Result<String, String> {
+            self.calls.borrow_mut().push(request);
+            self.replies.borrow_mut().remove(0)
+        }
+
+        fn calls(self) -> Vec<InferenceCall> {
+            self.calls.into_inner()
+        }
+    }
+
+    // ── control flow ──────────────────────────────────────────────────────────
+
     #[test]
-    fn checkpoint_pointer_is_first_message_and_points_at_checkpoint_files() {
-        let messages = vec![
-            msg("user", "\"first question\""),
-            msg("assistant", "\"first answer\""),
-            msg("user", "\"second question\""),
-            msg("assistant", "\"final answer\""),
-        ];
+    fn happy_path_makes_exactly_one_call_with_the_requested_model() {
+        let fake = FakeInference::new(vec![Ok("THE SUMMARY".to_string())]);
 
-        let out = build_replace_context(&messages, 42_000, 0.85);
+        let out = compact_with(&history(), Some("haiku-compact".to_string()), |r| fake.call(r))
+            .expect("summarisation succeeded");
 
-        // 1. The first message is the user-role checkpoint pointer, verbatim.
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].model.as_deref(), Some("haiku-compact"));
+        assert_eq!(out, build_replace_context("THE SUMMARY"));
+    }
+
+    #[test]
+    fn failure_retries_once_with_the_primary_model_and_uses_its_answer() {
+        let fake = FakeInference::new(vec![
+            Err("model not available".to_string()),
+            Ok("FALLBACK SUMMARY".to_string()),
+        ]);
+
+        let out = compact_with(&history(), Some("haiku-compact".to_string()), |r| fake.call(r))
+            .expect("fallback succeeded");
+
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 2, "one attempt per model, so each gets its own trace span");
+        assert_eq!(calls[0].model.as_deref(), Some("haiku-compact"));
+        assert_eq!(calls[1].model, None, "the fallback asks for the capsule's primary model");
+        // Same transcript and system prompt both times — only the model differs.
+        assert_eq!(calls[0].messages, calls[1].messages);
+        assert_eq!(calls[0].system_prompt, calls[1].system_prompt);
+        assert_eq!(out, build_replace_context("FALLBACK SUMMARY"));
+    }
+
+    #[test]
+    fn no_redundant_retry_when_no_compaction_model_was_requested() {
+        let fake = FakeInference::new(vec![Err("driver exploded".to_string())]);
+
+        let err = compact_with(&history(), None, |r| fake.call(r)).unwrap_err();
+
+        assert_eq!(fake.calls().len(), 1, "a second `model: none` call would be identical");
+        assert!(err.contains("driver exploded"), "{err}");
+    }
+
+    #[test]
+    fn both_attempts_failing_is_a_hard_error_naming_both_causes() {
+        let fake = FakeInference::new(vec![
+            Err("first boom".to_string()),
+            Err("second boom".to_string()),
+        ]);
+
+        let err = compact_with(&history(), Some("haiku-compact".to_string()), |r| fake.call(r))
+            .unwrap_err();
+
+        assert_eq!(fake.calls().len(), 2);
+        assert!(err.contains("haiku-compact"), "{err}");
+        assert!(err.contains("first boom"), "{err}");
+        assert!(err.contains("second boom"), "{err}");
+    }
+
+    // ── request shape ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn system_prompt_is_always_the_built_in_default() {
+        // Whatever an `event.system-prompt` might contain, it has no route into the
+        // request: `build_request` takes no system-prompt argument at all.
+        let fake = FakeInference::new(vec![Err("nope".to_string()), Ok("s".to_string())]);
+        compact_with(&history(), Some("m".to_string()), |r| fake.call(r)).unwrap();
+
+        for call in fake.calls() {
+            assert_eq!(call.system_prompt, DEFAULT_SYSTEM_PROMPT);
+        }
+    }
+
+    #[test]
+    fn transcript_carries_every_message_plus_a_final_user_instruction() {
+        let transcript = build_transcript(&history());
+
+        assert_eq!(transcript.len(), history().len() + 1);
+        assert_eq!(transcript[0], msg("user", "do the thing"));
+        assert_eq!(transcript[1], msg("assistant", "done"));
+        assert_eq!(transcript[2], msg("user", SUMMARY_INSTRUCTION));
+    }
+
+    #[test]
+    fn replace_context_is_one_user_message_holding_the_json_encoded_summary() {
+        let out = build_replace_context("summary body");
+
+        assert_eq!(out.len(), 1);
         assert_eq!(out[0].role, "user");
-        assert_eq!(out[0].content, CHECKPOINT_NOTICE);
-        // The pointer names all three checkpoint files under workdir/checkpoints/.
-        assert!(out[0].content.contains("workdir/checkpoints/"));
-        assert!(out[0].content.contains("summary.md"));
-        assert!(out[0].content.contains("plan.json"));
-        assert!(out[0].content.contains("decisions.json"));
-
-        // 2. The second message is the assistant-role summary.
-        assert_eq!(out[1].role, "assistant");
-        assert!(out[1].content.contains("Session compacted at 85% of context window"));
-        assert!(out[1].content.contains("42000 tokens"));
-        assert!(out[1].content.contains("4 messages (2 user, 2 assistant)"));
+        assert_eq!(out[0].content, "\"summary body\"");
+        // The host parses this back out of JSON, so a JSON-looking summary stays text.
+        assert_eq!(build_replace_context("42")[0].content, "\"42\"");
     }
 
     #[test]
-    fn short_history_is_preserved_verbatim_after_the_header_pair() {
-        // Fewer than PRESERVE_LAST_N messages: all are kept verbatim after the 2-message
-        // header pair, in order.
-        let messages = vec![
-            msg("user", "\"q1\""),
-            msg("assistant", "\"a1\""),
-            msg("user", "\"q2\""),
-        ];
+    fn request_model_is_passed_through_verbatim() {
+        assert_eq!(build_request(&history(), None).model, None);
+        assert_eq!(
+            build_request(&history(), Some("x".to_string())).model.as_deref(),
+            Some("x")
+        );
+    }
 
-        let out = build_replace_context(&messages, 10, 0.5);
+    // ── tool-marker rendering ─────────────────────────────────────────────────
 
-        assert_eq!(out.len(), 2 + messages.len());
-        assert_eq!(out[0].content, CHECKPOINT_NOTICE);
-        assert_eq!(&out[2..], &messages[..]);
+    fn envelope(
+        tool_call_id: serde_json::Value,
+        is_error: serde_json::Value,
+        body: serde_json::Value,
+    ) -> String {
+        serde_json::json!({
+            TOOL_MARKER: true,
+            "tool_call_id": tool_call_id,
+            "is_error": is_error,
+            "body": body,
+        })
+        .to_string()
     }
 
     #[test]
-    fn only_last_n_messages_are_preserved_when_history_is_long() {
-        // 20 messages -> header pair + exactly the last PRESERVE_LAST_N verbatim.
-        let messages: Vec<PlainMessage> = (0..20)
-            .map(|i| {
-                let role = if i % 2 == 0 { "user" } else { "assistant" };
-                msg(role, &format!("\"turn {i}\""))
-            })
-            .collect();
+    fn tool_marker_becomes_readable_text_under_a_non_tool_role() {
+        let wrapped = envelope(
+            serde_json::json!("call_42"),
+            serde_json::Value::Null,
+            serde_json::json!("3 tests passed"),
+        );
 
-        let out = build_replace_context(&messages, 100, 0.9);
+        let rendered = render_message(&msg("tool", &wrapped));
 
-        assert_eq!(out.len(), 2 + PRESERVE_LAST_N);
-        assert_eq!(out[0].content, CHECKPOINT_NOTICE);
-        // The preserved tail is exactly the last PRESERVE_LAST_N source messages, in order.
-        assert_eq!(&out[2..], &messages[messages.len() - PRESERVE_LAST_N..]);
+        assert_ne!(rendered.role, "tool", "a tool role with no tool_call_id breaks every driver");
+        assert_eq!(rendered.role, "user");
+        assert!(rendered.content.contains("call_42"), "{}", rendered.content);
+        assert!(rendered.content.contains("3 tests passed"), "{}", rendered.content);
+        // No raw wrapper JSON reaches the model.
+        assert!(!rendered.content.contains(TOOL_MARKER), "{}", rendered.content);
+        assert!(!rendered.content.contains("\"body\""), "{}", rendered.content);
     }
 
     #[test]
-    fn summary_includes_last_assistant_snippet_extracted_from_content_blocks() {
-        // Content stored as a JSON array of content blocks: extract_text pulls the text.
-        let messages = vec![
-            msg("user", "\"hi\""),
-            msg(
-                "assistant",
-                r#"[{"type":"text","text":"the decisive final answer"}]"#,
-            ),
-        ];
+    fn tool_marker_body_content_blocks_are_flattened_and_errors_are_flagged() {
+        let wrapped = envelope(
+            serde_json::json!("call_7"),
+            serde_json::json!(true),
+            serde_json::json!([{"type": "text", "text": "exit code 1"}]),
+        );
 
-        let out = build_replace_context(&messages, 1, 0.1);
-        assert!(out[1].content.contains("Last assistant response:"));
-        assert!(out[1].content.contains("the decisive final answer"));
+        let rendered = render_message(&msg("tool", &wrapped));
+
+        assert!(rendered.content.contains("(error)"), "{}", rendered.content);
+        assert!(rendered.content.contains("exit code 1"), "{}", rendered.content);
+    }
+
+    #[test]
+    fn tool_marker_with_missing_fields_still_renders() {
+        let wrapped = envelope(
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        );
+
+        let rendered = render_message(&msg("tool", &wrapped));
+
+        assert_eq!(rendered.role, "user");
+        assert!(rendered.content.contains("unknown"), "{}", rendered.content);
+    }
+
+    #[test]
+    fn tool_message_without_a_valid_marker_falls_back_to_extract_text() {
+        // Not JSON at all.
+        let raw = render_message(&msg("tool", "just some output"));
+        assert_eq!(raw, msg("user", "just some output"));
+
+        // JSON, but not our envelope: treated as ordinary content.
+        let other = render_message(&msg("tool", r#"{"__murmur_tool_msg__":false,"body":"x"}"#));
+        assert_eq!(other.role, "user");
+        assert_eq!(other.content, r#"{"__murmur_tool_msg__":false,"body":"x"}"#);
+
+        // A plain JSON string content.
+        let quoted = render_message(&msg("tool", "\"quoted output\""));
+        assert_eq!(quoted, msg("user", "quoted output"));
+    }
+
+    #[test]
+    fn non_tool_messages_keep_the_existing_extract_text_handling() {
+        assert_eq!(
+            render_message(&msg("assistant", r#"[{"type":"text","text":"hello"}]"#)),
+            msg("assistant", "hello")
+        );
+        assert_eq!(render_message(&msg("user", "\"plain\"")), msg("user", "plain"));
+        assert_eq!(render_message(&msg("user", "raw")), msg("user", "raw"));
+        // An unknown role is normalised to `user` rather than forwarded as-is.
+        assert_eq!(render_message(&msg("system", "\"note\"")), msg("user", "note"));
     }
 
     #[test]
@@ -335,22 +555,5 @@ mod tests {
         assert_eq!(extract_text(r#""just a string""#), "just a string");
         // Not valid JSON: falls back to the raw content.
         assert_eq!(extract_text("raw text"), "raw text");
-    }
-
-    #[test]
-    fn summary_snippet_truncation_is_char_boundary_safe() {
-        // A long multi-byte assistant message must not panic when truncated at ~300 bytes.
-        let long = format!("\"{}\"", "é".repeat(400));
-        let messages = vec![msg("assistant", &long)];
-        let summary = build_summary(&messages, 5, 0.6);
-        assert!(summary.contains('…'));
-    }
-
-    #[test]
-    fn checkpoint_markdown_embeds_summary_and_count() {
-        let md = logic::checkpoint_markdown("SUMMARY BODY", 12);
-        assert!(md.starts_with("# Compaction Summary"));
-        assert!(md.contains("SUMMARY BODY"));
-        assert!(md.contains("12 messages"));
     }
 }
