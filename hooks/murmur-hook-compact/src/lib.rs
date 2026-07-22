@@ -18,10 +18,10 @@
 pub mod logic {
     use serde_json::Value;
 
-    /// The hook's own summarisation system prompt. `event.system-prompt` is *never*
-    /// applied in this slice — see [`build_request`], which ignores it by construction
-    /// (it takes no system-prompt parameter at all). A later slice
-    /// (`compaction-system-prompt-in-hook`) wires the override up.
+    /// The hook's own summarisation system prompt, used when the host supplies no
+    /// `event.system-prompt` override. When an override *is* present, [`build_request`]
+    /// uses it verbatim in place of this default (a full replacement, not a
+    /// concatenation).
     pub const DEFAULT_SYSTEM_PROMPT: &str = "You are compacting an agent session so it can \
         continue in a fresh, smaller context window. Read the conversation transcript and \
         write a summary that lets the agent resume without re-reading any of it.\n\n\
@@ -160,13 +160,18 @@ pub mod logic {
         out
     }
 
-    /// Build the request for one summarisation attempt. `system_prompt` is always
-    /// [`DEFAULT_SYSTEM_PROMPT`]; there is no parameter through which an
-    /// `event.system-prompt` could reach it.
-    pub fn build_request(messages: &[PlainMessage], model: Option<String>) -> InferenceCall {
+    /// Build the request for one summarisation attempt. `system_prompt` is the host's
+    /// `event.system-prompt` override when present; when `None`, it falls back to
+    /// [`DEFAULT_SYSTEM_PROMPT`]. This `unwrap_or` is the single source of truth for the
+    /// default — callers pass the override through unresolved.
+    pub fn build_request(
+        messages: &[PlainMessage],
+        model: Option<String>,
+        system_prompt: Option<&str>,
+    ) -> InferenceCall {
         InferenceCall {
             messages: build_transcript(messages),
-            system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
+            system_prompt: system_prompt.unwrap_or(DEFAULT_SYSTEM_PROMPT).to_string(),
             model,
         }
     }
@@ -195,15 +200,20 @@ pub mod logic {
     /// * on failure, exactly one retry with `model: none` — but only when `model` was
     ///   `Some`, since retrying a `None` request would be a byte-identical repeat;
     /// * both failed (or the only attempt failed) → `Err`. No deterministic fallback.
+    ///
+    /// `system_prompt` is the host's `event.system-prompt` override (or `None` to use
+    /// [`DEFAULT_SYSTEM_PROMPT`]). It is threaded into *both* [`build_request`] calls, so
+    /// the primary attempt and the `model: none` fallback carry the identical prompt.
     pub fn compact_with<F>(
         messages: &[PlainMessage],
         model: Option<String>,
+        system_prompt: Option<&str>,
         mut call: F,
     ) -> Result<Vec<PlainMessage>, String>
     where
         F: FnMut(InferenceCall) -> Result<String, String>,
     {
-        let first = call(build_request(messages, model.clone()));
+        let first = call(build_request(messages, model.clone(), system_prompt));
 
         let summary = match first {
             Ok(text) => text,
@@ -213,7 +223,7 @@ pub mod logic {
                 };
                 // The failed attempt named a distinct model, so falling back to the
                 // capsule's primary model is a genuinely different request.
-                match call(build_request(messages, None)) {
+                match call(build_request(messages, None, system_prompt)) {
                     Ok(text) => text,
                     Err(fallback_err) => {
                         return Err(format!(
@@ -274,15 +284,21 @@ mod wasm_hook {
         }
 
         fn on_compaction(event: CompactionEvent) -> Result<HookOutput, String> {
-            // `event.system_prompt` is deliberately not read: this slice always uses the
-            // hook's own `DEFAULT_SYSTEM_PROMPT`.
             let plain: Vec<PlainMessage> = event
                 .messages
                 .iter()
                 .map(|m| PlainMessage::new(m.role.clone(), m.content.clone()))
                 .collect();
 
-            let new_messages = logic::compact_with(&plain, event.model, dispatch)?;
+            // Forward the host's `event.system-prompt` override verbatim; `build_request`
+            // is the single place that falls back to `DEFAULT_SYSTEM_PROMPT` when it is
+            // `None`, so the adapter must not resolve it here.
+            let new_messages = logic::compact_with(
+                &plain,
+                event.model,
+                event.system_prompt.as_deref(),
+                dispatch,
+            )?;
 
             Ok(HookOutput::ReplaceContext(
                 new_messages
@@ -381,7 +397,7 @@ mod tests {
     fn happy_path_makes_exactly_one_call_with_the_requested_model() {
         let fake = FakeInference::new(vec![Ok("THE SUMMARY".to_string())]);
 
-        let out = compact_with(&history(), Some("haiku-compact".to_string()), |r| {
+        let out = compact_with(&history(), Some("haiku-compact".to_string()), None, |r| {
             fake.call(r)
         })
         .expect("summarisation succeeded");
@@ -399,7 +415,7 @@ mod tests {
             Ok("FALLBACK SUMMARY".to_string()),
         ]);
 
-        let out = compact_with(&history(), Some("haiku-compact".to_string()), |r| {
+        let out = compact_with(&history(), Some("haiku-compact".to_string()), None, |r| {
             fake.call(r)
         })
         .expect("fallback succeeded");
@@ -425,7 +441,7 @@ mod tests {
     fn no_redundant_retry_when_no_compaction_model_was_requested() {
         let fake = FakeInference::new(vec![Err("driver exploded".to_string())]);
 
-        let err = compact_with(&history(), None, |r| fake.call(r)).unwrap_err();
+        let err = compact_with(&history(), None, None, |r| fake.call(r)).unwrap_err();
 
         assert_eq!(
             fake.calls().len(),
@@ -442,7 +458,7 @@ mod tests {
             Err("second boom".to_string()),
         ]);
 
-        let err = compact_with(&history(), Some("haiku-compact".to_string()), |r| {
+        let err = compact_with(&history(), Some("haiku-compact".to_string()), None, |r| {
             fake.call(r)
         })
         .unwrap_err();
@@ -456,15 +472,76 @@ mod tests {
     // ── request shape ─────────────────────────────────────────────────────────
 
     #[test]
-    fn system_prompt_is_always_the_built_in_default() {
-        // Whatever an `event.system-prompt` might contain, it has no route into the
-        // request: `build_request` takes no system-prompt argument at all.
+    fn system_prompt_override_absent_uses_the_built_in_default_on_both_attempts() {
+        // No `event.system-prompt`: both the primary and fallback attempts fall back to
+        // `DEFAULT_SYSTEM_PROMPT` — the pre-existing behaviour, unchanged.
         let fake = FakeInference::new(vec![Err("nope".to_string()), Ok("s".to_string())]);
-        compact_with(&history(), Some("m".to_string()), |r| fake.call(r)).unwrap();
+        compact_with(&history(), Some("m".to_string()), None, |r| fake.call(r)).unwrap();
 
-        for call in fake.calls() {
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 2);
+        for call in &calls {
             assert_eq!(call.system_prompt, DEFAULT_SYSTEM_PROMPT);
         }
+    }
+
+    #[test]
+    fn system_prompt_override_present_replaces_the_default_on_both_attempts() {
+        // The override reaches both the primary attempt and the `model: none` fallback,
+        // identically — never just the first (mirrors the model-field assertion in
+        // `failure_retries_once_with_the_primary_model_and_uses_its_answer`).
+        let override_prompt = "task = X, currently editing Y, already tried Z";
+        let fake = FakeInference::new(vec![
+            Err("model not available".to_string()),
+            Ok("FALLBACK SUMMARY".to_string()),
+        ]);
+
+        compact_with(
+            &history(),
+            Some("haiku-compact".to_string()),
+            Some(override_prompt),
+            |r| fake.call(r),
+        )
+        .expect("fallback succeeded");
+
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].system_prompt, override_prompt);
+        assert_eq!(calls[1].system_prompt, override_prompt);
+        // Both attempts carry the *same* prompt — a regression that threads the override
+        // into only the first call would fail here.
+        assert_eq!(calls[0].system_prompt, calls[1].system_prompt);
+    }
+
+    #[test]
+    fn system_prompt_override_present_without_fallback_yields_one_overridden_call() {
+        // A double that succeeds on the first attempt: exactly one recorded call, and its
+        // system prompt is the override verbatim.
+        let fake = FakeInference::new(vec![Ok("SUMMARY".to_string())]);
+
+        compact_with(
+            &history(),
+            Some("haiku-compact".to_string()),
+            Some("custom prompt"),
+            |r| fake.call(r),
+        )
+        .expect("summarisation succeeded");
+
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].system_prompt, "custom prompt");
+    }
+
+    #[test]
+    fn system_prompt_override_is_a_full_replacement_not_a_concatenation() {
+        // The recorded prompt is byte-identical to the override, and neither string
+        // contains the other as a substring — ruling out `format!("{default}\n{over}")`.
+        let override_prompt = "task = X, currently editing Y, already tried Z";
+        let request = build_request(&history(), None, Some(override_prompt));
+
+        assert_eq!(request.system_prompt, override_prompt);
+        assert!(!request.system_prompt.contains(DEFAULT_SYSTEM_PROMPT));
+        assert!(!DEFAULT_SYSTEM_PROMPT.contains(override_prompt));
     }
 
     #[test]
@@ -490,9 +567,9 @@ mod tests {
 
     #[test]
     fn request_model_is_passed_through_verbatim() {
-        assert_eq!(build_request(&history(), None).model, None);
+        assert_eq!(build_request(&history(), None, None).model, None);
         assert_eq!(
-            build_request(&history(), Some("x".to_string()))
+            build_request(&history(), Some("x".to_string()), None)
                 .model
                 .as_deref(),
             Some("x")

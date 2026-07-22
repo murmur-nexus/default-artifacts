@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-07-22T14:54:55Z",
+  "updated_at": "2026-07-22T22:21:33Z",
   "artifacts": [
     {
       "name": "murmur-driver-anthropic",
@@ -49,7 +49,7 @@
     },
     {
       "name": "murmur-hook-compact",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "runtime": "hook",
       "description": "Summarises conversation history when the session token threshold is reached.",
       "tags": [
