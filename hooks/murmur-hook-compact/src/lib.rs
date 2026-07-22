@@ -293,8 +293,12 @@ mod wasm_hook {
             // Forward the host's `event.system-prompt` override verbatim; `build_request`
             // is the single place that falls back to `DEFAULT_SYSTEM_PROMPT` when it is
             // `None`, so the adapter must not resolve it here.
-            let new_messages =
-                logic::compact_with(&plain, event.model, event.system_prompt.as_deref(), dispatch)?;
+            let new_messages = logic::compact_with(
+                &plain,
+                event.model,
+                event.system_prompt.as_deref(),
+                dispatch,
+            )?;
 
             Ok(HookOutput::ReplaceContext(
                 new_messages
