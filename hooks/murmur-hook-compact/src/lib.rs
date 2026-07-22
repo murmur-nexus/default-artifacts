@@ -56,7 +56,10 @@ pub mod logic {
 
     impl PlainMessage {
         pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
-            PlainMessage { role: role.into(), content: content.into() }
+            PlainMessage {
+                role: role.into(),
+                content: content.into(),
+            }
         }
     }
 
@@ -104,7 +107,11 @@ pub mod logic {
     /// `"user"`. Anything that is not an `assistant` turn also becomes `"user"`, so the
     /// transcript only ever contains the two roles every driver accepts.
     pub fn render_message(message: &PlainMessage) -> PlainMessage {
-        let role = if message.role == "assistant" { "assistant" } else { "user" };
+        let role = if message.role == "assistant" {
+            "assistant"
+        } else {
+            "user"
+        };
 
         if message.role == "tool" {
             if let Some(text) = render_tool_envelope(&message.content) {
@@ -124,7 +131,10 @@ pub mod logic {
             return None;
         }
 
-        let tool_call_id = parsed.get("tool_call_id").and_then(Value::as_str).unwrap_or("unknown");
+        let tool_call_id = parsed
+            .get("tool_call_id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
         let failed = parsed.get("is_error").and_then(Value::as_bool) == Some(true);
         let body = match parsed.get("body") {
             None | Some(Value::Null) => String::new(),
@@ -132,7 +142,9 @@ pub mod logic {
         };
 
         let status = if failed { " (error)" } else { "" };
-        Some(format!("[tool result for call {tool_call_id}{status}]\n{body}"))
+        Some(format!(
+            "[tool result for call {tool_call_id}{status}]\n{body}"
+        ))
     }
 
     /// Build the transcript handed to `run-inference`: every event message rendered by
@@ -191,13 +203,12 @@ pub mod logic {
     where
         F: FnMut(InferenceCall) -> Result<String, String>,
     {
-        let primary = model.clone();
-        let first = call(build_request(messages, primary.clone()));
+        let first = call(build_request(messages, model.clone()));
 
         let summary = match first {
             Ok(text) => text,
             Err(first_err) => {
-                let Some(requested) = primary else {
+                let Some(requested) = model else {
                     return Err(format!("compaction inference failed: {first_err}"));
                 };
                 // The failed attempt named a distinct model, so falling back to the
@@ -230,7 +241,9 @@ mod wasm_hook {
         generate_all,
     });
 
-    use murmur::runtime::inference::{run_inference, InferenceRequest, Message as InferenceMessage};
+    use murmur::runtime::inference::{
+        run_inference, InferenceRequest, Message as InferenceMessage,
+    };
 
     pub struct MurmurCompact;
 
@@ -274,7 +287,10 @@ mod wasm_hook {
             Ok(HookOutput::ReplaceContext(
                 new_messages
                     .into_iter()
-                    .map(|m| Message { role: m.role, content: m.content })
+                    .map(|m| Message {
+                        role: m.role,
+                        content: m.content,
+                    })
                     .collect(),
             ))
         }
@@ -299,7 +315,10 @@ mod wasm_hook {
             messages: call
                 .messages
                 .into_iter()
-                .map(|m| InferenceMessage { role: m.role, content: m.content })
+                .map(|m| InferenceMessage {
+                    role: m.role,
+                    content: m.content,
+                })
                 .collect(),
             system_prompt: Some(call.system_prompt),
             model: call.model,
@@ -326,7 +345,10 @@ mod tests {
     }
 
     fn history() -> Vec<PlainMessage> {
-        vec![msg("user", "\"do the thing\""), msg("assistant", "\"done\"")]
+        vec![
+            msg("user", "\"do the thing\""),
+            msg("assistant", "\"done\""),
+        ]
     }
 
     /// Records every request it is handed and replies from a scripted list of outcomes.
@@ -337,7 +359,10 @@ mod tests {
 
     impl FakeInference {
         fn new(replies: Vec<Result<String, String>>) -> Self {
-            FakeInference { calls: RefCell::new(Vec::new()), replies: RefCell::new(replies) }
+            FakeInference {
+                calls: RefCell::new(Vec::new()),
+                replies: RefCell::new(replies),
+            }
         }
 
         fn call(&self, request: InferenceCall) -> Result<String, String> {
@@ -356,8 +381,10 @@ mod tests {
     fn happy_path_makes_exactly_one_call_with_the_requested_model() {
         let fake = FakeInference::new(vec![Ok("THE SUMMARY".to_string())]);
 
-        let out = compact_with(&history(), Some("haiku-compact".to_string()), |r| fake.call(r))
-            .expect("summarisation succeeded");
+        let out = compact_with(&history(), Some("haiku-compact".to_string()), |r| {
+            fake.call(r)
+        })
+        .expect("summarisation succeeded");
 
         let calls = fake.calls();
         assert_eq!(calls.len(), 1);
@@ -372,13 +399,22 @@ mod tests {
             Ok("FALLBACK SUMMARY".to_string()),
         ]);
 
-        let out = compact_with(&history(), Some("haiku-compact".to_string()), |r| fake.call(r))
-            .expect("fallback succeeded");
+        let out = compact_with(&history(), Some("haiku-compact".to_string()), |r| {
+            fake.call(r)
+        })
+        .expect("fallback succeeded");
 
         let calls = fake.calls();
-        assert_eq!(calls.len(), 2, "one attempt per model, so each gets its own trace span");
+        assert_eq!(
+            calls.len(),
+            2,
+            "one attempt per model, so each gets its own trace span"
+        );
         assert_eq!(calls[0].model.as_deref(), Some("haiku-compact"));
-        assert_eq!(calls[1].model, None, "the fallback asks for the capsule's primary model");
+        assert_eq!(
+            calls[1].model, None,
+            "the fallback asks for the capsule's primary model"
+        );
         // Same transcript and system prompt both times — only the model differs.
         assert_eq!(calls[0].messages, calls[1].messages);
         assert_eq!(calls[0].system_prompt, calls[1].system_prompt);
@@ -391,7 +427,11 @@ mod tests {
 
         let err = compact_with(&history(), None, |r| fake.call(r)).unwrap_err();
 
-        assert_eq!(fake.calls().len(), 1, "a second `model: none` call would be identical");
+        assert_eq!(
+            fake.calls().len(),
+            1,
+            "a second `model: none` call would be identical"
+        );
         assert!(err.contains("driver exploded"), "{err}");
     }
 
@@ -402,8 +442,10 @@ mod tests {
             Err("second boom".to_string()),
         ]);
 
-        let err = compact_with(&history(), Some("haiku-compact".to_string()), |r| fake.call(r))
-            .unwrap_err();
+        let err = compact_with(&history(), Some("haiku-compact".to_string()), |r| {
+            fake.call(r)
+        })
+        .unwrap_err();
 
         assert_eq!(fake.calls().len(), 2);
         assert!(err.contains("haiku-compact"), "{err}");
@@ -450,7 +492,9 @@ mod tests {
     fn request_model_is_passed_through_verbatim() {
         assert_eq!(build_request(&history(), None).model, None);
         assert_eq!(
-            build_request(&history(), Some("x".to_string())).model.as_deref(),
+            build_request(&history(), Some("x".to_string()))
+                .model
+                .as_deref(),
             Some("x")
         );
     }
@@ -481,13 +525,28 @@ mod tests {
 
         let rendered = render_message(&msg("tool", &wrapped));
 
-        assert_ne!(rendered.role, "tool", "a tool role with no tool_call_id breaks every driver");
+        assert_ne!(
+            rendered.role, "tool",
+            "a tool role with no tool_call_id breaks every driver"
+        );
         assert_eq!(rendered.role, "user");
         assert!(rendered.content.contains("call_42"), "{}", rendered.content);
-        assert!(rendered.content.contains("3 tests passed"), "{}", rendered.content);
+        assert!(
+            rendered.content.contains("3 tests passed"),
+            "{}",
+            rendered.content
+        );
         // No raw wrapper JSON reaches the model.
-        assert!(!rendered.content.contains(TOOL_MARKER), "{}", rendered.content);
-        assert!(!rendered.content.contains("\"body\""), "{}", rendered.content);
+        assert!(
+            !rendered.content.contains(TOOL_MARKER),
+            "{}",
+            rendered.content
+        );
+        assert!(
+            !rendered.content.contains("\"body\""),
+            "{}",
+            rendered.content
+        );
     }
 
     #[test]
@@ -501,7 +560,11 @@ mod tests {
         let rendered = render_message(&msg("tool", &wrapped));
 
         assert!(rendered.content.contains("(error)"), "{}", rendered.content);
-        assert!(rendered.content.contains("exit code 1"), "{}", rendered.content);
+        assert!(
+            rendered.content.contains("exit code 1"),
+            "{}",
+            rendered.content
+        );
     }
 
     #[test]
@@ -540,10 +603,16 @@ mod tests {
             render_message(&msg("assistant", r#"[{"type":"text","text":"hello"}]"#)),
             msg("assistant", "hello")
         );
-        assert_eq!(render_message(&msg("user", "\"plain\"")), msg("user", "plain"));
+        assert_eq!(
+            render_message(&msg("user", "\"plain\"")),
+            msg("user", "plain")
+        );
         assert_eq!(render_message(&msg("user", "raw")), msg("user", "raw"));
         // An unknown role is normalised to `user` rather than forwarded as-is.
-        assert_eq!(render_message(&msg("system", "\"note\"")), msg("user", "note"));
+        assert_eq!(
+            render_message(&msg("system", "\"note\"")),
+            msg("user", "note")
+        );
     }
 
     #[test]
