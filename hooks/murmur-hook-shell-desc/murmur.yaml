@@ -5,3 +5,5 @@ binding: on-stage
 execution_mode: blocking
 commit_policy: write-manifests
 description: "Returns enriched tool manifests for common shell binaries at staging time."
+requires_files:
+  - murmur_hook_shell_desc.wasm

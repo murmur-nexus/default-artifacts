@@ -15,3 +15,5 @@ input_schema:
       description: "The question or prompt to present to the human. Displayed in the input-required task state."
   required:
     - prompt
+requires_files:
+  - murmur_tool_request_input.wasm
