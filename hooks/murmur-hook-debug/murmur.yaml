@@ -4,3 +4,5 @@ runtime: hook
 execution_mode: async
 commit_policy: none
 description: Writes hook lifecycle events to hook-debug.jsonl in the capsule workdir.
+requires_files:
+  - murmur_hook_debug.wasm

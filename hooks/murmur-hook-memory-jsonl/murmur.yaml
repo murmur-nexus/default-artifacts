@@ -4,3 +4,5 @@ runtime: hook
 execution_mode: blocking
 commit_policy: replace-context
 description: "Durable per-Turn Memory Log — appends each Turn to a JSONL file in the capsule workdir, reloads prior Turns at task start, and writes a close-out marker at task end."
+requires_files:
+  - murmur_hook_memory_jsonl.wasm
