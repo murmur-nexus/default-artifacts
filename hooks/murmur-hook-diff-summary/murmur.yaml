@@ -1,5 +1,5 @@
 name: murmur-hook-diff-summary
-version: 0.1.0
+version: 0.2.0
 runtime: hook
 execution_mode: blocking
 commit_policy: none

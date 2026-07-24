@@ -22,4 +22,24 @@ summarisation prompt for the compaction inference call (a replacement, not a
 concatenation), and applies identically to both the primary attempt and the
 `model: none` fallback. When it is absent, the hook uses its own built-in default.
 
+## Configuration
+
+Declare in your capsule `murmur.yaml`:
+
+```yaml
+artifacts:
+  - name: murmur-hook-compact
+    version: 0.3.0
+    runtime: hook
+```
+
+No `capabilities:` block is required — this hook touches neither the network
+nor the filesystem, and runs fully confined under the runtime's default-deny
+capability model.
+
+It reaches the model through the `murmur:runtime/inference` host import, which
+is not a capability the hook declares, and returns the summary as its
+`HookOutput`; the runtime — not the hook — writes the result under
+`workdir/checkpoints/` per the `replace-context` commit policy.
+
 See [murmur.yaml](./murmur.yaml) for the full manifest and configuration.
