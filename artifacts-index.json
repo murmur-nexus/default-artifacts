@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-07-22T22:21:33Z",
+  "updated_at": "2026-07-24T12:57:22Z",
   "artifacts": [
     {
       "name": "murmur-driver-anthropic",
@@ -63,7 +63,7 @@
     },
     {
       "name": "murmur-hook-debug",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "runtime": "hook",
       "description": "Writes hook lifecycle events to hook-debug.jsonl in the capsule workdir.",
       "tags": [
@@ -77,7 +77,7 @@
     },
     {
       "name": "murmur-hook-diff-summary",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "runtime": "hook",
       "description": "Snapshots files before each editor tool call and emits a structured unified-diff summary as an artifact event at end of turn.",
       "tags": [
@@ -92,7 +92,7 @@
     },
     {
       "name": "murmur-hook-eval",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "runtime": "hook",
       "description": "Structured evaluation hook \u2014 scores capsule sessions against configured scorers and writes eval.jsonl.",
       "tags": [
@@ -106,7 +106,7 @@
     },
     {
       "name": "murmur-hook-grafana",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "runtime": "hook",
       "description": "Emits OTel spans to a Grafana Tempo OTLP/HTTP endpoint for each capsule lifecycle event.",
       "tags": [
@@ -120,7 +120,7 @@
     },
     {
       "name": "murmur-hook-memory-jsonl",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "runtime": "hook",
       "description": "Durable per-Turn Memory Log \u2014 appends each Turn to a JSONL file in the capsule workdir, reloads prior Turns at task start, and writes a close-out marker at task end.",
       "tags": [
