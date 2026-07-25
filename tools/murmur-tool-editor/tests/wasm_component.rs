@@ -280,6 +280,74 @@ fn read_cache_persists_across_component_instantiations() {
     let _ = std::fs::remove_dir_all(&workdir);
 }
 
+#[test]
+fn component_loads_and_runs_ranged_read_file() {
+    // A bounded read through the real compiled component: only the requested line span comes
+    // back, alongside the file's total_lines and the resolved range.
+    let eng = engine();
+    let component = Component::from_file(&eng, component_path()).expect("load component");
+    let lnk = linker(&eng);
+    let workdir = unique_workdir("ranged");
+    std::fs::write(workdir.join("mod.txt"), "a\nb\nc\nd\ne\n").unwrap();
+
+    let (status, payload, _meta) = run_editor(
+        &eng,
+        &component,
+        &lnk,
+        &workdir,
+        r#"{"operation":"read_file","path":"mod.txt","start_line":2,"end_line":4}"#,
+    );
+    assert!(matches!(status, Status::Passed), "status: {status:?}");
+    assert_eq!(payload["content"], "b\nc\nd", "payload: {payload}");
+    assert_eq!(payload["total_lines"], 5);
+    assert_eq!(payload["start_line"], 2);
+    assert_eq!(payload["end_line"], 4);
+
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn component_loads_and_runs_find_with_context_lines() {
+    // context_lines=2 through the real component attaches context_before/context_after; a
+    // control call with context_lines omitted carries neither key (backward-compatible shape).
+    let eng = engine();
+    let component = Component::from_file(&eng, component_path()).expect("load component");
+    let lnk = linker(&eng);
+    let workdir = unique_workdir("ctx");
+    let sub = workdir.join("src");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join("f.txt"), "L1\nL2\nL3 needle\nL4\nL5\n").unwrap();
+
+    // With context.
+    let (status, payload, _meta) = run_editor(
+        &eng,
+        &component,
+        &lnk,
+        &workdir,
+        r#"{"operation":"find_in_files","pattern":"needle","dir":"src","recursive":false,"context_lines":2}"#,
+    );
+    assert!(matches!(status, Status::Passed), "status: {status:?}");
+    let m = &payload["matches"][0];
+    assert_eq!(m["line"], 3, "payload: {payload}");
+    assert_eq!(m["context_before"], serde_json::json!(["L1", "L2"]));
+    assert_eq!(m["context_after"], serde_json::json!(["L4", "L5"]));
+
+    // Without context: no context keys at all (byte-for-byte the historical shape).
+    let (status2, payload2, _m2) = run_editor(
+        &eng,
+        &component,
+        &lnk,
+        &workdir,
+        r#"{"operation":"find_in_files","pattern":"needle","dir":"src","recursive":false}"#,
+    );
+    assert!(matches!(status2, Status::Passed), "status: {status2:?}");
+    let m2 = &payload2["matches"][0];
+    assert!(m2.get("context_before").is_none(), "default must omit context_before");
+    assert!(m2.get("context_after").is_none(), "default must omit context_after");
+
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
 /// Build a synthetic tree of `dirs * files_per_dir` small text files under `root`, one of
 /// which contains the marker `NEEDLE`. Returns the file count.
 fn build_tree(root: &Path, dirs: usize, files_per_dir: usize) -> usize {
