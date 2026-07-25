@@ -12,7 +12,7 @@
 # Only publishable artifacts (those with a murmur.yaml) are listed here.
 # Internal-only crates (e.g. murmur-tool-git-validate) must not appear.
 
-workspace_version = "0.2.0"
+workspace_version = "0.3.0"
 
 [[artifact]]
 name = "murmur-driver-anthropic"
