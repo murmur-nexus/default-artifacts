@@ -22,6 +22,18 @@ pub mod logic {
 
     const FIND_RESULT_SIZE_LIMIT: usize = 500 * 1024; // 500 KB ceiling for find_in_files output
 
+    // Upper bound on a single ranged `read_file` request, in lines. A bounded read exists to
+    // let an agent inspect a function instead of a whole module, so the cap enforces by
+    // construction that a ranged read is always *smaller* than the whole-file read it
+    // replaces. 2000 lines is generous enough to cover any single function or type while
+    // still being a small fraction of a large module.
+    const MAX_READ_RANGE_LINES: usize = 2000;
+
+    // Upper bound on `find_in_files` `context_lines`, mirroring the range a `grep -C` user
+    // would realistically ask for. Beyond this the context stops being "the surrounding
+    // function" and starts re-transmitting whole files, defeating the bounded-read intent.
+    const MAX_CONTEXT_LINES: i64 = 20;
+
     // On-disk read-cache location, relative to the capsule workdir (the component's CWD /
     // preopened `.` at dispatch time). A plain relative path is how sibling artifacts scope
     // per-session state to the workdir — `murmur-hook-compact` writes `checkpoints/`, and
@@ -52,29 +64,42 @@ pub mod logic {
         pub const INVALID_PATTERN: &str = "invalid_pattern";
         pub const SEARCH_TOO_BROAD: &str = "search_too_broad";
         pub const RESULT_SIZE_EXCEEDED: &str = "result_size_exceeded";
+        // read_file range validation: start_line < 1, an inverted span (start > end), or a
+        // start_line past the end of the file. All three are caller mistakes about *which*
+        // lines to read, so they share one kind; the message states which one occurred.
+        pub const INVALID_RANGE: &str = "invalid_range";
+        // read_file resolved span exceeds MAX_READ_RANGE_LINES — a valid but too-wide range.
+        pub const RANGE_TOO_LARGE: &str = "range_too_large";
+        // find_in_files context_lines is negative or exceeds MAX_CONTEXT_LINES.
+        pub const CONTEXT_TOO_LARGE: &str = "context_too_large";
     }
 
-    // ── Read cache: keyed by (path, byte_range, mtime), persisted on disk ────────
+    // ── Read cache: keyed by (path, line_range, mtime), persisted on disk ────────
     //
     // The tool is a one-shot dispatch — one operation per component instantiation — so an
     // in-memory cache could never see a second `read_file` call. The cache therefore lives
-    // on disk in the workdir, keyed by (path, byte_range, mtime), so a *later* invocation
+    // on disk in the workdir, keyed by (path, line_range, mtime), so a *later* invocation
     // against an unchanged file returns a `cache_ref` pointer instead of re-transmitting the
-    // content.
+    // content. A whole-file read keys on `LineRange::whole_file()` (both fields `None`), so
+    // ranged reads of the same file cache under distinct keys and never collide with the
+    // whole-file entry or each other.
     //
-    // Retrieval is keyed by (path, byte_range, mtime) directly; the generated `cache_id`
+    // Retrieval is keyed by (path, line_range, mtime) directly; the generated `cache_id`
     // (`content.len() ^ mtime`) is only an opaque label returned to the caller and is never
     // used as a lookup key, so its collision-proneness is not exploitable.
 
+    // A resolved 1-based, inclusive line span, or the whole file when both fields are `None`.
+    // (Historically named `ByteRange`; its two `Option<usize>` fields now carry line numbers,
+    // which is all the cache key ever needs.)
     #[derive(Clone, Copy)]
-    struct ByteRange {
+    struct LineRange {
         start: Option<usize>,
         end: Option<usize>,
     }
 
-    impl ByteRange {
+    impl LineRange {
         fn whole_file() -> Self {
-            ByteRange { start: None, end: None }
+            LineRange { start: None, end: None }
         }
     }
 
@@ -99,7 +124,7 @@ pub mod logic {
         hash
     }
 
-    fn cache_key_string(path: &str, range: ByteRange, mtime: u64) -> String {
+    fn cache_key_string(path: &str, range: LineRange, mtime: u64) -> String {
         let start = range.start.map(|n| n.to_string()).unwrap_or_default();
         let end = range.end.map(|n| n.to_string()).unwrap_or_default();
         // NUL separators can't appear in any component, so the encoding is unambiguous.
@@ -271,36 +296,147 @@ pub mod logic {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        let byte_range = ByteRange::whole_file();
         let cache_dir = resolve_cache_dir();
-        let key = cache_key_string(&path, byte_range, mtime);
 
-        // Cache hit: the file is unchanged since a prior invocation cached it, so return the
-        // pointer only and skip re-transmitting the content.
+        // Optional 1-based, inclusive line bounds. Reading through `as_i64` (not `as_u64`) is
+        // deliberate: a negative or zero `start_line` must surface as an INVALID_RANGE error,
+        // not be silently dropped as "absent". A field present as anything non-integer (or
+        // JSON null) is treated as absent.
+        let start_arg = op.get("start_line").and_then(Value::as_i64);
+        let end_arg = op.get("end_line").and_then(Value::as_i64);
+
+        // Whole-file path: byte-for-byte the pre-slice behavior and the pre-slice cache key,
+        // so cache entries written before this feature keep hitting. The only addition is the
+        // `total_lines` field on a cache miss (additive — omitted on a hit, where the file is
+        // not read), letting an agent learn a file's size for a follow-up ranged read.
+        if start_arg.is_none() && end_arg.is_none() {
+            let key = cache_key_string(&path, LineRange::whole_file(), mtime);
+
+            if let Some(cache_id) = cache_lookup(&cache_dir, &key) {
+                return ok_with(
+                    format!("read {path} (cached)"),
+                    json!({ "cache_ref": cache_id }),
+                    format!("cache hit: {cache_id}"),
+                );
+            }
+
+            return match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    let byte_count = content.len();
+                    let total_lines = content.lines().count();
+                    let cache_id = format!("cache_{:x}", content.len() ^ (mtime as usize));
+
+                    cache_store(&cache_dir, &key, &cache_id);
+
+                    ok_with(
+                        format!("read {path}"),
+                        json!({
+                            "content": content,
+                            "cache_ref": cache_id,
+                            "total_lines": total_lines,
+                        }),
+                        format!("{byte_count} bytes"),
+                    )
+                }
+                Err(e) => err_result(io_error_kind(&e), format!("{path}: {e}")),
+            };
+        }
+
+        // Ranged path. The file must be read to count its lines and validate the span, even on
+        // a cache hit — but the cache still earns its keep by returning only a `cache_ref`
+        // (never the content) once a given (path, resolved-range, mtime) has been seen, so the
+        // saving is the transmission of the slice, not the local disk read.
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => return err_result(io_error_kind(&e), format!("{path}: {e}")),
+        };
+        let total_lines = content.lines().count();
+
+        let start = start_arg.unwrap_or(1);
+        if start < 1 {
+            return err_result(
+                err::INVALID_RANGE,
+                format!("start_line must be >= 1, got {start}"),
+            );
+        }
+        // start beyond EOF errors (states the real line count) rather than silently falling
+        // back to the whole file. An empty file (0 lines) rejects any start_line here.
+        if start as usize > total_lines {
+            return err_result(
+                err::INVALID_RANGE,
+                format!("start_line {start} is beyond end of file ({total_lines} lines)"),
+            );
+        }
+        // end defaults to EOF; an explicit end past EOF *clamps* (read-to-EOF is what an agent
+        // means) — the one case that clamps instead of erroring.
+        let mut end = end_arg.unwrap_or(total_lines as i64);
+        if end > total_lines as i64 {
+            end = total_lines as i64;
+        }
+        if start > end {
+            return err_result(
+                err::INVALID_RANGE,
+                format!("inverted range: start_line {start} is greater than end_line {end}"),
+            );
+        }
+
+        let start = start as usize;
+        let end = end as usize;
+        let span = end - start + 1;
+        if span > MAX_READ_RANGE_LINES {
+            return err_result(
+                err::RANGE_TOO_LARGE,
+                format!(
+                    "requested range of {span} lines exceeds the maximum of {MAX_READ_RANGE_LINES}; narrow start_line/end_line"
+                ),
+            );
+        }
+
+        // Key on the *resolved* range so different ranges of the same file cache independently
+        // and never collide with the whole-file entry.
+        let key = cache_key_string(
+            &path,
+            LineRange { start: Some(start), end: Some(end) },
+            mtime,
+        );
+
         if let Some(cache_id) = cache_lookup(&cache_dir, &key) {
             return ok_with(
-                format!("read {path} (cached)"),
-                json!({ "cache_ref": cache_id }),
+                format!("read {path} lines {start}-{end} (cached)"),
+                json!({
+                    "cache_ref": cache_id,
+                    "total_lines": total_lines,
+                    "start_line": start,
+                    "end_line": end,
+                }),
                 format!("cache hit: {cache_id}"),
             );
         }
 
-        // Cache miss: read the file, persist the pointer for the next invocation.
-        match std::fs::read_to_string(&path) {
-            Ok(content) => {
-                let byte_count = content.len();
-                let cache_id = format!("cache_{:x}", content.len() ^ (mtime as usize));
+        // Slice `[start-1, end)` (0-based half-open), join with "\n". `lines()` already strips
+        // line terminators, so the join reproduces the original text of the span.
+        let sliced: String = content
+            .lines()
+            .skip(start - 1)
+            .take(end - start + 1)
+            .collect::<Vec<&str>>()
+            .join("\n");
+        let byte_count = sliced.len();
+        let cache_id = format!("cache_{:x}", sliced.len() ^ (mtime as usize));
 
-                cache_store(&cache_dir, &key, &cache_id);
+        cache_store(&cache_dir, &key, &cache_id);
 
-                ok_with(
-                    format!("read {path}"),
-                    json!({ "content": content, "cache_ref": cache_id }),
-                    format!("{byte_count} bytes"),
-                )
-            }
-            Err(e) => err_result(io_error_kind(&e), format!("{path}: {e}")),
-        }
+        ok_with(
+            format!("read {path} lines {start}-{end}"),
+            json!({
+                "content": sliced,
+                "cache_ref": cache_id,
+                "total_lines": total_lines,
+                "start_line": start,
+                "end_line": end,
+            }),
+            format!("{byte_count} bytes (lines {start}-{end} of {total_lines})"),
+        )
     }
 
     fn op_write_file(op: &Value) -> Value {
@@ -382,6 +518,20 @@ pub mod logic {
         };
         let recursive = op.get("recursive").and_then(|v| v.as_bool()).unwrap_or(true);
 
+        // Optional grep-style context window. Default 0 reproduces the historical match shape
+        // exactly (no context keys). Validate before any filesystem walk so a rejected input
+        // performs no search. A negative value or one above the cap is rejected — the latter
+        // would re-transmit whole files and defeat the bounded-read intent.
+        let context_lines = op.get("context_lines").and_then(Value::as_i64).unwrap_or(0);
+        if !(0..=MAX_CONTEXT_LINES).contains(&context_lines) {
+            return err_result(
+                err::CONTEXT_TOO_LARGE,
+                format!(
+                    "context_lines must be between 0 and {MAX_CONTEXT_LINES}, got {context_lines}"
+                ),
+            );
+        }
+
         // Scope check: reject any input that does not narrow the search below repo root.
         let scope = dir.trim();
         if scope.is_empty() || scope == "." || scope == "./" {
@@ -442,13 +592,27 @@ pub mod logic {
             // Normalize away leading slash that strip_prefix can produce on some paths.
             let relative = relative.trim_start_matches('/').to_string();
 
-            for (idx, line) in contents.lines().enumerate() {
+            let lines: Vec<&str> = contents.lines().collect();
+            for (idx, line) in lines.iter().enumerate() {
                 if re.is_match(line) {
-                    let match_obj = json!({
+                    let mut match_obj = json!({
                         "path": relative,
                         "line": idx + 1,
                         "text": line,
                     });
+                    // Attach context only when requested, so the default shape is byte-for-byte
+                    // unchanged (no empty arrays). Each side is clamped to the lines that exist
+                    // — a match near a file boundary gets a shorter array, never padding.
+                    if context_lines > 0 {
+                        let cl = context_lines as usize;
+                        let before_start = idx.saturating_sub(cl);
+                        let after_end = std::cmp::min(idx + 1 + cl, lines.len());
+                        match_obj["context_before"] = json!(&lines[before_start..idx]);
+                        match_obj["context_after"] = json!(&lines[idx + 1..after_end]);
+                    }
+                    // The running lower bound is measured *after* context is attached, so a
+                    // large context window inflating the payload is caught here (and again by
+                    // the authoritative post-serialization check below).
                     approx_out_size += 2 * serde_json::to_string(&match_obj).unwrap_or_default().len();
                     if approx_out_size > FIND_RESULT_SIZE_LIMIT {
                         return err_result(err::RESULT_SIZE_EXCEEDED, size_exceeded_message());
@@ -594,6 +758,9 @@ pub mod logic {
                 err::INVALID_PATTERN,
                 err::SEARCH_TOO_BROAD,
                 err::RESULT_SIZE_EXCEEDED,
+                err::INVALID_RANGE,
+                err::RANGE_TOO_LARGE,
+                err::CONTEXT_TOO_LARGE,
             ];
             for (i, a) in kinds.iter().enumerate() {
                 for (j, b) in kinds.iter().enumerate() {
@@ -862,6 +1029,339 @@ pub mod logic {
             let _ = fs::remove_dir_all(&temp_dir);
         }
 
+        // ── Bounded read_file (start_line / end_line) ────────────────────────────
+        //
+        // Each test isolates the disk cache to its own temp dir via `cache_env_guard`, so a
+        // cache hit from a prior test can never mask a miss here. A shared helper writes a
+        // file of `n` numbered lines ("line 1".."line n"), the fixture every range test slices.
+
+        fn write_numbered_file(dir: &std::path::Path, name: &str, n: usize) -> String {
+            let _ = fs::remove_dir_all(dir);
+            fs::create_dir_all(dir).expect("failed to create temp dir");
+            let mut content = String::new();
+            for i in 1..=n {
+                content.push_str(&format!("line {i}\n"));
+            }
+            let path = dir.join(name);
+            fs::write(&path, content).expect("failed to write test file");
+            path.to_string_lossy().to_string()
+        }
+
+        #[test]
+        fn read_file_whole_file_reports_total_lines() {
+            // A whole-file read (no start/end) keeps its content and cache_ref unchanged, and
+            // now additionally reports total_lines — but adds NO start_line/end_line keys.
+            let dir = std::env::temp_dir().join("murmur_test_read_wholefile_total");
+            let _guard = cache_env_guard(&dir.join("cache"));
+            let path = write_numbered_file(&dir, "f.txt", 5);
+            let op = json!({ "operation": "read_file", "path": &path });
+
+            let out = op_read_file(&op);
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(out["content"], "line 1\nline 2\nline 3\nline 4\nline 5\n");
+            assert_eq!(out["total_lines"], 5);
+            assert!(out["cache_ref"].is_string());
+            assert!(out["start_line"].is_null(), "whole-file read must not add start_line");
+            assert!(out["end_line"].is_null(), "whole-file read must not add end_line");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_ranged_happy_path() {
+            let dir = std::env::temp_dir().join("murmur_test_read_ranged");
+            let _guard = cache_env_guard(&dir.join("cache"));
+            let path = write_numbered_file(&dir, "f.txt", 10);
+            let op = json!({ "operation": "read_file", "path": &path, "start_line": 2, "end_line": 4 });
+
+            let out = op_read_file(&op);
+            assert_eq!(out["ok"], true, "{out:?}");
+            // Sliced span, joined with "\n" (no trailing newline — lines() strips terminators).
+            assert_eq!(out["content"], "line 2\nline 3\nline 4");
+            assert_eq!(out["total_lines"], 10);
+            assert_eq!(out["start_line"], 2);
+            assert_eq!(out["end_line"], 4);
+            assert!(out["cache_ref"].is_string());
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_ranged_start_only_reads_to_eof() {
+            let dir = std::env::temp_dir().join("murmur_test_read_start_only");
+            let _guard = cache_env_guard(&dir.join("cache"));
+            let path = write_numbered_file(&dir, "f.txt", 6);
+            let op = json!({ "operation": "read_file", "path": &path, "start_line": 5 });
+
+            let out = op_read_file(&op);
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(out["content"], "line 5\nline 6");
+            assert_eq!(out["start_line"], 5);
+            assert_eq!(out["end_line"], 6); // resolved to total_lines
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_ranged_end_only_reads_from_top() {
+            let dir = std::env::temp_dir().join("murmur_test_read_end_only");
+            let _guard = cache_env_guard(&dir.join("cache"));
+            let path = write_numbered_file(&dir, "f.txt", 6);
+            let op = json!({ "operation": "read_file", "path": &path, "end_line": 3 });
+
+            let out = op_read_file(&op);
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(out["content"], "line 1\nline 2\nline 3");
+            assert_eq!(out["start_line"], 1); // resolved default
+            assert_eq!(out["end_line"], 3);
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_ranged_inverted_span_errors() {
+            let dir = std::env::temp_dir().join("murmur_test_read_inverted");
+            let _guard = cache_env_guard(&dir.join("cache"));
+            let path = write_numbered_file(&dir, "f.txt", 10);
+            let op = json!({ "operation": "read_file", "path": &path, "start_line": 5, "end_line": 2 });
+
+            let out = op_read_file(&op);
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::INVALID_RANGE);
+            assert!(out["message"].as_str().unwrap().contains("inverted"));
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_ranged_start_below_one_errors() {
+            let dir = std::env::temp_dir().join("murmur_test_read_start_zero");
+            let _guard = cache_env_guard(&dir.join("cache"));
+            let path = write_numbered_file(&dir, "f.txt", 10);
+            let op = json!({ "operation": "read_file", "path": &path, "start_line": 0 });
+
+            let out = op_read_file(&op);
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::INVALID_RANGE);
+            assert!(out["message"].as_str().unwrap().contains(">= 1"));
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_ranged_start_beyond_eof_errors() {
+            // start past EOF errors and states the real line count — never silently falls back
+            // to the whole file.
+            let dir = std::env::temp_dir().join("murmur_test_read_start_eof");
+            let _guard = cache_env_guard(&dir.join("cache"));
+            let path = write_numbered_file(&dir, "f.txt", 4);
+            let op = json!({ "operation": "read_file", "path": &path, "start_line": 99 });
+
+            let out = op_read_file(&op);
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::INVALID_RANGE);
+            let msg = out["message"].as_str().unwrap();
+            assert!(msg.contains("beyond end of file"), "{msg}");
+            assert!(msg.contains("4 lines"), "message must state real line count: {msg}");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_ranged_end_beyond_eof_clamps() {
+            // The one asymmetric case: end past EOF clamps to total_lines rather than erroring.
+            let dir = std::env::temp_dir().join("murmur_test_read_end_eof");
+            let _guard = cache_env_guard(&dir.join("cache"));
+            let path = write_numbered_file(&dir, "f.txt", 4);
+            let op = json!({ "operation": "read_file", "path": &path, "start_line": 3, "end_line": 999 });
+
+            let out = op_read_file(&op);
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(out["content"], "line 3\nline 4");
+            assert_eq!(out["end_line"], 4); // clamped, reported as resolved
+            assert_eq!(out["total_lines"], 4);
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_ranged_oversized_span_errors() {
+            let dir = std::env::temp_dir().join("murmur_test_read_oversized");
+            let _guard = cache_env_guard(&dir.join("cache"));
+            // A file larger than the cap, requested whole via an explicit span.
+            let path = write_numbered_file(&dir, "big.txt", MAX_READ_RANGE_LINES + 500);
+            let op = json!({
+                "operation": "read_file",
+                "path": &path,
+                "start_line": 1,
+                "end_line": MAX_READ_RANGE_LINES + 500,
+            });
+
+            let out = op_read_file(&op);
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::RANGE_TOO_LARGE);
+            assert!(out["message"].as_str().unwrap().contains("exceeds the maximum"));
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_ranged_cache_ref_differs_from_whole_file() {
+            // Different ranges of the same file cache under distinct keys, so a whole-file read
+            // and a ranged read return different cache_refs and never collide.
+            let dir = std::env::temp_dir().join("murmur_test_read_cache_distinct");
+            let _guard = cache_env_guard(&dir.join("cache"));
+            let path = write_numbered_file(&dir, "f.txt", 10);
+
+            let whole = op_read_file(&json!({ "operation": "read_file", "path": &path }));
+            let ranged = op_read_file(&json!({
+                "operation": "read_file", "path": &path, "start_line": 2, "end_line": 4
+            }));
+            assert_eq!(whole["ok"], true);
+            assert_eq!(ranged["ok"], true);
+            assert_ne!(
+                whole["cache_ref"].as_str().unwrap(),
+                ranged["cache_ref"].as_str().unwrap(),
+                "whole-file and ranged reads must not share a cache_ref"
+            );
+
+            // And the ranged read is itself cacheable: a second identical ranged read hits.
+            let ranged2 = op_read_file(&json!({
+                "operation": "read_file", "path": &path, "start_line": 2, "end_line": 4
+            }));
+            assert_eq!(ranged2["cache_ref"], ranged["cache_ref"]);
+            assert!(ranged2["content"].is_null(), "ranged cache hit must not resend content");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        // ── find_in_files context_lines ─────────────────────────────────────────
+
+        fn write_find_fixture(dir: &std::path::Path, name: &str, content: &str) -> String {
+            let _ = fs::remove_dir_all(dir);
+            fs::create_dir_all(dir).expect("failed to create temp dir");
+            fs::write(dir.join(name), content).expect("failed to write fixture");
+            dir.to_string_lossy().to_string()
+        }
+
+        #[test]
+        fn find_in_files_default_has_no_context_keys() {
+            // context_lines omitted → the match shape is byte-for-byte the historical one:
+            // {path, line, text} with NO context_before/context_after keys at all.
+            let dir = std::env::temp_dir().join("murmur_test_find_no_ctx");
+            let dir_name = write_find_fixture(&dir, "a.txt", "one\ntwo needle\nthree\n");
+            let op = json!({ "operation": "find_in_files", "pattern": "needle", "dir": &dir_name, "recursive": false });
+
+            let out = op_find_in_files(&op);
+            assert_eq!(out["ok"], true, "{out:?}");
+            let m = &out["matches"][0];
+            assert_eq!(m["line"], 2);
+            assert_eq!(m["text"], "two needle");
+            assert!(m.get("context_before").is_none(), "no context key when omitted");
+            assert!(m.get("context_after").is_none(), "no context key when omitted");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn find_in_files_context_lines_happy_path() {
+            let dir = std::env::temp_dir().join("murmur_test_find_ctx");
+            let dir_name = write_find_fixture(&dir, "a.txt", "L1\nL2\nL3 needle\nL4\nL5\n");
+            let op = json!({
+                "operation": "find_in_files", "pattern": "needle",
+                "dir": &dir_name, "recursive": false, "context_lines": 1
+            });
+
+            let out = op_find_in_files(&op);
+            assert_eq!(out["ok"], true, "{out:?}");
+            let m = &out["matches"][0];
+            assert_eq!(m["line"], 3);
+            assert_eq!(m["context_before"], json!(["L2"]));
+            assert_eq!(m["context_after"], json!(["L4"]));
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn find_in_files_context_clamped_at_boundaries() {
+            // A match on the first line gets an empty context_before (clamped, never padded)
+            // and a context_after shortened to the lines that exist.
+            let dir = std::env::temp_dir().join("murmur_test_find_ctx_boundary");
+            let dir_name = write_find_fixture(&dir, "a.txt", "head needle\nb\nc\n");
+            let op = json!({
+                "operation": "find_in_files", "pattern": "needle",
+                "dir": &dir_name, "recursive": false, "context_lines": 5
+            });
+
+            let out = op_find_in_files(&op);
+            assert_eq!(out["ok"], true, "{out:?}");
+            let m = &out["matches"][0];
+            assert_eq!(m["line"], 1);
+            assert_eq!(m["context_before"], json!([]), "top-of-file match: empty before");
+            assert_eq!(m["context_after"], json!(["b", "c"]), "clamped to existing lines");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn find_in_files_rejects_oversized_context() {
+            let dir = std::env::temp_dir().join("murmur_test_find_ctx_toobig");
+            let dir_name = write_find_fixture(&dir, "a.txt", "needle\n");
+            for bad in [MAX_CONTEXT_LINES + 1, -1] {
+                let op = json!({
+                    "operation": "find_in_files", "pattern": "needle",
+                    "dir": &dir_name, "recursive": false, "context_lines": bad
+                });
+                let out = op_find_in_files(&op);
+                assert_eq!(out["ok"], false, "context_lines {bad} must be rejected");
+                assert_eq!(out["error_kind"], err::CONTEXT_TOO_LARGE);
+            }
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn find_in_files_size_ceiling_accounts_for_context() {
+            // The fixture is under the 500KB ceiling with NO context, but the same search with
+            // a non-zero context window blows past it — proving the size accounting measures
+            // the context text, not just the match lines.
+            let dir = std::env::temp_dir().join("murmur_test_find_ctx_ceiling");
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).expect("failed to create temp dir");
+
+            let padding = "x".repeat(200);
+            let mut content = String::new();
+            // 1200 lines; every 4th is a match. The 900 non-matching lines are heavy padding
+            // that only enters the payload once context is requested.
+            for i in 0..1200 {
+                if i % 4 == 0 {
+                    content.push_str(&format!("marker {padding}\n"));
+                } else {
+                    content.push_str(&format!("{padding}\n"));
+                }
+            }
+            fs::write(dir.join("big.txt"), content).expect("failed to write fixture");
+            let dir_name = dir.to_string_lossy().to_string();
+
+            // Without context: comfortably under the ceiling.
+            let no_ctx = op_find_in_files(&json!({
+                "operation": "find_in_files", "pattern": "marker",
+                "dir": &dir_name, "recursive": false, "context_lines": 0
+            }));
+            assert_eq!(no_ctx["ok"], true, "no-context search should fit: {}", no_ctx["message"]);
+
+            // With context: the added neighbor text tips it over, and it is rejected.
+            let with_ctx = op_find_in_files(&json!({
+                "operation": "find_in_files", "pattern": "marker",
+                "dir": &dir_name, "recursive": false, "context_lines": 3
+            }));
+            assert_eq!(with_ctx["ok"], false);
+            assert_eq!(with_ctx["error_kind"], err::RESULT_SIZE_EXCEEDED);
+            assert!(with_ctx["message"].as_str().unwrap().contains("size limit"));
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
         // ── On-disk cache mechanism (unit-level) ────────────────────────────────
         //
         // These exercise the disk cache primitives directly with an explicit cache dir, so
@@ -874,14 +1374,14 @@ pub mod logic {
         fn cache_store_then_lookup_roundtrips() {
             let dir = std::env::temp_dir().join("murmur_test_cache_roundtrip");
             let _ = fs::remove_dir_all(&dir);
-            let key = cache_key_string("some/file.rs", ByteRange::whole_file(), 12345);
+            let key = cache_key_string("some/file.rs", LineRange::whole_file(), 12345);
 
             assert!(cache_lookup(&dir, &key).is_none(), "empty cache must miss");
             cache_store(&dir, &key, "cache_abc123");
             assert_eq!(cache_lookup(&dir, &key).as_deref(), Some("cache_abc123"));
 
             // A different key (different mtime) must miss.
-            let other = cache_key_string("some/file.rs", ByteRange::whole_file(), 99999);
+            let other = cache_key_string("some/file.rs", LineRange::whole_file(), 99999);
             assert!(cache_lookup(&dir, &other).is_none());
 
             let _ = fs::remove_dir_all(&dir);
@@ -892,7 +1392,7 @@ pub mod logic {
             let dir = std::env::temp_dir().join("murmur_test_cache_corrupt");
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).unwrap();
-            let key = cache_key_string("x.txt", ByteRange::whole_file(), 1);
+            let key = cache_key_string("x.txt", LineRange::whole_file(), 1);
 
             // Write a truncated/garbage file at the entry path.
             fs::write(cache_entry_path(&dir, &key), b"{ this is not json").unwrap();
@@ -907,7 +1407,7 @@ pub mod logic {
             let _ = fs::remove_dir_all(&dir);
             // Store more than MAX_CACHE_ENTRIES distinct keys; the directory must stay bounded.
             for i in 0..(MAX_CACHE_ENTRIES + 50) {
-                let key = cache_key_string("f.txt", ByteRange::whole_file(), i as u64);
+                let key = cache_key_string("f.txt", LineRange::whole_file(), i as u64);
                 cache_store(&dir, &key, &format!("cache_{i:x}"));
             }
             let count = fs::read_dir(&dir)
