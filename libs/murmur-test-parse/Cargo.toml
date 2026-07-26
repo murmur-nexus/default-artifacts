@@ -1,0 +1,19 @@
+[package]
+name = "murmur-test-parse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Internal-only shared library: the four test-runner output parsers plus format
+# auto-detection, extracted verbatim from murmur-tool-test-report so both that
+# native tool and the WASM murmur-hook-regression-verifier can share one copy.
+# It has zero native-only dependencies (no rusqlite), so it cross-compiles to
+# wasm32-wasip2 cleanly. NOT a publishable artifact — never listed in
+# artifacts.toml.
+
+[lib]
+name = "murmur_test_parse"
+path = "src/lib.rs"
+
+[dependencies]
+serde_json.workspace = true

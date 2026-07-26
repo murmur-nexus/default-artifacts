@@ -1322,10 +1322,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "murmur-hook-regression-verifier"
+version = "0.3.0"
+dependencies = [
+ "murmur-test-parse",
+ "serde_json",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
 name = "murmur-hook-shell-desc"
 version = "0.3.0"
 dependencies = [
  "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "murmur-test-parse"
+version = "0.3.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -1413,6 +1429,7 @@ dependencies = [
 name = "murmur-tool-test-report"
 version = "0.3.0"
 dependencies = [
+ "murmur-test-parse",
  "rusqlite",
  "serde",
  "serde_json",

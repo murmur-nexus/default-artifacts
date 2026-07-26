@@ -1,0 +1,8 @@
+name: murmur-hook-regression-verifier
+version: 0.1.0
+runtime: hook
+execution_mode: blocking
+commit_policy: reopen-task
+description: Watches a task's test runs, and at task end reopens the task when a change broke previously-passing tests (including wholesale "collection failure" module breaks).
+requires_files:
+  - murmur_hook_regression_verifier.wasm

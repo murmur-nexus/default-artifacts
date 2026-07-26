@@ -12,6 +12,9 @@ path = "src/main.rs"
 serde.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true
+# Shared parsers (detect_format/parse_cargo/parse_pytest/parse_go/parse_jest),
+# extracted so murmur-hook-regression-verifier can reuse them at the source level.
+murmur-test-parse = { path = "../../libs/murmur-test-parse" }
 
 [dev-dependencies]
 # Used only by the integration suite to hand-build a code-graph fixture db
