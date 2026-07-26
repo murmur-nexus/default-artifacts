@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-07-26T08:55:58Z",
+  "updated_at": "2026-07-26T18:41:55Z",
   "artifacts": [
     {
       "name": "murmur-driver-anthropic",
@@ -127,6 +127,21 @@
         "hook",
         "memory",
         "jsonl"
+      ],
+      "platforms": [
+        "darwin-aarch64",
+        "linux-x86_64"
+      ]
+    },
+    {
+      "name": "murmur-hook-regression-verifier",
+      "version": "0.1.0",
+      "runtime": "hook",
+      "description": "Watches a task's test runs, and at task end reopens the task when a change broke previously-passing tests (including wholesale \"collection failure\" module breaks).",
+      "tags": [
+        "hook",
+        "regression",
+        "verifier"
       ],
       "platforms": [
         "darwin-aarch64",
