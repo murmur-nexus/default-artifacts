@@ -41,7 +41,7 @@ exporting `murmur:tool/run`); the remaining five are native binaries whose C dep
 | `murmur-tool-editor` | `tools/murmur-tool-editor/` | WASM | File read/write/patch operations (`read_file`, `write_file`, `replace_in_file`, `find_in_files`) |
 | `murmur-tool-request-input` | `tools/murmur-tool-request-input/` | WASM | HITL pause gate — suspends the agent loop and waits for human input via `message/send` |
 | `murmur-tool-git` | `tools/murmur-tool-git/` | native | Git operations (clone, checkout, status, diff, commit, push, worktree, and more) |
-| `murmur-tool-code-graph` | `tools/murmur-tool-code-graph/` | native | Indexes a Rust repo into a SQLite symbol/edge graph; structured queries over stable symbol identities |
+| `murmur-tool-code-graph` | `tools/murmur-tool-code-graph/` | native | Indexes a Rust and/or Python repo into a SQLite symbol/edge graph; structured queries over stable symbol identities |
 | `murmur-tool-code-coverage` | `tools/murmur-tool-code-coverage/` | native | Spectrum-based fault localization (Ochiai / Tarantula) over per-test LCOV reports |
 | `murmur-tool-test-report` | `tools/murmur-tool-test-report/` | native | Parses raw test-runner output (cargo, pytest, go, jest) into a structured failure list |
 | `murmur-tool-registry-search` | `tools/murmur-tool-registry-search/` | native | Searches the Murmur artifact registry for artifacts matching a keyword |
