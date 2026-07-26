@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Build a default-artifacts WASM artifact and install it into a capsule.
+# Build a default-artifacts artifact (wasm component or native binary) and
+# install it into a capsule. The build path is chosen from the artifact's own
+# `implementation:` field — wasm builds for wasm32-wasip2, native delegates to
+# the artifact's package.sh (host build), same as CI does.
 #
 # Usage:
 #   scripts/local-install.sh <artifact-name> <target-capsule-dir> [artifact-path]
@@ -23,22 +26,45 @@ SRC_DIR="$REPO_ROOT/$ART_PATH"
 WASM_CRATE="${NAME//-/_}"
 WASM="$REPO_ROOT/target/wasm32-wasip2/release/${WASM_CRATE}.wasm"
 VERSION="$(grep '^version:' "$SRC_DIR/murmur.yaml" | awk '{print $2}' | tr -d '"')"
-ZIP="/tmp/${NAME}-${VERSION}.mur.zip"
 LOCK="$CAPSULE_DIR/murmur.lock"
 
-echo "→ [1/5] cargo build $NAME ($VERSION)"
-( cd "$REPO_ROOT" && cargo build -p "$NAME" --target wasm32-wasip2 --release )
+# Build+package differ by implementation, so read it rather than assuming wasm:
+# a native tool compiled with --target wasm32-wasip2 fails in its C dependencies
+# (e.g. libsqlite3-sys can't find stdio.h — there is no wasi libc sysroot here).
+IMPL="$(grep '^implementation:' "$SRC_DIR/murmur.yaml" | awk '{print $2}' | tr -d '"')"
 
-echo "→ [2/5] validate component"
-"$REPO_ROOT/scripts/validate-component.sh" "$WASM"
+if [ "$IMPL" = "native" ]; then
+  # Native artifacts own their build+package step (package.sh), the same entry
+  # point CI's build-native job calls. It compiles for the host, stages
+  # murmur.yaml + bin/<tool>, and writes a platform-tagged .mur.zip beside itself.
+  # Publishing stays opt-in (PUBLISH=--publish), so this only builds locally.
+  echo "→ [1/5] build + package $NAME ($VERSION) — native, via package.sh"
+  chmod +x "$SRC_DIR/package.sh" 2>/dev/null || true
+  [ -f "$SRC_DIR/package.sh" ] || { echo "error: $NAME is implementation: native but has no package.sh" >&2; exit 1; }
+  rm -f "$SRC_DIR"/*.mur.zip
+  ( cd "$SRC_DIR" && ./package.sh )
+  ZIP="$(ls -t "$SRC_DIR"/*.mur.zip 2>/dev/null | head -1)"
+  [ -n "$ZIP" ] || { echo "error: package.sh produced no .mur.zip in $SRC_DIR" >&2; exit 1; }
 
-echo "→ [3/5] package via mur build"
-STAGE="$(mktemp -d)"
-trap 'rm -rf "$STAGE"' EXIT
-cp -R "$SRC_DIR/." "$STAGE/"
-cp "$WASM" "$STAGE/${WASM_CRATE}.wasm"
-rm -f "$ZIP"
-mur build "$STAGE" -o "$ZIP"
+  echo "→ [2/5] validate component — skipped (native binary, not a wasm component)"
+  echo "→ [3/5] package — done by package.sh: $(basename "$ZIP")"
+else
+  ZIP="/tmp/${NAME}-${VERSION}.mur.zip"
+
+  echo "→ [1/5] cargo build $NAME ($VERSION)"
+  ( cd "$REPO_ROOT" && cargo build -p "$NAME" --target wasm32-wasip2 --release )
+
+  echo "→ [2/5] validate component"
+  "$REPO_ROOT/scripts/validate-component.sh" "$WASM"
+
+  echo "→ [3/5] package via mur build"
+  STAGE="$(mktemp -d)"
+  trap 'rm -rf "$STAGE"' EXIT
+  cp -R "$SRC_DIR/." "$STAGE/"
+  cp "$WASM" "$STAGE/${WASM_CRATE}.wasm"
+  rm -f "$ZIP"
+  mur build "$STAGE" -o "$ZIP"
+fi
 
 echo "→ [4/5] install into $CAPSULE_DIR"
 ( cd "$CAPSULE_DIR" && mur install "$ZIP" )
