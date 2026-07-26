@@ -14,6 +14,7 @@ serde_json.workspace = true
 rusqlite.workspace = true
 tree-sitter.workspace = true
 tree-sitter-rust.workspace = true
+tree-sitter-python.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]

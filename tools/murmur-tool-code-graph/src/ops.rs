@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use crate::db;
 use crate::out::{errored, failed, passed, Meta};
 use crate::parse;
+use crate::parse_python;
 
 // ── Input helpers ─────────────────────────────────────────────────────────────
 
@@ -105,13 +106,16 @@ struct IndexStats {
 }
 
 fn index_repo(conn: &mut Connection, repo: &Path) -> Result<IndexStats, String> {
-    let files = collect_rust_files(repo);
+    let files = collect_source_files(repo);
     let mut on_disk: Vec<String> = Vec::new();
     let mut changed = 0usize;
     let mut unchanged = 0usize;
 
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let mut pkg_cache: HashMap<PathBuf, (String, PathBuf)> = HashMap::new();
+    // Separate manifest caches per language: a Rust crate root (Cargo.toml) and a
+    // Python package root (pyproject.toml/setup.*) are sniffed differently.
+    let mut rust_cache: HashMap<PathBuf, (String, PathBuf)> = HashMap::new();
+    let mut py_cache: HashMap<PathBuf, (String, PathBuf)> = HashMap::new();
 
     for file in &files {
         let rel = rel_path(repo, file);
@@ -138,11 +142,20 @@ fn index_repo(conn: &mut Connection, repo: &Path) -> Result<IndexStats, String> 
         // edges originating from them) before inserting fresh ones.
         delete_file_rows(&tx, &rel).map_err(|e| e.to_string())?;
 
-        let file_id = upsert_file(&tx, &rel, &hash).map_err(|e| e.to_string())?;
+        // Dispatch to the parser matching the file's extension, threading the
+        // detected language into the `files` row.
+        let is_python = file.extension().and_then(|e| e.to_str()) == Some("py");
+        let language = if is_python { "python" } else { "rust" };
+        let file_id = upsert_file(&tx, &rel, &hash, language).map_err(|e| e.to_string())?;
 
-        let (package, module) = package_and_module(repo, file, &mut pkg_cache);
         let source = String::from_utf8_lossy(&bytes).into_owned();
-        let parsed = parse::parse_file(&source, &package, &module);
+        let parsed = if is_python {
+            let (package, module) = python_package_and_module(repo, file, &mut py_cache);
+            parse_python::parse_file(&source, &package, &module)
+        } else {
+            let (package, module) = package_and_module(repo, file, &mut rust_cache);
+            parse::parse_file(&source, &package, &module)
+        };
         insert_parsed(&tx, file_id, &parsed).map_err(|e| e.to_string())?;
     }
 
@@ -179,11 +192,15 @@ fn delete_file_rows(conn: &Connection, rel: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn upsert_file(conn: &Connection, rel: &str, hash: &str) -> rusqlite::Result<i64> {
+fn upsert_file(conn: &Connection, rel: &str, hash: &str, language: &str) -> rusqlite::Result<i64> {
+    // `language` is the actual per-file detected language ("rust" | "python"),
+    // not a hardcoded literal — on a conflicting reindex the language is also
+    // refreshed in case a path's extension (hence language) ever changes.
     conn.execute(
-        "INSERT INTO files (path, content_hash, language) VALUES (?1, ?2, 'rust')
-            ON CONFLICT(path) DO UPDATE SET content_hash = excluded.content_hash",
-        params![rel, hash],
+        "INSERT INTO files (path, content_hash, language) VALUES (?1, ?2, ?3)
+            ON CONFLICT(path) DO UPDATE SET content_hash = excluded.content_hash,
+                                            language = excluded.language",
+        params![rel, hash, language],
     )?;
     conn.query_row("SELECT id FROM files WHERE path = ?1", params![rel], |r| r.get(0))
 }
@@ -847,7 +864,10 @@ pub fn op_impact_analysis(op: &Value) -> Value {
         if vis == "pub" {
             public_apis.push(entry.clone());
         }
-        if is_test(&attrs, &module, &fpath) {
+        // The simple name is the final `::` segment of the qualified name — the
+        // same derivation the parsers use when populating `simple_name`.
+        let simple = qn.rsplit("::").next().unwrap_or(&qn);
+        if is_test(&attrs, &module, &fpath, simple) {
             tests.push(entry.clone());
         }
         if is_route(&attrs) {
@@ -911,9 +931,19 @@ fn rank_label(rank: i64) -> &'static str {
     }
 }
 
-/// Heuristic test detection: a test attribute, a `tests`/`test` module segment,
-/// or a test-shaped file path.
-fn is_test(attributes: &str, module: &str, file: &str) -> bool {
+/// Heuristic test detection, language-agnostic where possible:
+///
+/// - Rust attributes: `#[test]`, `tokio::test`, `async_std::test`, or any
+///   `test(`-marker attribute.
+/// - A `tests`/`test` module-path segment (split on both `::` and `.`, so both
+///   Rust and Python module paths are covered).
+/// - Rust test-shaped file names: `tests.rs`, `*_test.rs`, `*_tests.rs`.
+/// - The primary Python (pytest/unittest) signal: a `test_*.py`/`*_test.py`
+///   file name, or a `simple_name` starting with `test` (both `test_foo` and
+///   unittest-style `testSomething` — pytest/unittest collect any `test`-prefixed
+///   function).
+/// - A `tests/` directory anywhere on the path (any language).
+fn is_test(attributes: &str, module: &str, file: &str, simple_name: &str) -> bool {
     if attributes.contains("#[test]")
         || attributes.contains("tokio::test")
         || attributes.contains("async_std::test")
@@ -921,11 +951,18 @@ fn is_test(attributes: &str, module: &str, file: &str) -> bool {
     {
         return true;
     }
-    if module.split("::").any(|seg| seg == "tests" || seg == "test") {
+    if module.split([':', '.']).any(|seg| seg == "tests" || seg == "test") {
         return true;
     }
     let last = file.rsplit('/').next().unwrap_or(file);
     if last == "tests.rs" || last.ends_with("_test.rs") || last.ends_with("_tests.rs") {
+        return true;
+    }
+    // Python pytest/unittest naming conventions.
+    if (last.starts_with("test_") || last.ends_with("_test.py")) && last.ends_with(".py") {
+        return true;
+    }
+    if simple_name.starts_with("test") {
         return true;
     }
     file.starts_with("tests/") || file.contains("/tests/")
@@ -1000,9 +1037,10 @@ fn rel_path(repo: &Path, file: &Path) -> String {
         .join("/")
 }
 
-/// Recursively collect `*.rs` files, skipping build output, VCS, and the tool's
-/// own `.murmur` store and any hidden directory.
-fn collect_rust_files(repo: &Path) -> Vec<PathBuf> {
+/// Recursively collect `*.rs` and `*.py` files, skipping build output, VCS,
+/// the tool's own `.murmur` store, any hidden directory, and common
+/// Python virtualenv/build/cache directories.
+fn collect_source_files(repo: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![repo.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -1011,17 +1049,32 @@ fn collect_rust_files(repo: &Path) -> Vec<PathBuf> {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
             if path.is_dir() {
-                if name == "target" || name == ".git" || name.starts_with('.') {
+                if is_skipped_dir(&name) {
                     continue;
                 }
                 stack.push(path);
-            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            } else if matches!(path.extension().and_then(|e| e.to_str()), Some("rs") | Some("py")) {
                 out.push(path);
             }
         }
     }
     out.sort();
     out
+}
+
+/// Directory names that are never descended into: the Rust build dir, VCS, any
+/// hidden directory (which covers `.murmur`, `.venv`, `.tox`, `.git`), plus
+/// common Python virtualenv / build / cache / egg-info directories.
+fn is_skipped_dir(name: &str) -> bool {
+    name == "target"
+        || name == ".git"
+        || name.starts_with('.')
+        || name == "__pycache__"
+        || name == "venv"
+        || name == "build"
+        || name == "dist"
+        || name == "node_modules"
+        || name.ends_with(".egg-info")
 }
 
 /// Determine the crate package name and module path for `file`.
@@ -1130,4 +1183,188 @@ fn module_path(crate_root: &Path, file: &Path) -> String {
         comps.pop();
     }
     comps.join("::")
+}
+
+// ── Python package-layout helpers (analogues of the Rust ones above) ──────────
+
+/// Determine the Python package name and dotted module path for `file`.
+///
+/// - package: the name declared by the nearest ancestor `pyproject.toml`,
+///   `setup.py`, or `setup.cfg` (sniffed in that order at each directory,
+///   walking up); falls back to the repo directory name, exactly as the Rust
+///   `nearest_crate` fallback does.
+/// - module: the dotted path from that package root to the file, with a leading
+///   `src/` dropped, `__init__.py` collapsing to its parent module, and the
+///   `.py` suffix stripped; `""` at the package root.
+fn python_package_and_module(
+    repo: &Path,
+    file: &Path,
+    cache: &mut HashMap<PathBuf, (String, PathBuf)>,
+) -> (String, String) {
+    let dir = file.parent().unwrap_or(repo).to_path_buf();
+    let (package, root) = python_nearest_package(repo, &dir, cache);
+    let module = python_module_path(&root, file);
+    (package, module)
+}
+
+fn python_nearest_package(
+    repo: &Path,
+    start: &Path,
+    cache: &mut HashMap<PathBuf, (String, PathBuf)>,
+) -> (String, PathBuf) {
+    if let Some(hit) = cache.get(start) {
+        return hit.clone();
+    }
+    let mut cur = Some(start.to_path_buf());
+    while let Some(dir) = cur {
+        if let Some(name) = python_package_name(&dir) {
+            let result = (name, dir.clone());
+            cache.insert(start.to_path_buf(), result.clone());
+            return result;
+        }
+        if dir == repo {
+            break;
+        }
+        cur = dir.parent().map(|p| p.to_path_buf());
+        // Never ascend above the repo root.
+        if let Some(ref c) = cur {
+            if !c.starts_with(repo) {
+                break;
+            }
+        }
+    }
+    let fallback = (
+        repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "package".into()),
+        repo.to_path_buf(),
+    );
+    cache.insert(start.to_path_buf(), fallback.clone());
+    fallback
+}
+
+/// Sniff a package name from any Python manifest in `dir`, in priority order:
+/// `pyproject.toml` (`[project]`/`[tool.poetry]` `name = "..."`), then
+/// `setup.py` (`name="..."` / `name='...'` in the `setup(...)` call), then
+/// `setup.cfg` (`[metadata]` `name = ...`). Plain-text scanning only — no TOML
+/// dependency — mirroring the `Cargo.toml` `package_name` approach.
+fn python_package_name(dir: &Path) -> Option<String> {
+    if let Ok(text) = std::fs::read_to_string(dir.join("pyproject.toml")) {
+        if let Some(name) = pyproject_name(&text) {
+            return Some(name);
+        }
+    }
+    if let Ok(text) = std::fs::read_to_string(dir.join("setup.py")) {
+        if let Some(name) = setup_py_name(&text) {
+            return Some(name);
+        }
+    }
+    if let Ok(text) = std::fs::read_to_string(dir.join("setup.cfg")) {
+        if let Some(name) = setup_cfg_name(&text) {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// Extract `name = "..."` from a `[project]` or `[tool.poetry]` table of a
+/// `pyproject.toml`. Only these two tables are honored so a `name` key under an
+/// unrelated table is not mistaken for the package name.
+fn pyproject_name(text: &str) -> Option<String> {
+    let mut in_name_table = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_name_table = t == "[project]" || t == "[tool.poetry]";
+            continue;
+        }
+        if in_name_table {
+            if let Some(v) = toml_string_value(t, "name") {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// Extract the first `name="..."`/`name='...'` keyword argument from a
+/// `setup.py` (best-effort plain-text scan of the `setup(...)` call).
+fn setup_py_name(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let t = line.trim();
+        // Match `name = "..."` allowing whitespace around `=`.
+        if let Some(rest) = t.strip_prefix("name") {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix('=') {
+                let v = rest.trim().trim_end_matches(',').trim().trim_matches('"').trim_matches('\'');
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract `name = ...` from the `[metadata]` section of a `setup.cfg`.
+fn setup_cfg_name(text: &str) -> Option<String> {
+    let mut in_metadata = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_metadata = t == "[metadata]";
+            continue;
+        }
+        if in_metadata {
+            if let Some(rest) = t.strip_prefix("name") {
+                let rest = rest.trim_start();
+                if let Some(rest) = rest.strip_prefix('=') {
+                    let v = rest.trim();
+                    if !v.is_empty() {
+                        return Some(v.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Parse a `key = "value"` (or `'value'`) TOML line, returning the string value.
+fn toml_string_value(line: &str, key: &str) -> Option<String> {
+    let rest = line.strip_prefix(key)?.trim_start();
+    let rest = rest.strip_prefix('=')?.trim();
+    let v = rest.trim_matches('"').trim_matches('\'');
+    if v.is_empty() {
+        None
+    } else {
+        Some(v.to_string())
+    }
+}
+
+fn python_module_path(root: &Path, file: &Path) -> String {
+    let rel = match file.strip_prefix(root) {
+        Ok(r) => r,
+        Err(_) => return String::new(),
+    };
+    let mut comps: Vec<String> =
+        rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    if comps.is_empty() {
+        return String::new();
+    }
+    // Drop a leading `src/` (the common Python "src layout").
+    if comps.first().map(|s| s.as_str()) == Some("src") {
+        comps.remove(0);
+    }
+    if comps.is_empty() {
+        return String::new();
+    }
+    // Strip the `.py` extension from the final component.
+    let last = comps.len() - 1;
+    if let Some(stem) = comps[last].strip_suffix(".py") {
+        comps[last] = stem.to_string();
+    }
+    // Collapse a package-init file to its parent module.
+    if comps[last] == "__init__" {
+        comps.pop();
+    }
+    comps.join(".")
 }

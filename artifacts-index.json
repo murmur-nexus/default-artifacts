@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-07-25T15:57:42Z",
+  "updated_at": "2026-07-26T08:55:58Z",
   "artifacts": [
     {
       "name": "murmur-driver-anthropic",
@@ -193,9 +193,9 @@
     },
     {
       "name": "murmur-tool-code-graph",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "runtime": "tool",
-      "description": "Indexes a Rust repository into a SQLite-backed symbol/edge graph and answers",
+      "description": "Indexes a Rust and/or Python repository into a SQLite-backed symbol/edge graph",
       "tags": [
         "tool",
         "code",

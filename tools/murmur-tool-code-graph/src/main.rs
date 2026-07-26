@@ -1,5 +1,6 @@
-//! murmur-tool-code-graph — a native Murmur tool that indexes a Rust repository
-//! into a SQLite-backed symbol/edge graph and exposes it through six structured
+//! murmur-tool-code-graph — a native Murmur tool that indexes a Rust and/or
+//! Python repository into a SQLite-backed symbol/edge graph and exposes it
+//! through six structured
 //! operations: `index_repository`, `find_symbol`, `get_symbol`, `slice_symbol`,
 //! `explain_path`, `impact_analysis`.
 //!
@@ -11,6 +12,7 @@ mod db;
 mod ops;
 mod out;
 mod parse;
+mod parse_python;
 
 use std::io::Read;
 
