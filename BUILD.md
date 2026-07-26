@@ -82,14 +82,11 @@ A native tool must additionally be added to the `Cargo build (wasm)` exclude
 list in `ci.yml`. `scripts/check-build-coverage.sh` (run by CI) fails if an
 artifact in `artifacts.toml` is not built by exactly one `build.yml` matrix.
 
-> **Pending manual step — `murmur-hook-regression-verifier`.** The
-> `murmur-hook-regression-verifier` slice (card `7e8ff809`) added steps 1 and 2
-> above (`artifacts.toml` + root `Cargo.toml`) but deliberately left step 3
-> (the `build-wasm` matrix entry in `.github/workflows/build.yml`) as a manual
-> follow-up, matching the precedent set by the first `murmur-tool-code-graph`
-> slice. Add `murmur-hook-regression-verifier` to the `build-wasm` matrix before
-> relying on CI to build/publish it. The internal `libs/murmur-test-parse` crate
-> is *not* an artifact and must never be added to `artifacts.toml` or a matrix.
+> **Note — `murmur-hook-regression-verifier`.** The internal
+> `libs/murmur-test-parse` crate added alongside this hook (card `7e8ff809`) is
+> *not* an artifact and must never be added to `artifacts.toml` or a
+> `build.yml` matrix — it is a shared, unpublished library, not a shippable
+> component.
 
 ## Version management
 

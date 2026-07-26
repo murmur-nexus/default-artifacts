@@ -375,7 +375,11 @@ mod tests {
     fn scenario_3_collection_failure_module_wide() {
         let mut st = RegressionState::new();
         // baseline: 644 passing, none failing.
-        st.observe_shell("pytest", "=== test session starts ===\n=== 644 passed in 1.0s ===", "");
+        st.observe_shell(
+            "pytest",
+            "=== test session starts ===\n=== 644 passed in 1.0s ===",
+            "",
+        );
         st.observe_tool("murmur-tool-create");
         // current: collection error — 0 passing, no enumerated failures.
         st.observe_shell(
@@ -456,7 +460,11 @@ mod tests {
         let mut st = RegressionState::new();
         st.observe_tool("murmur-tool-editor");
         // First sighting of this command is after the edit → no baseline.
-        st.observe_shell("go test ./...", "--- FAIL: TestX (0.0s)\n    x_test.go:1: boom\nFAIL", "");
+        st.observe_shell(
+            "go test ./...",
+            "--- FAIL: TestX (0.0s)\n    x_test.go:1: boom\nFAIL",
+            "",
+        );
         let v = st.derive_verdict();
         assert!(!v.reopen);
         assert!(v.commands.is_empty());
