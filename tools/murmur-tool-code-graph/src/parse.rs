@@ -1,8 +1,9 @@
 //! Rust source parsing via `tree-sitter-rust` into symbols + edges.
 //!
-//! MVP language scope is Rust only. The output structs carry an explicit
-//! `language` field ("rust") so the storage layer's `language` columns are
-//! populated for real, keeping additional grammars additive later.
+//! The Python counterpart lives in [`crate::parse_python`]; both emit the same
+//! [`RawSymbol`]/[`RawEdge`]/[`Parsed`] shapes and set the `language` field
+//! ("rust" here, "python" there) so the storage layer's `language` columns are
+//! populated for real and the traversal engine stays language-agnostic.
 
 use tree_sitter::{Node, Parser};
 
@@ -48,15 +49,23 @@ pub struct Parsed {
     pub edges: Vec<RawEdge>,
 }
 
-/// Build the stable symbol identity.
+/// Build the stable symbol identity for a given language `scheme`.
 ///
-/// Format: `rust://<package>/<module>#<qualified_name>(<signature-body>)`
-/// where `<signature-body>` is empty for non-functions. Two worked examples are
-/// in the build summary. The identity deliberately omits `file:line`, so it
-/// survives unrelated edits elsewhere; it deliberately includes the normalized
-/// signature, so a change to *this* symbol's own signature yields a *new* id.
-pub fn make_symbol_id(package: &str, module: &str, qualified_name: &str, signature_body: &str) -> String {
-    format!("rust://{package}/{module}#{qualified_name}({signature_body})")
+/// Format: `<scheme>://<package>/<module>#<qualified_name>(<signature-body>)`
+/// where `<signature-body>` is empty for non-functions. The Rust parser passes
+/// `scheme = "rust"`; the Python parser (see [`crate::parse_python`]) passes
+/// `scheme = "python"`. Worked examples are in the build summary. The identity
+/// deliberately omits `file:line`, so it survives unrelated edits elsewhere; it
+/// deliberately includes the normalized signature, so a change to *this*
+/// symbol's own signature yields a *new* id.
+pub fn make_symbol_id(
+    scheme: &str,
+    package: &str,
+    module: &str,
+    qualified_name: &str,
+    signature_body: &str,
+) -> String {
+    format!("{scheme}://{package}/{module}#{qualified_name}({signature_body})")
 }
 
 /// Parse one Rust source file. `package` and `module` locate the file within
@@ -174,7 +183,7 @@ impl<'a> Ctx<'a> {
     ) -> Option<String> {
         let name = self.field_text(node, "name")?;
         let qualified = qualify(type_prefix, &name);
-        let symbol_id = make_symbol_id(self.package, module, &qualified, "");
+        let symbol_id = make_symbol_id("rust", self.package, module, &qualified, "");
         self.push_symbol(&symbol_id, module, &qualified, "", kind, node);
         self.push_contains(parent, &symbol_id, &name);
         Some(symbol_id)
@@ -190,7 +199,7 @@ impl<'a> Ctx<'a> {
         let Some(name) = self.field_text(node, "name") else { return };
         let qualified = qualify(type_prefix, &name);
         let signature = self.signature_body(node);
-        let symbol_id = make_symbol_id(self.package, module, &qualified, &signature);
+        let symbol_id = make_symbol_id("rust", self.package, module, &qualified, &signature);
         self.push_symbol(&symbol_id, module, &qualified, &signature, "function", node);
         self.push_contains(parent, &symbol_id, &name);
         // Collect callees from the body (function_signature_item has none).

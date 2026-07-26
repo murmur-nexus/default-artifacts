@@ -1,14 +1,23 @@
 name: murmur-tool-code-graph
-version: 0.1.0
+version: 0.2.0
 runtime: tool
 implementation: native
 description: |
-  Indexes a Rust repository into a SQLite-backed symbol/edge graph and answers
-  structured queries over it. Symbols are addressed by a stable identity —
-  `rust://<package>/<module>#<qualified-name>(<signature>)` — that survives
-  unrelated edits elsewhere in the repo, not by `file:line`. The graph is stored
-  at `<repo_path>/.murmur/code-graph.db`; re-indexing an unchanged repo is a fast
-  no-op via per-file content-hash comparison. MVP language scope is Rust only.
+  Indexes a Rust and/or Python repository into a SQLite-backed symbol/edge graph
+  and answers structured queries over it. Symbols are addressed by a stable
+  identity that survives unrelated edits elsewhere in the repo (not by
+  `file:line`), one scheme per language:
+    - Rust:   `rust://<package>/<module>#<qualified-name>(<signature>)`
+    - Python: `python://<package>/<module>#<qualified-name>(<params>)`
+  e.g. `rust://mycrate/graph#Foo::bar(&self,usize)->bool` and
+  `python://mypkg/pkg.core#Widget::doubled(self->int)`. A single index pass walks
+  both `*.rs` and `*.py` files, dispatching each to the parser matching its
+  extension, so pure-Rust, pure-Python, and mixed repos all index in one call.
+  The graph is stored at `<repo_path>/.murmur/code-graph.db`; re-indexing an
+  unchanged repo is a fast no-op via per-file content-hash comparison. Python
+  attribute-qualified calls (`x.foo()`) are conservatively classified as method
+  calls (never `definite` confidence), since Python cannot statically distinguish
+  a module-qualified free call from a dynamic dispatch.
 
   | op               | inputs                                        | outputs                                              |
   |------------------|-----------------------------------------------|------------------------------------------------------|
@@ -65,7 +74,7 @@ input_schema:
       description: "Optional for find_symbol. Maximum matches to return. Default 20, clamped to [1,500]."
     symbol_id:
       type: string
-      description: "Required for get_symbol and slice_symbol. The stable symbol identity, e.g. rust://mycrate/graph#Foo::bar(&self,usize)->bool."
+      description: "Required for get_symbol and slice_symbol. The stable symbol identity, e.g. rust://mycrate/graph#Foo::bar(&self,usize)->bool or python://mypkg/pkg.core#Widget::doubled(self->int)."
     max_depth:
       type: integer
       description: "Optional for slice_symbol and impact_analysis (default 3) and explain_path (default 6). Bounds traversal depth; the depth bound is the termination guarantee for cyclic graphs."

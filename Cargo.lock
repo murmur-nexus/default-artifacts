@@ -1241,7 +1241,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-driver-anthropic"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1251,7 +1251,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-driver-deepseek"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1261,7 +1261,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-driver-openai"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1271,7 +1271,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-hook-compact"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde_json",
  "wit-bindgen 0.59.0",
@@ -1279,7 +1279,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-hook-debug"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde_json",
  "wit-bindgen 0.59.0",
@@ -1287,7 +1287,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-hook-diff-summary"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1297,7 +1297,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-hook-eval"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde_json",
  "wit-bindgen 0.59.0",
@@ -1305,7 +1305,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-hook-grafana"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde_json",
  "wit-bindgen 0.59.0",
@@ -1313,7 +1313,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-hook-memory-jsonl"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1323,14 +1323,14 @@ dependencies = [
 
 [[package]]
 name = "murmur-hook-shell-desc"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "wit-bindgen 0.59.0",
 ]
 
 [[package]]
 name = "murmur-tool-code-coverage"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rusqlite",
  "serde",
@@ -1340,19 +1340,20 @@ dependencies = [
 
 [[package]]
 name = "murmur-tool-code-graph"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
  "tree-sitter",
+ "tree-sitter-python",
  "tree-sitter-rust",
 ]
 
 [[package]]
 name = "murmur-tool-create"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -1363,7 +1364,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-tool-editor"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "regex",
  "serde_json",
@@ -1375,7 +1376,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-tool-git"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rusqlite",
  "serde",
@@ -1384,7 +1385,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-tool-git-validate"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "clap",
  "serde_json",
@@ -1393,7 +1394,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-tool-registry-search"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1402,7 +1403,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-tool-request-input"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde_json",
  "wit-bindgen 0.59.0",
@@ -1410,7 +1411,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-tool-test-report"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rusqlite",
  "serde",
@@ -2109,6 +2110,16 @@ checksum = "df7cc499ceadd4dcdf7ec6d4cbc34ece92c3fa07821e287aedecd4416c516dca"
 dependencies = [
  "cc",
  "regex",
+]
+
+[[package]]
+name = "tree-sitter-python"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4066c6cf678f962f8c2c4561f205945c84834cce73d981e71392624fdc390a9"
+dependencies = [
+ "cc",
+ "tree-sitter",
 ]
 
 [[package]]

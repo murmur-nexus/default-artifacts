@@ -910,3 +910,466 @@ fn impact_10_pre_slice_db_migrates_and_repopulates() {
     assert_eq!(r["status"], "passed", "{r}");
     assert_eq!(conf_of(&r["callers"], I_RUN).as_deref(), Some("heuristic"), "{r}");
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Python indexer (card 5a10f12b)
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// A small real Python package `pyfixture` written to disk. Layout:
+//
+//   pyproject.toml                 ([project] name = "pyfixture")
+//   pyfixture/__init__.py          (empty — package root, collapses to "pyfixture")
+//   pyfixture/core.py              add(), Widget(+methods), top(), _private()
+//   pyfixture/handlers.py          handler() [@app.get route], save() [persistence], ...
+//   tests/test_core.py             test_add()  (pytest naming)
+//
+// Forward call graph (Python):
+//   top ──free──▶ Widget            (bare `Widget(2)`)
+//   top ──method─▶ doubled          (`w.doubled()` — heuristic)
+//   Widget::doubled ──free──▶ add
+//   handler ──free──▶ save ──free──▶ execute   (execute is a persistence marker)
+//   test_add ──free──▶ add
+//   use_client ──method─▶ fetch     (unresolved: no `fetch` symbol)
+
+const PYPKG: &str = "pyfixture";
+const PY_ADD: &str = "python://pyfixture/pyfixture.core#add(a,b)";
+const PY_WIDGET: &str = "python://pyfixture/pyfixture.core#Widget()";
+const PY_DOUBLED: &str = "python://pyfixture/pyfixture.core#Widget::doubled(self)";
+const PY_HIDDEN: &str = "python://pyfixture/pyfixture.core#Widget::_hidden(self)";
+const PY_TOP: &str = "python://pyfixture/pyfixture.core#top()";
+const PY_PRIVATE: &str = "python://pyfixture/pyfixture.core#_private()";
+const PY_HANDLER: &str = "python://pyfixture/pyfixture.handlers#handler()";
+const PY_SAVE: &str = "python://pyfixture/pyfixture.handlers#save()";
+const PY_TEST_ADD: &str = "python://pyfixture/tests.test_core#test_add()";
+
+fn write_python_fixture(repo: &Path) {
+    fs::write(
+        repo.join("pyproject.toml"),
+        format!("[project]\nname = \"{PYPKG}\"\nversion = \"0.1.0\"\n"),
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join("pyfixture")).unwrap();
+    fs::write(repo.join("pyfixture/__init__.py"), "").unwrap();
+    fs::write(
+        repo.join("pyfixture/core.py"),
+        r#""""Core module."""
+
+
+def add(a, b):
+    return a + b
+
+
+class Widget:
+    """A widget holding a number."""
+
+    def __init__(self, n):
+        self.n = n
+
+    def doubled(self):
+        return add(self.n, self.n)
+
+    def _hidden(self):
+        return add(1, 2)
+
+
+def top():
+    w = Widget(2)
+    return w.doubled()
+
+
+def _private():
+    return 0
+"#,
+    )
+    .unwrap();
+    fs::write(
+        repo.join("pyfixture/handlers.py"),
+        r#"@app.get("/core")
+def handler():
+    return save()
+
+
+def save():
+    execute()
+    return 1
+
+
+def execute():
+    return 0
+
+
+def use_client(c):
+    return c.fetch()
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join("tests")).unwrap();
+    fs::write(
+        repo.join("tests/test_core.py"),
+        "from pyfixture.core import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n",
+    )
+    .unwrap();
+}
+
+// ── py 01: index populates python rows, python:// ids, files.language ─────────
+
+#[test]
+fn py_01_index_populates_python_rows() {
+    use rusqlite::Connection;
+    let td = TestDir::new();
+    write_python_fixture(td.path());
+    let r = index(td.path());
+    assert_eq!(r["status"], "passed", "{r}");
+    assert_eq!(r["changed_files"], 4, "4 .py files: {r}");
+    assert!(r["total_symbols"].as_i64().unwrap() >= 8, "symbols: {r}");
+
+    let conn = Connection::open(td.path().join(".murmur/code-graph.db")).unwrap();
+    // Every files row is language = 'python' (the upsert_file '\''rust'\'' literal fix).
+    let non_python: i64 = conn
+        .query_row("SELECT COUNT(*) FROM files WHERE language != 'python'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(non_python, 0, "no file row may read language != python for a pure-Python repo");
+    // Symbols carry language = 'python' and python:// ids.
+    let py_syms: i64 = conn
+        .query_row("SELECT COUNT(*) FROM symbols WHERE language = 'python'", [], |r| r.get(0))
+        .unwrap();
+    assert!(py_syms >= 8, "python symbols: {py_syms}");
+    let bad_ids: i64 = conn
+        .query_row("SELECT COUNT(*) FROM symbols WHERE symbol_id NOT LIKE 'python://%'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(bad_ids, 0, "every symbol id must use the python:// scheme");
+}
+
+// ── py 02: identical reindex is a no-op read ──────────────────────────────────
+
+#[test]
+fn py_02_reindex_is_noop_read() {
+    let td = TestDir::new();
+    write_python_fixture(td.path());
+    index(td.path());
+    let r = index(td.path());
+    assert_eq!(r["status"], "passed");
+    assert_eq!(r["changed_files"], 0);
+    assert_eq!(r["unchanged_files"], 4);
+    assert_eq!(r["metadata"]["state_effect"], "read");
+}
+
+// ── py 03: find_symbol ranked FTS search ──────────────────────────────────────
+
+#[test]
+fn py_03_find_symbol_matches() {
+    let td = TestDir::new();
+    write_python_fixture(td.path());
+    index(td.path());
+    let r = run_tool(
+        td.path(),
+        json!({ "operation": "find_symbol", "repo_path": td.path().to_str().unwrap(), "query": "widget" }),
+    );
+    assert_eq!(r["status"], "passed");
+    let ids: Vec<&str> =
+        r["matches"].as_array().unwrap().iter().map(|m| m["symbol_id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&PY_WIDGET) || ids.contains(&PY_DOUBLED), "matches: {ids:?}");
+}
+
+// ── py 04: get_symbol full detail (language, visibility, callees/callers) ──────
+
+#[test]
+fn py_04_get_symbol_detail() {
+    let td = TestDir::new();
+    write_python_fixture(td.path());
+    index(td.path());
+    let r = run_tool(
+        td.path(),
+        json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap(), "symbol_id": PY_TOP }),
+    );
+    assert_eq!(r["status"], "passed", "{r}");
+    assert_eq!(r["qualified_name"], "top");
+    assert_eq!(r["kind"], "function");
+    assert_eq!(r["language"], "python");
+    assert_eq!(r["file"], "pyfixture/core.py");
+    // top calls Widget (free) and doubled (method); both resolve.
+    let callees: Vec<&str> = r["callees"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(callees.contains(&PY_WIDGET) && callees.contains(&PY_DOUBLED), "callees: {callees:?}");
+    assert_eq!(r["metadata"]["resource_id"], PY_TOP);
+}
+
+// ── py 05: visibility from underscore convention ──────────────────────────────
+
+#[test]
+fn py_05_visibility_underscore_convention() {
+    let td = TestDir::new();
+    write_python_fixture(td.path());
+    index(td.path());
+    let vis = |sid: &str| -> String {
+        run_tool(
+            td.path(),
+            json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap(), "symbol_id": sid }),
+        )["visibility"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(vis(PY_ADD), "pub", "add is public");
+    assert_eq!(vis(PY_WIDGET), "pub", "Widget is public");
+    assert_eq!(vis(PY_PRIVATE), "", "_private is private");
+    assert_eq!(vis(PY_HIDDEN), "", "_hidden is private");
+}
+
+// ── py 06: identity survives an unrelated edit + reindex ───────────────────────
+
+#[test]
+fn py_06_identity_survives_unrelated_edit() {
+    let td = TestDir::new();
+    write_python_fixture(td.path());
+    index(td.path());
+    // Edit an unrelated file (handlers.py), leaving core.py untouched.
+    fs::write(
+        td.path().join("pyfixture/handlers.py"),
+        "def save():\n    execute()\n    return 2\n\n\ndef execute():\n    return 0\n",
+    )
+    .unwrap();
+    let re = index(td.path());
+    assert_eq!(re["changed_files"], 1, "only handlers.py changed: {re}");
+    let r = run_tool(
+        td.path(),
+        json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap(), "symbol_id": PY_ADD }),
+    );
+    assert_eq!(r["status"], "passed", "add must still resolve: {r}");
+}
+
+// ── py 07: editing the symbol's own parameter list mints a new id ─────────────
+
+#[test]
+fn py_07_signature_change_mints_new_id() {
+    let td = TestDir::new();
+    write_python_fixture(td.path());
+    index(td.path());
+    // Change add's own parameter list: add(a, b) -> add(a, b, c).
+    let core = fs::read_to_string(td.path().join("pyfixture/core.py")).unwrap();
+    let core = core.replace("def add(a, b):", "def add(a, b, c):");
+    fs::write(td.path().join("pyfixture/core.py"), core).unwrap();
+    index(td.path());
+
+    // Old id no longer resolves.
+    let old = run_tool(
+        td.path(),
+        json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap(), "symbol_id": PY_ADD }),
+    );
+    assert_eq!(old["status"], "failed", "old id should be not-found: {old}");
+
+    // New id resolves.
+    let new_id = "python://pyfixture/pyfixture.core#add(a,b,c)";
+    let new = run_tool(
+        td.path(),
+        json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap(), "symbol_id": new_id }),
+    );
+    assert_eq!(new["status"], "passed", "new id should resolve: {new}");
+}
+
+// ── py 08: slice_symbol bounded by max_depth ──────────────────────────────────
+
+#[test]
+fn py_08_slice_bounded_by_depth() {
+    let td = TestDir::new();
+    write_python_fixture(td.path());
+    index(td.path());
+    // Depth 1 from top reaches its direct callees (Widget, doubled) not add (depth 2).
+    let r = run_tool(
+        td.path(),
+        json!({ "operation": "slice_symbol", "repo_path": td.path().to_str().unwrap(),
+                "symbol_id": PY_TOP, "max_depth": 1, "max_nodes": 50 }),
+    );
+    assert_eq!(r["status"], "passed");
+    let ids: Vec<&str> =
+        r["nodes"].as_array().unwrap().iter().map(|n| n["symbol_id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&PY_TOP) && ids.contains(&PY_DOUBLED), "ids: {ids:?}");
+    assert!(!ids.contains(&PY_ADD), "add is depth 2, excluded at max_depth 1: {ids:?}");
+}
+
+// ── py 09: explain_path finds a path (through a method hop) ────────────────────
+
+#[test]
+fn py_09_explain_path_found() {
+    let td = TestDir::new();
+    write_python_fixture(td.path());
+    index(td.path());
+    let r = run_tool(
+        td.path(),
+        json!({ "operation": "explain_path", "repo_path": td.path().to_str().unwrap(),
+                "from": PY_TOP, "to": PY_ADD, "max_depth": 6 }),
+    );
+    assert_eq!(r["status"], "passed");
+    assert_eq!(r["found"], true, "{r}");
+    let path: Vec<&str> = r["path"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert_eq!(path.first(), Some(&PY_TOP));
+    assert_eq!(path.last(), Some(&PY_ADD));
+}
+
+// ── py 10: impact_analysis — full shape, buckets, python classification ────────
+
+#[test]
+fn py_10_impact_full_shape() {
+    let td = TestDir::new();
+    write_python_fixture(td.path());
+    index(td.path());
+
+    let r = impact_over_symbol(td.path(), "pyfixture/core.py", PY_ADD, 50);
+    assert_eq!(r["status"], "passed", "{r}");
+
+    // roots = exactly add, depth 0, definite.
+    assert_eq!(ids(&r["roots"]), vec![PY_ADD.to_string()]);
+    assert_eq!(r["roots"][0]["confidence"], "definite");
+
+    // callers include doubled, _hidden, test_add, and (transitively) top.
+    let callers = ids(&r["callers"]);
+    for expect in [PY_DOUBLED, PY_HIDDEN, PY_TEST_ADD, PY_TOP] {
+        assert!(callers.contains(&expect.to_string()), "missing caller {expect}: {callers:?}");
+    }
+    assert!(!callers.contains(&PY_ADD.to_string()), "root must not be its own caller");
+
+    // top reaches add via a method hop (w.doubled()) → heuristic (weakest).
+    assert_eq!(conf_of(&r["callers"], PY_TOP).as_deref(), Some("heuristic"),
+        "top reaches add through a method call → heuristic: {r}");
+    // doubled -> add is a bare free call to a unique name → definite.
+    assert_eq!(conf_of(&r["callers"], PY_DOUBLED).as_deref(), Some("definite"));
+
+    // tests bucket: test_add (test_ prefix + test_*.py file + tests/ dir).
+    assert!(ids(&r["tests"]).contains(&PY_TEST_ADD.to_string()), "tests: {r}");
+
+    // public_apis: names not starting with _  (add, top, doubled); not _hidden.
+    let public = ids(&r["public_apis"]);
+    assert!(public.contains(&PY_ADD.to_string()), "add public: {public:?}");
+    assert!(public.contains(&PY_DOUBLED.to_string()), "doubled public: {public:?}");
+    assert!(!public.contains(&PY_HIDDEN.to_string()), "_hidden is private: {public:?}");
+}
+
+// ── py 11: impact_analysis — route + persistence classification ───────────────
+
+#[test]
+fn py_11_impact_route_and_persistence() {
+    let td = TestDir::new();
+    write_python_fixture(td.path());
+    index(td.path());
+
+    // handler carries @app.get("/core") → route; it is a root with no callers.
+    let rh = impact_over_symbol(td.path(), "pyfixture/handlers.py", PY_HANDLER, 50);
+    assert_eq!(rh["status"], "passed");
+    assert!(ids(&rh["routes"]).contains(&PY_HANDLER.to_string()), "route bucket: {rh}");
+
+    // save calls execute() (a persistence marker) → persistence bucket.
+    let rs = impact_over_symbol(td.path(), "pyfixture/handlers.py", PY_SAVE, 50);
+    assert!(ids(&rs["persistence_operations"]).contains(&PY_SAVE.to_string()), "persist: {rs}");
+}
+
+// ── py 12: method call is always heuristic (edge-level DB inspection) ──────────
+
+#[test]
+fn py_12_method_call_is_heuristic() {
+    use rusqlite::Connection;
+    let td = TestDir::new();
+    write_python_fixture(td.path());
+    index(td.path());
+
+    let conn = Connection::open(td.path().join(".murmur/code-graph.db")).unwrap();
+    let conf = |src: &str, name: &str| -> String {
+        conn.query_row(
+            "SELECT confidence FROM edges WHERE src_symbol_id = ?1 AND dst_name = ?2 AND edge_kind = 'calls'",
+            rusqlite::params![src, name],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap()
+    };
+    // top -> doubled is a method call (w.doubled()); even though `doubled` is a
+    // unique name it must be heuristic, never definite.
+    assert_eq!(conf(PY_TOP, "doubled"), "heuristic");
+    // doubled -> add is a free call to a unique name → definite.
+    assert_eq!(conf(PY_DOUBLED, "add"), "definite");
+    // Its call_style column is recorded as 'method'.
+    let style: String = conn
+        .query_row(
+            "SELECT call_style FROM edges WHERE src_symbol_id = ?1 AND dst_name = 'doubled'",
+            rusqlite::params![PY_TOP],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(style, "method");
+}
+
+// ── py 13: missing symbol_id → failed (input validation unchanged) ────────────
+
+#[test]
+fn py_13_missing_symbol_id_failed() {
+    let td = TestDir::new();
+    write_python_fixture(td.path());
+    index(td.path());
+    let r = run_tool(
+        td.path(),
+        json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap() }),
+    );
+    assert_eq!(r["status"], "failed");
+    assert!(r["message"].as_str().unwrap().contains("symbol_id"));
+}
+
+// ── py 14: a single index pass covers a mixed Rust + Python repo ───────────────
+
+fn write_mixed_fixture(repo: &Path) {
+    // A Rust crate at the root...
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"mixcrate\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub fn rust_fn() -> i64 {\n    1\n}\n").unwrap();
+    // ...and a Python tree beside it.
+    fs::create_dir_all(repo.join("py")).unwrap();
+    fs::write(
+        repo.join("py/app.py"),
+        "def py_fn():\n    return helper()\n\n\ndef helper():\n    return 2\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn py_14_mixed_repo_indexes_both_languages() {
+    use rusqlite::Connection;
+    let td = TestDir::new();
+    write_mixed_fixture(td.path());
+    let r = index(td.path());
+    assert_eq!(r["status"], "passed", "{r}");
+    assert_eq!(r["changed_files"], 2, "lib.rs + app.py: {r}");
+
+    let conn = Connection::open(td.path().join(".murmur/code-graph.db")).unwrap();
+    // Rust file/symbol...
+    let rust_files: i64 = conn
+        .query_row("SELECT COUNT(*) FROM files WHERE language = 'rust'", [], |r| r.get(0))
+        .unwrap();
+    let py_files: i64 = conn
+        .query_row("SELECT COUNT(*) FROM files WHERE language = 'python'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rust_files, 1, "one rust file");
+    assert_eq!(py_files, 1, "one python file");
+
+    // Both symbol schemes present in one graph.
+    let rust_fn = run_tool(
+        td.path(),
+        json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap(),
+                "symbol_id": "rust://mixcrate/#rust_fn(->i64)" }),
+    );
+    assert_eq!(rust_fn["status"], "passed", "rust symbol resolves: {rust_fn}");
+    // The Python package name falls back to the repo directory name (an opaque
+    // tempdir), so assert the Python symbol via find_symbol rather than a
+    // hard-coded id, keeping the test independent of the tempdir name.
+    let found = run_tool(
+        td.path(),
+        json!({ "operation": "find_symbol", "repo_path": td.path().to_str().unwrap(), "query": "py_fn" }),
+    );
+    let ids: Vec<String> = found["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["symbol_id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(ids.iter().any(|s| s.starts_with("python://") && s.contains("py.app#py_fn")),
+        "python symbol indexed in mixed repo: {ids:?}");
+}

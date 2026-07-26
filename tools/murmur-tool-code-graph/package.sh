@@ -12,7 +12,7 @@
 set -euo pipefail
 
 ARTIFACT_NAME="murmur-tool-code-graph"
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 # Platform detection from the current host OS and architecture.
 detect_platform() {
