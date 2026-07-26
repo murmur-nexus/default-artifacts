@@ -82,6 +82,12 @@ A native tool must additionally be added to the `Cargo build (wasm)` exclude
 list in `ci.yml`. `scripts/check-build-coverage.sh` (run by CI) fails if an
 artifact in `artifacts.toml` is not built by exactly one `build.yml` matrix.
 
+> **Note — `murmur-hook-regression-verifier`.** The internal
+> `libs/murmur-test-parse` crate added alongside this hook (card `7e8ff809`) is
+> *not* an artifact and must never be added to `artifacts.toml` or a
+> `build.yml` matrix — it is a shared, unpublished library, not a shippable
+> component.
+
 ## Version management
 
 All artifact versions are controlled from a single file: **`artifacts.toml`** at the repo root. After editing it, propagate versions to every surface:

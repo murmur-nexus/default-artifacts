@@ -60,6 +60,11 @@ path = "hooks/murmur-hook-memory-jsonl"
 version = "0.2.0"
 
 [[artifact]]
+name = "murmur-hook-regression-verifier"
+path = "hooks/murmur-hook-regression-verifier"
+version = "0.1.0"
+
+[[artifact]]
 name = "murmur-hook-shell-desc"
 path = "hooks/murmur-hook-shell-desc"
 version = "0.1.0"

@@ -1,0 +1,16 @@
+[package]
+name = "murmur-hook-regression-verifier"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde_json.workspace = true
+wit-bindgen.workspace = true
+# Shared test-output parsers (detect_format/parse_cargo/parse_pytest/parse_go/
+# parse_jest). This crate has no native-only deps, so it cross-compiles to
+# wasm32-wasip2 — unlike murmur-tool-test-report itself, which pulls rusqlite.
+murmur-test-parse = { path = "../../libs/murmur-test-parse" }
