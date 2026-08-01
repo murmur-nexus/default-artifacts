@@ -12,7 +12,7 @@
 # Only publishable artifacts (those with a murmur.yaml) are listed here.
 # Internal-only crates (e.g. murmur-tool-git-validate) must not appear.
 
-workspace_version = "0.4.0"
+workspace_version = "0.5.0"
 
 [[artifact]]
 name = "murmur-driver-anthropic"
@@ -32,42 +32,42 @@ version = "0.1.0"
 [[artifact]]
 name = "murmur-hook-compact"
 path = "hooks/murmur-hook-compact"
-version = "0.3.0"
+version = "0.4.0"
 
 [[artifact]]
 name = "murmur-hook-debug"
 path = "hooks/murmur-hook-debug"
-version = "0.2.0"
+version = "0.3.0"
 
 [[artifact]]
 name = "murmur-hook-diff-summary"
 path = "hooks/murmur-hook-diff-summary"
-version = "0.2.0"
+version = "0.3.0"
 
 [[artifact]]
 name = "murmur-hook-eval"
 path = "hooks/murmur-hook-eval"
-version = "0.2.0"
+version = "0.3.0"
 
 [[artifact]]
 name = "murmur-hook-grafana"
 path = "hooks/murmur-hook-grafana"
-version = "0.2.0"
+version = "0.3.0"
 
 [[artifact]]
 name = "murmur-hook-memory-jsonl"
 path = "hooks/murmur-hook-memory-jsonl"
-version = "0.2.0"
+version = "0.3.0"
 
 [[artifact]]
 name = "murmur-hook-regression-verifier"
 path = "hooks/murmur-hook-regression-verifier"
-version = "0.1.0"
+version = "0.2.0"
 
 [[artifact]]
 name = "murmur-hook-shell-desc"
 path = "hooks/murmur-hook-shell-desc"
-version = "0.1.0"
+version = "0.2.0"
 
 [[artifact]]
 name = "murmur-tool-create"
