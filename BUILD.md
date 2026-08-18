@@ -134,5 +134,14 @@ same murmur commit — both changes in one commit.
 ## Running tests
 
 ```bash
+# Whole workspace
 cargo test --workspace
+
+# One crate
+cargo test -p murmur-tool-create
+
+# Show test stdout
+cargo test --workspace -- --nocapture
 ```
+
+Cargo prints one result line per test binary, not a workspace-wide total.
