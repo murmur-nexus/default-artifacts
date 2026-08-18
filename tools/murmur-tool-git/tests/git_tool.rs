@@ -50,8 +50,12 @@ impl Drop for TestDir {
 }
 
 fn init_git_repo(repo: &Path) {
+    // Pin the initial branch to `main`: a bare `git init` inherits the host's
+    // `init.defaultBranch`, which several tests below check out by name.
     run_git([
         "init",
+        "-b",
+        "main",
         repo.to_str().expect("repo path utf-8"),
     ]);
     run_git(["-C", repo.to_str().unwrap(), "config", "user.email", "test@example.com"]);
@@ -623,7 +627,9 @@ fn setup_remote_pair(td: &TestDir) -> (PathBuf, PathBuf) {
     let bare = td.path().join("bare.git");
     let source = td.path().join("source");
 
-    run_git_dyn(&["init", "--bare", bare.to_str().unwrap()]);
+    // Pin the bare repo's HEAD to `main` too, so it matches the `main` branch
+    // that `init_git_repo` pins the source repo to.
+    run_git_dyn(&["init", "--bare", "-b", "main", bare.to_str().unwrap()]);
     init_git_repo(&source);
     run_git_dyn(&["-C", source.to_str().unwrap(), "remote", "add", "origin", bare.to_str().unwrap()]);
     run_git_dyn(&["-C", source.to_str().unwrap(), "push", "-u", "origin", "HEAD"]);
@@ -1405,4 +1411,503 @@ fn slice4_create_worktree_compat() {
     assert_eq!(res["ok"], true, "create_worktree (compat) failed: {}", res["message"]);
     assert_eq!(res["branch"], "compat-branch");
     assert!(wt_path.exists(), "compat worktree should exist on disk");
+}
+
+// ── Slice 2 helpers ───────────────────────────────────────────────────────────
+
+/// Stage a file, commit it, and return the commit hash.
+fn make_commit(repo: &Path, filename: &str, content: &str, message: &str) -> String {
+    let repo_s = repo.to_str().expect("repo path utf-8");
+    fs::write(repo.join(filename), content).expect("write file");
+    run_git_dyn(&["-C", repo_s, "add", filename]);
+    run_git_dyn(&["-C", repo_s, "commit", "-m", message]);
+
+    let out = Command::new("git")
+        .args(["-C", repo_s, "rev-parse", "HEAD"])
+        .output()
+        .expect("git should run");
+    assert!(
+        out.status.success(),
+        "git rev-parse HEAD failed\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Return `git status --porcelain=v1` output for `repo`.
+fn git_status_porcelain(repo: &Path) -> String {
+    let out = Command::new("git")
+        .args(["-C", repo.to_str().expect("repo path utf-8"), "status", "--porcelain=v1"])
+        .output()
+        .expect("git should run");
+    assert!(
+        out.status.success(),
+        "git status failed\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+/// Return the current HEAD hash for `repo`.
+fn head_hash(repo: &Path) -> String {
+    let out = Command::new("git")
+        .args(["-C", repo.to_str().expect("repo path utf-8"), "rev-parse", "HEAD"])
+        .output()
+        .expect("git should run");
+    assert!(
+        out.status.success(),
+        "git rev-parse HEAD failed\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+// ── Slice 2 tests: COMMIT ─────────────────────────────────────────────────────
+
+#[test]
+fn slice2_commit_success() {
+    let td = TestDir::new();
+    let repo = td.path().join("repo");
+    init_git_repo(&repo);
+    let repo_s = repo.to_str().unwrap();
+
+    fs::write(repo.join("new.txt"), "content\n").unwrap();
+    run_git_dyn(&["-C", repo_s, "add", "new.txt"]);
+
+    let res = run_tool_in(
+        &repo,
+        json!({
+            "operation": "commit",
+            "repo": repo_s,
+            "message": "add new.txt",
+        }),
+    );
+
+    assert_eq!(res["ok"], true, "commit should succeed; got: {res:?}");
+    assert!(
+        !res["hash"].as_str().unwrap_or("").is_empty(),
+        "hash must be populated"
+    );
+    assert!(
+        !res["short_hash"].as_str().unwrap_or("").is_empty(),
+        "short_hash must be populated"
+    );
+    assert_eq!(res["subject"], "add new.txt", "subject must match commit message");
+}
+
+#[test]
+fn slice2_commit_nothing() {
+    let td = TestDir::new();
+    let repo = td.path().join("repo");
+    init_git_repo(&repo);
+
+    // Nothing staged — should fail.
+    let res = run_tool_in(
+        &repo,
+        json!({
+            "operation": "commit",
+            "repo": repo.to_str().unwrap(),
+            "message": "should fail",
+        }),
+    );
+
+    assert_eq!(res["ok"], false, "commit with nothing staged should fail");
+    assert_eq!(res["error_kind"], "nothing_to_commit");
+}
+
+#[test]
+fn slice2_commit_allow_empty() {
+    let td = TestDir::new();
+    let repo = td.path().join("repo");
+    init_git_repo(&repo);
+
+    let res = run_tool_in(
+        &repo,
+        json!({
+            "operation": "commit",
+            "repo": repo.to_str().unwrap(),
+            "message": "empty commit",
+            "allow_empty": true,
+        }),
+    );
+
+    assert_eq!(
+        res["ok"], true,
+        "allow_empty commit on clean tree should succeed; got: {res:?}"
+    );
+    assert!(!res["hash"].as_str().unwrap_or("").is_empty());
+    assert_eq!(res["subject"], "empty commit");
+}
+
+// ── Slice 2 tests: CHERRY-PICK ────────────────────────────────────────────────
+
+#[test]
+fn slice2_cherry_pick_success() {
+    let td = TestDir::new();
+    let repo = td.path().join("repo");
+    init_git_repo(&repo);
+    let repo_s = repo.to_str().unwrap();
+
+    // Create feature branch and make a unique commit on it.
+    run_git_dyn(&["-C", repo_s, "checkout", "-b", "feature"]);
+    let pick_hash = make_commit(&repo, "cherry.txt", "cherry content\n", "add cherry.txt");
+
+    // Switch back to main.
+    run_git_dyn(&["-C", repo_s, "checkout", "main"]);
+
+    let res = run_tool_in(
+        &repo,
+        json!({
+            "operation": "cherry_pick",
+            "repo": repo_s,
+            "ref": pick_hash,
+        }),
+    );
+
+    assert_eq!(res["ok"], true, "cherry-pick should succeed; got: {res:?}");
+    assert!(!res["hash"].as_str().unwrap_or("").is_empty());
+    assert_eq!(res["subject"], "add cherry.txt");
+    assert!(
+        repo.join("cherry.txt").exists(),
+        "cherry.txt should exist in main after pick"
+    );
+}
+
+#[test]
+fn slice2_cherry_pick_conflict() {
+    let td = TestDir::new();
+    let repo = td.path().join("repo");
+    init_git_repo(&repo);
+    let repo_s = repo.to_str().unwrap();
+
+    // feature: modify README.md one way and commit.
+    run_git_dyn(&["-C", repo_s, "checkout", "-b", "feature"]);
+    let pick_hash = make_commit(&repo, "README.md", "feature version\n", "feature change");
+
+    // main: modify README.md a different way and commit (creates divergence).
+    run_git_dyn(&["-C", repo_s, "checkout", "main"]);
+    make_commit(&repo, "README.md", "main version\n", "main change");
+
+    // cherry-pick feature commit onto main → conflict.
+    let res = run_tool_in(
+        &repo,
+        json!({
+            "operation": "cherry_pick",
+            "repo": repo_s,
+            "ref": pick_hash,
+        }),
+    );
+
+    assert_eq!(res["ok"], false, "conflicting cherry-pick should fail; got: {res:?}");
+    assert_eq!(res["error_kind"], "conflict");
+
+    // Repo must still be in conflict state (not auto-aborted).
+    let status_text = git_status_porcelain(&repo);
+    assert!(
+        status_text.contains("UU") || status_text.contains("AA"),
+        "repo should be in conflict state after failed cherry-pick; status:\n{status_text}"
+    );
+}
+
+// ── Slice 2 tests: BRANCH ─────────────────────────────────────────────────────
+
+#[test]
+fn slice2_branch_list() {
+    let td = TestDir::new();
+    let repo = td.path().join("repo");
+    init_git_repo(&repo);
+
+    let res = run_tool_in(
+        &repo,
+        json!({
+            "operation": "branch",
+            "repo": repo.to_str().unwrap(),
+            "subcommand": "list",
+        }),
+    );
+
+    assert_eq!(res["ok"], true, "branch list should succeed; got: {res:?}");
+    let branches = res["branches"].as_array().expect("branches must be an array");
+    let current = branches.iter().find(|b| b["current"] == true);
+    assert!(current.is_some(), "one branch should be flagged as current");
+    let current_name = current.unwrap()["name"].as_str().unwrap_or("");
+    assert!(!current_name.is_empty(), "current branch name must not be empty");
+}
+
+#[test]
+fn slice2_branch_create() {
+    let td = TestDir::new();
+    let repo = td.path().join("repo");
+    init_git_repo(&repo);
+    let repo_s = repo.to_str().unwrap();
+
+    let res = run_tool_in(
+        &repo,
+        json!({
+            "operation": "branch",
+            "repo": repo_s,
+            "subcommand": "create",
+            "name": "new-feature",
+        }),
+    );
+    assert_eq!(res["ok"], true, "branch create should succeed; got: {res:?}");
+    assert_eq!(res["name"], "new-feature");
+
+    // Verify branch appears in list.
+    let list = run_tool_in(
+        &repo,
+        json!({
+            "operation": "branch",
+            "repo": repo_s,
+            "subcommand": "list",
+        }),
+    );
+    let branches = list["branches"].as_array().unwrap();
+    assert!(
+        branches.iter().any(|b| b["name"] == "new-feature"),
+        "new-feature should appear in branch list"
+    );
+}
+
+#[test]
+fn slice2_branch_delete() {
+    let td = TestDir::new();
+    let repo = td.path().join("repo");
+    init_git_repo(&repo);
+    let repo_s = repo.to_str().unwrap();
+
+    // Create a branch (same content as main → will be "merged").
+    run_tool_in(
+        &repo,
+        json!({
+            "operation": "branch",
+            "repo": repo_s,
+            "subcommand": "create",
+            "name": "to-delete",
+        }),
+    );
+
+    let res = run_tool_in(
+        &repo,
+        json!({
+            "operation": "branch",
+            "repo": repo_s,
+            "subcommand": "delete",
+            "name": "to-delete",
+        }),
+    );
+    assert_eq!(res["ok"], true, "branch delete should succeed; got: {res:?}");
+    assert_eq!(res["name"], "to-delete");
+
+    // Verify branch is gone.
+    let list = run_tool_in(
+        &repo,
+        json!({
+            "operation": "branch",
+            "repo": repo_s,
+            "subcommand": "list",
+        }),
+    );
+    let branches = list["branches"].as_array().unwrap();
+    assert!(
+        !branches.iter().any(|b| b["name"] == "to-delete"),
+        "to-delete should be gone from branch list"
+    );
+}
+
+#[test]
+fn slice2_branch_delete_not_merged() {
+    let td = TestDir::new();
+    let repo = td.path().join("repo");
+    init_git_repo(&repo);
+    let repo_s = repo.to_str().unwrap();
+
+    // Create branch and add a commit not in main → not merged.
+    run_git_dyn(&["-C", repo_s, "checkout", "-b", "unmerged"]);
+    make_commit(&repo, "extra.txt", "data\n", "unmerged commit");
+    run_git_dyn(&["-C", repo_s, "checkout", "main"]);
+
+    let res = run_tool_in(
+        &repo,
+        json!({
+            "operation": "branch",
+            "repo": repo_s,
+            "subcommand": "delete",
+            "name": "unmerged",
+        }),
+    );
+
+    assert_eq!(res["ok"], false, "deleting unmerged branch should fail");
+    assert_eq!(res["error_kind"], "not_merged");
+}
+
+// ── Slice 2 tests: CHECKOUT / SWITCH ──────────────────────────────────────────
+
+#[test]
+fn slice2_checkout_switch_branch() {
+    let td = TestDir::new();
+    let repo = td.path().join("repo");
+    init_git_repo(&repo);
+    let repo_s = repo.to_str().unwrap();
+
+    run_git_dyn(&["-C", repo_s, "branch", "other"]);
+
+    let res = run_tool_in(
+        &repo,
+        json!({
+            "operation": "checkout",
+            "repo": repo_s,
+            "ref": "other",
+        }),
+    );
+
+    assert_eq!(res["ok"], true, "checkout should succeed; got: {res:?}");
+    assert_eq!(res["branch"], "other");
+    assert_eq!(res["detached"], false);
+}
+
+#[test]
+fn slice2_checkout_create() {
+    let td = TestDir::new();
+    let repo = td.path().join("repo");
+    init_git_repo(&repo);
+
+    let res = run_tool_in(
+        &repo,
+        json!({
+            "operation": "checkout",
+            "repo": repo.to_str().unwrap(),
+            "ref": "fresh-branch",
+            "create": true,
+        }),
+    );
+
+    assert_eq!(res["ok"], true, "checkout -b should succeed; got: {res:?}");
+    assert_eq!(res["branch"], "fresh-branch");
+    assert_eq!(res["detached"], false);
+}
+
+#[test]
+fn slice2_checkout_dirty() {
+    let td = TestDir::new();
+    let repo = td.path().join("repo");
+    init_git_repo(&repo);
+    let repo_s = repo.to_str().unwrap();
+
+    // Create `other` branch where README.md differs from main.
+    run_git_dyn(&["-C", repo_s, "checkout", "-b", "other"]);
+    make_commit(&repo, "README.md", "other branch version\n", "other change");
+    run_git_dyn(&["-C", repo_s, "checkout", "main"]);
+
+    // Dirty the working tree: modify README.md locally (unstaged) so it conflicts with `other`.
+    fs::write(repo.join("README.md"), "local dirty change\n").unwrap();
+
+    let res = run_tool_in(
+        &repo,
+        json!({
+            "operation": "checkout",
+            "repo": repo_s,
+            "ref": "other",
+        }),
+    );
+
+    assert_eq!(res["ok"], false, "checkout with conflicting dirty tree should fail");
+    assert_eq!(res["error_kind"], "dirty_working_tree");
+}
+
+#[test]
+fn slice2_switch_create() {
+    let td = TestDir::new();
+    let repo = td.path().join("repo");
+    init_git_repo(&repo);
+
+    let res = run_tool_in(
+        &repo,
+        json!({
+            "operation": "switch",
+            "repo": repo.to_str().unwrap(),
+            "branch": "switched-branch",
+            "create": true,
+        }),
+    );
+
+    assert_eq!(res["ok"], true, "switch -c should succeed; got: {res:?}");
+    assert_eq!(res["branch"], "switched-branch");
+}
+
+// ── Slice 2 tests: RESET ──────────────────────────────────────────────────────
+
+#[test]
+fn slice2_reset_soft() {
+    let td = TestDir::new();
+    let repo = td.path().join("repo");
+    init_git_repo(&repo);
+    let repo_s = repo.to_str().unwrap();
+
+    // Initial commit is the parent we'll reset back to.
+    let parent_hash = head_hash(&repo);
+
+    // Add a second commit.
+    make_commit(&repo, "extra.txt", "data\n", "second commit");
+
+    // Soft reset back to the initial commit.
+    let res = run_tool_in(
+        &repo,
+        json!({
+            "operation": "reset",
+            "repo": repo_s,
+            "mode": "soft",
+            "ref": &parent_hash,
+        }),
+    );
+
+    assert_eq!(res["ok"], true, "reset soft should succeed; got: {res:?}");
+    assert_eq!(
+        res["ref"].as_str().unwrap_or(""),
+        parent_hash,
+        "HEAD should point to the parent commit after soft reset"
+    );
+
+    // With soft reset, changes should be staged (index should still have extra.txt).
+    let status_text = git_status_porcelain(&repo);
+    assert!(
+        status_text.contains("extra.txt"),
+        "after soft reset, extra.txt should be staged; status:\n{status_text}"
+    );
+}
+
+#[test]
+fn slice2_reset_hard() {
+    let td = TestDir::new();
+    let repo = td.path().join("repo");
+    init_git_repo(&repo);
+    let repo_s = repo.to_str().unwrap();
+
+    let parent_hash = head_hash(&repo);
+
+    make_commit(&repo, "extra.txt", "data\n", "second commit");
+
+    let res = run_tool_in(
+        &repo,
+        json!({
+            "operation": "reset",
+            "repo": repo_s,
+            "mode": "hard",
+            "ref": &parent_hash,
+        }),
+    );
+
+    assert_eq!(res["ok"], true, "reset hard should succeed; got: {res:?}");
+    assert_eq!(res["ref"].as_str().unwrap_or(""), parent_hash);
+
+    // Hard reset: extra.txt must not exist and working dir must be clean.
+    assert!(
+        !repo.join("extra.txt").exists(),
+        "extra.txt should be gone after hard reset"
+    );
+    let status_text = git_status_porcelain(&repo);
+    assert!(
+        status_text.trim().is_empty(),
+        "working directory should be clean after hard reset; status:\n{status_text}"
+    );
 }
