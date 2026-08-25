@@ -1368,6 +1368,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "murmur-tool-corpus"
+version = "0.5.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wasmtime",
+ "wasmtime-wasi",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
 name = "murmur-tool-create"
 version = "0.5.0"
 dependencies = [

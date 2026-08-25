@@ -70,6 +70,11 @@ path = "hooks/murmur-hook-shell-desc"
 version = "0.2.0"
 
 [[artifact]]
+name = "murmur-tool-corpus"
+path = "tools/murmur-tool-corpus"
+version = "0.1.0"
+
+[[artifact]]
 name = "murmur-tool-create"
 path = "tools/murmur-tool-create"
 version = "0.1.0"

@@ -17,7 +17,7 @@ This repository contains the default Murmur artifacts: inference drivers, hooks,
 |---|---|---|
 | `drivers/` | WASM (`wasm32-wasip2`) | `.wasm` + `murmur.yaml` → `.mur.zip` |
 | `hooks/` | WASM (`wasm32-wasip2`) | `.wasm` + `murmur.yaml` → `.mur.zip` |
-| `tools/murmur-tool-request-input/`, `murmur-tool-create/`, `murmur-tool-editor/` | WASM (`wasm32-wasip2`) | `.wasm` + `murmur.yaml` → `.mur.zip` |
+| `tools/murmur-tool-request-input/`, `murmur-tool-create/`, `murmur-tool-editor/`, `murmur-tool-corpus/` | WASM (`wasm32-wasip2`) | `.wasm` + `murmur.yaml` → `.mur.zip` |
 | `tools/murmur-tool-git/`, `murmur-tool-registry-search/`, `murmur-tool-code-graph/`, `murmur-tool-test-report/`, `murmur-tool-code-coverage/` | Native binary | `bin/<name>` + `murmur.yaml` → `.mur.zip` |
 | `skills/` | Docs only | `skill.md` + `murmur.yaml` → `.mur.zip` |
 

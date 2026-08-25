@@ -20,7 +20,7 @@ concurrency:
 #   1. verify-versions  — runs apply-versions.sh; fails if any version surface
 #                         is out of sync with artifacts.toml.
 #   2. build-wasm       — matrix over all WASM artifacts (drivers, hooks, and the
-#                         wasm tools: request-input, create, editor).
+#                         wasm tools: request-input, create, editor, corpus).
 #   3. build-native     — matrix over the remaining native tool artifacts
 #                         (git, registry-search).
 #   4. build-skills     — matrix over skill artifacts (zip-only; no Rust compile).
@@ -89,6 +89,7 @@ jobs:
           - { name: murmur-hook-regression-verifier, path: hooks/murmur-hook-regression-verifier }
           - { name: murmur-hook-shell-desc,     path: hooks/murmur-hook-shell-desc       }
           - { name: murmur-tool-request-input,  path: tools/murmur-tool-request-input    }
+          - { name: murmur-tool-corpus,         path: tools/murmur-tool-corpus           }
           - { name: murmur-tool-create,         path: tools/murmur-tool-create           }
           - { name: murmur-tool-editor,         path: tools/murmur-tool-editor           }
     steps:
