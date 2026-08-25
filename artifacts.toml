@@ -117,4 +117,4 @@ version = "0.1.0"
 [[artifact]]
 name = "murmur-skill-investigation-checkpoint"
 path = "skills/murmur-skill-investigation-checkpoint"
-version = "0.1.0"
+version = "0.2.0"
