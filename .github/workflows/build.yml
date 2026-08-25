@@ -246,7 +246,7 @@ jobs:
           merge-multiple: true
 
       - name: List release assets
-        run: ls -lh *.mur.zip
+        run: ls -lh ./*.mur.zip
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -254,4 +254,4 @@ jobs:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: "*.mur.zip"
           fail_on_unmatched_files: true
-          files_exists_behavior: overwrite
+          overwrite_files: true

@@ -353,9 +353,10 @@ fn op_read_recent(
 ) -> Result<Response, OpError> {
     let type_tag = required_str(args, "type")?;
     // `requested` is what the caller asked for after defaulting, reported alongside
-    // `returned` so a clamp is visible rather than silent.
-    let requested = optional_count(args, "n")?.unwrap_or(config.read_recent.default);
-    let limit = requested.min(config.read_recent.max);
+    // `returned` so a clamp is visible rather than silent. Clamping in `u64` keeps a
+    // count larger than the component's 32-bit `usize` a capped read, not a wrapped one.
+    let requested = optional_count(args, "n")?.unwrap_or(config.read_recent.default as u64);
+    let limit = requested.min(config.read_recent.max as u64) as usize;
 
     let records = store.read_all()?;
     let withdrawn = withdrawal_index(&records);
@@ -398,8 +399,8 @@ fn op_search(
 ) -> Result<Response, OpError> {
     let query = required_str(args, "query")?;
     let k = optional_count(args, "k")?
-        .unwrap_or(config.search.default_k)
-        .min(config.search.max_k);
+        .unwrap_or(config.search.default_k as u64)
+        .min(config.search.max_k as u64) as usize;
     let type_filter = optional_str(args, "type")?;
 
     let query_terms: BTreeSet<String> = terms(query).into_iter().collect();
@@ -580,7 +581,13 @@ fn optional_str<'a>(args: &'a Map<String, Value>, field: &str) -> Result<Option<
 /// A positive count (`n` or `k`). Absent means "use the operator default"; present and
 /// non-positive is a caller fault, because silently reading it as "unbounded" is the one
 /// interpretation this store must never offer.
-fn optional_count(args: &Map<String, Value>, field: &str) -> Result<Option<usize>, OpError> {
+///
+/// The count stays a `u64` rather than becoming a `usize` here. `usize` is 32 bits in the
+/// component, so a caller asking for more than `u32::MAX` would wrap — and a request for
+/// far too much would come back as an empty result set rather than a capped one, which is
+/// the silent short read this store must never produce. Clamping against the operator cap
+/// happens in `u64` and only the clamped value, always at most the cap, becomes a `usize`.
+fn optional_count(args: &Map<String, Value>, field: &str) -> Result<Option<u64>, OpError> {
     match args.get(field) {
         None | Some(Value::Null) => Ok(None),
         Some(value) => match value.as_u64() {
@@ -588,7 +595,7 @@ fn optional_count(args: &Map<String, Value>, field: &str) -> Result<Option<usize
                 kind::INVALID_INPUT,
                 format!("\"{field}\" must be a positive integer when present"),
             )),
-            Some(n) => Ok(Some(n as usize)),
+            Some(n) => Ok(Some(n)),
         },
     }
 }

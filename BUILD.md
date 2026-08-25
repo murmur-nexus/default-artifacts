@@ -71,12 +71,18 @@ Output: `tools/<name>/<name>-<version>-<platform>.mur.zip` (gitignored).
 
 ## Adding a new artifact
 
-A new artifact is a three-file change, enforced by CI:
+A new artifact is a four-file change, enforced by CI:
 
 1. `artifacts.toml` — add an `[[artifact]]` entry (name, path, version).
 2. Root `Cargo.toml` — add the crate to `[workspace] members` (if it is a crate).
 3. `.github/workflows/build.yml` — add it to the matching matrix
    (`build-wasm`, `build-native`, or `build-skills`).
+4. `scripts/validate-component.sh` — add the name to the category map (WASM
+   components only). The script refuses to skip a name it does not recognise and
+   exits `2`, so leaving this out fails CI rather than silently validating
+   nothing. A name matching `murmur-hook-*` or `murmur-driver-*` is already
+   covered by its wildcard; a `murmur-tool-*` WASM component must be listed
+   explicitly, because most tools are native binaries the script skips.
 
 A native tool must additionally be added to the `Cargo build (wasm)` exclude
 list in `ci.yml`. `scripts/check-build-coverage.sh` (run by CI) fails if an

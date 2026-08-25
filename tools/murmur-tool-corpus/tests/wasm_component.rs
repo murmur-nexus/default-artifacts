@@ -415,3 +415,65 @@ fn search_runs_through_the_real_component() {
     assert_eq!(workdir_entries(&f.workdir), Vec::<String>::new());
     let _ = std::fs::remove_dir_all(&f.root);
 }
+
+/// A count above `u32::MAX` is clamped to the operator cap in the component, where
+/// `usize` is 32 bits wide.
+///
+/// This can only be proved here. On a 64-bit host no `u64` a caller can send narrows at
+/// all, so the host tests cannot see the wrap that would turn "give me everything you
+/// will allow" into an empty result set and a `requested` count of zero — a silent short
+/// read from a store whose whole purpose is that a record never goes missing.
+#[test]
+fn a_count_wider_than_the_components_usize_is_clamped_not_wrapped() {
+    let eng = engine();
+    let component = Component::from_file(&eng, component_path()).expect("load component");
+    let lnk = linker(&eng);
+    let f = fixture("wide_count", true);
+
+    for i in 0..3 {
+        let (status, envelope, _) = run_corpus(
+            &eng,
+            &component,
+            &lnk,
+            &f.workdir,
+            Some(&f.state),
+            json!({ "operation": "append", "type": "note", "body": { "text": format!("rollback plan {i}") } }),
+        );
+        assert!(matches!(status, Status::Passed), "append status: {status:?} {envelope}");
+    }
+
+    // 2^32 — zero in a wrapped 32-bit `usize`, and 2^32 + 3 truncates to 3 rather than
+    // being reported as asked for.
+    for n in [4_294_967_296u64, 4_294_967_299, u64::MAX] {
+        let (status, envelope, _) = run_corpus(
+            &eng,
+            &component,
+            &lnk,
+            &f.workdir,
+            Some(&f.state),
+            json!({ "operation": "read_recent", "type": "note", "n": n }),
+        );
+        assert!(matches!(status, Status::Passed), "read_recent status: {status:?} {envelope}");
+        assert_eq!(envelope["requested"], n, "requested must echo the count asked for");
+        assert_eq!(envelope["returned"], 3, "all three records, capped by max=20: {envelope}");
+        assert_eq!(envelope["records"].as_array().expect("records").len(), 3, "{envelope}");
+
+        let (status, envelope, _) = run_corpus(
+            &eng,
+            &component,
+            &lnk,
+            &f.workdir,
+            Some(&f.state),
+            json!({ "operation": "search", "query": "rollback plan", "k": n }),
+        );
+        assert!(matches!(status, Status::Passed), "search status: {status:?} {envelope}");
+        assert_eq!(
+            envelope["hits"].as_array().expect("hits").len(),
+            3,
+            "k={n} must clamp to max_k=10, not to zero: {envelope}"
+        );
+    }
+
+    assert_eq!(workdir_entries(&f.workdir), Vec::<String>::new());
+    let _ = std::fs::remove_dir_all(&f.root);
+}
