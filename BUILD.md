@@ -131,6 +131,48 @@ change in murmur: check out murmur beside this repo (`../murmur`), copy its
 until it exits `0`, then set the `ref:` in `ci.yml`'s `wit-sync` job to that
 same murmur commit — both changes in one commit.
 
+## Published hooks vs. the WIT contract
+
+Every published `.mur.zip` embeds the version of `murmur:hook/lifecycle` its
+component was built against. That embedded version is the string the host
+resolves an instantiation against, and it is a separate axis from the
+artifact's own release version in `artifacts.toml` — a hook at release
+`0.2.0` can, and does, export interface `@0.5.0`.
+
+Checked live against the `official` registry on 2026-08-25, all eight
+`hooks/*` artifacts export `murmur:hook/lifecycle@0.5.0`, matching this
+repo's `wit/hook/` mirror and the only version murmur v0.2.0's host accepts:
+
+| Artifact | Published version | Exported interface |
+| --- | --- | --- |
+| `murmur-hook-compact` | 0.4.0 | `murmur:hook/lifecycle@0.5.0` |
+| `murmur-hook-debug` | 0.3.0 | `murmur:hook/lifecycle@0.5.0` |
+| `murmur-hook-diff-summary` | 0.3.0 | `murmur:hook/lifecycle@0.5.0` |
+| `murmur-hook-eval` | 0.3.0 | `murmur:hook/lifecycle@0.5.0` |
+| `murmur-hook-grafana` | 0.3.0 | `murmur:hook/lifecycle@0.5.0` |
+| `murmur-hook-memory-jsonl` | 0.3.0 | `murmur:hook/lifecycle@0.5.0` |
+| `murmur-hook-regression-verifier` | 0.2.0 | `murmur:hook/lifecycle@0.5.0` |
+| `murmur-hook-shell-desc` | 0.2.0 | `murmur:hook/lifecycle@0.5.0` |
+
+The `v0.4.0` and `v0.5.0` releases that produced these binaries were both cut
+after commit `04ee889` vendored the `@0.5.0` WIT, so the published set never
+lagged the contract. Nothing is owed here: no rebuild, no version bump, no
+republish.
+
+The table above is a snapshot of one check, not a mapping to keep current.
+Re-run the check after any `murmur:hook` version bump rather than reading it:
+
+```bash
+mur install -g murmur-hook-compact
+unzip -o -d /tmp/hook-check \
+  ~/.murmur/artifacts/murmur-hook-compact/0.4.0/murmur-hook-compact-0.4.0.mur.zip
+strings /tmp/hook-check/murmur_hook_compact.wasm \
+  | grep -o 'murmur:hook/lifecycle@[0-9.]*' | sort -u
+```
+
+`wasm-tools component wit <file>.wasm` prints the full interface if you need
+to confirm a specific record or variant case rather than the version alone.
+
 ## Running tests
 
 ```bash
