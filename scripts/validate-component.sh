@@ -15,7 +15,7 @@
 #   murmur-hook-*                      -> HOOK   category
 #   murmur-driver-*                    -> TOOL   category
 #   murmur-tool-request-input          -> TOOL   category
-#   murmur-tool-{create,editor}        -> TOOL   category (ported to wasm32-wasip2
+#   murmur-tool-{create,editor,corpus} -> TOOL   category (ported to wasm32-wasip2
 #                                               components that export murmur:tool/run;
 #                                               they import zero murmur:* interfaces)
 #   murmur-tool-{git,git-validate,     -> SKIP   (still native bin crates cross-compiled
@@ -65,7 +65,7 @@ case "$name" in
     category="hook"
     expected_export="murmur:hook/lifecycle"
     ;;
-  murmur-driver-*|murmur-tool-request-input|murmur-tool-create|murmur-tool-editor)
+  murmur-driver-*|murmur-tool-request-input|murmur-tool-create|murmur-tool-editor|murmur-tool-corpus)
     category="tool"
     expected_export="murmur:tool/run"
     ;;

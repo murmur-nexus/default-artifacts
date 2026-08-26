@@ -30,13 +30,15 @@ WASM components (`runtime: hook`) that attach to lifecycle events. Each hook dec
 
 ## Tools
 
-Tool artifacts (`runtime: tool`) exposed to the agent as callable functions. `murmur-tool-create`,
-`murmur-tool-editor`, and `murmur-tool-request-input` are WASM components (`wasm32-wasip2`,
-exporting `murmur:tool/run`); the remaining five are native binaries whose C dependencies
-(SQLite, tree-sitter, TLS) do not cross-compile to wasm32-wasip2 (see [BUILD.md](./BUILD.md)).
+Tool artifacts (`runtime: tool`) exposed to the agent as callable functions. `murmur-tool-corpus`,
+`murmur-tool-create`, `murmur-tool-editor`, and `murmur-tool-request-input` are WASM components
+(`wasm32-wasip2`, exporting `murmur:tool/run`); the remaining five are native binaries whose C
+dependencies (SQLite, tree-sitter, TLS) do not cross-compile to wasm32-wasip2 (see
+[BUILD.md](./BUILD.md)).
 
 | Artifact | Location | Implementation | Description |
 |---|---|---|---|
+| `murmur-tool-corpus` | `tools/murmur-tool-corpus/` | WASM | Append-only record store (`append`, `get`, `read_recent`, `search`); requires a `capabilities.state` grant |
 | `murmur-tool-create` | `tools/murmur-tool-create/` | WASM | Scaffolds new tool artifact directories |
 | `murmur-tool-editor` | `tools/murmur-tool-editor/` | WASM | File read/write/patch operations (`read_file`, `write_file`, `replace_in_file`, `find_in_files`) |
 | `murmur-tool-request-input` | `tools/murmur-tool-request-input/` | WASM | HITL pause gate — suspends the agent loop and waits for human input via `message/send` |

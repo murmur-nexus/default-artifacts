@@ -1,0 +1,83 @@
+name: murmur-tool-corpus
+version: 0.1.0
+runtime: tool
+implementation: wasm
+description: |
+  Append-only record store for Murmur capsules. Records are written once and never
+  rewritten: the store assigns every id, timestamp and schema version, deletion does not
+  exist, and no operation returns the whole corpus.
+
+  | op          | inputs                                       | outputs                              |
+  |-------------|----------------------------------------------|--------------------------------------|
+  | append      | type, body, external_id?, withdraws?         | id: string, deduped: bool            |
+  | get         | id                                           | record: object                       |
+  | read_recent | type, n?                                     | records: [...], returned, requested  |
+  | search      | query, k?, type?                             | hits: [{id, type, created_at, score, body}] |
+
+  The store lives at `state/corpus.jsonl`, behind the capsule's `capabilities.state`
+  grant. Its configuration lives beside it at `state/corpus.config.json`, written by the
+  operator, where the agent cannot reach it: the operator declares which record types
+  exist, the JSON Schema each type's body must satisfy, and the caps on `n` and `k`. A
+  type that is not declared there cannot be appended, and a body that fails its schema is
+  not written at all. Without the state grant every operation returns `state_unavailable`;
+  the tool never falls back to the workdir.
+
+  append is the only write. `external_id` makes a retried append idempotent — the second
+  call returns the first call's id with `deduped: true` and leaves the file unchanged.
+  Retracting a record means appending another one carrying `withdraws: <id>`; the target
+  then drops out of `search` and `read_recent`, while `get` still resolves it with
+  `body: null` and `withdrawn_by`/`withdrawn_at` set. `type` and `body` are required on a
+  withdrawal too — it is a first-class record with its own provenance.
+
+  read_recent returns the newest non-withdrawn records of one type; `n` defaults to and is
+  clamped by the operator's caps, and the response reports both `requested` and `returned`
+  so a clamp is visible. search term-matches over the type tag, the external_id and every
+  string leaf in the body, scoring each record by the fraction of distinct query terms it
+  matches, ordered by score then recency; `k` is capped the same way.
+
+  All responses: {ok: bool, operation: string, ...fields..., error_kind?: string,
+  message?: string}. error_kind is one of invalid_input, unknown_operation,
+  state_unavailable, config_missing, config_invalid, unknown_type, schema_violation,
+  not_found, withdraw_target_not_found, already_withdrawn, corpus_corrupt, io_error.
+
+input_schema:
+  type: object
+  properties:
+    operation:
+      type: string
+      enum:
+        - append
+        - get
+        - read_recent
+        - search
+      description: "Operation to perform."
+    type:
+      type: string
+      description: "Record type, as declared in the operator's corpus.config.json. Required for append and read_recent; optional for search, where it filters hits."
+    body:
+      description: "Arbitrary JSON validated against the type's operator-supplied schema. Required for append, including a withdrawal."
+    external_id:
+      type: string
+      description: "Idempotency key, unique per (type, external_id). Optional for append. A repeat returns the first call's id with deduped: true and writes nothing."
+    withdraws:
+      type: string
+      description: "Id of a record this append withdraws. Optional for append. The target must exist and must not already be withdrawn."
+    id:
+      type: string
+      description: "Record id. Required for get."
+    n:
+      type: integer
+      description: "How many records to return. Optional for read_recent. Defaults to the operator's read_recent.default and is clamped to read_recent.max."
+    query:
+      type: string
+      description: "Free text to match. Required for search."
+    k:
+      type: integer
+      description: "Maximum hits to return. Optional for search. Defaults to the operator's search.default_k and is clamped to search.max_k."
+  required:
+    - operation
+
+capabilities:
+  state: {}
+requires_files:
+  - murmur_tool_corpus.wasm

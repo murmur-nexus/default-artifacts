@@ -12,6 +12,7 @@ members = [
   "hooks/murmur-hook-regression-verifier",
   "hooks/murmur-hook-shell-desc",
   "libs/murmur-test-parse",
+  "tools/murmur-tool-corpus",
   "tools/murmur-tool-create",
   "tools/murmur-tool-editor",
   "tools/murmur-tool-code-coverage",
