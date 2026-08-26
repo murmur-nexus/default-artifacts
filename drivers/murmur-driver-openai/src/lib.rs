@@ -193,6 +193,13 @@ fn default_object() -> Value {
 /// Whether the capsule opted into server-side response retention (`store: true`).
 /// Parses the `MURMUR_INFERENCE_DRIVER_CONFIG` JSON object for a boolean `store`
 /// field; anything missing, malformed, or non-boolean is treated as opt-out.
+fn store_opt_in(driver_config: Option<&str>) -> bool {
+    driver_config
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .and_then(|cfg| cfg.get("store").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
 /// The routing hint to forward, or `None` when the host sent no usable one. An absent, null,
 /// non-string, empty or whitespace-only value all mean "no key" and are never an error.
 fn prompt_cache_key(request: &MurmurRequest) -> Option<&str> {
@@ -201,13 +208,6 @@ fn prompt_cache_key(request: &MurmurRequest) -> Option<&str> {
         .as_str()
         .map(str::trim)
         .filter(|key| !key.is_empty())
-}
-
-fn store_opt_in(driver_config: Option<&str>) -> bool {
-    driver_config
-        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-        .and_then(|cfg| cfg.get("store").and_then(Value::as_bool))
-        .unwrap_or(false)
 }
 
 fn translate_murmur_request_to_openai(
@@ -706,10 +706,7 @@ fn stamp_streaming_flags(body: &mut Value, surface: ApiSurface) {
     };
     obj.insert("stream".to_string(), json!(true));
     if surface == ApiSurface::ChatCompletions {
-        obj.insert(
-            "stream_options".to_string(),
-            json!({"include_usage": true}),
-        );
+        obj.insert("stream_options".to_string(), json!({"include_usage": true}));
     }
 }
 
@@ -1268,7 +1265,6 @@ fn assemble_openai_streaming_response(
     ))
 }
 
-#[allow(dead_code)] // reachable only from the wasm32-gated driver module
 fn error_payload(message: &str) -> Value {
     json!({
         "stop_reason": "error",
@@ -3034,7 +3030,13 @@ mod tests {
 
     #[test]
     fn absent_null_or_blank_prompt_cache_key_adds_no_member() {
-        for hint in [None, Some(Value::Null), Some(json!("")), Some(json!("   ")), Some(json!(7))] {
+        for hint in [
+            None,
+            Some(Value::Null),
+            Some(json!("")),
+            Some(json!("   ")),
+            Some(json!(7)),
+        ] {
             let mut payload = json!({
                 "model": "gpt-4o",
                 "max_tokens": 256,

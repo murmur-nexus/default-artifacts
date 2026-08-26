@@ -411,10 +411,7 @@ fn murmur_response(stop_reason: &str, content: Vec<Value>, usage: UsageTokens) -
 fn stamp_streaming_flags(body: &mut Value) {
     if let Some(obj) = body.as_object_mut() {
         obj.insert("stream".to_string(), json!(true));
-        obj.insert(
-            "stream_options".to_string(),
-            json!({"include_usage": true}),
-        );
+        obj.insert("stream_options".to_string(), json!({"include_usage": true}));
     }
 }
 
@@ -697,13 +694,7 @@ fn parse_deepseek_sse_body<F: FnMut(&str), G: FnMut(&str)>(
         }
     }
 
-    assemble_deepseek_streaming_response(
-        &text_acc,
-        &reasoning_acc,
-        tool_states,
-        stop_reason,
-        usage,
-    )
+    assemble_deepseek_streaming_response(&text_acc, &reasoning_acc, tool_states, stop_reason, usage)
 }
 
 #[allow(dead_code)]

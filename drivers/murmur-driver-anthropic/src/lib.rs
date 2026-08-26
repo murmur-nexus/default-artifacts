@@ -1568,9 +1568,12 @@ mod tests {
         }))
         .unwrap();
 
-        let translated =
-            translate_murmur_request_to_anthropic(&request, ModelFamily::Claude4Plus, &thinking_off())
-                .unwrap();
+        let translated = translate_murmur_request_to_anthropic(
+            &request,
+            ModelFamily::Claude4Plus,
+            &thinking_off(),
+        )
+        .unwrap();
 
         let serialized = serde_json::to_string(&translated).unwrap();
         assert!(
