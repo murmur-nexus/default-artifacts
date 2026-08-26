@@ -4,7 +4,8 @@
 //! `create`), and read-only. There is no code path in this crate that can rewrite a byte
 //! already on disk — no whole-file rewrite, no rename-over, no temp-file swap. That is
 //! the guarantee the whole artifact exists to provide, and it is enforced by the absence
-//! of the alternatives rather than by a check.
+//! of the alternatives rather than by a check. [`Store::verify`] is a read: it names the
+//! lines a scan cannot use, and repairing them stays a human action on the file.
 //!
 //! The state directory is never created here. If the durable-state grant is missing, the
 //! guest path `state/` resolves inside the workdir preopen instead, and creating it there
@@ -16,14 +17,11 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::config::{parse_config, Config};
-use crate::ops::{kind, OpError};
+use crate::ops::{kind, single_line_excerpt, OpError};
 use crate::record::Record;
 
 /// The corpus itself, relative to the state directory.
 pub const CORPUS_FILE: &str = "corpus.jsonl";
-/// The operator config, relative to the state directory.
-pub const CONFIG_FILE: &str = "corpus.config.json";
 
 /// Where a withdrawn record's tombstone points: the withdrawing record's id and when it
 /// was appended.
@@ -31,6 +29,38 @@ pub const CONFIG_FILE: &str = "corpus.config.json";
 pub struct Withdrawal {
     pub by: String,
     pub at: String,
+}
+
+/// Every record in the corpus, plus the 1-based number of every line that did not parse.
+///
+/// The two travel together because a result set is only honest alongside what it omits: a
+/// caller holding just `records` cannot tell a corpus of three from a corpus of four with
+/// one line it could not read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Scan {
+    pub records: Vec<Record>,
+    pub skipped_lines: Vec<u64>,
+}
+
+/// One line `verify` could not read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BadLine {
+    /// 1-based line number in `corpus.jsonl`, so an operator can go straight to it.
+    pub line: u64,
+    /// The parse failure, as the JSON parser reported it.
+    pub error: String,
+    /// The start of the line, collapsed to one line and bounded — enough to recognise what
+    /// went wrong without copying an arbitrarily long line into an agent's context.
+    pub preview: String,
+}
+
+/// What `verify` found: how much of the corpus is readable, and what is not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifyReport {
+    pub lines: u64,
+    pub records: u64,
+    /// Every bad line, uncapped. The display cap lives in `ops`.
+    pub bad_lines: Vec<BadLine>,
 }
 
 /// A handle on an existing, reachable state directory.
@@ -71,74 +101,80 @@ impl Store {
         self.root.join(CORPUS_FILE)
     }
 
-    /// The operator config's path.
-    pub fn config_path(&self) -> PathBuf {
-        self.root.join(CONFIG_FILE)
+    /// The corpus file's text, or `None` when no corpus exists yet.
+    ///
+    /// A corpus that has never been appended to is an empty corpus, not a fault: the file
+    /// is created by the first append and by nothing else here.
+    fn read_text(&self) -> Result<Option<String>, OpError> {
+        let path = self.corpus_path();
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Ok(Some(text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(OpError::new(
+                kind::IO_ERROR,
+                format!("cannot read \"{}\": {e}", path.display()),
+            )),
+        }
     }
 
-    /// Read and validate the operator config.
-    pub fn load_config(&self) -> Result<Config, OpError> {
-        let path = self.config_path();
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(OpError::new(
-                    kind::CONFIG_MISSING,
-                    format!(
-                        "no operator configuration at \"{}\"; the corpus refuses every operation \
-                         until an operator declares its record types there",
-                        path.display()
-                    ),
-                ))
-            }
-            Err(e) => {
-                return Err(OpError::new(
-                    kind::IO_ERROR,
-                    format!("cannot read \"{}\": {e}", path.display()),
-                ))
-            }
-        };
-        parse_config(&text).map_err(|message| OpError::new(kind::CONFIG_INVALID, message))
-    }
-
-    /// Every record in the corpus, in append order.
+    /// Every record in the corpus, in append order, alongside the lines that were skipped.
     ///
     /// Internal scanning: dedupe, the withdrawal index and search all need the whole file.
     /// No *operation* exposes this — `read_recent` and `search` are capped, and there is
     /// no operation that returns the corpus.
     ///
-    /// A line that does not parse as a record fails the whole call with `corpus_corrupt`,
-    /// naming the 1-based line number. There is no partial result set: a store that
-    /// quietly drops what it cannot read is the accounting failure this artifact exists to
-    /// prevent.
-    pub fn read_all(&self) -> Result<Vec<Record>, OpError> {
-        let path = self.corpus_path();
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => {
-                return Err(OpError::new(
-                    kind::IO_ERROR,
-                    format!("cannot read \"{}\": {e}", path.display()),
-                ))
-            }
+    /// A line that does not parse as a record is skipped rather than failing the call, and
+    /// its number is carried back in [`Scan::skipped_lines`] for the caller to report.
+    /// Skipping is only acceptable because reporting is not optional: every response built
+    /// from a scan that skipped something says so, in the envelope and in the summary, so
+    /// the damage reaches the agent's context and the trace on the very next call instead
+    /// of one bad byte making the whole store unusable.
+    pub fn read_all(&self) -> Result<Scan, OpError> {
+        let Some(text) = self.read_text()? else {
+            return Ok(Scan { records: Vec::new(), skipped_lines: Vec::new() });
         };
 
         let mut records = Vec::new();
+        let mut skipped_lines = Vec::new();
         for (index, line) in text.lines().enumerate() {
-            let record: Record = serde_json::from_str(line).map_err(|e| {
-                OpError::new(
-                    kind::CORPUS_CORRUPT,
-                    format!(
-                        "{} line {} does not parse as a record: {e}",
-                        CORPUS_FILE,
-                        index + 1
-                    ),
-                )
-            })?;
-            records.push(record);
+            // A blank line is skipped and reported like any other unreadable one.
+            // `append_record` writes exactly one `\n` terminator and `str::lines()` yields
+            // no trailing element for it, so a blank line means something other than this
+            // tool wrote to the file — which is exactly what the operator should be told.
+            match serde_json::from_str::<Record>(line) {
+                Ok(record) => records.push(record),
+                Err(_) => skipped_lines.push(index as u64 + 1),
+            }
         }
-        Ok(records)
+        Ok(Scan { records, skipped_lines })
+    }
+
+    /// Read every line and report the ones that are not records.
+    ///
+    /// This is a read like any other. There is no repairing counterpart: rewriting the
+    /// file would be the only code path in this crate that opens the corpus for something
+    /// other than append, and that invariant is worth more than the convenience. Repair is
+    /// a human action on `corpus.jsonl`, informed by what this reports.
+    pub fn verify(&self) -> Result<VerifyReport, OpError> {
+        let Some(text) = self.read_text()? else {
+            return Ok(VerifyReport { lines: 0, records: 0, bad_lines: Vec::new() });
+        };
+
+        let mut lines = 0;
+        let mut records = 0;
+        let mut bad_lines = Vec::new();
+        for (index, line) in text.lines().enumerate() {
+            lines += 1;
+            match serde_json::from_str::<Record>(line) {
+                Ok(_) => records += 1,
+                Err(e) => bad_lines.push(BadLine {
+                    line: index as u64 + 1,
+                    error: e.to_string(),
+                    preview: single_line_excerpt(line),
+                }),
+            }
+        }
+        Ok(VerifyReport { lines, records, bad_lines })
     }
 
     /// Append one record as a single JSON line.

@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-25T23:22:57Z",
+  "updated_at": "2026-08-26T23:01:52Z",
   "artifacts": [
     {
       "name": "murmur-driver-anthropic",
@@ -165,7 +165,7 @@
     },
     {
       "name": "murmur-tool-corpus",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "runtime": "tool",
       "description": "Append-only record store for Murmur capsules.",
       "tags": [

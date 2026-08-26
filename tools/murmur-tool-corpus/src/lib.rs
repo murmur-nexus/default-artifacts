@@ -7,9 +7,10 @@
 //! withdrawal record that is itself appended; and no operation returns the whole corpus.
 //!
 //! Everything below this file is free of `cfg(target_arch)` so `cargo test` exercises it
-//! natively, and file access is rooted at a caller-supplied `&Path` so nothing but the
-//! adapter here knows the guest path. The tool is domain-blind throughout: `type` is an
-//! opaque tag, `body` is arbitrary JSON, and every schema comes from the operator.
+//! natively, and both the state directory and the operator configuration arrive as
+//! parameters, so nothing but the adapter here knows the guest path or reads the process
+//! environment. The tool is domain-blind throughout: `type` is an opaque tag, `body` is
+//! arbitrary JSON, and every schema comes from the operator's capsule manifest.
 
 pub mod config;
 pub mod id;
@@ -26,6 +27,15 @@ pub mod store;
 /// preopen instead, and a corpus there would be one the agent can rewrite at will — so a
 /// missing directory is reported as `state_unavailable`, not repaired.
 pub const STATE_DIR: &str = "state";
+
+/// Guest environment variable the runtime delivers this artifact's `config:` block in,
+/// compact JSON, read off this artifact's own grant and no other's.
+///
+/// It is runtime-owned: the runtime injects it ahead of the manifest's
+/// `capabilities.env.allow` allowlist and the allowlist builder skips the name, so no host
+/// value can reach the guest under it and no capability declares it. An artifact entry
+/// with no `config:` key gets no variable at all, which is what `config_missing` reports.
+pub const ARTIFACT_CONFIG_ENV: &str = "MURMUR_ARTIFACT_CONFIG";
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_tool {
@@ -45,8 +55,12 @@ mod wasm_tool {
 
     impl Guest for Component {
         fn run(input: ToolInput) -> ToolResult {
+            // The only environment read in the crate. Everything below this module takes
+            // the configuration as a parameter, so the host tests supply it directly.
+            let config_json = std::env::var(crate::ARTIFACT_CONFIG_ENV).ok();
             let response = ops::run(
                 Path::new(crate::STATE_DIR),
+                config_json.as_deref(),
                 input.data.as_deref().unwrap_or_default(),
             );
 

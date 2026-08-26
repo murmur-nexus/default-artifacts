@@ -1,16 +1,19 @@
-//! The four operations, the output envelope, and the error-kind vocabulary.
+//! The five operations, the output envelope, and the error-kind vocabulary.
 //!
-//! There are exactly four: `append`, `get`, `read_recent` and `search`. Deliberately
-//! absent is any operation that returns the whole corpus — `read_recent` is capped by
-//! operator config and `search` returns at most `k` hits, also capped, so an unbounded
-//! read is not forbidden so much as inexpressible.
+//! There are exactly five: `append`, `get`, `read_recent`, `search` and `verify`.
+//! Deliberately absent is any operation that returns the whole corpus — `read_recent` is
+//! capped by operator config and `search` returns at most `k` excerpt hits, also capped,
+//! so an unbounded read is not forbidden so much as inexpressible. Equally deliberately
+//! absent is a `repair` verb: `verify` names the lines a scan could not use, and fixing
+//! them is a human action on `corpus.jsonl`, because a rewriting code path would be the
+//! only one in this crate that opens the corpus for something other than append.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
-use crate::config::Config;
+use crate::config::{parse_config, Config};
 use crate::id::mint_id;
 use crate::record::{now_rfc3339_millis, searchable_text, Record};
 use crate::schema::validate_body;
@@ -22,11 +25,11 @@ pub mod kind {
     /// The call itself was malformed: unparseable, not an object, or missing a field the
     /// requested operation requires.
     pub const INVALID_INPUT: &str = "invalid_input";
-    /// `operation` named something other than the four.
+    /// `operation` named something other than the five.
     pub const UNKNOWN_OPERATION: &str = "unknown_operation";
     /// The durable-state grant is missing, so the corpus is unreachable.
     pub const STATE_UNAVAILABLE: &str = "state_unavailable";
-    /// State is reachable but no operator has configured this corpus.
+    /// This artifact's entry in the capsule manifest declares no `config:` block.
     pub const CONFIG_MISSING: &str = "config_missing";
     /// The operator configuration is present but not usable.
     pub const CONFIG_INVALID: &str = "config_invalid";
@@ -40,8 +43,6 @@ pub mod kind {
     pub const WITHDRAW_TARGET_NOT_FOUND: &str = "withdraw_target_not_found";
     /// The record a withdrawal names has already been withdrawn.
     pub const ALREADY_WITHDRAWN: &str = "already_withdrawn";
-    /// A line in the corpus does not parse as a record.
-    pub const CORPUS_CORRUPT: &str = "corpus_corrupt";
     /// The filesystem refused a read or an append.
     pub const IO_ERROR: &str = "io_error";
 }
@@ -55,22 +56,47 @@ pub const EFFECT_READ: &str = "read";
 /// `state_effect` for a call that appended a line.
 pub const EFFECT_MUTATE: &str = "mutate";
 
-/// The four operation names, in the order the manifest's enum lists them.
-pub const OPERATIONS: [&str; 4] = ["append", "get", "read_recent", "search"];
+/// The five operation names, in the order the manifest's enum lists them.
+pub const OPERATIONS: [&str; 5] = ["append", "get", "read_recent", "search", "verify"];
+
+/// How many characters of source text a search excerpt or a `verify` preview carries.
+///
+/// Enough to recognise the record without pulling its body into context — the whole point
+/// of returning an excerpt rather than a record is that an agent scans hits cheaply and
+/// calls `get` on the two or three it actually wants.
+pub const EXCERPT_CHARS: usize = 120;
+
+/// How many line numbers a single response will list, in `skipped_lines` or `bad_lines`.
+///
+/// The counts beside those lists are always the true totals, so the cap costs an operator
+/// nothing but the tail of a list they would not read anyway. A corrupt corpus must not
+/// flood an agent's context with line numbers.
+pub const MAX_REPORTED_LINES: usize = 100;
 
 /// `operation` reported in the envelope when the call did not name a usable one.
 const UNKNOWN_OPERATION_LABEL: &str = "unknown";
 
 /// A failure, carrying the error kind that decides the tool's status.
+///
+/// `skipped_lines` is empty unless the failure was raised after a scan that could not read
+/// every line. Carrying it here is what lets a caller tell "no such record" apart from
+/// "hidden behind a line I could not read" — the two look identical in a bare `not_found`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpError {
     pub kind: &'static str,
     pub message: String,
+    pub skipped_lines: Vec<u64>,
 }
 
 impl OpError {
     pub fn new(kind: &'static str, message: impl Into<String>) -> Self {
-        Self { kind, message: message.into() }
+        Self { kind, message: message.into(), skipped_lines: Vec::new() }
+    }
+
+    /// Attach the skip list of the scan this failure was raised after.
+    pub fn with_skipped(mut self, skipped: &[u64]) -> Self {
+        self.skipped_lines = skipped.to_vec();
+        self
     }
 }
 
@@ -109,14 +135,17 @@ pub struct Response {
 
 /// Dispatch one call against the corpus rooted at `state_dir`.
 ///
-/// `state_dir` is supplied by the caller so nothing below `lib.rs` knows the guest path:
-/// the component passes `state`, host tests pass a temp directory.
-pub fn run(state_dir: &Path, data: &str) -> Response {
+/// `state_dir` and `config_json` are both supplied by the caller so nothing below
+/// `lib.rs` knows the guest path or reads the process environment: the component passes
+/// `state` and the `MURMUR_ARTIFACT_CONFIG` it was launched with, host tests pass a temp
+/// directory and a literal. `None` means the artifact's manifest entry declared no
+/// `config:` block at all.
+pub fn run(state_dir: &Path, config_json: Option<&str>, data: &str) -> Response {
     let (operation, args) = match parse_call(data) {
         Ok(parsed) => parsed,
         Err(e) => return failure(UNKNOWN_OPERATION_LABEL, &e),
     };
-    match dispatch(state_dir, &operation, &args) {
+    match dispatch(state_dir, config_json, &operation, &args) {
         Ok(response) => response,
         Err(e) => failure(&operation, &e),
     }
@@ -168,6 +197,7 @@ fn parse_call(data: &str) -> Result<(String, Map<String, Value>), OpError> {
 
 fn dispatch(
     state_dir: &Path,
+    config_json: Option<&str>,
     operation: &str,
     args: &Map<String, Value>,
 ) -> Result<Response, OpError> {
@@ -182,8 +212,16 @@ fn dispatch(
     }
 
     let store = Store::open(state_dir)?;
-    let config = store.load_config()?;
 
+    // `verify` runs on the state grant alone. It is the diagnostic an operator reaches for
+    // when the corpus stops behaving, and the configuration may be precisely what is
+    // missing — gating it behind the thing being diagnosed would make it useless exactly
+    // when it is needed.
+    if operation == "verify" {
+        return op_verify(&store);
+    }
+
+    let config = load_config(config_json)?;
     match operation {
         "append" => op_append(&store, &config, args),
         "get" => op_get(&store, args),
@@ -191,6 +229,24 @@ fn dispatch(
         "search" => op_search(&store, &config, args),
         _ => unreachable!("operation was checked against OPERATIONS above"),
     }
+}
+
+/// The operator configuration for this artifact, as the runtime delivered it.
+///
+/// The runtime validates shape and not meaning — it guarantees well-formed JSON of an
+/// object within its size cap, and nothing about which keys this tool needs — so every
+/// semantic check stays in [`parse_config`].
+fn load_config(config_json: Option<&str>) -> Result<Config, OpError> {
+    let text = config_json.ok_or_else(|| {
+        OpError::new(
+            kind::CONFIG_MISSING,
+            "this artifact's entry in the capsule's murmur.yaml declares no `config:` block; \
+             add one under the murmur-tool-corpus entry declaring config_version and the \
+             record types this corpus accepts — the store refuses every operation but \
+             `verify` until an operator has declared them",
+        )
+    })?;
+    parse_config(text).map_err(|message| OpError::new(kind::CONFIG_INVALID, message))
 }
 
 // ── append ────────────────────────────────────────────────────────────────────
@@ -229,7 +285,8 @@ fn op_append(
         )
     })?;
 
-    let records = store.read_all()?;
+    let scan = store.read_all()?;
+    let records = &scan.records;
 
     // The dedupe check comes before the withdrawal checks so a retried withdrawal is
     // idempotent: on the second call its target is already withdrawn by the first call's
@@ -253,25 +310,30 @@ fn op_append(
                 ),
                 EFFECT_READ,
                 format!("corpus:{}", existing.id),
+                &scan.skipped_lines,
             ));
         }
     }
 
     if let Some(target) = withdraws {
         if !records.iter().any(|r| r.id == target) {
+            // Worst case a bad line hides the target and a legitimate withdrawal is
+            // refused; the skip list is what tells the caller to look before believing it.
             return Err(OpError::new(
                 kind::WITHDRAW_TARGET_NOT_FOUND,
                 format!("cannot withdraw \"{target}\": no record carries that id"),
-            ));
+            )
+            .with_skipped(&scan.skipped_lines));
         }
-        if let Some(existing) = withdrawal_index(&records).get(target) {
+        if let Some(existing) = withdrawal_index(records).get(target) {
             return Err(OpError::new(
                 kind::ALREADY_WITHDRAWN,
                 format!(
                     "cannot withdraw \"{target}\": it was already withdrawn by {} at {}",
                     existing.by, existing.at
                 ),
-            ));
+            )
+            .with_skipped(&scan.skipped_lines));
         }
     }
 
@@ -303,6 +365,7 @@ fn op_append(
         summary,
         EFFECT_MUTATE,
         format!("corpus:{}", record.id),
+        &scan.skipped_lines,
     ))
 }
 
@@ -310,13 +373,19 @@ fn op_append(
 
 fn op_get(store: &Store, args: &Map<String, Value>) -> Result<Response, OpError> {
     let id = required_str(args, "id")?;
-    let records = store.read_all()?;
-    let record = records
+    let scan = store.read_all()?;
+    let record = scan
+        .records
         .iter()
         .find(|r| r.id == id)
-        .ok_or_else(|| OpError::new(kind::NOT_FOUND, format!("no record carries the id \"{id}\"")))?;
+        .ok_or_else(|| {
+            // A skip list here is the difference between "no such record" and "hidden
+            // behind a line I could not read".
+            OpError::new(kind::NOT_FOUND, format!("no record carries the id \"{id}\""))
+                .with_skipped(&scan.skipped_lines)
+        })?;
 
-    let withdrawn = withdrawal_index(&records).get(id).cloned();
+    let withdrawn = withdrawal_index(&scan.records).get(id).cloned();
     let (view, summary) = match withdrawn {
         Some(withdrawal) => {
             let mut view = record_value(record)?;
@@ -341,6 +410,7 @@ fn op_get(store: &Store, args: &Map<String, Value>) -> Result<Response, OpError>
         summary,
         EFFECT_READ,
         format!("corpus:{id}"),
+        &scan.skipped_lines,
     ))
 }
 
@@ -358,9 +428,10 @@ fn op_read_recent(
     let requested = optional_count(args, "n")?.unwrap_or(config.read_recent.default as u64);
     let limit = requested.min(config.read_recent.max as u64) as usize;
 
-    let records = store.read_all()?;
-    let withdrawn = withdrawal_index(&records);
-    let mut matching: Vec<&Record> = records
+    let scan = store.read_all()?;
+    let withdrawn = withdrawal_index(&scan.records);
+    let mut matching: Vec<&Record> = scan
+        .records
         .iter()
         .filter(|r| r.type_tag == type_tag && !withdrawn.contains_key(&r.id))
         .collect();
@@ -387,6 +458,7 @@ fn op_read_recent(
         format!("read_recent type \"{type_tag}\": returned {returned} of {requested} requested"),
         EFFECT_READ,
         format!("corpus:type:{type_tag}"),
+        &scan.skipped_lines,
     ))
 }
 
@@ -405,11 +477,11 @@ fn op_search(
 
     let query_terms: BTreeSet<String> = terms(query).into_iter().collect();
 
-    let records = store.read_all()?;
-    let withdrawn = withdrawal_index(&records);
+    let scan = store.read_all()?;
+    let withdrawn = withdrawal_index(&scan.records);
 
     let mut scored: Vec<(f64, &Record)> = Vec::new();
-    for record in &records {
+    for record in &scan.records {
         if withdrawn.contains_key(&record.id) {
             continue;
         }
@@ -437,6 +509,9 @@ fn op_search(
             .then_with(|| (&rb.created_at, &rb.id).cmp(&(&ra.created_at, &ra.id)))
     });
 
+    // A hit is not a record: it carries an excerpt of the matching text, not the body.
+    // Twenty-five full bodies per search is a context budget spent before the agent has
+    // decided which two it wants — `get` retrieves those.
     let hits: Vec<Value> = scored
         .iter()
         .take(k)
@@ -446,7 +521,7 @@ fn op_search(
                 "type": record.type_tag,
                 "created_at": record.created_at,
                 "score": score,
-                "body": record.body,
+                "excerpt": excerpt_for(&query_terms, record),
             })
         })
         .collect();
@@ -456,6 +531,64 @@ fn op_search(
         format!("search \"{query}\": {} hit(s) (k={k})", hits.len()),
         EFFECT_READ,
         format!("corpus:search:{}", normalise_query(query)),
+        &scan.skipped_lines,
+    ))
+}
+
+/// The line of the record a hit shows: the **first** segment of [`searchable_text`] that
+/// contains a query term, collapsed to one line and bounded at [`EXCERPT_CHARS`].
+///
+/// Consuming `searchable_text` rather than reaching into the body is what keeps excerpting
+/// and scoring over exactly the same text, and keeps the seam a future embedding-based
+/// retrieval will index over intact.
+///
+/// A record only reaches here with a positive score, so a matching segment exists; the
+/// fallbacks keep a hit with no text at all out of the response should that ever change.
+fn excerpt_for(query_terms: &BTreeSet<String>, record: &Record) -> String {
+    let segments = searchable_text(record);
+    let chosen = segments
+        .iter()
+        .find(|segment| terms(segment).iter().any(|term| query_terms.contains(term)))
+        .or_else(|| segments.first());
+    chosen.map(|segment| single_line_excerpt(segment)).unwrap_or_default()
+}
+
+// ── verify ────────────────────────────────────────────────────────────────────
+
+/// Report every line the corpus scan cannot use.
+///
+/// Runs on the state grant alone, and writes nothing: this is a read, and there is no
+/// repairing counterpart. Repair means editing `corpus.jsonl` by hand, which is a human
+/// action taken with this report in front of you.
+fn op_verify(store: &Store) -> Result<Response, OpError> {
+    let report = store.verify()?;
+    let bad_line_count = report.bad_lines.len() as u64;
+    let bad_lines: Vec<Value> = report
+        .bad_lines
+        .iter()
+        .take(MAX_REPORTED_LINES)
+        .map(|bad| json!({ "line": bad.line, "error": bad.error, "preview": bad.preview }))
+        .collect();
+
+    let summary = format!(
+        "verify: {} line(s), {} record(s), {bad_line_count} unreadable line(s)",
+        report.lines, report.records
+    );
+    Ok(success(
+        json!({
+            "ok": true,
+            "operation": "verify",
+            "lines": report.lines,
+            "records": report.records,
+            "bad_line_count": bad_line_count,
+            "bad_lines": bad_lines,
+        }),
+        summary,
+        EFFECT_READ,
+        "corpus:file".to_string(),
+        // `verify` *is* the skip report; repeating it in the skip fields would say the
+        // same thing twice and less precisely.
+        &[],
     ))
 }
 
@@ -492,6 +625,21 @@ pub fn terms(text: &str) -> Vec<String> {
     out
 }
 
+/// One line of at most [`EXCERPT_CHARS`] characters, with `…` appended when characters
+/// were dropped.
+///
+/// Truncation counts `chars()`, not bytes, so a multi-byte value is cut on a character
+/// boundary rather than splitting a code point. `split_whitespace` both trims and collapses
+/// every run, so no `\n`, `\r` or `\t` survives into an envelope.
+pub(crate) fn single_line_excerpt(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out: String = collapsed.chars().take(EXCERPT_CHARS).collect();
+    if collapsed.chars().nth(EXCERPT_CHARS).is_some() {
+        out.push('…');
+    }
+    out
+}
+
 /// The query as it appears in `resource_id`: lowercased, whitespace-normalised.
 fn normalise_query(query: &str) -> String {
     query.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
@@ -504,7 +652,11 @@ fn success(
     summary: String,
     state_effect: &str,
     resource_id: String,
+    skipped: &[u64],
 ) -> Response {
+    let mut envelope = envelope;
+    let mut summary = summary;
+    add_skip_fields(&mut envelope, &mut summary, skipped);
     Response {
         status: OpStatus::Passed,
         summary,
@@ -520,18 +672,39 @@ fn success(
 /// addressed nothing the host should record, and an unqualified `read` on a rejected
 /// append would misreport it.
 fn failure(operation: &str, error: &OpError) -> Response {
+    let mut summary = format!("{}: {}", error.kind, error.message);
+    let mut envelope = json!({
+        "ok": false,
+        "operation": operation,
+        "error_kind": error.kind,
+        "message": error.message,
+    });
+    add_skip_fields(&mut envelope, &mut summary, &error.skipped_lines);
     Response {
         status: status_for(error.kind),
-        summary: format!("{}: {}", error.kind, error.message),
-        data: json!({
-            "ok": false,
-            "operation": operation,
-            "error_kind": error.kind,
-            "message": error.message,
-        })
-        .to_string(),
+        summary,
+        data: envelope.to_string(),
         metadata: Vec::new(),
     }
+}
+
+/// Record on a response that its scan could not read every line.
+///
+/// The two fields are present together or not at all: `skipped_line_count` without the
+/// numbers is unactionable, and neither field means the scan read the whole file. The list
+/// is capped at [`MAX_REPORTED_LINES`] while the count stays the true total, and the count
+/// is repeated in the summary, because that is the part a trace reader sees.
+fn add_skip_fields(envelope: &mut Value, summary: &mut String, skipped: &[u64]) {
+    if skipped.is_empty() {
+        return;
+    }
+    if let Value::Object(map) = envelope {
+        let reported: Vec<Value> =
+            skipped.iter().take(MAX_REPORTED_LINES).map(|line| json!(line)).collect();
+        map.insert("skipped_lines".to_string(), Value::Array(reported));
+        map.insert("skipped_line_count".to_string(), json!(skipped.len() as u64));
+    }
+    summary.push_str(&format!("; skipped {} unparseable line(s)", skipped.len()));
 }
 
 fn record_value(record: &Record) -> Result<Map<String, Value>, OpError> {

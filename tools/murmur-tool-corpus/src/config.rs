@@ -1,7 +1,10 @@
 //! The operator-written configuration that decides what this corpus will accept.
 //!
-//! The file lives beside the corpus itself, under the durable-state grant, where the
-//! agent cannot reach it: an agent that could edit the schemas could append anything.
+//! It lives in the `config:` block on this artifact's entry in the operator's capsule
+//! manifest, where the agent cannot reach it and where a change to it is a change to a
+//! file under the operator's own review: an agent that could edit the schemas could append
+//! anything, and a schema that changed without a trace would make the log unaccountable.
+//! The runtime delivers the block as compact JSON; what arrives here is that JSON.
 //!
 //! Loading is fail-closed. A type that is not declared here cannot be appended, an
 //! unsupported schema keyword is a hard error rather than an ignored constraint, and a
@@ -85,11 +88,11 @@ impl Config {
     }
 }
 
-/// The wire shape of `corpus.config.json`, before validation.
+/// The wire shape of the `config:` block, before validation.
 ///
 /// `config_version` is an `Option` so that omitting it produces this module's own message
 /// rather than serde's. Unknown top-level keys are accepted so an operator can annotate
-/// the file; every key this build acts on is listed here.
+/// the block; every key this build acts on is listed here.
 #[derive(Debug, Deserialize)]
 struct RawConfig {
     config_version: Option<u64>,
@@ -116,9 +119,14 @@ fn default_schema_version() -> i64 {
 
 /// Parse and validate the operator config. The `Err` string is the operator-facing
 /// message; the caller turns it into a `config_invalid` result.
+///
+/// The runtime validates the delivered block's shape and not its meaning, so every check
+/// below is this artifact's own. The JSON-parse arm is unreachable through the runtime,
+/// which only ever delivers a well-formed JSON object, and is kept because it is reachable
+/// from a host caller and costs one branch.
 pub fn parse_config(text: &str) -> Result<Config, String> {
     let raw: RawConfig = serde_json::from_str(text)
-        .map_err(|e| format!("corpus.config.json is not valid configuration JSON: {e}"))?;
+        .map_err(|e| format!("the `config:` block is not valid configuration JSON: {e}"))?;
 
     match raw.config_version {
         Some(SUPPORTED_CONFIG_VERSION) => {}
@@ -339,7 +347,7 @@ mod tests {
     #[test]
     fn malformed_json_is_rejected() {
         let err = parse_config("{ not json").expect_err("malformed JSON must be rejected");
-        assert!(err.contains("corpus.config.json"), "{err}");
+        assert!(err.contains("`config:` block"), "{err}");
     }
 
     #[test]
