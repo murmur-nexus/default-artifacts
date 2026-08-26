@@ -135,7 +135,6 @@ fn store_for(
 
 /// One independent instantiation + `run` call. Returns the status, the decoded envelope
 /// from `ToolResult.data`, and the metadata list.
-#[allow(clippy::too_many_arguments)]
 fn run_corpus(
     engine: &Engine,
     component: &Component,
