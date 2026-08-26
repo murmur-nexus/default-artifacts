@@ -22,6 +22,10 @@ exports `murmur:tool/run`, imports no `murmur:*` interface).
   still resolves it with `body: null` and the withdrawal's id and timestamp.
 - **No unbounded read.** `read_recent` and `search` are capped by operator
   config, and there is no operation that returns the whole corpus.
+- **Retrieval order is fixed.** `read_recent` returns newest first; `search` returns
+  highest score first, ties broken newest first. Both order by `(created_at, id)`
+  descending, so two records minted in the same millisecond still come back in mint
+  order and repeat runs over an unchanged corpus are byte-identical.
 - **Fail-closed configuration.** A type the operator never declared cannot be
   appended, a body failing its schema is not written, and a schema keyword this
   build does not implement is a hard configuration error rather than an ignored

@@ -512,6 +512,48 @@ fn search_breaks_score_ties_by_recency_and_repeats_byte_identically() {
 }
 
 #[test]
+fn a_same_millisecond_score_tie_orders_newest_first_in_both_retrieval_paths() {
+    // The tie-break only runs when two records share a `created_at`, and `created_at` is
+    // millisecond-resolution — appending through `ops::run` lands in the same millisecond
+    // only sometimes, which makes a timing-dependent assertion out of a fixed rule. Seed
+    // the corpus directly so the tie is always taken.
+    let state = state_with_config("search_same_ms");
+    let at = "2026-08-25T12:00:00.000Z";
+    // Ids share the embedded millisecond and differ only in the mint sequence, exactly as
+    // two ids minted back to back inside one millisecond do. `older` sorts first.
+    let older = "not_01a03b59b6d0701db0ef1ec3f4c49092";
+    let newer = "not_01a03b59b6d070208eabe63702b51cfd";
+    let lines = [
+        json!({ "id": older, "type": "note", "schema_version": 1, "created_at": at,
+                "body": { "text": "rollback plan alpha" } }),
+        json!({ "id": newer, "type": "note", "schema_version": 1, "created_at": at,
+                "body": { "text": "rollback plan bravo" } }),
+    ];
+    let file: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    std::fs::write(state.join(CORPUS_FILE), file).expect("seed the corpus");
+
+    let hits = call(&state, json!({ "operation": "search", "query": "rollback plan", "k": 3 }));
+    let hit_ids: Vec<&str> = hits.envelope["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(hit_ids, vec![newer, older], "search must be newest-first on a tie");
+
+    // Both scores are 1.0, so this is purely the tie-break — and it must agree with the
+    // other retrieval path, which orders the same two records by the same rule.
+    let recent = call(&state, json!({ "operation": "read_recent", "type": "note", "n": 3 }));
+    let recent_ids: Vec<&str> = recent.envelope["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(recent_ids, hit_ids, "search and read_recent must agree on a tie");
+}
+
+#[test]
 fn search_honours_the_type_filter_and_excludes_withdrawn_records() {
     let state = state_with_config("search_filter");
     let note = append_note(&state, "rollback plan in a note");

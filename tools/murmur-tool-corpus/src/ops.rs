@@ -424,14 +424,17 @@ fn op_search(
         }
     }
 
-    // Score descending, then recency (newest first), then id ascending as the final
-    // determinism tie-break, so repeated runs against an unchanged corpus are
-    // byte-identical.
+    // Score descending, then recency (newest first). `created_at` is only
+    // millisecond-resolution, so two records minted in the same millisecond tie on it;
+    // the id breaks that tie in the same direction, because it embeds the same timestamp
+    // followed by a per-call mint sequence and so sorts lexicographically in mint order.
+    // Descending on both is what makes this newest-first *and* byte-identical across
+    // repeated runs — an ascending id tie-break would silently order a same-millisecond
+    // pair oldest-first, and disagree with `read_recent` on the same two records.
     scored.sort_by(|(sa, ra), (sb, rb)| {
         sb.partial_cmp(sa)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| rb.created_at.cmp(&ra.created_at))
-            .then_with(|| ra.id.cmp(&rb.id))
+            .then_with(|| (&rb.created_at, &rb.id).cmp(&(&ra.created_at, &ra.id)))
     });
 
     let hits: Vec<Value> = scored
