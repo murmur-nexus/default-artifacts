@@ -31,7 +31,9 @@ LOCK="$CAPSULE_DIR/murmur.lock"
 # Build+package differ by implementation, so read it rather than assuming wasm:
 # a native tool compiled with --target wasm32-wasip2 fails in its C dependencies
 # (e.g. libsqlite3-sys can't find stdio.h — there is no wasi libc sysroot here).
-IMPL="$(grep '^implementation:' "$SRC_DIR/murmur.yaml" | awk '{print $2}' | tr -d '"')"
+# `implementation:` is optional and absent from every driver and hook manifest, so grep exits 1
+# there; without the `|| true` that status propagates out of the assignment and `set -e` aborts.
+IMPL="$(grep '^implementation:' "$SRC_DIR/murmur.yaml" | awk '{print $2}' | tr -d '"' || true)"
 
 if [ "$IMPL" = "native" ]; then
   # Native artifacts own their build+package step (package.sh), the same entry

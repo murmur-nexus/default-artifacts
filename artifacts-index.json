@@ -1,10 +1,10 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-26T23:01:52Z",
+  "updated_at": "2026-08-27T02:12:17Z",
   "artifacts": [
     {
       "name": "murmur-driver-anthropic",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "runtime": "driver",
       "description": "Anthropic Messages API inference driver for Murmur agent capsules.",
       "tags": [
@@ -19,7 +19,7 @@
     },
     {
       "name": "murmur-driver-deepseek",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "runtime": "driver",
       "description": "DeepSeek inference driver \u2014 deepseek-v4-flash and deepseek-v4-pro with thinking mode",
       "tags": [
@@ -34,7 +34,7 @@
     },
     {
       "name": "murmur-driver-openai",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "runtime": "driver",
       "description": "OpenAI inference driver for Murmur agent capsules \u2014 Chat Completions, with Responses API for gpt-5 and later models.",
       "tags": [
