@@ -58,19 +58,12 @@ reach. Without that grant every operation returns `state_unavailable` — the to
 never falls back to the workdir, because a corpus the agent can rewrite is worse
 than no corpus. The configuration is not a file at all; see below.
 
-<<<<<<< HEAD
-The durable-state grant that mounts `state/` is proved end to end against a real
-`mur run` by the murmur repository's `crates/murmur-cli/tests/state.rs`; this
-crate's own `tests/wasm_component.rs` proves the tool's half against the compiled
-component.
-=======
-> The Murmur runtime mounts a granted store at the preopen `state`, so a capsule
-> whose manifest entry for this tool declares `capabilities.state` reaches the
-> corpus end to end, and one that does not gets `state_unavailable` from every
-> call. Both are proved against the compiled component by
-> `tests/wasm_component.rs`, and against a real `mur run` launch by the murmur
-> repository's `crates/murmur-cli/tests/corpus_state.rs`.
->>>>>>> fdf0ba1 (fix: update runtime mounts granted store corpus)
+The Murmur runtime mounts a granted store at the preopen `state`, so a capsule
+whose manifest entry for this tool declares `capabilities.state` reaches the
+corpus end to end, and one that does not gets `state_unavailable` from every
+call. Both are proved against the compiled component by
+`tests/wasm_component.rs`, and against a real `mur run` launch by the murmur
+repository's `crates/murmur-cli/tests/corpus_state.rs`.
 
 ## Configuring it
 
