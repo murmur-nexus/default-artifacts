@@ -1,10 +1,10 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-27T02:12:17Z",
+  "updated_at": "2026-08-27T03:49:29Z",
   "artifacts": [
     {
       "name": "murmur-driver-anthropic",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "runtime": "driver",
       "description": "Anthropic Messages API inference driver for Murmur agent capsules.",
       "tags": [
