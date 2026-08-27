@@ -110,6 +110,119 @@ fn parse_thinking_config(config_json: &str) -> ThinkingConfig {
     ThinkingConfig { enabled, budget_tokens }
 }
 
+// ── Prompt caching ────────────────────────────────────────────────────────────
+
+// Anthropic's per-request ceiling on `cache_control` markers; a fifth marker is a 400.
+const MAX_CACHE_BREAKPOINTS: usize = 4;
+
+// Markers this driver places: the tool inventory, the system prompt, and the tail of the
+// settled conversation. The remaining slot is left free for an intermediate message-level
+// marker, which a turn appending more than 20 content blocks would need — a breakpoint
+// walks backward at most 20 blocks looking for a prior entry, so a longer turn pushes the
+// previous entry out of the window and rewrites instead of reading.
+const DRIVER_CACHE_BREAKPOINTS: usize = 3;
+
+const _: () = assert!(DRIVER_CACHE_BREAKPOINTS < MAX_CACHE_BREAKPOINTS);
+
+// Content-block types Anthropic accepts a `cache_control` member on. A `thinking` block is
+// not among them.
+const CACHE_ELIGIBLE_BLOCK_TYPES: &[&str] =
+    &["text", "image", "tool_use", "tool_result", "document"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheTtl {
+    FiveMinutes,
+    OneHour,
+}
+
+/// Where the driver places prompt-cache breakpoints, read from `inference.driver.config`.
+///
+/// Caching is on by default: it needs no capsule change, leaves the body a valid Messages API
+/// request, and does not affect the model's output. `enabled: false` exists for an
+/// Anthropic-compatible gateway that rejects `cache_control`, and as the escape hatch for a
+/// capsule that supplies its own marker through `params`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PromptCacheConfig {
+    enabled: bool,
+    ttl: CacheTtl,
+}
+
+impl Default for PromptCacheConfig {
+    fn default() -> Self {
+        Self { enabled: true, ttl: CacheTtl::FiveMinutes }
+    }
+}
+
+impl PromptCacheConfig {
+    // The marker value every breakpoint in one request carries. One TTL per request satisfies
+    // Anthropic's rule that longer-TTL entries precede shorter-TTL ones with no ordering logic.
+    fn marker(&self) -> Value {
+        match self.ttl {
+            CacheTtl::FiveMinutes => json!({"type": "ephemeral"}),
+            CacheTtl::OneHour => json!({"type": "ephemeral", "ttl": "1h"}),
+        }
+    }
+}
+
+// Reads `prompt_cache` ("enabled"/"disabled" or a bool, default enabled) and `prompt_cache_ttl`
+// ("5m"/"1h", default "5m") from the driver config JSON. Every unrecognised, ill-typed, absent
+// or malformed input falls back to the default; neither key can produce an error.
+fn parse_prompt_cache_config(config_json: &str) -> PromptCacheConfig {
+    let Ok(config) = serde_json::from_str::<Value>(config_json) else {
+        return PromptCacheConfig::default();
+    };
+    let enabled = match config.get("prompt_cache") {
+        Some(Value::String(value)) => !value.trim().eq_ignore_ascii_case("disabled"),
+        Some(Value::Bool(value)) => *value,
+        _ => true,
+    };
+    let ttl = match config.get("prompt_cache_ttl").and_then(Value::as_str) {
+        Some(value) if value.trim().eq_ignore_ascii_case("1h") => CacheTtl::OneHour,
+        _ => CacheTtl::FiveMinutes,
+    };
+    PromptCacheConfig { enabled, ttl }
+}
+
+// Adds the marker to a content block, reporting whether it landed. A block that is not a JSON
+// object cannot carry one.
+fn mark_cache_breakpoint(block: &mut Value, marker: &Value) -> bool {
+    match block.as_object_mut() {
+        Some(object) => {
+            object.insert("cache_control".to_string(), marker.clone());
+            true
+        }
+        None => false,
+    }
+}
+
+fn is_cache_eligible_block(block: &Value) -> bool {
+    block
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| CACHE_ELIGIBLE_BLOCK_TYPES.contains(&kind))
+}
+
+// Marks the end of the settled conversation — the last block the next request can read up to,
+// given `messages` only ever grows by append.
+//
+// The search runs backwards and crosses message boundaries: the final message can translate to
+// an empty content array (a `thinking` block dropped because thinking is off), and a `thinking`
+// block itself is not an eligible target. When no eligible block exists anywhere, no marker is
+// placed — the tools and system breakpoints still stand on their own.
+fn mark_last_eligible_message_block(messages: &mut [Value], marker: &Value) -> bool {
+    for message in messages.iter_mut().rev() {
+        let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for block in content.iter_mut().rev() {
+            if is_cache_eligible_block(block) && mark_cache_breakpoint(block, marker) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[derive(Debug, Deserialize)]
 struct MurmurRequest {
     // The host sends a prompt-cache routing hint as a reserved top-level `prompt_cache_key`
@@ -189,6 +302,7 @@ fn translate_murmur_request_to_anthropic(
     request: &MurmurRequest,
     family: ModelFamily,
     thinking: &ThinkingConfig,
+    prompt_cache: &PromptCacheConfig,
 ) -> Result<Value, String> {
     let mut messages = Vec::with_capacity(request.messages.len());
 
@@ -229,7 +343,7 @@ fn translate_murmur_request_to_anthropic(
         }
     }
 
-    let tools = request
+    let mut tools = request
         .tools
         .iter()
         .map(|tool| {
@@ -251,6 +365,18 @@ fn translate_murmur_request_to_anthropic(
         })
         .collect::<Vec<_>>();
 
+    // Breakpoints, in the order Anthropic renders the prompt: `tools` → `system` → `messages`.
+    // Each site places at most one marker and there are DRIVER_CACHE_BREAKPOINTS of them, which
+    // is how the per-request budget is held below MAX_CACHE_BREAKPOINTS.
+    let marker = prompt_cache.marker();
+
+    if prompt_cache.enabled {
+        if let Some(last_tool) = tools.last_mut() {
+            mark_cache_breakpoint(last_tool, &marker);
+        }
+        mark_last_eligible_message_block(&mut messages, &marker);
+    }
+
     let mut body = Map::new();
     body.insert("model".to_string(), Value::String(request.model.clone()));
     body.insert("max_tokens".to_string(), Value::from(request.max_tokens));
@@ -262,7 +388,15 @@ fn translate_murmur_request_to_anthropic(
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
     {
-        body.insert("system".to_string(), Value::String(system.to_string()));
+        // With caching on, `system` is emitted as a one-element array of text blocks so the
+        // marker has a block to sit on; with caching off it stays the bare string. Because tools
+        // render first, this marker caches the tool inventory and the system prompt together.
+        let value = if prompt_cache.enabled {
+            json!([{"type": "text", "text": system, "cache_control": marker}])
+        } else {
+            Value::String(system.to_string())
+        };
+        body.insert("system".to_string(), value);
     }
 
     if !tools.is_empty() {
@@ -750,7 +884,8 @@ fn error_payload(message: &str) -> Value {
 mod wasm_driver {
     use super::{
         assemble_anthropic_streaming_response, classify_model, error_payload, parse_beta_features,
-        parse_thinking_config, process_anthropic_sse_line, stamp_streaming_flags,
+        parse_prompt_cache_config, parse_thinking_config, process_anthropic_sse_line,
+        stamp_streaming_flags,
         translate_anthropic_response_to_murmur, translate_murmur_request_to_anthropic,
         AnthropicSseState, MurmurRequest, ThinkingConfig,
     };
@@ -824,8 +959,17 @@ mod wasm_driver {
             .as_deref()
             .map(parse_thinking_config)
             .unwrap_or_else(ThinkingConfig::disabled);
-        let mut provider_request =
-            translate_murmur_request_to_anthropic(&murmur_request, family, &thinking)?;
+        // Prompt caching is GA — it needs no `anthropic-beta` header, only the markers.
+        let prompt_cache = driver_config
+            .as_deref()
+            .map(parse_prompt_cache_config)
+            .unwrap_or_default();
+        let mut provider_request = translate_murmur_request_to_anthropic(
+            &murmur_request,
+            family,
+            &thinking,
+            &prompt_cache,
+        )?;
 
         stamp_streaming_flags(&mut provider_request);
 
@@ -1101,14 +1245,38 @@ mod wasm_driver {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_model, parse_anthropic_sse_body, parse_beta_features, parse_thinking_config,
-        stamp_streaming_flags, translate_anthropic_response_to_murmur,
-        translate_murmur_request_to_anthropic, ModelFamily, MurmurRequest, ThinkingConfig,
+        classify_model, parse_anthropic_sse_body, parse_beta_features, parse_prompt_cache_config,
+        parse_thinking_config, stamp_streaming_flags, translate_anthropic_response_to_murmur,
+        translate_murmur_request_to_anthropic, CacheTtl, ModelFamily, MurmurRequest,
+        PromptCacheConfig, ThinkingConfig, MAX_CACHE_BREAKPOINTS,
     };
     use serde_json::{json, Value};
 
     fn thinking_off() -> ThinkingConfig {
         ThinkingConfig::disabled()
+    }
+
+    fn cache_default() -> PromptCacheConfig {
+        PromptCacheConfig::default()
+    }
+
+    fn cache_off() -> PromptCacheConfig {
+        PromptCacheConfig { enabled: false, ..PromptCacheConfig::default() }
+    }
+
+    // Counts `cache_control` members at every nesting depth of a serialized body.
+    fn count_cache_markers(value: &Value) -> usize {
+        match value {
+            Value::Object(map) => {
+                map.iter()
+                    .map(|(key, nested)| {
+                        usize::from(key == "cache_control") + count_cache_markers(nested)
+                    })
+                    .sum()
+            }
+            Value::Array(items) => items.iter().map(count_cache_markers).sum(),
+            _ => 0,
+        }
     }
 
     #[test]
@@ -1145,7 +1313,13 @@ mod tests {
         .unwrap();
 
         let translated =
-            translate_murmur_request_to_anthropic(&request, ModelFamily::Claude4Plus, &thinking_off()).unwrap();
+            translate_murmur_request_to_anthropic(
+                &request,
+                ModelFamily::Claude4Plus,
+                &thinking_off(),
+                &cache_default(),
+            )
+            .unwrap();
         let messages = translated["messages"].as_array().unwrap();
 
         assert_eq!(
@@ -1188,7 +1362,13 @@ mod tests {
         .unwrap();
 
         let translated =
-            translate_murmur_request_to_anthropic(&request, ModelFamily::Claude4Plus, &thinking_off()).unwrap();
+            translate_murmur_request_to_anthropic(
+                &request,
+                ModelFamily::Claude4Plus,
+                &thinking_off(),
+                &cache_default(),
+            )
+            .unwrap();
 
         assert_eq!(translated["tool_choice"], json!({"type": "any"}));
     }
@@ -1268,7 +1448,13 @@ mod tests {
         .unwrap();
 
         let translated =
-            translate_murmur_request_to_anthropic(&request, ModelFamily::Claude4Plus, &thinking_off()).unwrap();
+            translate_murmur_request_to_anthropic(
+                &request,
+                ModelFamily::Claude4Plus,
+                &thinking_off(),
+                &cache_default(),
+            )
+            .unwrap();
 
         assert_eq!(translated["temperature"], 0.7);
         assert!(
@@ -1290,7 +1476,13 @@ mod tests {
         .unwrap();
 
         let translated =
-            translate_murmur_request_to_anthropic(&request, ModelFamily::Claude4Plus, &thinking_off()).unwrap();
+            translate_murmur_request_to_anthropic(
+                &request,
+                ModelFamily::Claude4Plus,
+                &thinking_off(),
+                &cache_default(),
+            )
+            .unwrap();
 
         assert_eq!(translated["top_p"], 0.9);
     }
@@ -1309,7 +1501,13 @@ mod tests {
         .unwrap();
 
         let translated =
-            translate_murmur_request_to_anthropic(&request, ModelFamily::Claude3, &thinking_off()).unwrap();
+            translate_murmur_request_to_anthropic(
+                &request,
+                ModelFamily::Claude3,
+                &thinking_off(),
+                &cache_default(),
+            )
+            .unwrap();
 
         assert_eq!(translated["temperature"], 0.5);
         assert_eq!(translated["top_p"], 0.8);
@@ -1445,7 +1643,13 @@ mod tests {
 
         let cfg = ThinkingConfig { enabled: true, budget_tokens: 2048 };
         let translated =
-            translate_murmur_request_to_anthropic(&request, ModelFamily::Claude4Plus, &cfg).unwrap();
+            translate_murmur_request_to_anthropic(
+                &request,
+                ModelFamily::Claude4Plus,
+                &cfg,
+                &cache_default(),
+            )
+            .unwrap();
 
         assert_eq!(translated["thinking"]["type"], "enabled");
         assert_eq!(translated["thinking"]["budget_tokens"], 2048);
@@ -1465,7 +1669,13 @@ mod tests {
 
         let cfg = ThinkingConfig { enabled: true, budget_tokens: 4096 };
         let translated =
-            translate_murmur_request_to_anthropic(&request, ModelFamily::Claude4Plus, &cfg).unwrap();
+            translate_murmur_request_to_anthropic(
+                &request,
+                ModelFamily::Claude4Plus,
+                &cfg,
+                &cache_default(),
+            )
+            .unwrap();
 
         assert_eq!(translated["thinking"]["budget_tokens"], 999);
     }
@@ -1488,7 +1698,13 @@ mod tests {
         // Enabled → thinking block replayed first, verbatim, with signature.
         let on = ThinkingConfig { enabled: true, budget_tokens: 2048 };
         let with_thinking =
-            translate_murmur_request_to_anthropic(&request, ModelFamily::Claude4Plus, &on).unwrap();
+            translate_murmur_request_to_anthropic(
+                &request,
+                ModelFamily::Claude4Plus,
+                &on,
+                &cache_default(),
+            )
+            .unwrap();
         let content = &with_thinking["messages"][0]["content"];
         assert_eq!(content[0]["type"], "thinking");
         assert_eq!(content[0]["thinking"], "step by step");
@@ -1497,8 +1713,13 @@ mod tests {
 
         // Disabled → thinking block dropped (sending it would 400).
         let without =
-            translate_murmur_request_to_anthropic(&request, ModelFamily::Claude4Plus, &thinking_off())
-                .unwrap();
+            translate_murmur_request_to_anthropic(
+                &request,
+                ModelFamily::Claude4Plus,
+                &thinking_off(),
+                &cache_default(),
+            )
+            .unwrap();
         assert_eq!(without["messages"][0]["content"][0]["type"], "text");
     }
 
@@ -1572,6 +1793,7 @@ mod tests {
             &request,
             ModelFamily::Claude4Plus,
             &thinking_off(),
+            &cache_default(),
         )
         .unwrap();
 
@@ -1693,5 +1915,323 @@ mod tests {
         stamp_streaming_flags(&mut body);
         assert_eq!(body["stream"], json!(true));
         assert!(body.get("stream_options").is_none());
+    }
+
+    // ── prompt caching ────────────────────────────────────────────────────────
+
+    fn cache_request(system: Value, tools: Value, messages: Value) -> MurmurRequest {
+        serde_json::from_value(json!({
+            "model": "claude-opus-4-6",
+            "max_tokens": 2048,
+            "system": system,
+            "tools": tools,
+            "messages": messages,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn marks_the_stable_prefix_with_cache_breakpoints() {
+        let request = cache_request(
+            json!("You are helpful"),
+            json!([
+                {"name": "calc", "description": "calculate", "parameters": {"type": "object"}},
+                {"name": "grep", "description": "search", "parameters": {"type": "object"}}
+            ]),
+            json!([{"role": "user", "content": [{"type": "text", "text": "hi"}]}]),
+        );
+
+        let translated = translate_murmur_request_to_anthropic(
+            &request,
+            ModelFamily::Claude4Plus,
+            &thinking_off(),
+            &cache_default(),
+        )
+        .unwrap();
+
+        // The marker sits on the last tool only — tools render at position 0, so this is a read
+        // point any later request with the same inventory can hit.
+        assert!(translated["tools"][0].get("cache_control").is_none());
+        assert_eq!(
+            translated["tools"][1]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(translated["tools"][0]["name"], "calc");
+        assert_eq!(translated["tools"][1]["name"], "grep");
+        assert_eq!(translated["tools"][1]["description"], "search");
+        assert_eq!(translated["tools"][1]["input_schema"], json!({"type": "object"}));
+
+        // `system` becomes a one-element array of text blocks so a marker has a block to sit on.
+        assert_eq!(
+            translated["system"],
+            json!([{
+                "type": "text",
+                "text": "You are helpful",
+                "cache_control": {"type": "ephemeral"}
+            }])
+        );
+    }
+
+    #[test]
+    fn marks_the_settled_conversation_tail() {
+        let request = cache_request(
+            json!("You are helpful"),
+            json!([]),
+            json!([
+                {"role": "user", "content": [{"type": "text", "text": "add 1 and 1"}]},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "calling calc"},
+                        {"type": "tool_call", "id": "tc-1", "name": "calc", "input": {"x": 1}}
+                    ]
+                },
+                {"role": "tool", "tool_call_id": "tc-1", "content": [{"type": "text", "text": "2"}]}
+            ]),
+        );
+
+        let translated = translate_murmur_request_to_anthropic(
+            &request,
+            ModelFamily::Claude4Plus,
+            &thinking_off(),
+            &cache_default(),
+        )
+        .unwrap();
+
+        let messages = translated["messages"].as_array().unwrap();
+        assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+        assert_eq!(
+            messages[2]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        for earlier in &messages[..2] {
+            for block in earlier["content"].as_array().unwrap() {
+                assert!(
+                    block.get("cache_control").is_none(),
+                    "marker leaked onto an earlier message block: {block}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn never_exceeds_the_breakpoint_budget() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "claude-opus-4-6",
+            "max_tokens": 8192,
+            "system": "You are helpful",
+            "tools": [
+                {"name": "calc", "parameters": {"type": "object"}},
+                {"name": "grep", "parameters": {"type": "object"}},
+                {"name": "edit", "parameters": {"type": "object"}}
+            ],
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "one"}]},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "text": "hmm", "signature": "sig-1"},
+                        {"type": "text", "text": "two"},
+                        {"type": "tool_call", "id": "tc-1", "name": "calc", "input": {}}
+                    ]
+                },
+                {"role": "tool", "tool_call_id": "tc-1", "content": [{"type": "text", "text": "3"}]},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "source": {"media_type": "image/png", "data": "aGk="}},
+                        {"type": "text", "text": "four"}
+                    ]
+                }
+            ],
+            "params": {"metadata": {"user_id": "u-1"}, "stop_sequences": ["END"]}
+        }))
+        .unwrap();
+
+        let thinking_on = ThinkingConfig { enabled: true, budget_tokens: 2048 };
+
+        for (config, expects_ttl) in [(cache_default(), false), (
+            PromptCacheConfig { enabled: true, ttl: CacheTtl::OneHour },
+            true,
+        )] {
+            let translated = translate_murmur_request_to_anthropic(
+                &request,
+                ModelFamily::Claude4Plus,
+                &thinking_on,
+                &config,
+            )
+            .unwrap();
+
+            let markers = count_cache_markers(&translated);
+            assert_eq!(markers, 3, "expected tools + system + messages markers");
+            assert!(markers <= MAX_CACHE_BREAKPOINTS);
+
+            // Every marker in one request carries the same TTL, so longer-TTL entries can never
+            // follow shorter-TTL ones.
+            let expected = if expects_ttl {
+                json!({"type": "ephemeral", "ttl": "1h"})
+            } else {
+                json!({"type": "ephemeral"})
+            };
+            assert_eq!(translated["tools"][2]["cache_control"], expected);
+            assert_eq!(translated["system"][0]["cache_control"], expected);
+            assert_eq!(
+                translated["messages"][3]["content"][1]["cache_control"],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn empty_tools_system_and_messages_emit_no_markers() {
+        let empty = cache_request(json!(null), json!([]), json!([]));
+        let translated = translate_murmur_request_to_anthropic(
+            &empty,
+            ModelFamily::Claude4Plus,
+            &thinking_off(),
+            &cache_default(),
+        )
+        .unwrap();
+        assert!(translated.get("tools").is_none());
+        assert!(translated.get("system").is_none());
+        assert_eq!(translated["messages"], json!([]));
+        assert_eq!(count_cache_markers(&translated), 0);
+
+        // A whitespace-only system prompt drops the key entirely rather than emitting an empty
+        // block that could never cache.
+        let blank_system = cache_request(json!("   "), json!([]), json!([]));
+        let translated = translate_murmur_request_to_anthropic(
+            &blank_system,
+            ModelFamily::Claude4Plus,
+            &thinking_off(),
+            &cache_default(),
+        )
+        .unwrap();
+        assert!(translated.get("system").is_none());
+        assert_eq!(count_cache_markers(&translated), 0);
+    }
+
+    #[test]
+    fn thinking_blocks_are_never_marked() {
+        // A `thinking` block cannot carry a marker, so the search steps back to the text block.
+        let trailing_thinking = cache_request(
+            json!(null),
+            json!([]),
+            json!([{
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "the answer"},
+                    {"type": "thinking", "text": "step by step", "signature": "sig-abc"}
+                ]
+            }]),
+        );
+        let thinking_on = ThinkingConfig { enabled: true, budget_tokens: 2048 };
+        let translated = translate_murmur_request_to_anthropic(
+            &trailing_thinking,
+            ModelFamily::Claude4Plus,
+            &thinking_on,
+            &cache_default(),
+        )
+        .unwrap();
+        let content = translated["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(content[1]["type"], "thinking");
+        assert!(content[1].get("cache_control").is_none());
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["cache_control"], json!({"type": "ephemeral"}));
+        assert_eq!(count_cache_markers(&translated), 1);
+
+        // With thinking off the last message translates to an empty content array, so the search
+        // crosses the message boundary into the preceding user turn.
+        let dropped_thinking = cache_request(
+            json!(null),
+            json!([]),
+            json!([
+                {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                {
+                    "role": "assistant",
+                    "content": [{"type": "thinking", "text": "unsigned", "signature": ""}]
+                }
+            ]),
+        );
+        let translated = translate_murmur_request_to_anthropic(
+            &dropped_thinking,
+            ModelFamily::Claude4Plus,
+            &thinking_off(),
+            &cache_default(),
+        )
+        .unwrap();
+        assert_eq!(translated["messages"][1]["content"], json!([]));
+        assert_eq!(
+            translated["messages"][0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(count_cache_markers(&translated), 1);
+    }
+
+    #[test]
+    fn disabled_prompt_cache_restores_the_uncached_body() {
+        let request = cache_request(
+            json!("You are helpful"),
+            json!([{"name": "calc", "description": "calculate", "parameters": {"type": "object"}}]),
+            json!([{"role": "user", "content": [{"type": "text", "text": "hi"}]}]),
+        );
+
+        let translated = translate_murmur_request_to_anthropic(
+            &request,
+            ModelFamily::Claude4Plus,
+            &thinking_off(),
+            &cache_off(),
+        )
+        .unwrap();
+
+        // `system` is back to a bare JSON string and no marker appears at any depth.
+        assert_eq!(translated["system"], json!("You are helpful"));
+        assert_eq!(count_cache_markers(&translated), 0);
+        assert!(!serde_json::to_string(&translated)
+            .unwrap()
+            .contains("cache_control"));
+        assert_eq!(
+            translated["tools"],
+            json!([{
+                "name": "calc",
+                "description": "calculate",
+                "input_schema": {"type": "object"}
+            }])
+        );
+        assert_eq!(
+            translated["messages"],
+            json!([{"role": "user", "content": [{"type": "text", "text": "hi"}]}])
+        );
+    }
+
+    #[test]
+    fn parse_prompt_cache_config_falls_back_to_enabled_five_minutes() {
+        let default = PromptCacheConfig::default();
+        for input in [
+            "{}",
+            r#"{"prompt_cache":"enabled"}"#,
+            r#"{"prompt_cache":true}"#,
+            r#"{"prompt_cache":7}"#,
+            r#"{"prompt_cache_ttl":"30m"}"#,
+            r#"{"prompt_cache_ttl":5}"#,
+            "not json",
+            "",
+        ] {
+            assert_eq!(
+                parse_prompt_cache_config(input),
+                default,
+                "unexpected config for {input}"
+            );
+        }
+
+        for input in [r#"{"prompt_cache":"disabled"}"#, r#"{"prompt_cache":false}"#] {
+            let config = parse_prompt_cache_config(input);
+            assert!(!config.enabled, "expected disabled for {input}");
+        }
+
+        let hourly = parse_prompt_cache_config(r#"{"prompt_cache_ttl":"1h"}"#);
+        assert!(hourly.enabled);
+        assert_eq!(hourly.ttl, CacheTtl::OneHour);
+        assert_eq!(hourly.marker(), json!({"type": "ephemeral", "ttl": "1h"}));
     }
 }

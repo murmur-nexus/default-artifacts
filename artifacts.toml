@@ -17,7 +17,7 @@ workspace_version = "0.5.0"
 [[artifact]]
 name = "murmur-driver-anthropic"
 path = "drivers/murmur-driver-anthropic"
-version = "0.2.0"
+version = "0.3.0"
 
 [[artifact]]
 name = "murmur-driver-deepseek"

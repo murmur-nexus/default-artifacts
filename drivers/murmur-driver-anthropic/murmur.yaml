@@ -1,5 +1,5 @@
 name: murmur-driver-anthropic
-version: 0.2.0
+version: 0.3.0
 runtime: driver
 description: Anthropic Messages API inference driver for Murmur agent capsules.
 requires_files:
