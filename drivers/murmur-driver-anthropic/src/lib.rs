@@ -1248,7 +1248,7 @@ mod tests {
         classify_model, parse_anthropic_sse_body, parse_beta_features, parse_prompt_cache_config,
         parse_thinking_config, stamp_streaming_flags, translate_anthropic_response_to_murmur,
         translate_murmur_request_to_anthropic, CacheTtl, ModelFamily, MurmurRequest,
-        PromptCacheConfig, ThinkingConfig, MAX_CACHE_BREAKPOINTS,
+        PromptCacheConfig, ThinkingConfig, DRIVER_CACHE_BREAKPOINTS, MAX_CACHE_BREAKPOINTS,
     };
     use serde_json::{json, Value};
 
@@ -2063,7 +2063,10 @@ mod tests {
             .unwrap();
 
             let markers = count_cache_markers(&translated);
-            assert_eq!(markers, 3, "expected tools + system + messages markers");
+            assert_eq!(
+                markers, DRIVER_CACHE_BREAKPOINTS,
+                "expected tools + system + messages markers"
+            );
             assert!(markers <= MAX_CACHE_BREAKPOINTS);
 
             // Every marker in one request carries the same TTL, so longer-TTL entries can never
@@ -2212,6 +2215,7 @@ mod tests {
             r#"{"prompt_cache":"enabled"}"#,
             r#"{"prompt_cache":true}"#,
             r#"{"prompt_cache":7}"#,
+            r#"{"prompt_cache":"garbage"}"#,
             r#"{"prompt_cache_ttl":"30m"}"#,
             r#"{"prompt_cache_ttl":5}"#,
             "not json",
