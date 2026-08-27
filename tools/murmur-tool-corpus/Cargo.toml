@@ -20,3 +20,8 @@ wit-bindgen.workspace = true
 [dev-dependencies]
 wasmtime = "46"
 wasmtime-wasi = "46"
+# Used by tests/mur_run_state.rs, which stages a scratch HOME holding a whole artifact
+# registry and a capsule store per launch. Its neighbours hand-roll a directory under
+# std::env::temp_dir() and leave it behind, which is affordable for the few small files
+# they write and not for the tens of megabytes a staged launch leaves.
+tempfile = "3"

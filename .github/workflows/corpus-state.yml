@@ -1,0 +1,109 @@
+name: corpus-state
+
+# murmur-tool-corpus reaching a durable store is a join between two repositories: the tool
+# and the inference driver are built here, and the `capabilities.state` grant that mounts
+# the store is the runtime's. Neither repository's own suite can see the join --
+# tools/murmur-tool-corpus/tests/ proves the corpus against directories and Wasmtime
+# contexts it built itself, and murmur proves the grant against fixture capsules that
+# already know its conventions. This job is where the two meet, under a real `mur run`.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    # A murmur push cannot redden this repository's CI on its own -- that needs a trigger in
+    # that repository's workflows, which this repository does not own. A nightly run bounds
+    # how long a break in the join can sit unnoticed to one day.
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  corpus-state:
+    name: corpus-state
+    runs-on: ubuntu-latest
+    # Two cargo builds dominate this job: `mur` out of the murmur checkout, and this
+    # workspace's two components. It is bounded here so a hung launch fails the job rather
+    # than burning the runner's own limit.
+    timeout-minutes: 30
+    steps:
+      - name: Check out default-artifacts
+        # Both repositories nest under $GITHUB_WORKSPACE: actions/checkout rejects a path
+        # that escapes it, so this is the sibling layout that passes its validation.
+        uses: actions/checkout@v4
+        with:
+          path: default-artifacts
+
+      - name: Check out murmur
+        # Its default branch, not a pinned SHA: the point of this job is that a runtime
+        # change which breaks the join reddens the next build here rather than waiting for
+        # a bump. The pinned checkout in ci.yml's wit-sync job answers a different question
+        # -- whether the mirrored WIT files are current -- and deliberately stays pinned.
+        uses: actions/checkout@v4
+        with:
+          repository: murmur-nexus/murmur
+          path: murmur
+
+      - name: Record which murmur commit this ran against
+        # A red build has to say which runtime it ran against, since the branch it resolves
+        # moves under the job.
+        run: |
+          sha=$(git -C murmur rev-parse HEAD)
+          echo "mur built from murmur@$sha" >> "$GITHUB_STEP_SUMMARY"
+
+      # Pinned toolchain, as in ci.yml. The murmur checkout carries its own
+      # rust-toolchain.toml, which rustup honours for the `mur` build below.
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.95.0"
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Relative to $GITHUB_WORKSPACE, which holds two repositories here rather than one
+          # workspace at its root.
+          workspaces: |
+            default-artifacts
+            murmur
+
+      - name: Install libseccomp
+        # murmur-cli links against it. Bounded separately from the job: a runner whose Azure
+        # mirror is unreachable leaves `apt-get update` failing over for tens of minutes,
+        # which reads as a cancelled job with no failing step rather than as the
+        # infrastructure hiccup it is.
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libseccomp-dev
+
+      - name: Install murmur's pinned toolchain
+        # rust-toolchain.toml in that checkout names the channel; rustup installs it here so
+        # a toolchain download failure is its own step rather than an opaque `cargo build`
+        # failure inside it.
+        working-directory: murmur
+        run: rustup show
+
+      - name: Build mur
+        # Debug, not release: this binary is launched a handful of times and compiled once,
+        # so the compile is what costs.
+        working-directory: murmur
+        run: cargo build -p murmur-cli
+
+      - name: Run the corpus state tests
+        working-directory: default-artifacts
+        env:
+          MUR_BIN: ${{ github.workspace }}/murmur/target/debug/mur
+        run: |
+          set -o pipefail
+          # `--ignored` is what makes these four run at all: drop it and cargo filters them
+          # out, the job goes green, and nothing ran.
+          cargo test -p murmur-tool-corpus --test mur_run_state -- --ignored --nocapture 2>&1 \
+            | tee corpus-state.log
+          if ! grep -q '4 passed; 0 failed' corpus-state.log; then
+            echo "::error::the corpus state suite did not report 4 passed; 0 failed"
+            exit 1
+          fi

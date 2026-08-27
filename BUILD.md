@@ -193,3 +193,15 @@ cargo test --workspace -- --nocapture
 ```
 
 Cargo prints one result line per test binary, not a workspace-wide total.
+
+`tools/murmur-tool-corpus/tests/mur_run_state.rs` is `#[ignore]`d, because it
+launches the `mur` runtime as a subprocess to prove the corpus reaches a durable
+store under a real capsule. Point `MUR_BIN` at a `mur` binary — or put one on
+`PATH` — and ask for it by name:
+
+```bash
+MUR_BIN=/path/to/mur cargo test -p murmur-tool-corpus --test mur_run_state -- --ignored
+```
+
+A run that finds no `mur` fails rather than skipping. The `corpus-state` workflow
+runs it against a `mur` built from murmur's default branch.

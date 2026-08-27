@@ -62,8 +62,8 @@ The Murmur runtime mounts a granted store at the preopen `state`, so a capsule
 whose manifest entry for this tool declares `capabilities.state` reaches the
 corpus end to end, and one that does not gets `state_unavailable` from every
 call. Both are proved against the compiled component by
-`tests/wasm_component.rs`, and against a real `mur run` launch by the murmur
-repository's `crates/murmur-cli/tests/corpus_state.rs`.
+`tests/wasm_component.rs`, and against a real `mur run` launch by
+`tests/mur_run_state.rs`.
 
 ## Configuring it
 
