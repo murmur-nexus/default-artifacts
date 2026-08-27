@@ -10,7 +10,7 @@ WASM components (`runtime: driver`). Export `murmur:tool/run` (`world driver`) a
 
 | Artifact | Location | Description |
 |---|---|---|
-| `murmur-driver-anthropic` | `drivers/murmur-driver-anthropic/` | Anthropic Messages API, with extended thinking and prompt-cache breakpoints |
+| `murmur-driver-anthropic` | `drivers/murmur-driver-anthropic/` | Anthropic Messages API, with extended thinking and prompt-cache breakpoints; caching is tuned by a `config:` block on its manifest entry |
 | `murmur-driver-deepseek` | `drivers/murmur-driver-deepseek/` | DeepSeek API — `deepseek-v4-flash` and `deepseek-v4-pro`, with thinking mode |
 | `murmur-driver-openai` | `drivers/murmur-driver-openai/` | OpenAI-compatible Chat Completions API, with Responses API for `gpt-5` and later models |
 

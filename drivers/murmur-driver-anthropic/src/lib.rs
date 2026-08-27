@@ -165,8 +165,8 @@ impl PromptCacheConfig {
 }
 
 // Reads `prompt_cache` ("enabled"/"disabled" or a bool, default enabled) and `prompt_cache_ttl`
-// ("5m"/"1h", default "5m") from the driver config JSON. Every unrecognised, ill-typed, absent
-// or malformed input falls back to the default; neither key can produce an error.
+// ("5m"/"1h", default "5m") from this artifact's own config JSON. Every unrecognised, ill-typed,
+// absent or malformed input falls back to the default; neither key can produce an error.
 fn parse_prompt_cache_config(config_json: &str) -> PromptCacheConfig {
     let Ok(config) = serde_json::from_str::<Value>(config_json) else {
         return PromptCacheConfig::default();
@@ -946,6 +946,10 @@ mod wasm_driver {
             .map_err(|_| "driver: missing MURMUR_INFERENCE_ENDPOINT".to_string())?;
         let api_key = std::env::var("MURMUR_INFERENCE_API_KEY").ok();
         let driver_config = std::env::var("MURMUR_INFERENCE_DRIVER_CONFIG").ok();
+        // Prompt caching is configured per artifact, not per driver role: `cache_control`
+        // breakpoints exist only in the Messages API, so the keys travel on this artifact's own
+        // `config:` block rather than on the role-wide `inference.driver.config`.
+        let artifact_config = std::env::var("MURMUR_ARTIFACT_CONFIG").ok();
 
         let raw = input
             .data
@@ -960,7 +964,7 @@ mod wasm_driver {
             .map(parse_thinking_config)
             .unwrap_or_else(ThinkingConfig::disabled);
         // Prompt caching is GA — it needs no `anthropic-beta` header, only the markers.
-        let prompt_cache = driver_config
+        let prompt_cache = artifact_config
             .as_deref()
             .map(parse_prompt_cache_config)
             .unwrap_or_default();

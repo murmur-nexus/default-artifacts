@@ -1,6 +1,28 @@
 name: murmur-driver-anthropic
-version: 0.3.0
+version: 0.4.0
 runtime: driver
-description: Anthropic Messages API inference driver for Murmur agent capsules.
+description: |
+  Anthropic Messages API inference driver for Murmur agent capsules. Translates the Murmur
+  canonical inference format to and from the Messages API, including SSE streaming, extended
+  thinking and model-family handling.
+
+  It places `cache_control` breakpoints on the tool inventory, the system prompt and the end of
+  the settled conversation, so a prefix is cached across turns. Caching is on by default; the
+  `config:` block on this driver's entry in the capsule's manifest tunes it, and reaches this
+  artifact alone as `MURMUR_ARTIFACT_CONFIG`. `prompt_cache` accepts `enabled`/`disabled` or a
+  bool and defaults to enabled; `prompt_cache_ttl` accepts `5m`/`1h` and defaults to `5m`. Any
+  other value falls back to the default, and neither key errors or warns.
+
+      artifacts:
+        - name: murmur-driver-anthropic
+          runtime: driver
+          config:
+            prompt_cache: enabled
+            prompt_cache_ttl: 1h
+
+  Caching lives on the artifact rather than on `inference.driver.config` because a
+  `cache_control` breakpoint is an Anthropic construct — the other drivers have nowhere to put
+  one. Extended thinking, `anthropic-beta` features and passthrough `params` are still read from
+  `inference.driver.config`.
 requires_files:
   - murmur_driver_anthropic.wasm

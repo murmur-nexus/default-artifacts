@@ -34,7 +34,9 @@ When no cacheable block exists anywhere, marker 3 is left out and the other two
 still stand.
 
 Caching is on by default and needs no capsule change. Configure it under
-`inference.driver.config` in the capsule's `murmur.yaml`:
+`config:` on this driver's entry in the capsule's `artifacts:` list, which the
+runtime lowers to compact JSON and delivers to this artifact alone as
+`MURMUR_ARTIFACT_CONFIG`:
 
 | Key | Accepted | Default | Effect |
 |---|---|---|---|
@@ -42,17 +44,25 @@ Caching is on by default and needs no capsule change. Configure it under
 | `prompt_cache_ttl` | `5m` / `1h` (case-insensitive) | `5m` | `1h` puts the 1-hour TTL on every marker |
 
 ```yaml
-inference:
-  driver:
+artifacts:
+  - name: murmur-driver-anthropic
+    runtime: driver
     config:
       prompt_cache: enabled
       prompt_cache_ttl: 1h
 ```
 
 Neither key errors or warns. Any other value — an unrecognised string, a number,
-a missing key, or driver config that is not valid JSON — falls back to the
-default. Only the exact value `disabled` or `false` turns caching off, so a typo
-cannot silently disable it.
+a missing key, an entry with no `config:` block at all, or config that is not
+valid JSON — falls back to the default. Only the exact value `disabled` or
+`false` turns caching off, so a typo cannot silently disable it.
+
+These two keys are the only ones read from `MURMUR_ARTIFACT_CONFIG`; everything
+else this driver takes — extended thinking, `anthropic-beta` features, `params`
+— is read from `inference.driver.config`. Caching belongs on the artifact
+because a `cache_control` breakpoint is an Anthropic construct: the other
+drivers have nowhere to put one, since OpenAI and DeepSeek cache a prefix
+automatically with no marker in the request.
 
 **The `system` field changes shape with caching on.** It is sent as a
 one-element array of text blocks so a marker has a block to sit on:
