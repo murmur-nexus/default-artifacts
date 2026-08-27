@@ -1,8 +1,8 @@
 # murmur-tool-corpus
 
-Append-only record store for Murmur capsules — `append`, `get`, `read_recent`
-and `search` over one JSON-lines file the capsule can trust rather than merely
-ask an agent to respect.
+Append-only record store for Murmur capsules — `append`, `get`, `read_recent`,
+`search` and `verify` over one JSON-lines file the capsule can trust rather than
+merely ask an agent to respect.
 
 WASM tool component (`runtime: tool`, `implementation: wasm`, world `tool`,
 exports `murmur:tool/run`, imports no `murmur:*` interface).
@@ -26,6 +26,22 @@ exports `murmur:tool/run`, imports no `murmur:*` interface).
   highest score first, ties broken newest first. Both order by `(created_at, id)`
   descending, so two records minted in the same millisecond still come back in mint
   order and repeat runs over an unchanged corpus are byte-identical.
+- **A search hit is an excerpt, not a record.** Each hit is
+  `{id, type, created_at, score, excerpt}`. The excerpt is the first segment of the
+  record's searchable text containing a query term, collapsed to one line and cut to
+  120 characters on a character boundary. Scan the hits; call `get` on the two or
+  three worth reading in full.
+- **A bad line is skipped and reported, never fatal.** Every read — including the
+  scan `append` runs for dedupe and withdrawal checks — steps over a line that does
+  not parse. Any response built from such a scan carries `skipped_lines` and
+  `skipped_line_count` and says so in its summary, so the damage reaches the agent's
+  context and the trace on the very next call rather than going quiet.
+- **`verify` names the damage, and nothing repairs it.** `verify` reports every
+  unreadable line with its number, its parse error and a bounded preview. There is
+  deliberately no `repair` verb: rewriting the file would be the only code path that
+  opens the corpus for something other than append, and that invariant is worth more
+  than the convenience. Repair is a human edit to `corpus.jsonl`, made with a
+  `verify` report in front of you.
 - **Fail-closed configuration.** A type the operator never declared cannot be
   appended, a body failing its schema is not written, and a schema keyword this
   build does not implement is a hard configuration error rather than an ignored
@@ -36,22 +52,51 @@ exports `murmur:tool/run`, imports no `murmur:*` interface).
 | Path | Written by | Purpose |
 |---|---|---|
 | `state/corpus.jsonl` | this tool, append-only | the records |
-| `state/corpus.config.json` | the operator | declared types, their schemas, and the caps on `n` and `k` |
 
-Both sit behind the capsule's `capabilities.state` grant, out of the agent's
+It sits behind the capsule's `capabilities.state` grant, out of the agent's
 reach. Without that grant every operation returns `state_unavailable` — the tool
 never falls back to the workdir, because a corpus the agent can rewrite is worse
-than no corpus.
+than no corpus. The configuration is not a file at all; see below.
 
-> The Murmur runtime does not grant a `state/` preopen yet, so a capsule that
-> installs this tool today gets `state_unavailable` from every call. The
-> behaviour is proved against the compiled component by
-> `tests/wasm_component.rs`; end-to-end use waits on the durable-state grant.
+The durable-state grant that mounts `state/` is proved end to end against a real
+`mur run` by the murmur repository's `crates/murmur-cli/tests/state.rs`; this
+crate's own `tests/wasm_component.rs` proves the tool's half against the compiled
+component.
 
 ## Configuring it
 
-`state/corpus.config.json` is written by the operator, not by the agent, and no
-operation runs until it parses. Every field it accepts:
+The operator configuration is the `config:` block on this tool's entry in the
+**capsule's** `murmur.yaml`. The runtime lowers it to compact JSON and delivers it
+to this artifact alone as `MURMUR_ARTIFACT_CONFIG`; no capability declares it, and
+`capabilities.env.allow` cannot substitute a host value for it. An entry with no
+`config:` block gets `config_missing` from every operation but `verify`.
+
+```yaml
+artifacts:
+  - name: murmur-tool-corpus
+    runtime: tool
+    capabilities:
+      state: {}
+    config:
+      config_version: 1
+      read_recent: { default: 10, max: 50 }
+      search: { default_k: 5, max_k: 25 }
+      prefix_map: { session-note: snt }
+      types:
+        note:
+          schema_version: 1
+          schema:
+            type: object
+            required: [text]
+            properties:
+              text: { type: string }
+              tags: { type: array, items: { type: string } }
+            additionalProperties: false
+```
+
+Keeping it there rather than in a file under `state/` puts every schema change in
+the operator's own manifest, under whatever review that file already gets, and
+leaves the agent no way to reach it. Every field the block accepts:
 
 | Key | Required | Default | Meaning |
 |---|---|---|---|
@@ -65,28 +110,10 @@ operation runs until it parses. Every field it accepts:
 | `search.max_k` | no | `25` | ceiling `k` is clamped to |
 | `prefix_map.<tag>` | no | derived | explicit id prefix for a type, `^[a-z][a-z0-9]{0,7}$` |
 
-```json
-{
-  "config_version": 1,
-  "read_recent": { "default": 10, "max": 50 },
-  "search": { "default_k": 5, "max_k": 25 },
-  "prefix_map": { "session-note": "snt" },
-  "types": {
-    "note": {
-      "schema_version": 1,
-      "schema": {
-        "type": "object",
-        "required": ["text"],
-        "properties": {
-          "text": { "type": "string" },
-          "tags": { "type": "array", "items": { "type": "string" } }
-        },
-        "additionalProperties": false
-      }
-    }
-  }
-}
-```
+The runtime checks the block's shape and not its meaning — a mapping with string
+keys whose compact JSON is at most 65536 bytes, or the launch is refused with
+`error[E-CAP-010]` naming the entry. Which keys this tool needs, and what they
+mean, is checked here and reported as `config_invalid`.
 
 ### Supported schema keywords
 
@@ -107,6 +134,28 @@ reserves `ses`, `tsk`, `ctx`, `req`, `dep`, `evt`, `msg`; a type deriving one of
 those is `config_invalid` until `prefix_map` gives it another. Two types sharing
 a prefix is allowed — the UUID keeps ids unique.
 
+## Reading a `verify` report
+
+```json
+{"ok": true, "operation": "verify", "lines": 7, "records": 5, "bad_line_count": 2,
+ "bad_lines": [
+   {"line": 3, "error": "expected ident at line 1 column 2", "preview": "this line is not a record"},
+   {"line": 7, "error": "missing field `body` at line 1 column 89", "preview": "{\"created_at\":\"2026-08-25T12:00:00.000Z\",\"id\":\"not_01a\", ...}"}
+ ]}
+```
+
+`lines` counts every line in the file, `records` the ones that parse, and each
+`bad_lines` entry gives the 1-based line number to open, the parse error, and a
+one-line preview of at most 120 characters. `bad_lines` is capped at 100 entries
+while `bad_line_count` stays the true total, so a badly damaged corpus cannot
+flood an agent's context. The same cap and the same rule apply to the
+`skipped_lines` / `skipped_line_count` pair the other four operations attach when
+their scan stepped over something.
+
+Fix a bad line by editing `state/corpus.jsonl` directly. Deleting the line loses
+whatever it recorded; a line that is a mangled record is usually worth
+reconstructing by hand. Either way the tool will not do it for you, on purpose.
+
 ## Compared to `murmur-hook-memory-jsonl`
 
 Both append JSON lines, and they are not alternatives:
@@ -116,7 +165,7 @@ Both append JSON lines, and they are not alternatives:
 | Kind | tool the agent calls | hook fired by the turn lifecycle |
 | Location | `state/`, behind `capabilities.state` | the capsule workdir |
 | Record shape | operator-declared types, schema-checked | fixed turn / task-close records |
-| Retrieval | `get`, capped `read_recent` and `search` | reloads prior turns into context |
+| Retrieval | `get`, capped `read_recent`, excerpt `search` | reloads prior turns into context |
 
 Reach for the corpus when a record must survive an agent that can edit files;
 reach for the memory log when a turn history should reload itself.
@@ -124,9 +173,10 @@ reach for the memory log when a turn history should reload itself.
 ## Extending it
 
 `murmur_tool_corpus::record::searchable_text(&Record) -> Vec<String>` is the seam
-between retrieval versions: v1 term-matches over its output, and a future
-embedding-based v2 consumes the identical output. Its ordering is a contract, not
-an implementation detail.
+between retrieval versions: v1 term-matches over its output *and* draws every
+excerpt from it, and a future embedding-based v2 consumes the identical output.
+Its ordering is a contract, not an implementation detail — it is what decides
+which segment of a record an excerpt comes from.
 
 See [murmur.yaml](./murmur.yaml) for the full manifest and per-operation
 input/output schemas.

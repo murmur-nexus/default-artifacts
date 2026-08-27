@@ -9,11 +9,14 @@
 //! * The tool writes nothing outside the durable-state preopen, and fails closed when
 //!   that preopen is absent instead of quietly building a corpus inside the workdir the
 //!   agent can rewrite.
+//! * The operator configuration is read out of the guest environment, from the variable
+//!   the runtime delivers a `config:` block in — a path the host tests, which pass the
+//!   JSON in as a parameter, never take.
 //!
-//! The runtime does not grant a `state/` preopen today (`capsule-runtime` gives a tool
-//! exactly one, the workdir at `.`), which is why this test builds its own `WasiCtx` with
-//! two. `Component::from_file` succeeding is also the artifact-validation gate — there is
-//! no `wasm-tools` CLI dependency here.
+//! The `WasiCtx` here is built by hand: the workdir preopen at `.` the runtime always
+//! grants, plus the second preopen `capabilities.state` mounts and the environment
+//! variable an artifact's `config:` block arrives in. `Component::from_file` succeeding is
+//! also the artifact-validation gate — there is no `wasm-tools` CLI dependency here.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -102,10 +105,16 @@ fn linker(engine: &Engine) -> Linker<HostState> {
     linker
 }
 
-/// A fresh Store with the workdir at `.` — what the capsule runtime grants today — plus,
-/// when `state` is `Some`, a second preopen at the guest path the corpus lives under.
-/// That second preopen stands in for the `capabilities.state` grant.
-fn store_for(engine: &Engine, workdir: &Path, state: Option<&Path>) -> Store<HostState> {
+/// A fresh Store with the workdir at `.` — what the capsule runtime always grants — plus,
+/// when `state` is `Some`, a second preopen at the guest path the corpus lives under
+/// standing in for the `capabilities.state` grant, and when `config` is `Some`, the
+/// environment variable the runtime delivers an artifact's `config:` block in.
+fn store_for(
+    engine: &Engine,
+    workdir: &Path,
+    state: Option<&Path>,
+    config: Option<&str>,
+) -> Store<HostState> {
     let mut builder = WasiCtxBuilder::new();
     builder
         .preopened_dir(workdir, ".", DirPerms::all(), FilePerms::all())
@@ -114,6 +123,9 @@ fn store_for(engine: &Engine, workdir: &Path, state: Option<&Path>) -> Store<Hos
         builder
             .preopened_dir(state, STATE_GUEST_PATH, DirPerms::all(), FilePerms::all())
             .expect("preopen state dir");
+    }
+    if let Some(config) = config {
+        builder.env(murmur_tool_corpus::ARTIFACT_CONFIG_ENV, config);
     }
     Store::new(
         engine,
@@ -129,9 +141,10 @@ fn run_corpus(
     linker: &Linker<HostState>,
     workdir: &Path,
     state: Option<&Path>,
+    config: Option<&str>,
     payload: Value,
 ) -> (Status, Value, Vec<(String, String)>) {
-    let mut store = store_for(engine, workdir, state);
+    let mut store = store_for(engine, workdir, state, config);
     let tool = Tool::instantiate(&mut store, component, linker).expect("instantiate component");
     let input = ToolInput { data: Some(payload.to_string()), log_path: None };
     let result = tool
@@ -150,11 +163,20 @@ struct Fixture {
     root: PathBuf,
     workdir: PathBuf,
     state: PathBuf,
+    /// The `config:` block, as compact JSON, to hand every call in this fixture.
+    config: String,
 }
 
-/// A throwaway workdir plus a separate persistent state directory carrying the operator
-/// config. The two are siblings, so anything the tool writes into the workdir is visible
-/// as a stray entry.
+impl Fixture {
+    /// The configuration as a launched, configured artifact would receive it.
+    fn config(&self) -> Option<&str> {
+        Some(self.config.as_str())
+    }
+}
+
+/// A throwaway workdir plus a separate persistent state directory. The two are siblings, so
+/// anything the tool writes into the workdir is visible as a stray entry. The operator
+/// configuration is written to neither: it reaches the guest in its environment.
 fn fixture(tag: &str, with_state: bool) -> Fixture {
     let root = std::env::temp_dir().join(format!(
         "murmur_corpus_wasm_{tag}_{}_{}",
@@ -167,38 +189,34 @@ fn fixture(tag: &str, with_state: bool) -> Fixture {
     std::fs::create_dir_all(&workdir).expect("create workdir");
     if with_state {
         std::fs::create_dir_all(&state).expect("create state dir");
-        std::fs::write(
-            state.join("corpus.config.json"),
-            json!({
-                "config_version": 1,
-                "read_recent": { "default": 5, "max": 20 },
-                "search": { "default_k": 3, "max_k": 10 },
-                "types": {
-                    "note": {
-                        "schema_version": 1,
-                        "schema": {
-                            "type": "object",
-                            "required": ["text"],
-                            "properties": { "text": { "type": "string" } },
-                            "additionalProperties": false
-                        }
-                    },
-                    "withdrawal": {
-                        "schema_version": 1,
-                        "schema": {
-                            "type": "object",
-                            "required": ["reason"],
-                            "properties": { "reason": { "type": "string" } },
-                            "additionalProperties": false
-                        }
-                    }
-                }
-            })
-            .to_string(),
-        )
-        .expect("write operator config");
     }
-    Fixture { root, workdir, state }
+    let config = json!({
+        "config_version": 1,
+        "read_recent": { "default": 5, "max": 20 },
+        "search": { "default_k": 3, "max_k": 10 },
+        "types": {
+            "note": {
+                "schema_version": 1,
+                "schema": {
+                    "type": "object",
+                    "required": ["text"],
+                    "properties": { "text": { "type": "string" } },
+                    "additionalProperties": false
+                }
+            },
+            "withdrawal": {
+                "schema_version": 1,
+                "schema": {
+                    "type": "object",
+                    "required": ["reason"],
+                    "properties": { "reason": { "type": "string" } },
+                    "additionalProperties": false
+                }
+            }
+        }
+    })
+    .to_string();
+    Fixture { root, workdir, state, config }
 }
 
 fn workdir_entries(workdir: &Path) -> Vec<String> {
@@ -224,6 +242,7 @@ fn the_corpus_survives_independent_instantiations() {
         &lnk,
         &f.workdir,
         Some(&f.state),
+        f.config(),
         json!({ "operation": "append", "type": "note", "body": { "text": "durable across stores" } }),
     );
     assert!(matches!(status, Status::Passed), "append status: {status:?} {envelope}");
@@ -246,6 +265,7 @@ fn the_corpus_survives_independent_instantiations() {
         &lnk,
         &f.workdir,
         Some(&f.state),
+        f.config(),
         json!({ "operation": "read_recent", "type": "note", "n": 5 }),
     );
     assert!(matches!(status, Status::Passed), "read_recent status: {status:?} {envelope}");
@@ -260,6 +280,7 @@ fn the_corpus_survives_independent_instantiations() {
         &lnk,
         &f.workdir,
         Some(&f.state),
+        f.config(),
         json!({ "operation": "get", "id": id }),
     );
     assert!(matches!(status, Status::Passed), "get status: {status:?} {envelope}");
@@ -290,6 +311,7 @@ fn a_withdrawal_in_one_instantiation_is_visible_to_the_next() {
         &lnk,
         &f.workdir,
         Some(&f.state),
+        f.config(),
         json!({ "operation": "append", "type": "note", "body": { "text": "to be retracted" } }),
     );
     let target = envelope["id"].as_str().expect("an id").to_string();
@@ -300,6 +322,7 @@ fn a_withdrawal_in_one_instantiation_is_visible_to_the_next() {
         &lnk,
         &f.workdir,
         Some(&f.state),
+        f.config(),
         json!({ "operation": "append", "type": "withdrawal",
                 "body": { "reason": "superseded" }, "withdraws": target }),
     );
@@ -313,6 +336,7 @@ fn a_withdrawal_in_one_instantiation_is_visible_to_the_next() {
         &lnk,
         &f.workdir,
         Some(&f.state),
+        f.config(),
         json!({ "operation": "get", "id": target }),
     );
     assert!(matches!(status, Status::Passed), "get status: {status:?} {envelope}");
@@ -326,6 +350,7 @@ fn a_withdrawal_in_one_instantiation_is_visible_to_the_next() {
         &lnk,
         &f.workdir,
         Some(&f.state),
+        f.config(),
         json!({ "operation": "read_recent", "type": "note", "n": 5 }),
     );
     assert_eq!(envelope["returned"], 0, "a withdrawn record drops out of read_recent");
@@ -346,9 +371,10 @@ fn without_a_state_preopen_every_operation_fails_closed_and_creates_nothing() {
         json!({ "operation": "get", "id": "not_00000000000000000000000000000000" }),
         json!({ "operation": "read_recent", "type": "note", "n": 5 }),
         json!({ "operation": "search", "query": "anything" }),
+        json!({ "operation": "verify" }),
     ] {
         let (status, envelope, _meta) =
-            run_corpus(&eng, &component, &lnk, &f.workdir, None, payload.clone());
+            run_corpus(&eng, &component, &lnk, &f.workdir, None, f.config(), payload.clone());
         assert!(
             matches!(status, Status::Error),
             "{payload} expected status error, got {status:?}: {envelope}"
@@ -388,6 +414,7 @@ fn search_runs_through_the_real_component() {
             &lnk,
             &f.workdir,
             Some(&f.state),
+            f.config(),
             json!({ "operation": "append", "type": "note", "body": { "text": text } }),
         );
         assert!(matches!(status, Status::Passed), "append status: {status:?} {envelope}");
@@ -399,19 +426,74 @@ fn search_runs_through_the_real_component() {
         &lnk,
         &f.workdir,
         Some(&f.state),
+        f.config(),
         json!({ "operation": "search", "query": "rollback plan", "k": 5 }),
     );
     assert!(matches!(status, Status::Passed), "search status: {status:?} {envelope}");
     let hits = envelope["hits"].as_array().expect("hits array");
     assert_eq!(hits.len(), 2, "{envelope}");
     assert_eq!(hits[0]["score"], 1.0);
+    assert_eq!(hits[0]["excerpt"], "the rollback plan for the release");
+    assert!(hits[0].get("body").is_none(), "a hit is not a record: {}", hits[0]);
     assert_eq!(hits[1]["score"], 0.5);
+    assert_eq!(hits[1]["excerpt"], "rollback only");
     assert!(
         meta.iter().any(|(k, v)| k == "resource_id" && v == "corpus:search:rollback plan"),
         "{meta:?}"
     );
     assert!(meta.iter().any(|(k, v)| k == "state_effect" && v == "read"), "{meta:?}");
 
+    assert_eq!(workdir_entries(&f.workdir), Vec::<String>::new());
+    let _ = std::fs::remove_dir_all(&f.root);
+}
+
+/// Without the variable there is no configuration, and the component says so where the
+/// operator will look: their own capsule manifest.
+///
+/// Only this test can prove it. The host tests hand `ops::run` its configuration as a
+/// parameter, so the environment read in the WIT adapter — the whole delivery path — is
+/// exercised nowhere else.
+#[test]
+fn without_the_config_variable_the_configured_operations_are_config_missing() {
+    let eng = engine();
+    let component = Component::from_file(&eng, component_path()).expect("load component");
+    let lnk = linker(&eng);
+    let f = fixture("no_config", true);
+
+    for payload in [
+        json!({ "operation": "append", "type": "note", "body": { "text": "x" } }),
+        json!({ "operation": "read_recent", "type": "note", "n": 5 }),
+        json!({ "operation": "search", "query": "anything" }),
+    ] {
+        let (status, envelope, _meta) =
+            run_corpus(&eng, &component, &lnk, &f.workdir, Some(&f.state), None, payload.clone());
+        assert!(
+            matches!(status, Status::Error),
+            "{payload} expected status error, got {status:?}: {envelope}"
+        );
+        assert_eq!(envelope["error_kind"], "config_missing", "{payload} -> {envelope}");
+        let message = envelope["message"].as_str().unwrap_or_default();
+        assert!(message.contains("config:"), "must name the block: {envelope}");
+        assert!(message.contains("murmur.yaml"), "must name the file: {envelope}");
+    }
+
+    // `verify` is the exception: it is the diagnostic for a corpus whose configuration may
+    // itself be what is missing.
+    let (status, envelope, meta) = run_corpus(
+        &eng,
+        &component,
+        &lnk,
+        &f.workdir,
+        Some(&f.state),
+        None,
+        json!({ "operation": "verify" }),
+    );
+    assert!(matches!(status, Status::Passed), "verify status: {status:?} {envelope}");
+    assert_eq!(envelope["lines"], 0, "{envelope}");
+    assert_eq!(envelope["bad_line_count"], 0, "{envelope}");
+    assert!(meta.iter().any(|(k, v)| k == "resource_id" && v == "corpus:file"), "{meta:?}");
+
+    assert!(!f.state.join("corpus.jsonl").exists(), "nothing was written");
     assert_eq!(workdir_entries(&f.workdir), Vec::<String>::new());
     let _ = std::fs::remove_dir_all(&f.root);
 }
@@ -437,6 +519,7 @@ fn a_count_wider_than_the_components_usize_is_clamped_not_wrapped() {
             &lnk,
             &f.workdir,
             Some(&f.state),
+            f.config(),
             json!({ "operation": "append", "type": "note", "body": { "text": format!("rollback plan {i}") } }),
         );
         assert!(matches!(status, Status::Passed), "append status: {status:?} {envelope}");
@@ -451,6 +534,7 @@ fn a_count_wider_than_the_components_usize_is_clamped_not_wrapped() {
             &lnk,
             &f.workdir,
             Some(&f.state),
+            f.config(),
             json!({ "operation": "read_recent", "type": "note", "n": n }),
         );
         assert!(matches!(status, Status::Passed), "read_recent status: {status:?} {envelope}");
@@ -464,6 +548,7 @@ fn a_count_wider_than_the_components_usize_is_clamped_not_wrapped() {
             &lnk,
             &f.workdir,
             Some(&f.state),
+            f.config(),
             json!({ "operation": "search", "query": "rollback plan", "k": n }),
         );
         assert!(matches!(status, Status::Passed), "search status: {status:?} {envelope}");

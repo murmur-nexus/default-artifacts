@@ -72,7 +72,7 @@ version = "0.2.0"
 [[artifact]]
 name = "murmur-tool-corpus"
 path = "tools/murmur-tool-corpus"
-version = "0.1.0"
+version = "0.2.0"
 
 [[artifact]]
 name = "murmur-tool-create"

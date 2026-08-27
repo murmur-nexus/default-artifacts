@@ -1,21 +1,22 @@
-//! Host tests for the four operations and the append-only file access underneath them.
+//! Host tests for the five operations and the append-only file access underneath them.
 //!
 //! These live outside `src/` on purpose: a test fixture has to create the state directory
-//! the tool itself must never create, and keeping that call out of `src/` keeps the
-//! crate's source free of every directory-creating and file-rewriting call by inspection.
+//! the tool itself must never create — and, for the corruption cases, rewrite the corpus
+//! file — and keeping those calls out of `src/` keeps the crate's source free of every
+//! directory-creating and file-rewriting call by inspection.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{json, Value};
 
-use murmur_tool_corpus::ops::{self, OpStatus};
-use murmur_tool_corpus::store::{CONFIG_FILE, CORPUS_FILE};
+use murmur_tool_corpus::ops::{self, OpStatus, MAX_REPORTED_LINES};
+use murmur_tool_corpus::store::CORPUS_FILE;
 
 static DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// A throwaway parent directory holding a `state/` the fixture creates itself, standing in
-/// for the durable-state preopen the runtime will one day grant.
+/// for the preopen the capsule's `capabilities.state` grant mounts there.
 fn temp_root(tag: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
         "murmur_corpus_{tag}_{}_{}",
@@ -59,21 +60,25 @@ fn config_json() -> Value {
                     "properties": { "reason": { "type": "string" } },
                     "additionalProperties": false
                 }
-            }
+            },
+            // An open body, so an excerpt test can put several string leaves in one record
+            // and pin down which of them the excerpt is drawn from.
+            "open": { "schema_version": 1, "schema": { "type": "object" } }
         }
     })
 }
 
-/// A state directory with the standard operator config already in place.
+/// A reachable state directory. The configuration is not written anywhere: it reaches the
+/// tool as the `config:` block the runtime delivers, which [`call`] supplies directly.
 fn state_with_config(tag: &str) -> PathBuf {
     let state = temp_root(tag).join("state");
     std::fs::create_dir_all(&state).expect("create the state dir");
-    std::fs::write(state.join(CONFIG_FILE), config_json().to_string()).expect("write config");
     state
 }
 
 struct Call {
     status: OpStatus,
+    summary: String,
     envelope: Value,
     metadata: Vec<(String, String)>,
 }
@@ -91,11 +96,22 @@ impl Call {
 }
 
 fn call(state: &Path, payload: Value) -> Call {
-    let response = ops::run(state, &payload.to_string());
+    call_with_config(state, Some(config_json().to_string()), payload)
+}
+
+/// One call under a caller-chosen `config:` block. `None` stands for an artifact entry
+/// that declares no block at all — what the runtime delivers as an unset variable.
+fn call_with_config(state: &Path, config: Option<String>, payload: Value) -> Call {
+    let response = ops::run(state, config.as_deref(), &payload.to_string());
     let envelope: Value =
         serde_json::from_str(&response.data).expect("the envelope is always valid JSON");
     assert!(!response.summary.is_empty(), "every response carries a summary");
-    Call { status: response.status, envelope, metadata: response.metadata }
+    Call {
+        status: response.status,
+        summary: response.summary,
+        envelope,
+        metadata: response.metadata,
+    }
 }
 
 fn append(state: &Path, type_tag: &str, body: Value) -> Call {
@@ -110,6 +126,32 @@ fn append_note(state: &Path, text: &str) -> String {
 
 fn corpus_bytes(state: &Path) -> Vec<u8> {
     std::fs::read(state.join(CORPUS_FILE)).unwrap_or_default()
+}
+
+/// Append a raw line to the corpus behind the tool's back, as a stray write or a truncated
+/// flush would leave one.
+fn corrupt(state: &Path, line: &str) {
+    let corpus = state.join(CORPUS_FILE);
+    let mut text = std::fs::read_to_string(&corpus).unwrap_or_default();
+    text.push_str(line);
+    text.push('\n');
+    std::fs::write(&corpus, text).expect("seed a bad line");
+}
+
+/// Replace one 1-based line of the corpus, standing in for a line damaged in place.
+fn damage_line(state: &Path, line: usize, replacement: &str) {
+    let corpus = state.join(CORPUS_FILE);
+    let text = std::fs::read_to_string(&corpus).expect("read the corpus");
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    lines[line - 1] = replacement.to_string();
+    std::fs::write(&corpus, lines.join("\n") + "\n").expect("damage a line");
+}
+
+fn skipped(call: &Call) -> Vec<u64> {
+    call.envelope["skipped_lines"]
+        .as_array()
+        .map(|lines| lines.iter().map(|n| n.as_u64().expect("a line number")).collect())
+        .unwrap_or_default()
 }
 
 // ── append ────────────────────────────────────────────────────────────────────
@@ -481,7 +523,8 @@ fn search_ranks_by_the_fraction_of_distinct_query_terms_matched() {
     assert_eq!(hits[0]["id"], full);
     assert_eq!(hits[0]["score"], 1.0);
     assert_eq!(hits[0]["type"], "note");
-    assert_eq!(hits[0]["body"], json!({ "text": "the rollback plan for the release" }));
+    assert_eq!(hits[0]["excerpt"], "the rollback plan for the release");
+    assert!(hits[0].get("body").is_none(), "a hit is not a record: {}", hits[0]);
     assert!(hits[0]["created_at"].as_str().unwrap().ends_with('Z'));
     assert_eq!(hits[1]["id"], partial);
     assert_eq!(hits[1]["score"], 0.5);
@@ -497,8 +540,9 @@ fn search_breaks_score_ties_by_recency_and_repeats_byte_identically() {
     let third = append_note(&state, "rollback plan charlie");
 
     let payload = json!({ "operation": "search", "query": "rollback plan", "k": 3 });
-    let a = ops::run(&state, &payload.to_string());
-    let b = ops::run(&state, &payload.to_string());
+    let config = config_json().to_string();
+    let a = ops::run(&state, Some(&config), &payload.to_string());
+    let b = ops::run(&state, Some(&config), &payload.to_string());
     assert_eq!(a.data, b.data, "repeated searches must be byte-identical");
 
     let envelope: Value = serde_json::from_str(&a.data).unwrap();
@@ -628,6 +672,74 @@ fn search_normalises_the_query_in_its_resource_id() {
 }
 
 #[test]
+fn a_search_hit_carries_an_excerpt_and_never_a_body() {
+    let state = state_with_config("search_excerpt_shape");
+    let long = format!("the widget report {}", "detail ".repeat(40));
+    for _ in 0..3 {
+        append_note(&state, &long);
+    }
+
+    let c = call(&state, json!({ "operation": "search", "query": "widget", "k": 3 }));
+    assert_eq!(c.status, OpStatus::Passed, "{}", c.envelope);
+    let hits = c.envelope["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 3, "{}", c.envelope);
+    assert!(c.envelope.get("skipped_lines").is_none(), "a clean scan says nothing");
+
+    for hit in hits {
+        let keys: Vec<&str> = hit.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["created_at", "excerpt", "id", "score", "type"], "{hit}");
+        let excerpt = hit["excerpt"].as_str().expect("an excerpt");
+        assert!(excerpt.starts_with("the widget report"), "{excerpt}");
+        assert!(!excerpt.contains(['\n', '\r', '\t']), "an excerpt is one line: {excerpt}");
+        assert!(
+            excerpt.chars().count() <= 121,
+            "at most 120 characters plus the truncation mark: {excerpt}"
+        );
+        assert!(excerpt.ends_with('…'), "this source text is past the cap: {excerpt}");
+    }
+
+    // The split is only worth having because the body is still one call away.
+    let id = hits[0]["id"].as_str().unwrap();
+    let got = call(&state, json!({ "operation": "get", "id": id }));
+    assert_eq!(got.envelope["record"]["body"]["text"], long.as_str());
+}
+
+#[test]
+fn an_excerpt_is_drawn_from_the_first_searchable_segment_that_matches() {
+    // `searchable_text` yields the type tag, then `external_id`, then string leaves with
+    // object keys in sorted order — so which segment matches decides the excerpt.
+    let state = state_with_config("search_excerpt_pick");
+    append(
+        &state,
+        "open",
+        json!({ "alpha": "nothing relevant here", "zeta": "the widget is on fire" }),
+    );
+
+    let on_leaf = call(&state, json!({ "operation": "search", "query": "widget" }));
+    assert_eq!(on_leaf.envelope["hits"][0]["excerpt"], "the widget is on fire");
+
+    let on_tag = call(&state, json!({ "operation": "search", "query": "open" }));
+    assert_eq!(on_tag.envelope["hits"][0]["excerpt"], "open");
+}
+
+#[test]
+fn an_excerpt_truncates_multi_byte_text_on_a_character_boundary() {
+    let state = state_with_config("search_excerpt_utf8");
+    append_note(&state, &format!("widget {}", "é".repeat(200)));
+
+    let c = call(&state, json!({ "operation": "search", "query": "widget" }));
+    let excerpt = c.envelope["hits"][0]["excerpt"].as_str().expect("an excerpt");
+
+    // Counting characters, not bytes: 120 characters of source text plus the mark. A
+    // byte-slicing implementation lands mid-`é` and fails here rather than somewhere
+    // subtler.
+    assert_eq!(excerpt.chars().count(), 121, "{excerpt}");
+    assert!(excerpt.ends_with('…'), "{excerpt}");
+    assert!(excerpt.starts_with("widget "), "{excerpt}");
+    assert_eq!(excerpt.chars().filter(|c| *c == 'é').count(), 113, "{excerpt}");
+}
+
+#[test]
 fn search_requires_a_query() {
     let state = state_with_config("search_required");
     let c = call(&state, json!({ "operation": "search" }));
@@ -637,52 +749,340 @@ fn search_requires_a_query() {
 // ── environment and operator faults ───────────────────────────────────────────
 
 #[test]
-fn a_corrupt_line_fails_the_whole_operation_and_names_its_line_number() {
+fn all_four_operations_survive_a_bad_line_and_report_it() {
     let state = state_with_config("corrupt");
-    append_note(&state, "good one");
+    let first = append_note(&state, "good one");
     append_note(&state, "good two");
-    let corpus = state.join(CORPUS_FILE);
-    let mut text = std::fs::read_to_string(&corpus).unwrap();
-    text.push_str("this line is not a record\n");
-    std::fs::write(&corpus, text).unwrap();
+    corrupt(&state, "this line is not a record");
+    let third = append_note(&state, "good three");
+    assert_eq!(
+        corpus_bytes(&state).iter().filter(|b| **b == b'\n').count(),
+        4,
+        "the fixture is two good lines, one bad, then a good one written past it"
+    );
+
+    // The record appended *after* the bad line is still readable; a bad line hides itself
+    // and nothing else.
+    let recent = call(&state, json!({ "operation": "read_recent", "type": "note", "n": 3 }));
+    let ids: Vec<&str> = recent.envelope["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&third.as_str()), "{}", recent.envelope);
 
     for payload in [
         json!({ "operation": "read_recent", "type": "note", "n": 3 }),
         json!({ "operation": "search", "query": "good" }),
-        json!({ "operation": "get", "id": "not_00000000000000000000000000000000" }),
-        json!({ "operation": "append", "type": "note", "body": { "text": "x" } }),
+        json!({ "operation": "get", "id": first }),
+        json!({ "operation": "append", "type": "note", "body": { "text": "good four" } }),
     ] {
         let c = call(&state, payload.clone());
-        assert_eq!(c.status, OpStatus::Error, "{}: {}", payload, c.envelope);
-        assert_eq!(c.kind(), "corpus_corrupt", "{}", c.envelope);
-        assert!(c.message().contains("line 3"), "must name the line: {}", c.message());
-        assert!(c.envelope.get("records").is_none(), "no partial result set");
-        assert!(c.envelope.get("hits").is_none(), "no partial result set");
+        assert_eq!(c.status, OpStatus::Passed, "{}: {}", payload, c.envelope);
+        assert_eq!(c.envelope["skipped_lines"], json!([3]), "{payload}: {}", c.envelope);
+        assert_eq!(c.envelope["skipped_line_count"], 1, "{payload}: {}", c.envelope);
+        assert!(
+            c.summary.ends_with("; skipped 1 unparseable line(s)"),
+            "{payload}: the summary must carry the count: {}",
+            c.summary
+        );
     }
 }
 
 #[test]
-fn a_state_dir_without_a_config_is_config_missing() {
-    let root = temp_root("config_missing");
-    let state = root.join("state");
-    std::fs::create_dir_all(&state).unwrap();
+fn a_blank_line_is_reported_like_any_other_unreadable_line() {
+    let state = state_with_config("blank_line");
+    append_note(&state, "only entry");
+    corrupt(&state, "");
 
-    let c = call(&state, json!({ "operation": "read_recent", "type": "note" }));
+    let c = call(&state, json!({ "operation": "read_recent", "type": "note", "n": 3 }));
+    assert_eq!(c.status, OpStatus::Passed, "{}", c.envelope);
+    assert_eq!(c.envelope["skipped_lines"], json!([2]), "{}", c.envelope);
+    assert_eq!(c.envelope["skipped_line_count"], 1, "{}", c.envelope);
+    assert_eq!(c.envelope["returned"], 1, "{}", c.envelope);
+}
+
+#[test]
+fn a_failure_envelope_carries_the_skip_fields_too() {
+    // `not_found` and "hidden behind a line I could not read" are indistinguishable
+    // without the skip fields, and the caller's next move differs between them.
+    let state = state_with_config("skip_on_failure");
+    let hidden = "not_01a03b59b6d0701db0ef1ec3f4c49092";
+    // Valid JSON, but not a record: it has no `body`.
+    let broken = json!({ "id": hidden, "type": "note", "schema_version": 1,
+                         "created_at": "2026-08-25T12:00:00.000Z" });
+    std::fs::write(state.join(CORPUS_FILE), format!("{broken}\n")).expect("seed the corpus");
+
+    let got = call(&state, json!({ "operation": "get", "id": hidden }));
+    assert_eq!(got.status, OpStatus::Failed, "{}", got.envelope);
+    assert_eq!(got.kind(), "not_found");
+    assert_eq!(got.envelope["skipped_lines"], json!([1]), "{}", got.envelope);
+    assert_eq!(got.envelope["skipped_line_count"], 1, "{}", got.envelope);
+
+    let orphan = call(
+        &state,
+        json!({ "operation": "append", "type": "withdrawal",
+                "body": { "reason": "gone" }, "withdraws": hidden }),
+    );
+    assert_eq!(orphan.kind(), "withdraw_target_not_found", "{}", orphan.envelope);
+    assert_eq!(orphan.envelope["skipped_lines"], json!([1]), "{}", orphan.envelope);
+
+    let live = state_with_config("skip_on_already_withdrawn");
+    let target = append_note(&live, "target");
+    call(
+        &live,
+        json!({ "operation": "append", "type": "withdrawal",
+                "body": { "reason": "superseded" }, "withdraws": target }),
+    );
+    corrupt(&live, "not a record either");
+    let twice = call(
+        &live,
+        json!({ "operation": "append", "type": "withdrawal",
+                "body": { "reason": "again" }, "withdraws": target }),
+    );
+    assert_eq!(twice.kind(), "already_withdrawn", "{}", twice.envelope);
+    assert_eq!(twice.envelope["skipped_lines"], json!([3]), "{}", twice.envelope);
+}
+
+#[test]
+fn append_writes_a_duplicate_rather_than_refusing_past_a_hidden_dedupe_target() {
+    // Worst case a dedupe check misses a record hidden behind a bad line and a duplicate
+    // is written. That is far better than being unable to record anything at all.
+    let state = state_with_config("hidden_dedupe");
+    let first = call(
+        &state,
+        json!({ "operation": "append", "type": "note", "body": { "text": "once" },
+                "external_id": "ext-1" }),
+    );
+    let first_id = first.envelope["id"].as_str().unwrap().to_string();
+    damage_line(&state, 1, r#"{"id": "not_01a", "type": "note", "external_id": "ext-1""#);
+
+    let second = call(
+        &state,
+        json!({ "operation": "append", "type": "note", "body": { "text": "again" },
+                "external_id": "ext-1" }),
+    );
+    assert_eq!(second.status, OpStatus::Passed, "{}", second.envelope);
+    assert_eq!(second.envelope["deduped"], false, "{}", second.envelope);
+    assert_ne!(second.envelope["id"], first_id.as_str());
+    assert_eq!(second.envelope["skipped_lines"], json!([1]), "{}", second.envelope);
+}
+
+#[test]
+fn reported_line_lists_are_capped_while_the_counts_stay_true() {
+    let state = state_with_config("report_cap");
+    append_note(&state, "the one good record");
+    for i in 0..150 {
+        corrupt(&state, &format!("bad line {i}"));
+    }
+
+    let recent = call(&state, json!({ "operation": "read_recent", "type": "note", "n": 3 }));
+    assert_eq!(skipped(&recent).len(), MAX_REPORTED_LINES, "{}", recent.envelope);
+    assert_eq!(recent.envelope["skipped_line_count"], 150, "{}", recent.envelope);
+    assert_eq!(skipped(&recent)[0], 2, "the list starts at the first bad line");
+
+    let verified = call(&state, json!({ "operation": "verify" }));
+    let bad = verified.envelope["bad_lines"].as_array().unwrap();
+    assert_eq!(bad.len(), MAX_REPORTED_LINES, "{}", verified.envelope);
+    assert_eq!(verified.envelope["bad_line_count"], 150, "{}", verified.envelope);
+    assert_eq!(verified.envelope["lines"], 151);
+    assert_eq!(verified.envelope["records"], 1);
+}
+
+// ── verify ────────────────────────────────────────────────────────────────────
+
+#[test]
+fn verify_reports_every_bad_line_with_its_number_and_error() {
+    let state = state_with_config("verify_two");
+    for i in 0..7 {
+        append_note(&state, &format!("entry {i}"));
+    }
+    // Line 3 is not JSON at all; line 7 is valid JSON that is not a record — it has no
+    // `body`. The two failures must read differently, because they need different fixes.
+    damage_line(&state, 3, "this line is not a record");
+    damage_line(
+        &state,
+        7,
+        &json!({ "id": "not_01a", "type": "note", "schema_version": 1,
+                 "created_at": "2026-08-25T12:00:00.000Z" })
+            .to_string(),
+    );
+    let before = corpus_bytes(&state);
+
+    let c = call(&state, json!({ "operation": "verify" }));
+    assert_eq!(c.status, OpStatus::Passed, "{}", c.envelope);
+    assert_eq!(c.envelope["ok"], true);
+    assert_eq!(c.envelope["operation"], "verify");
+    assert_eq!(c.envelope["lines"], 7);
+    assert_eq!(c.envelope["records"], 5);
+    assert_eq!(c.envelope["bad_line_count"], 2, "{}", c.envelope);
+
+    let bad = c.envelope["bad_lines"].as_array().unwrap();
+    let lines: Vec<u64> = bad.iter().map(|b| b["line"].as_u64().unwrap()).collect();
+    assert_eq!(lines, vec![3, 7], "{}", c.envelope);
+    let errors: Vec<&str> = bad.iter().map(|b| b["error"].as_str().unwrap()).collect();
+    assert_ne!(errors[0], errors[1], "distinct failures must read differently: {errors:?}");
+    assert!(errors[1].contains("body"), "the missing field is named: {}", errors[1]);
+    for entry in bad {
+        let preview = entry["preview"].as_str().expect("a preview");
+        assert!(preview.chars().count() <= 121, "preview is bounded: {preview}");
+        assert!(!preview.contains(['\n', '\r', '\t']), "preview is one line: {preview}");
+    }
+    assert!(c.summary.contains('2'), "the summary names the counts: {}", c.summary);
+    assert_eq!(c.meta("state_effect"), Some("read"));
+    assert_eq!(c.meta("resource_id"), Some("corpus:file"));
+
+    assert_eq!(corpus_bytes(&state), before, "verify is a read; it must write nothing");
+}
+
+#[test]
+fn verify_succeeds_without_configuration_while_the_other_operations_do_not() {
+    // `verify` is the operator's diagnostic, and the configuration may be exactly what
+    // they are diagnosing.
+    let state = state_with_config("verify_no_config");
+    append_note(&state, "one good record");
+    corrupt(&state, "and one bad line");
+
+    let verified = call_with_config(&state, None, json!({ "operation": "verify" }));
+    assert_eq!(verified.status, OpStatus::Passed, "{}", verified.envelope);
+    assert_eq!(verified.envelope["bad_line_count"], 1, "{}", verified.envelope);
+    assert_eq!(verified.envelope["bad_lines"][0]["line"], 2);
+
+    let recent = call_with_config(
+        &state,
+        None,
+        json!({ "operation": "read_recent", "type": "note" }),
+    );
+    assert_eq!(recent.status, OpStatus::Error, "{}", recent.envelope);
+    assert_eq!(recent.kind(), "config_missing", "{}", recent.envelope);
+}
+
+#[test]
+fn verify_on_an_absent_corpus_reports_an_empty_store_and_creates_nothing() {
+    let state = state_with_config("verify_absent");
+    let c = call(&state, json!({ "operation": "verify" }));
+
+    assert_eq!(c.status, OpStatus::Passed, "{}", c.envelope);
+    assert_eq!(c.envelope["lines"], 0);
+    assert_eq!(c.envelope["records"], 0);
+    assert_eq!(c.envelope["bad_line_count"], 0);
+    assert_eq!(c.envelope["bad_lines"], json!([]));
+    assert!(c.envelope.get("skipped_lines").is_none(), "a clean scan says nothing: {}", c.envelope);
+    assert!(!state.join(CORPUS_FILE).exists(), "verify must not create the corpus");
+}
+
+#[test]
+fn verify_without_the_state_grant_fails_closed_and_creates_nothing() {
+    let root = temp_root("verify_no_state");
+    let state = root.join("state");
+
+    let c = call(&state, json!({ "operation": "verify" }));
+    assert_eq!(c.status, OpStatus::Error, "{}", c.envelope);
+    assert_eq!(c.kind(), "state_unavailable");
+    assert!(!state.exists(), "verify must never create the state directory");
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+}
+
+// ── configuration from the capsule manifest ───────────────────────────────────
+
+#[test]
+fn configuration_arrives_through_the_manifest_config_block() {
+    let state = state_with_config("manifest_config");
+    let block = json!({
+        "config_version": 1,
+        "read_recent": { "default": 1, "max": 2 },
+        "search": { "default_k": 1, "max_k": 2 },
+        "prefix_map": { "ledger": "lgr" },
+        "types": {
+            "ledger": {
+                "schema_version": 7,
+                "schema": {
+                    "type": "object",
+                    "required": ["text"],
+                    "properties": { "text": { "type": "string" } },
+                    "additionalProperties": false
+                }
+            }
+        }
+    })
+    .to_string();
+    let under = |payload: Value| call_with_config(&state, Some(block.clone()), payload);
+
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        let c = under(json!({ "operation": "append", "type": "ledger",
+                              "body": { "text": format!("posting {i}") } }));
+        assert_eq!(c.status, OpStatus::Passed, "{}", c.envelope);
+        let id = c.envelope["id"].as_str().expect("an id").to_string();
+        assert!(id.starts_with("lgr_"), "the block's prefix_map decides the prefix: {id}");
+        ids.push(id);
+    }
+
+    let text = String::from_utf8(corpus_bytes(&state)).unwrap();
+    let line: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(line["schema_version"], 7, "the block's schema_version is stamped");
+
+    let defaulted = under(json!({ "operation": "read_recent", "type": "ledger" }));
+    assert_eq!(defaulted.envelope["returned"], 1, "read_recent.default is 1 here");
+    let clamped = under(json!({ "operation": "read_recent", "type": "ledger", "n": 99 }));
+    assert_eq!(clamped.envelope["returned"], 2, "read_recent.max is 2 here");
+
+    let hits = under(json!({ "operation": "search", "query": "posting" }));
+    assert_eq!(hits.envelope["hits"].as_array().unwrap().len(), 1, "search.default_k is 1");
+    let more = under(json!({ "operation": "search", "query": "posting", "k": 99 }));
+    assert_eq!(more.envelope["hits"].as_array().unwrap().len(), 2, "search.max_k is 2");
+
+    // A type this block never declares stays undeclared, however the standard fixture
+    // configures it.
+    let foreign = under(json!({ "operation": "append", "type": "note", "body": { "text": "x" } }));
+    assert_eq!(foreign.kind(), "unknown_type", "{}", foreign.envelope);
+}
+
+#[test]
+fn no_config_block_is_config_missing_naming_the_manifest() {
+    let state = state_with_config("no_config_block");
+
+    let c = call_with_config(
+        &state,
+        None,
+        json!({ "operation": "append", "type": "note", "body": { "text": "x" } }),
+    );
     assert_eq!(c.status, OpStatus::Error, "{}", c.envelope);
     assert_eq!(c.kind(), "config_missing");
-    assert!(c.message().contains(CONFIG_FILE), "{}", c.message());
+    assert!(c.message().contains("config:"), "must name the block: {}", c.message());
+    assert!(c.message().contains("murmur.yaml"), "must name the file: {}", c.message());
+    assert!(
+        !c.message().contains("state/"),
+        "must not point at a path under the state grant: {}",
+        c.message()
+    );
+    assert!(corpus_bytes(&state).is_empty(), "nothing is written without a configuration");
 }
 
 #[test]
 fn an_invalid_config_is_config_invalid() {
-    let root = temp_root("config_invalid");
-    let state = root.join("state");
-    std::fs::create_dir_all(&state).unwrap();
-    std::fs::write(state.join(CONFIG_FILE), "{ not json").unwrap();
+    let state = state_with_config("config_invalid");
+    let types = json!({ "note": { "schema": { "type": "object" } } });
 
-    let c = call(&state, json!({ "operation": "read_recent", "type": "note" }));
-    assert_eq!(c.status, OpStatus::Error, "{}", c.envelope);
-    assert_eq!(c.kind(), "config_invalid");
+    for block in [
+        // The runtime guarantees well-formed JSON, but this arm stays reachable from a
+        // host caller and every semantic check below it is this artifact's own.
+        "{ not json".to_string(),
+        json!({ "config_version": 2, "types": types }).to_string(),
+        json!({ "config_version": 1,
+                "types": { "note": { "schema": { "type": "object",
+                          "properties": { "t": { "pattern": "^a" } } } } } })
+        .to_string(),
+    ] {
+        let c = call_with_config(
+            &state,
+            Some(block.clone()),
+            json!({ "operation": "read_recent", "type": "note" }),
+        );
+        assert_eq!(c.status, OpStatus::Error, "{block}: {}", c.envelope);
+        assert_eq!(c.kind(), "config_invalid", "{block}: {}", c.envelope);
+    }
 }
 
 #[test]
@@ -729,8 +1129,9 @@ fn an_unrecognised_operation_is_rejected_before_state_is_touched() {
 #[test]
 fn malformed_input_is_invalid_input() {
     let state = state_with_config("bad_input");
+    let config = config_json().to_string();
     for raw in ["", "   ", "not json", "[1,2,3]", "\"just a string\"", "{}"] {
-        let response = ops::run(&state, raw);
+        let response = ops::run(&state, Some(&config), raw);
         let envelope: Value = serde_json::from_str(&response.data).unwrap();
         assert_eq!(response.status, OpStatus::Failed, "{raw:?} -> {envelope}");
         assert_eq!(envelope["error_kind"], "invalid_input", "{raw:?} -> {envelope}");
@@ -745,7 +1146,7 @@ fn a_double_encoded_payload_is_re_parsed_once() {
         .to_string();
     let outer = Value::String(inner).to_string();
 
-    let response = ops::run(&state, &outer);
+    let response = ops::run(&state, Some(&config_json().to_string()), &outer);
     let envelope: Value = serde_json::from_str(&response.data).unwrap();
     assert_eq!(response.status, OpStatus::Passed, "{envelope}");
     assert_eq!(envelope["operation"], "append");
@@ -763,3 +1164,4 @@ fn every_failure_envelope_carries_the_same_four_keys_and_no_metadata() {
     }
     assert!(c.metadata.is_empty(), "a failed call addressed nothing");
 }
+

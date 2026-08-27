@@ -1,5 +1,5 @@
 name: murmur-tool-corpus
-version: 0.1.0
+version: 0.2.0
 runtime: tool
 implementation: wasm
 description: |
@@ -12,15 +12,39 @@ description: |
   | append      | type, body, external_id?, withdraws?         | id: string, deduped: bool            |
   | get         | id                                           | record: object                       |
   | read_recent | type, n?                                     | records: [...], returned, requested  |
-  | search      | query, k?, type?                             | hits: [{id, type, created_at, score, body}] |
+  | search      | query, k?, type?                             | hits: [{id, type, created_at, score, excerpt}] |
+  | verify      | —                                            | lines, records, bad_line_count, bad_lines: [{line, error, preview}] |
+
+  A search hit is not a record: `excerpt` is one line of at most 120 characters of the
+  first matching text in the record, not its body. Scan the hits, then call `get` on the
+  two or three worth reading in full.
 
   The store lives at `state/corpus.jsonl`, behind the capsule's `capabilities.state`
-  grant. Its configuration lives beside it at `state/corpus.config.json`, written by the
-  operator, where the agent cannot reach it: the operator declares which record types
-  exist, the JSON Schema each type's body must satisfy, and the caps on `n` and `k`. A
-  type that is not declared there cannot be appended, and a body that fails its schema is
-  not written at all. Without the state grant every operation returns `state_unavailable`;
-  the tool never falls back to the workdir.
+  grant. Its configuration is the `config:` block on this tool's entry in the capsule's
+  own murmur.yaml, delivered by the runtime and out of the agent's reach: the operator
+  declares `config_version: 1`, which record types exist, the JSON Schema each type's body
+  must satisfy, and the caps on `n` and `k`. An entry with no `config:` block gets
+  `config_missing` on every operation but `verify`; a type that is not declared cannot be
+  appended, and a body that fails its schema is not written at all. Without the state
+  grant every operation returns `state_unavailable`; the tool never falls back to the
+  workdir.
+
+      artifacts:
+        - name: murmur-tool-corpus
+          runtime: tool
+          capabilities:
+            state: {}
+          config:
+            config_version: 1
+            search: { default_k: 5, max_k: 25 }
+            types:
+              note:
+                schema_version: 1
+                schema:
+                  type: object
+                  required: [text]
+                  properties: { text: { type: string } }
+                  additionalProperties: false
 
   append is the only write. `external_id` makes a retried append idempotent — the second
   call returns the first call's id with `deduped: true` and leaves the file unchanged.
@@ -35,10 +59,19 @@ description: |
   string leaf in the body, scoring each record by the fraction of distinct query terms it
   matches, ordered by score then recency; `k` is capped the same way.
 
-  All responses: {ok: bool, operation: string, ...fields..., error_kind?: string,
-  message?: string}. error_kind is one of invalid_input, unknown_operation,
-  state_unavailable, config_missing, config_invalid, unknown_type, schema_violation,
-  not_found, withdraw_target_not_found, already_withdrawn, corpus_corrupt, io_error.
+  A line that does not parse as a record is skipped, not fatal: the call succeeds over the
+  rest of the file and the response carries `skipped_lines` and `skipped_line_count`,
+  present together or not at all, with the list capped at 100 entries and the count always
+  true. verify reads the whole file and reports every unreadable line with its number, its
+  parse error and a bounded preview; it needs the state grant but not the configuration,
+  since the configuration may be what the operator is diagnosing. There is no repair verb:
+  repair means editing state/corpus.jsonl by hand, informed by what verify reports.
+
+  All responses: {ok: bool, operation: string, ...fields..., skipped_lines?: [int],
+  skipped_line_count?: int, error_kind?: string, message?: string}. error_kind is one of
+  invalid_input, unknown_operation, state_unavailable, config_missing, config_invalid,
+  unknown_type, schema_violation, not_found, withdraw_target_not_found, already_withdrawn,
+  io_error.
 
 input_schema:
   type: object
@@ -50,10 +83,11 @@ input_schema:
         - get
         - read_recent
         - search
-      description: "Operation to perform."
+        - verify
+      description: "Operation to perform. verify takes no other input."
     type:
       type: string
-      description: "Record type, as declared in the operator's corpus.config.json. Required for append and read_recent; optional for search, where it filters hits."
+      description: "Record type, as declared in the operator's config: block. Required for append and read_recent; optional for search, where it filters hits."
     body:
       description: "Arbitrary JSON validated against the type's operator-supplied schema. Required for append, including a withdrawal."
     external_id:
@@ -70,10 +104,10 @@ input_schema:
       description: "How many records to return. Optional for read_recent. Defaults to the operator's read_recent.default and is clamped to read_recent.max."
     query:
       type: string
-      description: "Free text to match. Required for search."
+      description: "Free text to match. Required for search. Each hit carries an excerpt of the matching text, not the record body; call get with a hit's id for the body."
     k:
       type: integer
-      description: "Maximum hits to return. Optional for search. Defaults to the operator's search.default_k and is clamped to search.max_k."
+      description: "Maximum excerpt hits to return. Optional for search. Defaults to the operator's search.default_k and is clamped to search.max_k."
   required:
     - operation
 
