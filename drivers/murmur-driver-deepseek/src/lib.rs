@@ -66,6 +66,10 @@ const THINKING_STRIPPED_PARAMS: &[&str] =
 
 #[derive(Debug, Deserialize)]
 struct MurmurRequest {
+    // The host sends a prompt-cache routing hint as a reserved top-level `prompt_cache_key`
+    // member. It is deliberately not declared here: DeepSeek's context cache is automatic and
+    // defines no cache-key field. An undeclared member is dropped by serde, so it cannot reach
+    // the provider body — do not add a field and filter it out later.
     model: String,
     max_tokens: u32,
     #[serde(default)]
@@ -317,6 +321,100 @@ fn translate_tool_message(message: &MurmurMessage) -> Result<Value, String> {
     }))
 }
 
+// ── Provider token usage ──────────────────────────────────────────────────────
+
+/// Provider-reported token counts, carried on the reserved top-level `usage` object of the
+/// translated response. Every member is independently optional: a count the provider did not
+/// report is omitted rather than sent as `0`, because the host records a reported `0` as a real
+/// zero and a fabricated one reads as a cache miss on the `inference` trace event.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct UsageTokens {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cached_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+}
+
+impl UsageTokens {
+    /// Take every member `later` reports, keeping the current value for the rest. Streaming
+    /// usage arrives across more than one chunk, each carrying only part of the picture.
+    fn merge_from(&mut self, later: UsageTokens) {
+        if later.input_tokens.is_some() {
+            self.input_tokens = later.input_tokens;
+        }
+        if later.output_tokens.is_some() {
+            self.output_tokens = later.output_tokens;
+        }
+        if later.cached_tokens.is_some() {
+            self.cached_tokens = later.cached_tokens;
+        }
+        if later.cache_write_tokens.is_some() {
+            self.cache_write_tokens = later.cache_write_tokens;
+        }
+    }
+
+    /// `None` when no member survived, in which case the response carries no `usage` key at all.
+    fn to_value(self) -> Option<Value> {
+        let mut obj = Map::new();
+        for (key, count) in [
+            ("input_tokens", self.input_tokens),
+            ("output_tokens", self.output_tokens),
+            ("cached_tokens", self.cached_tokens),
+            ("cache_write_tokens", self.cache_write_tokens),
+        ] {
+            if let Some(count) = count {
+                obj.insert(key.to_string(), Value::from(count));
+            }
+        }
+        if obj.is_empty() {
+            None
+        } else {
+            Some(Value::Object(obj))
+        }
+    }
+}
+
+/// Read the contract members out of a DeepSeek `usage` object. `prompt_tokens_details` is the
+/// current spelling of the cache-hit count and `prompt_cache_hit_tokens` the older one, so the
+/// first is preferred and the second is the fallback. `prompt_cache_miss_tokens` is never read:
+/// it counts input that missed the cache, not input written into it, so mapping it to
+/// `cache_write_tokens` would report a cache write on every cold turn. DeepSeek reports no cache
+/// write count at all, so that member is always omitted. A member that is absent, null, or not a
+/// non-negative integer is dropped; its siblings are kept.
+fn extract_deepseek_usage(usage: &Value) -> UsageTokens {
+    UsageTokens {
+        input_tokens: usage.get("prompt_tokens").and_then(Value::as_u64),
+        output_tokens: usage.get("completion_tokens").and_then(Value::as_u64),
+        cached_tokens: usage
+            .pointer("/prompt_tokens_details/cached_tokens")
+            .and_then(Value::as_u64)
+            .or_else(|| usage.get("prompt_cache_hit_tokens").and_then(Value::as_u64)),
+        cache_write_tokens: None,
+    }
+}
+
+/// Build the murmur response envelope, attaching `usage` only when a count survived.
+fn murmur_response(stop_reason: &str, content: Vec<Value>, usage: UsageTokens) -> Value {
+    let mut response = json!({
+        "stop_reason": stop_reason,
+        "content": content,
+    });
+    if let Some(usage) = usage.to_value() {
+        response["usage"] = usage;
+    }
+    response
+}
+
+/// Force streaming on, overriding any `stream` key from `params`, and opt into the usage-bearing
+/// final chunk. `stream_options` is only valid alongside `stream: true`, so the two are stamped
+/// together; without it DeepSeek streams no token counts at all.
+fn stamp_streaming_flags(body: &mut Value) {
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("stream".to_string(), json!(true));
+        obj.insert("stream_options".to_string(), json!({"include_usage": true}));
+    }
+}
+
 // ── Response translation ──────────────────────────────────────────────────────
 
 fn translate_deepseek_response_to_murmur(response: &Value) -> Result<Value, String> {
@@ -400,10 +498,12 @@ fn translate_deepseek_response_to_murmur(response: &Value) -> Result<Value, Stri
         }
     }
 
-    Ok(json!({
-        "stop_reason": stop_reason,
-        "content": content,
-    }))
+    let usage = response
+        .get("usage")
+        .map(extract_deepseek_usage)
+        .unwrap_or_default();
+
+    Ok(murmur_response(stop_reason, content, usage))
 }
 
 // ── SSE streaming ──────────────────────────────────────────────────────────────
@@ -432,6 +532,7 @@ fn process_deepseek_sse_line(
     line: &str,
     tool_states: &mut Vec<ToolCallState>,
     stop_reason: &mut Option<String>,
+    usage: &mut UsageTokens,
     emit_text: &mut impl FnMut(&str),
     emit_thinking: &mut impl FnMut(&str),
 ) -> bool {
@@ -444,6 +545,12 @@ fn process_deepseek_sse_line(
     let Ok(data) = serde_json::from_str::<Value>(json_str) else {
         return false;
     };
+
+    // Read before the `choices`-shaped early returns below: the usage-bearing final chunk has an
+    // empty `choices` array and would otherwise be discarded.
+    if let Some(reported) = data.get("usage").filter(|value| !value.is_null()) {
+        usage.merge_from(extract_deepseek_usage(reported));
+    }
 
     let choice = data
         .get("choices")
@@ -510,6 +617,7 @@ fn assemble_deepseek_streaming_response(
     reasoning_acc: &str,
     tool_states: Vec<ToolCallState>,
     stop_reason: Option<String>,
+    usage: UsageTokens,
 ) -> Result<Value, String> {
     let stop_reason_str = map_finish_reason(stop_reason.as_deref())?;
 
@@ -545,10 +653,7 @@ fn assemble_deepseek_streaming_response(
         content.push(json!({"type": "text", "text": text_acc}));
     }
 
-    Ok(json!({
-        "stop_reason": stop_reason_str,
-        "content": content,
-    }))
+    Ok(murmur_response(stop_reason_str, content, usage))
 }
 
 /// Parse a complete SSE body string (used in tests).
@@ -562,6 +667,7 @@ fn parse_deepseek_sse_body<F: FnMut(&str), G: FnMut(&str)>(
     let mut reasoning_acc = String::new();
     let mut tool_states: Vec<ToolCallState> = Vec::new();
     let mut stop_reason: Option<String> = None;
+    let mut usage = UsageTokens::default();
 
     for line in body.lines() {
         let line = line.trim_end_matches('\r');
@@ -574,14 +680,21 @@ fn parse_deepseek_sse_body<F: FnMut(&str), G: FnMut(&str)>(
                 emit_thinking(t);
                 reasoning_acc.push_str(t);
             };
-            process_deepseek_sse_line(line, &mut tool_states, &mut stop_reason, &mut et, &mut eth)
+            process_deepseek_sse_line(
+                line,
+                &mut tool_states,
+                &mut stop_reason,
+                &mut usage,
+                &mut et,
+                &mut eth,
+            )
         };
         if done {
             break;
         }
     }
 
-    assemble_deepseek_streaming_response(&text_acc, &reasoning_acc, tool_states, stop_reason)
+    assemble_deepseek_streaming_response(&text_acc, &reasoning_acc, tool_states, stop_reason, usage)
 }
 
 #[allow(dead_code)]
@@ -598,11 +711,12 @@ fn error_payload(message: &str) -> Value {
 mod wasm_driver {
     use super::{
         assemble_deepseek_streaming_response, error_payload, process_deepseek_sse_line,
-        translate_deepseek_response_to_murmur, translate_murmur_request_to_deepseek, validate_model,
-        MurmurRequest, ThinkingConfig, ToolCallState,
+        stamp_streaming_flags, translate_deepseek_response_to_murmur,
+        translate_murmur_request_to_deepseek, validate_model, MurmurRequest, ThinkingConfig,
+        ToolCallState, UsageTokens,
     };
     use std::collections::HashMap;
-    use serde_json::{json, Value};
+    use serde_json::Value;
 
     wit_bindgen::generate!({
         path: "../../wit/guest",
@@ -680,10 +794,7 @@ mod wasm_driver {
         let mut provider_request =
             translate_murmur_request_to_deepseek(&murmur_request, &thinking)?;
 
-        // Force streaming on; overrides any 'stream' key from params.
-        if let Some(obj) = provider_request.as_object_mut() {
-            obj.insert("stream".to_string(), json!(true));
-        }
+        stamp_streaming_flags(&mut provider_request);
 
         let body = serde_json::to_vec(&provider_request)
             .map_err(|err| format!("driver: failed to encode request body: {err}"))?;
@@ -746,11 +857,13 @@ mod wasm_driver {
             let mut reasoning_acc = String::new();
             let mut tool_states: Vec<ToolCallState> = Vec::new();
             let mut stop_reason: Option<String> = None;
+            let mut usage = UsageTokens::default();
             let mut done = false;
 
             let handle_line = |line: &str,
                                    tool_states: &mut Vec<ToolCallState>,
                                    stop_reason: &mut Option<String>,
+                                   usage: &mut UsageTokens,
                                    text_acc: &mut String,
                                    reasoning_acc: &mut String|
              -> bool {
@@ -762,7 +875,7 @@ mod wasm_driver {
                     murmur::text::chunks::emit_thinking_chunk(t);
                     reasoning_acc.push_str(t);
                 };
-                process_deepseek_sse_line(line, tool_states, stop_reason, &mut et, &mut eth)
+                process_deepseek_sse_line(line, tool_states, stop_reason, usage, &mut et, &mut eth)
             };
 
             // Process bytes already read.
@@ -774,6 +887,7 @@ mod wasm_driver {
                         line,
                         &mut tool_states,
                         &mut stop_reason,
+                        &mut usage,
                         &mut text_acc,
                         &mut reasoning_acc,
                     );
@@ -801,6 +915,7 @@ mod wasm_driver {
                                 line,
                                 &mut tool_states,
                                 &mut stop_reason,
+                                &mut usage,
                                 &mut text_acc,
                                 &mut reasoning_acc,
                             );
@@ -817,7 +932,13 @@ mod wasm_driver {
 
             drop(stream);
             let _ = wasip2::http::types::IncomingBody::finish(incoming_body);
-            assemble_deepseek_streaming_response(&text_acc, &reasoning_acc, tool_states, stop_reason)?
+            assemble_deepseek_streaming_response(
+                &text_acc,
+                &reasoning_acc,
+                tool_states,
+                stop_reason,
+                usage,
+            )?
         };
 
         Ok(result)
@@ -973,10 +1094,10 @@ mod wasm_driver {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_deepseek_sse_body, translate_deepseek_response_to_murmur,
+        parse_deepseek_sse_body, stamp_streaming_flags, translate_deepseek_response_to_murmur,
         translate_murmur_request_to_deepseek, validate_model, MurmurRequest, ThinkingConfig,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::collections::HashMap;
 
     fn thinking_enabled() -> ThinkingConfig {
@@ -1333,5 +1454,158 @@ mod tests {
         assert_eq!(result["content"][1]["id"], "tc-1");
         assert_eq!(result["content"][1]["name"], "echo");
         assert_eq!(result["content"][1]["input"], json!({"msg": "hi"}));
+    }
+
+    // ── prompt_cache_key (never forwarded) ────────────────────────────────────
+
+    #[test]
+    fn prompt_cache_key_never_reaches_the_deepseek_body() {
+        // DeepSeek's context cache is automatic and defines no cache-key field, so the reserved
+        // top-level hint must not survive translation at any nesting depth.
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "deepseek-v4-pro",
+            "max_tokens": 1024,
+            "prompt_cache_key": "demo-capsule:1.0.0:ctx-7",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            "params": {"temperature": 0.2}
+        }))
+        .unwrap();
+
+        let translated =
+            translate_murmur_request_to_deepseek(&request, &thinking_disabled()).unwrap();
+
+        let serialized = serde_json::to_string(&translated).unwrap();
+        assert!(
+            !serialized.contains("prompt_cache_key"),
+            "prompt_cache_key leaked into the DeepSeek body: {serialized}"
+        );
+        assert!(!serialized.contains("demo-capsule:1.0.0:ctx-7"));
+        // Unrelated params still pass through.
+        assert_eq!(translated["temperature"], json!(0.2));
+    }
+
+    // ── usage ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn non_streaming_usage_round_trip() {
+        let response = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "Hello"}
+            }],
+            "usage": {
+                "prompt_tokens": 500,
+                "completion_tokens": 30,
+                "prompt_tokens_details": {"cached_tokens": 448},
+                "prompt_cache_miss_tokens": 52
+            }
+        });
+
+        let translated = translate_deepseek_response_to_murmur(&response).unwrap();
+
+        assert_eq!(translated["stop_reason"], "end_turn");
+        assert_eq!(translated["content"][0]["text"], "Hello");
+        assert_eq!(
+            translated["usage"],
+            json!({"input_tokens": 500, "output_tokens": 30, "cached_tokens": 448})
+        );
+        // A cache miss is not a cache write; it must not be mapped anywhere.
+        assert!(translated["usage"].get("cache_write_tokens").is_none());
+        assert!(!serde_json::to_string(&translated)
+            .unwrap()
+            .contains("prompt_cache_miss_tokens"));
+    }
+
+    #[test]
+    fn legacy_prompt_cache_hit_tokens_supplies_cached_tokens() {
+        let response = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "Hello"}
+            }],
+            "usage": {
+                "prompt_tokens": 500,
+                "completion_tokens": 30,
+                "prompt_cache_hit_tokens": 448,
+                "prompt_cache_miss_tokens": 52
+            }
+        });
+
+        let translated = translate_deepseek_response_to_murmur(&response).unwrap();
+
+        assert_eq!(translated["usage"]["cached_tokens"], 448);
+        assert!(translated["usage"].get("cache_write_tokens").is_none());
+    }
+
+    #[test]
+    fn streaming_usage_arrives_on_the_choices_less_final_chunk() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":500,\"completion_tokens\":30,\"prompt_tokens_details\":{\"cached_tokens\":448}}}\n",
+            "data: [DONE]\n",
+        );
+
+        let result = parse_deepseek_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap();
+
+        assert_eq!(result["stop_reason"], "end_turn");
+        assert_eq!(result["content"][0]["text"], "Hello");
+        assert_eq!(
+            result["usage"],
+            json!({"input_tokens": 500, "output_tokens": 30, "cached_tokens": 448})
+        );
+    }
+
+    #[test]
+    fn missing_or_malformed_usage_omits_the_member() {
+        for usage in [
+            None,
+            Some(json!("12043")),
+            Some(json!({"input_tokens": "12043", "output_tokens": -4, "cached_tokens": 1.5})),
+            Some(json!({})),
+            Some(Value::Null),
+        ] {
+            let mut response = json!({
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "Hello"}
+                }]
+            });
+            if let Some(usage) = usage.clone() {
+                response["usage"] = usage;
+            }
+
+            let translated = translate_deepseek_response_to_murmur(&response).unwrap();
+            assert!(
+                translated.get("usage").is_none(),
+                "expected no usage key for {usage:?}, got {translated}"
+            );
+        }
+    }
+
+    #[test]
+    fn reported_zero_is_kept_and_unreported_siblings_are_omitted() {
+        let response = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "Hello"}
+            }],
+            "usage": {"prompt_tokens": 40, "prompt_tokens_details": {"cached_tokens": 0}}
+        });
+
+        let translated = translate_deepseek_response_to_murmur(&response).unwrap();
+
+        assert_eq!(
+            translated["usage"],
+            json!({"input_tokens": 40, "cached_tokens": 0})
+        );
+    }
+
+    #[test]
+    fn streaming_flags_request_usage_on_the_final_chunk() {
+        let mut body = json!({"model": "deepseek-v4-pro", "stream": false});
+        stamp_streaming_flags(&mut body);
+        assert_eq!(body["stream"], json!(true));
+        assert_eq!(body["stream_options"], json!({"include_usage": true}));
     }
 }

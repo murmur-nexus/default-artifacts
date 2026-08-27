@@ -1,3 +1,7 @@
+// Functions and types are only referenced from the wasm_driver module (cfg-gated to wasm32)
+// or from cfg(test). Suppress dead_code noise in plain host library builds.
+#![cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
@@ -8,7 +12,13 @@ use serde_json::{json, Map, Value};
 ///   • response-side: the `tool-result.metadata` key this driver returns the
 ///     provider response `id` under, so the host can persist and re-supply it.
 /// Both directions must use this exact string — the host reads/writes it verbatim.
+#[allow(dead_code)] // reachable only from the wasm32-gated driver module
 const CONTINUATION_ID_KEY: &str = "continuation_id";
+
+/// Reserved key carrying the prompt-cache routing hint. Read from a top-level member of the
+/// incoming murmur request JSON (never from `params`) and written under the same name into the
+/// provider body, which both the Chat Completions and the Responses API define.
+const PROMPT_CACHE_KEY: &str = "prompt_cache_key";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModelFamily {
@@ -93,6 +103,14 @@ struct MurmurRequest {
     /// commit, in which case `messages` is the full context and we full-resend.
     #[serde(default)]
     continuation_id: Option<String>,
+    /// Prompt-cache routing hint, injected by the host as a reserved top-level
+    /// `prompt_cache_key` member. Constant for every turn of one task, so the turns
+    /// route to the machine holding the previous turn's cache entry. Held as a raw
+    /// `Value` rather than `Option<String>` so a null or non-string does not fail the
+    /// whole request parse: the contract treats anything but a non-blank string as
+    /// "no key" and forwards nothing (see `prompt_cache_key`).
+    #[serde(default)]
+    prompt_cache_key: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -182,6 +200,16 @@ fn store_opt_in(driver_config: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+/// The routing hint to forward, or `None` when the host sent no usable one. An absent, null,
+/// non-string, empty or whitespace-only value all mean "no key" and are never an error.
+fn prompt_cache_key(request: &MurmurRequest) -> Option<&str> {
+    request
+        .prompt_cache_key
+        .as_str()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+}
+
 fn translate_murmur_request_to_openai(
     request: &MurmurRequest,
     family: ModelFamily,
@@ -242,6 +270,12 @@ fn translate_murmur_request_to_openai(
 
     if !tools.is_empty() {
         body.insert("tools".to_string(), Value::Array(tools));
+    }
+
+    // Inserted before the pass-through loop below, which skips keys already in the body: the
+    // host-supplied hint wins over a same-named key a capsule author put in `params`.
+    if let Some(key) = prompt_cache_key(request) {
+        body.insert(PROMPT_CACHE_KEY.to_string(), Value::String(key.to_string()));
     }
 
     for (key, value) in &request.params {
@@ -470,6 +504,12 @@ fn translate_murmur_request_to_responses(
         body.insert("tools".to_string(), Value::Array(tools));
     }
 
+    // Forwarded on the continuation path too: a continuation does not change which prefix the
+    // turns share. Inserted before the pass-through loop, which skips keys already in the body.
+    if let Some(key) = prompt_cache_key(request) {
+        body.insert(PROMPT_CACHE_KEY.to_string(), Value::String(key.to_string()));
+    }
+
     for (key, value) in &request.params {
         if body.contains_key(key) {
             continue;
@@ -562,6 +602,114 @@ fn translate_tool_message_responses(message: &MurmurMessage) -> Result<Value, St
     }))
 }
 
+// ── Provider token usage ─────────────────────────────────────────────────────
+
+/// Provider-reported token counts, carried on the reserved top-level `usage` object of the
+/// translated response. Every member is independently optional: a count the provider did not
+/// report is omitted rather than sent as `0`, because the host records a reported `0` as a real
+/// zero and a fabricated one reads as a cache miss on the `inference` trace event.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct UsageTokens {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cached_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+}
+
+impl UsageTokens {
+    /// Take every member `later` reports, keeping the current value for the rest. Streaming
+    /// usage arrives across more than one event, each carrying only part of the picture.
+    fn merge_from(&mut self, later: UsageTokens) {
+        if later.input_tokens.is_some() {
+            self.input_tokens = later.input_tokens;
+        }
+        if later.output_tokens.is_some() {
+            self.output_tokens = later.output_tokens;
+        }
+        if later.cached_tokens.is_some() {
+            self.cached_tokens = later.cached_tokens;
+        }
+        if later.cache_write_tokens.is_some() {
+            self.cache_write_tokens = later.cache_write_tokens;
+        }
+    }
+
+    /// `None` when no member survived, in which case the response carries no `usage` key at all.
+    fn to_value(self) -> Option<Value> {
+        let mut obj = Map::new();
+        for (key, count) in [
+            ("input_tokens", self.input_tokens),
+            ("output_tokens", self.output_tokens),
+            ("cached_tokens", self.cached_tokens),
+            ("cache_write_tokens", self.cache_write_tokens),
+        ] {
+            if let Some(count) = count {
+                obj.insert(key.to_string(), Value::from(count));
+            }
+        }
+        if obj.is_empty() {
+            None
+        } else {
+            Some(Value::Object(obj))
+        }
+    }
+}
+
+/// Read the contract members out of a Chat Completions `usage` object. The two surfaces spell
+/// these differently, so this extractor is not shared with `extract_responses_usage`. Neither
+/// surface reports a cache write count, so that member is always omitted. A member that is
+/// absent, null, or not a non-negative integer is dropped; its siblings are kept.
+fn extract_chat_usage(usage: &Value) -> UsageTokens {
+    UsageTokens {
+        input_tokens: usage.get("prompt_tokens").and_then(Value::as_u64),
+        output_tokens: usage.get("completion_tokens").and_then(Value::as_u64),
+        cached_tokens: usage
+            .pointer("/prompt_tokens_details/cached_tokens")
+            .and_then(Value::as_u64),
+        cache_write_tokens: None,
+    }
+}
+
+/// Read the contract members out of a Responses `usage` object, which spells the request and
+/// completion counts `input_tokens` / `output_tokens` and nests the cache hit under
+/// `input_tokens_details` (see `extract_chat_usage` for the Chat Completions spelling).
+fn extract_responses_usage(usage: &Value) -> UsageTokens {
+    UsageTokens {
+        input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
+        output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
+        cached_tokens: usage
+            .pointer("/input_tokens_details/cached_tokens")
+            .and_then(Value::as_u64),
+        cache_write_tokens: None,
+    }
+}
+
+/// Build the murmur response envelope, attaching `usage` only when a count survived.
+fn murmur_response(stop_reason: &str, content: Vec<Value>, usage: UsageTokens) -> Value {
+    let mut response = json!({
+        "stop_reason": stop_reason,
+        "content": content,
+    });
+    if let Some(usage) = usage.to_value() {
+        response["usage"] = usage;
+    }
+    response
+}
+
+/// Force streaming on, overriding any `stream` key from `params`. Chat Completions additionally
+/// needs `stream_options` before it will send the usage-bearing final chunk; the Responses
+/// surface reports usage on `response.completed` regardless and rejects the option, so the two
+/// flags are stamped together only where both apply.
+fn stamp_streaming_flags(body: &mut Value, surface: ApiSurface) {
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    obj.insert("stream".to_string(), json!(true));
+    if surface == ApiSurface::ChatCompletions {
+        obj.insert("stream_options".to_string(), json!({"include_usage": true}));
+    }
+}
+
 fn translate_openai_response_to_murmur(response: &Value) -> Result<Value, String> {
     let choice = response
         .get("choices")
@@ -637,10 +785,12 @@ fn translate_openai_response_to_murmur(response: &Value) -> Result<Value, String
         }
     }
 
-    Ok(json!({
-        "stop_reason": stop_reason,
-        "content": content,
-    }))
+    let usage = response
+        .get("usage")
+        .map(extract_chat_usage)
+        .unwrap_or_default();
+
+    Ok(murmur_response(stop_reason, content, usage))
 }
 
 // ── Responses API: non-streaming response translation ────────────────────────
@@ -779,10 +929,12 @@ fn translate_responses_to_murmur(response: &Value) -> Result<Value, String> {
         }
     }
 
-    Ok(json!({
-        "stop_reason": stop_reason_str,
-        "content": content,
-    }))
+    let usage = response
+        .get("usage")
+        .map(extract_responses_usage)
+        .unwrap_or_default();
+
+    Ok(murmur_response(stop_reason_str, content, usage))
 }
 
 // ── SSE streaming types and parsing ──────────────────────────────────────────
@@ -885,10 +1037,12 @@ struct ToolCallState {
 /// Text content is routed through `thinking` and split between `emit_text` (which the
 /// caller also uses to accumulate `text_acc`) and `emit_thinking`. Structured thinking
 /// blocks in array-format content are dispatched directly to `emit_thinking`.
+#[allow(clippy::too_many_arguments)]
 fn process_openai_sse_line(
     line: &str,
     tool_states: &mut Vec<ToolCallState>,
     stop_reason: &mut Option<String>,
+    usage: &mut UsageTokens,
     thinking: &mut ThinkingState,
     emit_text: &mut impl FnMut(&str),
     emit_thinking: &mut impl FnMut(&str),
@@ -902,6 +1056,12 @@ fn process_openai_sse_line(
     let Ok(data) = serde_json::from_str::<Value>(json_str) else {
         return false;
     };
+
+    // Read before the `choices`-shaped early returns below: the chunk that carries usage (sent
+    // only when `stream_options.include_usage` was requested) has an empty `choices` array.
+    if let Some(reported) = data.get("usage").filter(|value| !value.is_null()) {
+        usage.merge_from(extract_chat_usage(reported));
+    }
 
     let choice = data
         .get("choices")
@@ -993,6 +1153,7 @@ fn parse_openai_sse_body<F: FnMut(&str), G: FnMut(&str)>(
     let mut thinking_acc = String::new();
     let mut tool_states: Vec<ToolCallState> = Vec::new();
     let mut stop_reason: Option<String> = None;
+    let mut usage = UsageTokens::default();
     let mut thinking = ThinkingState::new();
 
     for line in body.lines() {
@@ -1000,7 +1161,7 @@ fn parse_openai_sse_body<F: FnMut(&str), G: FnMut(&str)>(
         let done = {
             let mut combined_text = |t: &str| { emit_text(t); text_acc.push_str(t); };
             let mut combined_thinking = |t: &str| { emit_thinking(t); thinking_acc.push_str(t); };
-            process_openai_sse_line(line, &mut tool_states, &mut stop_reason, &mut thinking, &mut combined_text, &mut combined_thinking)
+            process_openai_sse_line(line, &mut tool_states, &mut stop_reason, &mut usage, &mut thinking, &mut combined_text, &mut combined_thinking)
         };
         if done { break; }
     }
@@ -1010,7 +1171,7 @@ fn parse_openai_sse_body<F: FnMut(&str), G: FnMut(&str)>(
         thinking.flush(&mut combined_text, &mut combined_thinking);
     }
 
-    assemble_openai_streaming_response(&text_acc, &thinking_acc, tool_states, stop_reason)
+    assemble_openai_streaming_response(&text_acc, &thinking_acc, tool_states, stop_reason, usage)
 }
 
 /// Parse a complete Responses API SSE body string (used in tests).
@@ -1028,6 +1189,7 @@ fn parse_responses_sse_body<F: FnMut(&str), G: FnMut(&str)>(
     let mut incomplete_reason: Option<String> = None;
     let mut error_message: Option<String> = None;
     let mut response_id: Option<String> = None;
+    let mut usage = UsageTokens::default();
 
     for line in body.lines() {
         let line = line.trim_end_matches('\r');
@@ -1042,6 +1204,7 @@ fn parse_responses_sse_body<F: FnMut(&str), G: FnMut(&str)>(
                 &mut incomplete_reason,
                 &mut error_message,
                 &mut response_id,
+                &mut usage,
                 &mut combined_text,
                 &mut combined_thinking,
             )
@@ -1056,6 +1219,7 @@ fn parse_responses_sse_body<F: FnMut(&str), G: FnMut(&str)>(
         status,
         incomplete_reason,
         error_message,
+        usage,
     )
 }
 
@@ -1064,6 +1228,7 @@ fn assemble_openai_streaming_response(
     thinking_acc: &str,
     tool_states: Vec<ToolCallState>,
     stop_reason: Option<String>,
+    usage: UsageTokens,
 ) -> Result<Value, String> {
     let stop_reason_str = match stop_reason.as_deref() {
         Some("stop") | None => "end_turn",
@@ -1093,10 +1258,11 @@ fn assemble_openai_streaming_response(
         }));
     }
 
-    Ok(json!({
-        "stop_reason": stop_reason_str,
-        "content": assemble_content_tail(thinking_acc, tool_content, text_acc),
-    }))
+    Ok(murmur_response(
+        stop_reason_str,
+        assemble_content_tail(thinking_acc, tool_content, text_acc),
+        usage,
+    ))
 }
 
 fn error_payload(message: &str) -> Value {
@@ -1135,6 +1301,7 @@ fn process_responses_sse_line(
     incomplete_reason: &mut Option<String>,
     error_message: &mut Option<String>,
     response_id: &mut Option<String>,
+    usage: &mut UsageTokens,
     emit_text: &mut impl FnMut(&str),
     emit_thinking: &mut impl FnMut(&str),
 ) -> bool {
@@ -1230,6 +1397,9 @@ fn process_responses_sse_line(
                         .to_string(),
                 );
             }
+            if let Some(reported) = response_obj.get("usage").filter(|value| !value.is_null()) {
+                usage.merge_from(extract_responses_usage(reported));
+            }
         }
         _ => {}
     }
@@ -1244,6 +1414,7 @@ fn assemble_responses_streaming_response(
     status: Option<String>,
     incomplete_reason: Option<String>,
     error_message: Option<String>,
+    usage: UsageTokens,
 ) -> Result<Value, String> {
     if let Some(msg) = error_message {
         return Ok(error_payload(&format!("OpenAI Responses error: {msg}")));
@@ -1273,10 +1444,11 @@ fn assemble_responses_streaming_response(
         }));
     }
 
-    Ok(json!({
-        "stop_reason": stop_reason_str,
-        "content": assemble_content_tail(thinking_acc, tool_content, text_acc),
-    }))
+    Ok(murmur_response(
+        stop_reason_str,
+        assemble_content_tail(thinking_acc, tool_content, text_acc),
+        usage,
+    ))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1284,13 +1456,13 @@ mod wasm_driver {
     use super::{
         assemble_openai_streaming_response, assemble_responses_streaming_response,
         classify_api_surface, classify_model, error_payload, process_openai_sse_line,
-        process_responses_sse_line, store_opt_in, translate_murmur_request_to_openai,
-        translate_murmur_request_to_responses, translate_openai_response_to_murmur,
-        translate_responses_to_murmur, ApiSurface, MurmurRequest, ThinkingState, ToolCallState,
-        CONTINUATION_ID_KEY,
+        process_responses_sse_line, stamp_streaming_flags, store_opt_in,
+        translate_murmur_request_to_openai, translate_murmur_request_to_responses,
+        translate_openai_response_to_murmur, translate_responses_to_murmur, ApiSurface,
+        MurmurRequest, ThinkingState, ToolCallState, UsageTokens, CONTINUATION_ID_KEY,
     };
     use std::collections::HashMap;
-    use serde_json::{json, Value};
+    use serde_json::Value;
 
     wit_bindgen::generate!({
         path: "../../wit/guest",
@@ -1385,10 +1557,7 @@ mod wasm_driver {
             ),
         };
 
-        // Force streaming on; overrides any 'stream' key from params.
-        if let Some(obj) = provider_request.as_object_mut() {
-            obj.insert("stream".to_string(), json!(true));
-        }
+        stamp_streaming_flags(&mut provider_request, surface);
 
         let body = serde_json::to_vec(&provider_request)
             .map_err(|err| format!("driver: failed to encode request body: {err}"))?;
@@ -1489,6 +1658,7 @@ mod wasm_driver {
         let mut thinking_acc = String::new();
         let mut tool_states: Vec<ToolCallState> = Vec::new();
         let mut stop_reason: Option<String> = None;
+        let mut usage = UsageTokens::default();
         let mut thinking = ThinkingState::new();
         let mut done = false;
 
@@ -1504,6 +1674,7 @@ mod wasm_driver {
                         line,
                         &mut tool_states,
                         &mut stop_reason,
+                        &mut usage,
                         &mut thinking,
                         &mut emit_t,
                         &mut emit_think,
@@ -1536,6 +1707,7 @@ mod wasm_driver {
                                 line,
                                 &mut tool_states,
                                 &mut stop_reason,
+                                &mut usage,
                                 &mut thinking,
                                 &mut emit_t,
                                 &mut emit_think,
@@ -1559,7 +1731,7 @@ mod wasm_driver {
             let mut emit_think = |t: &str| { murmur::text::chunks::emit_thinking_chunk(t); thinking_acc.push_str(t); };
             thinking.flush(&mut emit_t, &mut emit_think);
         }
-        assemble_openai_streaming_response(&text_acc, &thinking_acc, tool_states, stop_reason)
+        assemble_openai_streaming_response(&text_acc, &thinking_acc, tool_states, stop_reason, usage)
     }
 
     /// SSE streaming for the Responses surface: process lines incrementally,
@@ -1578,6 +1750,7 @@ mod wasm_driver {
         let mut incomplete_reason: Option<String> = None;
         let mut error_message: Option<String> = None;
         let mut response_id: Option<String> = None;
+        let mut usage = UsageTokens::default();
         let mut done = false;
 
         // Process bytes already read.
@@ -1596,6 +1769,7 @@ mod wasm_driver {
                         &mut incomplete_reason,
                         &mut error_message,
                         &mut response_id,
+                        &mut usage,
                         &mut emit_t,
                         &mut emit_think,
                     );
@@ -1631,6 +1805,7 @@ mod wasm_driver {
                                 &mut incomplete_reason,
                                 &mut error_message,
                                 &mut response_id,
+                                &mut usage,
                                 &mut emit_t,
                                 &mut emit_think,
                             );
@@ -1655,6 +1830,7 @@ mod wasm_driver {
             status,
             incomplete_reason,
             error_message,
+            usage,
         )?;
         Ok((result, response_id))
     }
@@ -1808,12 +1984,12 @@ mod wasm_driver {
 mod tests {
     use super::{
         classify_api_surface, classify_model, gpt_major_version, parse_openai_sse_body,
-        parse_responses_sse_body, process_responses_sse_line, store_opt_in,
+        parse_responses_sse_body, process_responses_sse_line, stamp_streaming_flags, store_opt_in,
         translate_murmur_request_to_openai, translate_murmur_request_to_responses,
         translate_openai_response_to_murmur, translate_responses_to_murmur, ApiSurface,
-        ModelFamily, MurmurRequest, ToolCallState,
+        ModelFamily, MurmurRequest, ToolCallState, UsageTokens,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::collections::HashMap;
 
     #[test]
@@ -2556,6 +2732,7 @@ mod tests {
         let mut incomplete_reason: Option<String> = None;
         let mut error_message: Option<String> = None;
         let mut response_id: Option<String> = None;
+        let mut usage = UsageTokens::default();
         let line = r#"data: {"type":"response.completed","response":{"id":"resp_stream_42","status":"completed"}}"#;
         let done = process_responses_sse_line(
             line,
@@ -2565,6 +2742,7 @@ mod tests {
             &mut incomplete_reason,
             &mut error_message,
             &mut response_id,
+            &mut usage,
             &mut |_| {},
             &mut |_| {},
         );
@@ -2798,5 +2976,258 @@ mod tests {
         assert_eq!(content[1]["id"], "call_2");
         assert_eq!(content[1]["name"], "b");
         assert_eq!(content[1]["input"], json!({"y": 2}));
+    }
+
+    // ── prompt_cache_key ──────────────────────────────────────────────────────
+
+    fn request_with_cache_key(model: &str, extra: Value) -> MurmurRequest {
+        let mut payload = json!({
+            "model": model,
+            "max_tokens": 256,
+            "prompt_cache_key": "demo-capsule:1.0.0:ctx-7",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+        });
+        for (key, value) in extra.as_object().cloned().unwrap_or_default() {
+            payload[key] = value;
+        }
+        serde_json::from_value(payload).unwrap()
+    }
+
+    #[test]
+    fn chat_completions_forwards_prompt_cache_key() {
+        let request = request_with_cache_key("gpt-4o", json!({}));
+        let translated =
+            translate_murmur_request_to_openai(&request, ModelFamily::GptClassic).unwrap();
+        assert_eq!(translated["prompt_cache_key"], "demo-capsule:1.0.0:ctx-7");
+    }
+
+    #[test]
+    fn chat_completions_host_key_wins_over_a_same_named_param() {
+        let request = request_with_cache_key(
+            "gpt-4o",
+            json!({"params": {"prompt_cache_key": "from-params"}}),
+        );
+        let translated =
+            translate_murmur_request_to_openai(&request, ModelFamily::GptClassic).unwrap();
+        assert_eq!(translated["prompt_cache_key"], "demo-capsule:1.0.0:ctx-7");
+    }
+
+    #[test]
+    fn responses_forwards_prompt_cache_key() {
+        let request = request_with_cache_key("gpt-5", json!({}));
+        let translated = translate_murmur_request_to_responses(&request, false).unwrap();
+        assert_eq!(translated["prompt_cache_key"], "demo-capsule:1.0.0:ctx-7");
+    }
+
+    #[test]
+    fn responses_continuation_still_forwards_prompt_cache_key() {
+        // A continuation does not change which prefix the turns share.
+        let request = request_with_cache_key("gpt-5", json!({"continuation_id": "resp_abc"}));
+        let translated = translate_murmur_request_to_responses(&request, true).unwrap();
+        assert_eq!(translated["previous_response_id"], "resp_abc");
+        assert_eq!(translated["prompt_cache_key"], "demo-capsule:1.0.0:ctx-7");
+    }
+
+    #[test]
+    fn absent_null_or_blank_prompt_cache_key_adds_no_member() {
+        for hint in [
+            None,
+            Some(Value::Null),
+            Some(json!("")),
+            Some(json!("   ")),
+            Some(json!(7)),
+        ] {
+            let mut payload = json!({
+                "model": "gpt-4o",
+                "max_tokens": 256,
+                "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+            });
+            if let Some(hint) = hint.clone() {
+                payload["prompt_cache_key"] = hint;
+            }
+            let request: MurmurRequest = serde_json::from_value(payload).unwrap();
+
+            let chat =
+                translate_murmur_request_to_openai(&request, ModelFamily::GptClassic).unwrap();
+            assert!(
+                chat.get("prompt_cache_key").is_none(),
+                "chat body carried a key for {hint:?}: {chat}"
+            );
+
+            let responses = translate_murmur_request_to_responses(&request, false).unwrap();
+            assert!(
+                responses.get("prompt_cache_key").is_none(),
+                "responses body carried a key for {hint:?}: {responses}"
+            );
+        }
+    }
+
+    // ── usage ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn chat_completions_usage_round_trip() {
+        let response = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "Hello"}
+            }],
+            "usage": {
+                "prompt_tokens": 900,
+                "completion_tokens": 40,
+                "prompt_tokens_details": {"cached_tokens": 768}
+            }
+        });
+
+        let translated = translate_openai_response_to_murmur(&response).unwrap();
+
+        assert_eq!(translated["stop_reason"], "end_turn");
+        assert_eq!(translated["content"][0]["text"], "Hello");
+        assert_eq!(translated["usage"]["input_tokens"], 900);
+        assert_eq!(translated["usage"]["output_tokens"], 40);
+        assert_eq!(translated["usage"]["cached_tokens"], 768);
+        // Neither OpenAI surface reports a cache write count.
+        assert!(translated["usage"].get("cache_write_tokens").is_none());
+    }
+
+    #[test]
+    fn responses_usage_round_trip() {
+        let response = json!({
+            "status": "completed",
+            "output": [
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Hello"}]}
+            ],
+            "usage": {
+                "input_tokens": 900,
+                "output_tokens": 40,
+                "input_tokens_details": {"cached_tokens": 768}
+            }
+        });
+
+        let translated = translate_responses_to_murmur(&response).unwrap();
+
+        assert_eq!(translated["stop_reason"], "end_turn");
+        assert_eq!(translated["content"][0]["text"], "Hello");
+        assert_eq!(translated["usage"]["input_tokens"], 900);
+        assert_eq!(translated["usage"]["output_tokens"], 40);
+        assert_eq!(translated["usage"]["cached_tokens"], 768);
+        assert!(translated["usage"].get("cache_write_tokens").is_none());
+    }
+
+    #[test]
+    fn chat_completions_streaming_usage_arrives_on_the_choices_less_final_chunk() {
+        let body = concat!(
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n",
+            "data: {\"id\":\"c1\",\"choices\":[],\"usage\":{\"prompt_tokens\":900,\"completion_tokens\":40,\"prompt_tokens_details\":{\"cached_tokens\":768}}}\n",
+            "data: [DONE]\n",
+        );
+
+        let result = parse_openai_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap();
+
+        assert_eq!(result["stop_reason"], "end_turn");
+        assert_eq!(result["content"][0]["text"], "Hello");
+        assert_eq!(
+            result["usage"],
+            json!({"input_tokens": 900, "output_tokens": 40, "cached_tokens": 768})
+        );
+    }
+
+    #[test]
+    fn responses_streaming_usage_arrives_on_the_completed_event() {
+        let body = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":900,\"output_tokens\":40,\"input_tokens_details\":{\"cached_tokens\":768}}}}\n",
+        );
+
+        let result = parse_responses_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap();
+
+        assert_eq!(result["stop_reason"], "end_turn");
+        assert_eq!(result["content"][0]["text"], "Hello");
+        assert_eq!(
+            result["usage"],
+            json!({"input_tokens": 900, "output_tokens": 40, "cached_tokens": 768})
+        );
+    }
+
+    #[test]
+    fn missing_or_malformed_usage_omits_the_member_on_both_surfaces() {
+        for usage in [
+            None,
+            Some(json!("12043")),
+            Some(json!({"input_tokens": "12043", "output_tokens": -4, "cached_tokens": 1.5})),
+            Some(json!({})),
+            Some(Value::Null),
+        ] {
+            let mut chat = json!({
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "Hello"}
+                }]
+            });
+            let mut responses = json!({
+                "status": "completed",
+                "output": [
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Hello"}]}
+                ]
+            });
+            if let Some(usage) = usage.clone() {
+                chat["usage"] = usage.clone();
+                responses["usage"] = usage;
+            }
+
+            let translated = translate_openai_response_to_murmur(&chat).unwrap();
+            assert!(
+                translated.get("usage").is_none(),
+                "chat surface kept a usage key for {usage:?}: {translated}"
+            );
+
+            let translated = translate_responses_to_murmur(&responses).unwrap();
+            assert!(
+                translated.get("usage").is_none(),
+                "responses surface kept a usage key for {usage:?}: {translated}"
+            );
+        }
+    }
+
+    #[test]
+    fn reported_zero_is_kept_and_unreported_siblings_are_omitted() {
+        let response = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "Hello"}
+            }],
+            "usage": {"prompt_tokens": 40, "prompt_tokens_details": {"cached_tokens": 0}}
+        });
+
+        let translated = translate_openai_response_to_murmur(&response).unwrap();
+
+        assert_eq!(
+            translated["usage"],
+            json!({"input_tokens": 40, "cached_tokens": 0})
+        );
+    }
+
+    #[test]
+    fn error_payloads_carry_no_usage() {
+        let response = json!({
+            "choices": [{"finish_reason": "content_filter", "message": {"content": "x"}}],
+            "usage": {"prompt_tokens": 900, "completion_tokens": 40}
+        });
+        let translated = translate_openai_response_to_murmur(&response).unwrap();
+        assert_eq!(translated["stop_reason"], "error");
+        assert!(translated.get("usage").is_none());
+    }
+
+    #[test]
+    fn streaming_flags_include_usage_only_on_chat_completions() {
+        let mut chat = json!({"model": "gpt-4o", "stream": false});
+        stamp_streaming_flags(&mut chat, ApiSurface::ChatCompletions);
+        assert_eq!(chat["stream"], json!(true));
+        assert_eq!(chat["stream_options"], json!({"include_usage": true}));
+
+        let mut responses = json!({"model": "gpt-5"});
+        stamp_streaming_flags(&mut responses, ApiSurface::Responses);
+        assert_eq!(responses["stream"], json!(true));
+        assert!(responses.get("stream_options").is_none());
     }
 }

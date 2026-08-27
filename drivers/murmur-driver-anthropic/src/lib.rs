@@ -1,3 +1,7 @@
+// Functions and types are only referenced from the wasm_driver module (cfg-gated to wasm32)
+// or from cfg(test). Suppress dead_code noise in plain host library builds.
+#![cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
@@ -108,6 +112,10 @@ fn parse_thinking_config(config_json: &str) -> ThinkingConfig {
 
 #[derive(Debug, Deserialize)]
 struct MurmurRequest {
+    // The host sends a prompt-cache routing hint as a reserved top-level `prompt_cache_key`
+    // member. It is deliberately not declared here: the Messages API rejects a body carrying
+    // any field it does not define, and it defines no cache-key field. An undeclared member is
+    // dropped by serde, so it cannot reach the provider body — do not add a field and filter it.
     model: String,
     max_tokens: u32,
     #[serde(default)]
@@ -343,6 +351,94 @@ fn translate_standard_content_blocks(
         .collect()
 }
 
+// ── Provider token usage ─────────────────────────────────────────────
+
+/// Provider-reported token counts, carried on the reserved top-level `usage` object of the
+/// translated response. Every member is independently optional: a count the provider did not
+/// report is omitted rather than sent as `0`, because the host records a reported `0` as a real
+/// zero and a fabricated one reads as a cache miss on the `inference` trace event.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct UsageTokens {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cached_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+}
+
+impl UsageTokens {
+    /// Take every member `later` reports, keeping the current value for the rest. Streaming
+    /// usage arrives across more than one event, each carrying only part of the picture.
+    fn merge_from(&mut self, later: UsageTokens) {
+        if later.input_tokens.is_some() {
+            self.input_tokens = later.input_tokens;
+        }
+        if later.output_tokens.is_some() {
+            self.output_tokens = later.output_tokens;
+        }
+        if later.cached_tokens.is_some() {
+            self.cached_tokens = later.cached_tokens;
+        }
+        if later.cache_write_tokens.is_some() {
+            self.cache_write_tokens = later.cache_write_tokens;
+        }
+    }
+
+    /// `None` when no member survived, in which case the response carries no `usage` key at all.
+    fn to_value(self) -> Option<Value> {
+        let mut obj = Map::new();
+        for (key, count) in [
+            ("input_tokens", self.input_tokens),
+            ("output_tokens", self.output_tokens),
+            ("cached_tokens", self.cached_tokens),
+            ("cache_write_tokens", self.cache_write_tokens),
+        ] {
+            if let Some(count) = count {
+                obj.insert(key.to_string(), Value::from(count));
+            }
+        }
+        if obj.is_empty() {
+            None
+        } else {
+            Some(Value::Object(obj))
+        }
+    }
+}
+
+/// Read the four contract members out of an Anthropic `usage` object. A member that is absent,
+/// null, or not a non-negative integer is dropped; its siblings are kept. A non-object argument
+/// yields no members at all.
+fn extract_anthropic_usage(usage: &Value) -> UsageTokens {
+    UsageTokens {
+        input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
+        output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
+        cached_tokens: usage.get("cache_read_input_tokens").and_then(Value::as_u64),
+        cache_write_tokens: usage
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64),
+    }
+}
+
+/// Build the murmur response envelope, attaching `usage` only when a count survived.
+fn murmur_response(stop_reason: &str, content: Vec<Value>, usage: UsageTokens) -> Value {
+    let mut response = json!({
+        "stop_reason": stop_reason,
+        "content": content,
+    });
+    if let Some(usage) = usage.to_value() {
+        response["usage"] = usage;
+    }
+    response
+}
+
+/// Force streaming on, overriding any `stream` key from `params`. The Messages API reports usage
+/// on the stream's own `message_start` and `message_delta` events, and rejects a body carrying
+/// any field it does not define, so no usage opt-in is stamped alongside it.
+fn stamp_streaming_flags(body: &mut Value) {
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("stream".to_string(), json!(true));
+    }
+}
+
 fn translate_anthropic_response_to_murmur(response: &Value) -> Result<Value, String> {
     let anthropic_stop = response
         .get("stop_reason")
@@ -387,10 +483,12 @@ fn translate_anthropic_response_to_murmur(response: &Value) -> Result<Value, Str
         })
         .collect::<Vec<_>>();
 
-    Ok(json!({
-        "stop_reason": stop_reason,
-        "content": content,
-    }))
+    let usage = response
+        .get("usage")
+        .map(extract_anthropic_usage)
+        .unwrap_or_default();
+
+    Ok(murmur_response(stop_reason, content, usage))
 }
 
 // ── SSE streaming types and parsing ──────────────────────────────────────────
@@ -404,6 +502,7 @@ enum AnthropicBlock {
 struct AnthropicSseState {
     blocks: Vec<Option<AnthropicBlock>>,
     stop_reason: Option<String>,
+    usage: UsageTokens,
     current_event: String,
     current_data: String,
     done: bool,
@@ -414,6 +513,7 @@ impl AnthropicSseState {
         Self {
             blocks: Vec::new(),
             stop_reason: None,
+            usage: UsageTokens::default(),
             current_event: String::new(),
             current_data: String::new(),
             done: false,
@@ -550,17 +650,28 @@ fn dispatch_anthropic_sse_event(
                 }
             }
         }
+        "message_start" => {
+            // Carries the request-side counts plus a placeholder `output_tokens` that a later
+            // `message_delta` supersedes.
+            if let Some(usage) = val.pointer("/message/usage") {
+                state.usage.merge_from(extract_anthropic_usage(usage));
+            }
+        }
         "message_delta" => {
             if let Some(reason) = val.pointer("/delta/stop_reason").and_then(Value::as_str) {
                 if !reason.is_empty() {
                     state.stop_reason = Some(reason.to_string());
                 }
             }
+            // Cumulative counts for the completion so far; the last one dispatched wins.
+            if let Some(usage) = val.get("usage") {
+                state.usage.merge_from(extract_anthropic_usage(usage));
+            }
         }
         "message_stop" => {
             state.done = true;
         }
-        _ => {} // message_start, content_block_stop, ping — no-op
+        _ => {} // content_block_stop, ping — no-op
     }
 }
 
@@ -596,6 +707,7 @@ fn assemble_anthropic_streaming_response(state: AnthropicSseState) -> Result<Val
         }
     };
 
+    let usage = state.usage;
     let mut content = Vec::new();
     for block in state.blocks.into_iter().flatten() {
         match block {
@@ -623,12 +735,10 @@ fn assemble_anthropic_streaming_response(state: AnthropicSseState) -> Result<Val
         }
     }
 
-    Ok(json!({
-        "stop_reason": stop_reason,
-        "content": content,
-    }))
+    Ok(murmur_response(stop_reason, content, usage))
 }
 
+#[allow(dead_code)] // reachable only from the wasm32-gated driver module
 fn error_payload(message: &str) -> Value {
     json!({
         "stop_reason": "error",
@@ -640,10 +750,11 @@ fn error_payload(message: &str) -> Value {
 mod wasm_driver {
     use super::{
         assemble_anthropic_streaming_response, classify_model, error_payload, parse_beta_features,
-        parse_thinking_config, process_anthropic_sse_line, translate_anthropic_response_to_murmur,
-        translate_murmur_request_to_anthropic, AnthropicSseState, MurmurRequest, ThinkingConfig,
+        parse_thinking_config, process_anthropic_sse_line, stamp_streaming_flags,
+        translate_anthropic_response_to_murmur, translate_murmur_request_to_anthropic,
+        AnthropicSseState, MurmurRequest, ThinkingConfig,
     };
-    use serde_json::{json, Value};
+    use serde_json::Value;
 
     wit_bindgen::generate!({
         path: "../../wit/guest",
@@ -716,10 +827,7 @@ mod wasm_driver {
         let mut provider_request =
             translate_murmur_request_to_anthropic(&murmur_request, family, &thinking)?;
 
-        // Force streaming on; overrides any 'stream' key from params.
-        if let Some(obj) = provider_request.as_object_mut() {
-            obj.insert("stream".to_string(), json!(true));
-        }
+        stamp_streaming_flags(&mut provider_request);
 
         let body = serde_json::to_vec(&provider_request)
             .map_err(|err| format!("driver: failed to encode request body: {err}"))?;
@@ -994,8 +1102,8 @@ mod wasm_driver {
 mod tests {
     use super::{
         classify_model, parse_anthropic_sse_body, parse_beta_features, parse_thinking_config,
-        translate_anthropic_response_to_murmur, translate_murmur_request_to_anthropic,
-        ModelFamily, MurmurRequest, ThinkingConfig,
+        stamp_streaming_flags, translate_anthropic_response_to_murmur,
+        translate_murmur_request_to_anthropic, ModelFamily, MurmurRequest, ThinkingConfig,
     };
     use serde_json::{json, Value};
 
@@ -1443,5 +1551,147 @@ mod tests {
         assert_eq!(result["content"][1]["type"], "text");
         assert_eq!(result["content"][1]["text"], "The answer is 42.");
         assert_eq!(result["stop_reason"], "end_turn");
+    }
+
+    // ── prompt_cache_key (never forwarded) ────────────────────────────────────
+
+    #[test]
+    fn prompt_cache_key_never_reaches_the_anthropic_body() {
+        // The Messages API 400s on any body member it does not define, so the reserved
+        // top-level hint must not survive translation at any nesting depth.
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "claude-opus-4-6",
+            "max_tokens": 1024,
+            "prompt_cache_key": "demo-capsule:1.0.0:ctx-7",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            "params": {"temperature": 0.2}
+        }))
+        .unwrap();
+
+        let translated = translate_murmur_request_to_anthropic(
+            &request,
+            ModelFamily::Claude4Plus,
+            &thinking_off(),
+        )
+        .unwrap();
+
+        let serialized = serde_json::to_string(&translated).unwrap();
+        assert!(
+            !serialized.contains("prompt_cache_key"),
+            "prompt_cache_key leaked into the Anthropic body: {serialized}"
+        );
+        assert!(!serialized.contains("demo-capsule:1.0.0:ctx-7"));
+        // Unrelated params still pass through.
+        assert_eq!(translated["temperature"], json!(0.2));
+    }
+
+    // ── usage ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn non_streaming_usage_round_trip() {
+        let response = json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "Hello"}],
+            "usage": {
+                "input_tokens": 12043,
+                "output_tokens": 218,
+                "cache_read_input_tokens": 11780,
+                "cache_creation_input_tokens": 7
+            }
+        });
+
+        let translated = translate_anthropic_response_to_murmur(&response).unwrap();
+
+        assert_eq!(translated["stop_reason"], "end_turn");
+        assert_eq!(translated["content"][0]["text"], "Hello");
+        assert_eq!(
+            translated["usage"],
+            json!({
+                "input_tokens": 12043,
+                "output_tokens": 218,
+                "cached_tokens": 11780,
+                "cache_write_tokens": 7
+            })
+        );
+    }
+
+    #[test]
+    fn streaming_usage_seeded_by_message_start_and_finished_by_message_delta() {
+        let body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"usage\":{\"input_tokens\":100,\"output_tokens\":1,\"cache_read_input_tokens\":90,\"cache_creation_input_tokens\":10}}}\n",
+            "\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n",
+            "\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":55}}\n",
+            "\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n",
+            "\n",
+        );
+
+        let result = parse_anthropic_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap();
+
+        assert_eq!(result["stop_reason"], "end_turn");
+        assert_eq!(result["content"][0]["text"], "Hello");
+        assert_eq!(result["usage"]["input_tokens"], 100);
+        // The cumulative delta count wins over the message_start placeholder.
+        assert_eq!(result["usage"]["output_tokens"], 55);
+        assert_eq!(result["usage"]["cached_tokens"], 90);
+        assert_eq!(result["usage"]["cache_write_tokens"], 10);
+    }
+
+    #[test]
+    fn missing_or_malformed_usage_omits_the_member() {
+        for usage in [
+            None,
+            Some(json!("12043")),
+            Some(json!({"input_tokens": "12043", "output_tokens": -4, "cached_tokens": 1.5})),
+            Some(json!({})),
+            Some(Value::Null),
+        ] {
+            let mut response = json!({
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "Hello"}]
+            });
+            if let Some(usage) = usage.clone() {
+                response["usage"] = usage;
+            }
+
+            let translated = translate_anthropic_response_to_murmur(&response).unwrap();
+            assert!(
+                translated.get("usage").is_none(),
+                "expected no usage key for {usage:?}, got {translated}"
+            );
+        }
+    }
+
+    #[test]
+    fn reported_zero_is_kept_and_unreported_siblings_are_omitted() {
+        let response = json!({
+            "stop_reason": "end_turn",
+            "content": [],
+            "usage": {"input_tokens": 40, "cache_read_input_tokens": 0}
+        });
+
+        let translated = translate_anthropic_response_to_murmur(&response).unwrap();
+
+        assert_eq!(
+            translated["usage"],
+            json!({"input_tokens": 40, "cached_tokens": 0})
+        );
+    }
+
+    #[test]
+    fn streaming_flags_carry_no_stream_options() {
+        let mut body = json!({"model": "claude-opus-4-6", "stream": false});
+        stamp_streaming_flags(&mut body);
+        assert_eq!(body["stream"], json!(true));
+        assert!(body.get("stream_options").is_none());
     }
 }
