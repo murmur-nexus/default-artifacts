@@ -21,25 +21,44 @@ This repository contains the default Murmur artifacts: inference drivers, hooks,
 | `tools/murmur-tool-git/`, `murmur-tool-registry-search/`, `murmur-tool-code-graph/`, `murmur-tool-test-report/`, `murmur-tool-code-coverage/` | Native binary | `bin/<name>` + `murmur.yaml` → `.mur.zip` |
 | `skills/` | Docs only | `skill.md` + `murmur.yaml` → `.mur.zip` |
 
-Five tools are native because they need capabilities a `wasm32-wasip2` guest doesn't
+These tools are native because they need capabilities a `wasm32-wasip2` guest doesn't
 have: `murmur-tool-git` spawns the system `git` binary; `murmur-tool-registry-search`
 needs raw sockets and a native TLS stack; `murmur-tool-code-graph`,
 `murmur-tool-test-report`, and `murmur-tool-code-coverage` link C sources (bundled
-SQLite, tree-sitter) that don't cross-compile. All five are excluded from the
-workspace wasm build in `ci.yml` and built by `build.yml`'s `build-native` matrix
-instead.
+SQLite, tree-sitter) that don't cross-compile. They are excluded from the workspace
+wasm build and built by `build.yml`'s `build-native` matrix instead.
+
+Nothing lists them by name to make that happen. `scripts/classify-crates.sh` reads
+each crate's own manifest and classifies every `[workspace] members` entry:
+
+| Class | Rule | Wasm build |
+|---|---|---|
+| `native-artifact` | `murmur.yaml` says `implementation: native` | excluded |
+| `internal-bin` | no `murmur.yaml`, and Cargo.toml declares a `[[bin]]` — a host-side helper, e.g. `murmur-tool-git-validate` | excluded |
+| `wasm-artifact` | `murmur.yaml` says `implementation: wasm`, or omits the key (drivers and hooks) | built |
+| `internal-lib` | no `murmur.yaml`, library only — linked into wasm artifacts, e.g. `murmur-test-parse` | built |
+
+A member matching none of the four is a hard error, not a guess.
 
 ## Building locally
 
 These commands are for development only — CI handles all building and packaging when you push a release tag.
 
 ```bash
-# All WASM artifacts
-cargo build --workspace --target wasm32-wasip2 --release
+# All WASM artifacts — the same command CI runs
+./scripts/build-wasm.sh
 
 # A single artifact
 cargo build -p murmur-driver-anthropic --target wasm32-wasip2 --release
 ```
+
+`build-wasm.sh` is the one definition of "build everything that targets wasm": it
+derives the `--exclude` flags from the classification above and prints which rule
+excluded each crate. Extra arguments are passed through to `cargo build`. Running
+`cargo build --workspace --target wasm32-wasip2 --release` by hand instead fails
+deep inside a C build (`tree-sitter` needs `clang`, `libsqlite3-sys` needs a C
+toolchain) with an error that names the C compiler rather than the missing
+exclusions.
 
 Output lands in `target/wasm32-wasip2/release/<crate_name>.wasm`.
 
@@ -50,8 +69,20 @@ time on the WASM `cdylib` tools — build native tools with `-p <name>` instead.
 
 Every WASM artifact must be a well-formed component whose world-level
 imports/exports match its category (hooks export `murmur:hook/lifecycle`;
-drivers and wasm tools export `murmur:tool/run`). CI enforces this on every
-push/PR; to check locally the same way:
+drivers and wasm tools export `murmur:tool/run`), at the exact interface version
+declared by the vendored WIT it is built against — `wit/hook/deps/murmur-hook/lifecycle.wit`
+for hooks, `wit/guest/deps/murmur-tool/tool.wit` for tools. A component left
+unrebuilt across a WIT version bump exports the old version and is rejected here
+rather than failing to link at `mur run`.
+
+Run bare, the script validates every `.wasm` in the build output and exits
+non-zero if any failed — this is exactly what CI runs:
+
+```bash
+./scripts/validate-component.sh
+```
+
+Given a path, it validates that one artifact:
 
 ```bash
 ./scripts/validate-component.sh target/wasm32-wasip2/release/murmur_hook_debug.wasm
@@ -84,9 +115,13 @@ A new artifact is a four-file change, enforced by CI:
    covered by its wildcard; a `murmur-tool-*` WASM component must be listed
    explicitly, because most tools are native binaries the script skips.
 
-A native tool must additionally be added to the `Cargo build (wasm)` exclude
-list in `ci.yml`. `scripts/check-build-coverage.sh` (run by CI) fails if an
-artifact in `artifacts.toml` is not built by exactly one `build.yml` matrix.
+A native tool needs no further change: `implementation: native` in its
+`murmur.yaml` is what excludes it from the wasm build, via
+`scripts/classify-crates.sh`. `scripts/check-build-coverage.sh` (run by CI) fails
+if an artifact in `artifacts.toml` is not built by exactly one `build.yml` matrix,
+or is built by a matrix that disagrees with its `implementation:` — so a native
+tool added to `build-wasm`, or one whose `implementation:` changes without its
+matrix entry moving, fails CI rather than a release.
 
 > **Note — `murmur-hook-regression-verifier`.** The internal
 > `libs/murmur-test-parse` crate added alongside this hook (card `7e8ff809`) is

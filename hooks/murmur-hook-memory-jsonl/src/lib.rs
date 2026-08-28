@@ -213,7 +213,12 @@ mod wasm_hook {
             } else {
                 let messages = seed
                     .into_iter()
-                    .map(|(role, content)| Message { role, content })
+                    .map(|(role, content)| Message {
+                        role,
+                        content,
+                        id: None,
+                        source_id: None,
+                    })
                     .collect();
                 Ok(HookOutput::ReplaceContext(messages))
             }

@@ -64,7 +64,10 @@ jobs:
       # artifacts.toml is the source of truth for what ships; the build.yml matrices
       # are hand-maintained. Without this check a new artifact silently misses every
       # release while still appearing in artifacts-index.json, so `mur install` fails
-      # on an entry with no .mur.zip behind it.
+      # on an entry with no .mur.zip behind it. The same check also fails if an
+      # artifact sits under a matrix that disagrees with its murmur.yaml's
+      # `implementation:`, which is what keeps build-native and the wasm build's
+      # derived exclusions from drifting apart.
       - name: Verify every artifact is covered by a build matrix
         run: |
           chmod +x scripts/check-build-coverage.sh
@@ -76,30 +79,27 @@ jobs:
       # Native tools (`implementation: native` in their murmur.yaml) are excluded:
       # they are host binaries, not components, and their C dependencies
       # (libsqlite3-sys, tree-sitter) do not cross-compile to wasm32-wasip2.
-      # Keep this list in sync with the `build-native` matrix in build.yml.
+      #
+      # The script derives that exclusion set from the manifests rather than
+      # repeating it here, so "build everything that targets wasm" has one
+      # definition a developer can run locally. The step above holds build.yml's
+      # matrices to the same derivation.
       - name: Cargo build (wasm)
-        run: |
-          cargo build --workspace --target wasm32-wasip2 --release \
-            --exclude murmur-tool-registry-search \
-            --exclude murmur-tool-git \
-            --exclude murmur-tool-git-validate \
-            --exclude murmur-tool-code-graph \
-            --exclude murmur-tool-code-coverage \
-            --exclude murmur-tool-test-report
+        run: bash scripts/build-wasm.sh
 
       # Every built .wasm must be a well-formed component whose world-level
       # imports/exports match its category (hooks export murmur:hook/lifecycle
       # with no murmur:* import; drivers/tools export murmur:tool/run and import
-      # only murmur:text/chunks and/or murmur:task/task). Native command
-      # components (murmur-tool-{create,editor,git,...}) are skipped by name.
+      # only murmur:text/chunks and/or murmur:task/task), at the exact interface
+      # version the vendored WIT declares — a component built against a stale WIT
+      # is unloadable by the host. Native command components
+      # (murmur-tool-{create,editor,git,...}) are skipped by name.
       # A malformed or mis-bound component fails here instead of at `mur run`.
+      #
+      # Invoked bare, the script walks target/wasm32-wasip2/release/ itself, so
+      # "validate everything" has one definition a developer can run locally.
       - name: Validate built components
-        run: |
-          rc=0
-          for wasm in target/wasm32-wasip2/release/*.wasm; do
-            bash scripts/validate-component.sh "$wasm" || rc=1
-          done
-          exit "$rc"
+        run: bash scripts/validate-component.sh
 
   # Verify the artifact-facing WIT trees (wit/guest, wit/hook) stay byte-identical
   # to murmur/crates/capsule-runtime/wit. murmur is pinned to a literal SHA so an
@@ -131,7 +131,7 @@ jobs:
           # ./scripts/check-wit-sync.sh until it exits 0, then set `ref:` to that
           # same commit. The mirror and the pin must always move together —
           # moving one without the other is what turns this job red.
-          ref: d98a9a2fb53ee44a5faa1c63eead4f4eef192062
+          ref: 0ab660561fdd52c298239314558becdabc849e25
           path: murmur
 
       - name: Check artifact-facing WIT files are in sync with murmur
