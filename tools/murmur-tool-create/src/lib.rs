@@ -21,6 +21,79 @@ pub mod logic {
 
     use serde_json::Value;
 
+    /// The `version:` every generated manifest declares. A freshly scaffolded artifact starts
+    /// its own version line at `0.1.0`; it is unrelated to this generator's version, which the
+    /// README records separately from `CARGO_PKG_VERSION`.
+    const SCAFFOLD_VERSION: &str = "0.1.0";
+
+    /// The schema pair the tool arms declare. A hook omits both — it is dispatched with a
+    /// lifecycle event, never with a tool payload.
+    const TOOL_SCHEMAS: &str = concat!(
+        "input_schema: |\n",
+        "  {\"type\":\"object\",\"properties\":{}}\n",
+        "output_schema: |\n",
+        "  {\"type\":\"object\",\"properties\":{}}\n",
+    );
+
+    /// What a scaffold request's `runtime` field selects.
+    ///
+    /// The request's vocabulary is not the manifest's. `mur` reads an artifact's *role* from
+    /// `runtime:` and its *packaging* from `implementation:`, and derives the published
+    /// classification from the pair (`Manifest::registry_runtime`). Writing the request word
+    /// straight into `runtime:` collapses the two: `runtime: native` publishes as wasm and is
+    /// rejected outright when the artifact is named from a capsule manifest. Each arm here
+    /// spells the pair back out, along with the payload entry `mur build` has to be told to
+    /// pack — an undeclared `requires_files:` means an archive holding the manifest alone.
+    #[derive(Clone, Copy)]
+    enum Kind {
+        Wasm,
+        Native,
+        Hook,
+    }
+
+    impl Kind {
+        fn parse(runtime: &str) -> Result<Self, String> {
+            match runtime {
+                "native" => Ok(Self::Native),
+                "wasm" => Ok(Self::Wasm),
+                "hook" => Ok(Self::Hook),
+                other => Err(format!(
+                    "unknown runtime '{other}'; expected 'native', 'wasm', or 'hook'"
+                )),
+            }
+        }
+
+        /// The generated manifest's `runtime:` value — the artifact's role.
+        fn role(self) -> &'static str {
+            match self {
+                Self::Wasm | Self::Native => "tool",
+                Self::Hook => "hook",
+            }
+        }
+
+        /// The generated manifest's `implementation:` value — how the payload is built.
+        fn implementation(self) -> &'static str {
+            match self {
+                Self::Native => "native",
+                Self::Wasm | Self::Hook => "wasm",
+            }
+        }
+
+        /// The sole `requires_files:` entry, which is the payload `mur build` packs beside
+        /// `murmur.yaml`.
+        ///
+        /// A native payload is `bin/<artifact-name>` because that is the only path the capsule
+        /// runtime resolves a native binary at (`payload_shape::native_binary_entry`). A wasm
+        /// payload is the cdylib filename cargo produces: the artifact name with `-` replaced
+        /// by `_`, plus `.wasm`.
+        fn requires_file(self, name: &str) -> String {
+            match self {
+                Self::Native => format!("bin/{name}"),
+                Self::Wasm | Self::Hook => format!("{}.wasm", name.replace('-', "_")),
+            }
+        }
+    }
+
     /// Handle a scaffold request payload — the `data` field the native binary read from its
     /// stdin envelope. Returns the created tool's `(name, relative_path)` on success.
     /// `base_dir` is the workdir root under which `tools/<name>/` is created (the preopened
@@ -74,6 +147,10 @@ pub mod logic {
             return Err("tool name must not be empty".to_string());
         }
 
+        // Resolved before anything is created, so an unrecognised runtime leaves no
+        // half-scaffolded directory behind for the author to clean up.
+        let kind = Kind::parse(runtime)?;
+
         let tool_dir = base_dir.join(PathBuf::from("tools").join(name));
 
         if tool_dir.exists() {
@@ -85,41 +162,55 @@ pub mod logic {
         fs::create_dir_all(&tool_dir)
             .map_err(|e| format!("failed to create {}: {e}", tool_dir.display()))?;
 
-        write_manifest(&tool_dir, name, runtime)?;
+        write_manifest(&tool_dir, name, kind)?;
 
-        match runtime {
-            "native" => write_native_stub(&tool_dir, name)?,
-            "wasm" => write_wasm_stub(&tool_dir, name)?,
-            "hook" => write_hook_stub(&tool_dir, name)?,
-            other => {
-                return Err(format!(
-                    "unknown runtime '{other}'; expected 'native', 'wasm', or 'hook'"
-                ))
-            }
+        match kind {
+            Kind::Native => write_native_stub(&tool_dir, name)?,
+            Kind::Wasm => write_wasm_stub(&tool_dir, name)?,
+            Kind::Hook => write_hook_stub(&tool_dir, name)?,
         }
 
-        write_readme(&tool_dir, name, runtime)?;
+        write_readme(&tool_dir, name, kind)?;
 
         Ok(())
     }
 
-    fn write_manifest(tool_dir: &Path, name: &str, runtime: &str) -> Result<(), String> {
+    fn write_manifest(tool_dir: &Path, name: &str, kind: Kind) -> Result<(), String> {
+        let role = kind.role();
+        let implementation = kind.implementation();
+        let requires_file = kind.requires_file(name);
+
+        // The dispatch fields a hook manifest carries and a tool manifest does not, modelled on
+        // `hooks/murmur-hook-debug/murmur.yaml`.
+        let hook_keys = match kind {
+            Kind::Hook => "execution_mode: async\ncommit_policy: none\n",
+            Kind::Wasm | Kind::Native => "",
+        };
+        let schemas = match kind {
+            Kind::Hook => "",
+            Kind::Wasm | Kind::Native => TOOL_SCHEMAS,
+        };
+
         let content = format!(
             "name: {name}\n\
-             version: 0.3.2\n\
-             runtime: {runtime}\n\
+             version: {SCAFFOLD_VERSION}\n\
+             runtime: {role}\n\
+             implementation: {implementation}\n\
+             {hook_keys}\
              description: |\n\
              \x20 TODO: describe what {name} does\n\
-             input_schema: |\n\
-             \x20 {{\"type\":\"object\",\"properties\":{{}}}}\n\
-             output_schema: |\n\
-             \x20 {{\"type\":\"object\",\"properties\":{{}}}}\n"
+             {schemas}\
+             requires_files:\n\
+             \x20 - {requires_file}\n"
         );
         fs::write(tool_dir.join("murmur.yaml"), content)
             .map_err(|e| format!("failed to write murmur.yaml: {e}"))
     }
 
-    fn write_native_stub(tool_dir: &Path, _name: &str) -> Result<(), String> {
+    /// Writes the native payload to `bin/<name>` — the one path
+    /// `payload_shape::native_binary_entry` resolves, and the path the artifact's own
+    /// `package.sh` stages the compiled binary at.
+    fn write_native_stub(tool_dir: &Path, name: &str) -> Result<(), String> {
         let bin_dir = tool_dir.join("bin");
         fs::create_dir_all(&bin_dir).map_err(|e| format!("failed to create bin/: {e}"))?;
 
@@ -129,18 +220,18 @@ pub mod logic {
                     INPUT=$(cat)\n\
                     echo '{\"status\":\"passed\",\"summary\":\"stub: not yet implemented\",\"data\":null,\"data_path\":null,\"truncated\":false,\"metadata\":[]}'\n";
 
-        let run_path = bin_dir.join("run");
-        fs::write(&run_path, stub).map_err(|e| format!("failed to write bin/run: {e}"))?;
+        let run_path = bin_dir.join(name);
+        fs::write(&run_path, stub).map_err(|e| format!("failed to write bin/{name}: {e}"))?;
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mut perms = fs::metadata(&run_path)
-                .map_err(|e| format!("failed to read bin/run metadata: {e}"))?
+                .map_err(|e| format!("failed to read bin/{name} metadata: {e}"))?
                 .permissions();
             perms.set_mode(0o755);
             fs::set_permissions(&run_path, perms)
-                .map_err(|e| format!("failed to chmod bin/run: {e}"))?;
+                .map_err(|e| format!("failed to chmod bin/{name}: {e}"))?;
         }
 
         Ok(())
@@ -156,21 +247,25 @@ pub mod logic {
         fs::create_dir_all(tool_dir.join("src"))
             .map_err(|e| format!("failed to create src/: {e}"))?;
         let cargo_name = name.replace('_', "-");
+        // `wit-bindgen` tracks this workspace's `[workspace.dependencies]` pin: the generated
+        // crate is built against the same vendored `wit/hook` this repo's own hooks are.
         let cargo_toml = format!(
             "[package]\n\
              name = \"{cargo_name}\"\n\
-             version = \"0.3.2\"\n\
+             version = \"{SCAFFOLD_VERSION}\"\n\
              edition = \"2021\"\n\
              \n\
              [lib]\n\
              crate-type = [\"cdylib\", \"rlib\"]\n\
              \n\
              [dependencies]\n\
-             wit-bindgen = \"0.46\"\n"
+             wit-bindgen = \"0.59\"\n"
         );
         fs::write(tool_dir.join("Cargo.toml"), cargo_toml)
             .map_err(|e| format!("failed to write Cargo.toml: {e}"))?;
 
+        // All nine `murmur:hook/lifecycle` functions. `Guest` has no defaulted methods, so a
+        // stub missing any one of them does not compile.
         let lib_rs = r#"#[cfg(target_arch = "wasm32")]
 mod wasm_hook {
     wit_bindgen::generate!({
@@ -183,16 +278,18 @@ mod wasm_hook {
 
     use exports::murmur::hook::lifecycle::{
         CompactionEvent, Guest, HookOutput, InferenceEvent, SessionContext, SessionEndEvent,
-        ShellEvent, StageEvent, ToolEvent,
+        ShellEvent, StageEvent, TaskEndEvent, TaskStartEvent, ToolEvent,
     };
 
     impl Guest for Hook {
         fn on_stage(_: StageEvent) -> Result<HookOutput, String> { Ok(HookOutput::None) }
         fn on_session_start(_: SessionContext) -> Result<HookOutput, String> { Ok(HookOutput::None) }
+        fn on_task_start(_: TaskStartEvent) -> Result<HookOutput, String> { Ok(HookOutput::None) }
         fn on_inference(_: InferenceEvent) -> Result<HookOutput, String> { Ok(HookOutput::None) }
         fn on_tool_call(_: ToolEvent) -> Result<HookOutput, String> { Ok(HookOutput::None) }
         fn on_shell(_: ShellEvent) -> Result<HookOutput, String> { Ok(HookOutput::None) }
         fn on_compaction(_: CompactionEvent) -> Result<HookOutput, String> { Ok(HookOutput::None) }
+        fn on_task_end(_: TaskEndEvent) -> Result<HookOutput, String> { Ok(HookOutput::None) }
         fn on_session_end(_: SessionEndEvent) -> Result<HookOutput, String> { Ok(HookOutput::None) }
     }
 
@@ -203,21 +300,26 @@ mod wasm_hook {
             .map_err(|e| format!("failed to write src/lib.rs: {e}"))
     }
 
-    fn write_readme(tool_dir: &Path, name: &str, runtime: &str) -> Result<(), String> {
-        let stub_file = match runtime {
-            "native" => "`bin/run`",
-            "hook" => "`src/lib.rs`",
-            _ => "`component.wat`",
+    fn write_readme(tool_dir: &Path, name: &str, kind: Kind) -> Result<(), String> {
+        let stub_file = match kind {
+            Kind::Native => format!("`bin/{name}`"),
+            Kind::Hook => "`src/lib.rs`".to_string(),
+            Kind::Wasm => "`component.wat`".to_string(),
         };
-        let hook_note = if runtime == "hook" {
-            "This is a hook artifact. It implements `murmur:hook/lifecycle` and receives synchronous lifecycle events from the runtime. Keep handlers fast and return `Ok(HookOutput::None)` unless the event truly could not be recorded.\n\n"
-        } else {
-            ""
+        let hook_note = match kind {
+            Kind::Hook => "This is a hook artifact. It implements `murmur:hook/lifecycle` and receives synchronous lifecycle events from the runtime. Keep handlers fast and return `Ok(HookOutput::None)` unless the event truly could not be recorded.\n\n",
+            Kind::Wasm | Kind::Native => "",
         };
+        // The generator's own version, read from the crate rather than written as a literal:
+        // `scripts/apply-versions.sh` rewrites manifests and `Cargo.toml`s, and cannot see
+        // inside a Rust string.
+        let generator_version = env!("CARGO_PKG_VERSION");
         let content = format!(
             "# {name} — Implementation Guide\n\
              \n\
-             Generated by murmur-tool-create 0.3.2. Read this before writing any implementation.\n\
+             Generated by murmur-tool-create {generator_version}\n\
+             \n\
+             Read this before writing any implementation.\n\
              \n\
              ## What was created\n\
              \n\
@@ -264,15 +366,38 @@ mod wasm_hook {
                 base.join("murmur.yaml").exists(),
                 "murmur.yaml should exist"
             );
-            assert!(
-                base.join("bin").join("run").exists(),
-                "bin/run should exist"
-            );
             assert!(base.join("README.md").exists(), "README.md should exist");
+
+            // `bin/<name>`, not `bin/run`: `payload_shape::native_binary_entry` resolves a
+            // native payload at the artifact's own name and at nothing else.
+            let payload = base.join("bin").join("my-tool");
+            assert!(payload.exists(), "bin/my-tool should exist");
+            assert!(
+                !base.join("bin").join("run").exists(),
+                "bin/run should no longer be written"
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = fs::metadata(&payload).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o755, "bin/my-tool should be mode 0755");
+            }
 
             let manifest = fs::read_to_string(base.join("murmur.yaml")).unwrap();
             assert!(manifest.contains("name: my-tool"));
-            assert!(manifest.contains("runtime: native"));
+            assert!(manifest.contains("version: 0.1.0"), "got: {manifest}");
+            assert!(manifest.contains("runtime: tool"), "got: {manifest}");
+            assert!(
+                manifest.contains("implementation: native"),
+                "got: {manifest}"
+            );
+            assert!(
+                manifest.contains("requires_files:\n  - bin/my-tool\n"),
+                "got: {manifest}"
+            );
+            // The defect this arm existed to carry: the request word written straight into
+            // `runtime:`, which publishes the artifact as wasm.
+            assert!(!manifest.contains("runtime: native"), "got: {manifest}");
         }
 
         #[test]
@@ -284,6 +409,27 @@ mod wasm_hook {
             assert!(base.join("murmur.yaml").exists());
             assert!(base.join("component.wat").exists());
             assert!(base.join("README.md").exists());
+
+            let manifest = fs::read_to_string(base.join("murmur.yaml")).unwrap();
+            assert!(manifest.contains("name: csv-parser"));
+            assert!(manifest.contains("version: 0.1.0"), "got: {manifest}");
+            assert!(manifest.contains("runtime: tool"), "got: {manifest}");
+            assert!(manifest.contains("implementation: wasm"), "got: {manifest}");
+            assert!(
+                manifest.contains("requires_files:\n  - csv_parser.wasm\n"),
+                "got: {manifest}"
+            );
+            assert!(!manifest.contains("runtime: wasm"), "got: {manifest}");
+            // The one version line is the scaffolded artifact's own starting version. The
+            // generator used to stamp a literal of its own here, which belonged to neither.
+            assert_eq!(
+                manifest
+                    .lines()
+                    .filter(|line| line.starts_with("version:"))
+                    .collect::<Vec<_>>(),
+                ["version: 0.1.0"],
+                "got: {manifest}"
+            );
         }
 
         #[test]
@@ -298,10 +444,57 @@ mod wasm_hook {
             assert!(base.join("README.md").exists());
 
             let manifest = fs::read_to_string(base.join("murmur.yaml")).unwrap();
-            assert!(manifest.contains("runtime: hook"));
+            assert!(manifest.contains("version: 0.1.0"), "got: {manifest}");
+            assert!(manifest.contains("runtime: hook"), "got: {manifest}");
+            assert!(manifest.contains("implementation: wasm"), "got: {manifest}");
+            assert!(manifest.contains("execution_mode: async"), "got: {manifest}");
+            assert!(manifest.contains("commit_policy: none"), "got: {manifest}");
+            assert!(
+                manifest.contains("requires_files:\n  - event_sink.wasm\n"),
+                "got: {manifest}"
+            );
+            // A hook is dispatched with a lifecycle event, never a tool payload.
+            assert!(!manifest.contains("input_schema"), "got: {manifest}");
+            assert!(!manifest.contains("output_schema"), "got: {manifest}");
+
+            let cargo_toml = fs::read_to_string(base.join("Cargo.toml")).unwrap();
+            assert!(cargo_toml.contains("version = \"0.1.0\""), "got: {cargo_toml}");
+            assert!(
+                cargo_toml.contains("wit-bindgen = \"0.59\""),
+                "got: {cargo_toml}"
+            );
+
+            // `Guest` defaults none of its nine methods; a stub short of any one of them is a
+            // scaffold that does not compile.
             let source = fs::read_to_string(base.join("src").join("lib.rs")).unwrap();
-            assert!(source.contains("on_session_start"));
-            assert!(source.contains("on_session_end"));
+            for func in [
+                "on_stage",
+                "on_session_start",
+                "on_task_start",
+                "on_inference",
+                "on_tool_call",
+                "on_shell",
+                "on_compaction",
+                "on_task_end",
+                "on_session_end",
+            ] {
+                assert!(source.contains(func), "generated hook is missing {func}");
+            }
+        }
+
+        #[test]
+        fn readme_attributes_the_generators_own_version() {
+            let tmp = TempDir::new().unwrap();
+            scaffold_tool_in(tmp.path(), "attributed", "wasm").unwrap();
+
+            let readme =
+                fs::read_to_string(tmp.path().join("tools").join("attributed").join("README.md"))
+                    .unwrap();
+            let expected = format!("Generated by murmur-tool-create {}", env!("CARGO_PKG_VERSION"));
+            assert!(
+                readme.lines().any(|line| line == expected),
+                "README should carry the attribution line {expected:?}; got:\n{readme}"
+            );
         }
 
         #[test]
@@ -319,6 +512,10 @@ mod wasm_hook {
 
             let err = scaffold_tool_in(tmp.path(), "bad-tool", "quantum").unwrap_err();
             assert!(err.contains("unknown runtime"), "got: {err}");
+            assert!(
+                !tmp.path().join("tools").join("bad-tool").exists(),
+                "a rejected runtime should leave no directory behind"
+            );
         }
 
         #[test]
@@ -333,6 +530,23 @@ mod wasm_hook {
                 .join("tools")
                 .join("from-req")
                 .join("component.wat")
+                .exists());
+        }
+
+        #[test]
+        fn handle_request_scaffolds_from_double_encoded_envelope() {
+            let tmp = TempDir::new().unwrap();
+            let payload =
+                r#"{"data":"{\"type\":\"tool\",\"name\":\"enveloped\",\"runtime\":\"native\"}"}"#;
+            let (name, path) = handle_request(Some(payload), tmp.path()).unwrap();
+            assert_eq!(name, "enveloped");
+            assert_eq!(path, "tools/enveloped");
+            assert!(tmp
+                .path()
+                .join("tools")
+                .join("enveloped")
+                .join("bin")
+                .join("enveloped")
                 .exists());
         }
 

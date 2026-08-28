@@ -240,3 +240,12 @@ MUR_BIN=/path/to/mur cargo test -p murmur-tool-corpus --test mur_run_state -- --
 
 A run that finds no `mur` fails rather than skipping. The `corpus-state` workflow
 runs it against a `mur` built from murmur's default branch.
+
+`tools/murmur-tool-create/tests/mur_manifest_shape.rs` is `#[ignore]`d for the same
+reason: it builds and publishes an unedited scaffold through a real `mur` to prove
+the generated `murmur.yaml` classifies and packs the way its author asked for. It
+resolves `mur` the same way, and fails rather than skipping when it finds none:
+
+```bash
+MUR_BIN=/path/to/mur cargo test -p murmur-tool-create --test mur_manifest_shape -- --ignored
+```
