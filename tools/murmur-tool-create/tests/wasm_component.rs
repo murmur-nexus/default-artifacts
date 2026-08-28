@@ -143,8 +143,21 @@ fn scaffold_native_tool_through_component() {
     let base = workdir.join("tools").join("probe-tool");
     let manifest = std::fs::read_to_string(base.join("murmur.yaml")).expect("murmur.yaml missing");
     assert!(manifest.contains("name: probe-tool"));
-    assert!(manifest.contains("runtime: native"));
-    assert!(base.join("bin").join("run").exists(), "bin/run missing");
+    // The role/packaging split `mur` reads, not the request word: a manifest saying
+    // `runtime: native` publishes as wasm and is rejected by a capsule manifest outright.
+    assert!(manifest.contains("runtime: tool"), "manifest: {manifest}");
+    assert!(
+        manifest.contains("implementation: native"),
+        "manifest: {manifest}"
+    );
+    assert!(
+        manifest.contains("requires_files:\n  - bin/probe-tool\n"),
+        "manifest: {manifest}"
+    );
+    assert!(
+        base.join("bin").join("probe-tool").exists(),
+        "bin/probe-tool missing"
+    );
     assert!(base.join("README.md").exists(), "README.md missing");
 
     let _ = std::fs::remove_dir_all(&workdir);

@@ -115,6 +115,13 @@ A new artifact is a four-file change, enforced by CI:
    covered by its wildcard; a `murmur-tool-*` WASM component must be listed
    explicitly, because most tools are native binaries the script skips.
 
+To start the artifact directory itself, `murmur-tool-create` scaffolds one for a
+`native` tool, a `wasm` tool, or a `hook` — emitting a `murmur.yaml` that already
+carries the `runtime:` / `implementation:` split and the `requires_files:` entry
+this checklist and `scripts/check-build-coverage.sh` depend on. See
+[tools/murmur-tool-create/README.md](./tools/murmur-tool-create/README.md) for
+what each arm generates.
+
 A native tool needs no further change: `implementation: native` in its
 `murmur.yaml` is what excludes it from the wasm build, via
 `scripts/classify-crates.sh`. `scripts/check-build-coverage.sh` (run by CI) fails
@@ -240,3 +247,12 @@ MUR_BIN=/path/to/mur cargo test -p murmur-tool-corpus --test mur_run_state -- --
 
 A run that finds no `mur` fails rather than skipping. The `corpus-state` workflow
 runs it against a `mur` built from murmur's default branch.
+
+`tools/murmur-tool-create/tests/mur_manifest_shape.rs` is `#[ignore]`d for the same
+reason: it builds and publishes an unedited scaffold through a real `mur` to prove
+the generated `murmur.yaml` classifies and packs the way its author asked for. It
+resolves `mur` the same way, and fails rather than skipping when it finds none:
+
+```bash
+MUR_BIN=/path/to/mur cargo test -p murmur-tool-create --test mur_manifest_shape -- --ignored
+```
