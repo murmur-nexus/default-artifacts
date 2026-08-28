@@ -306,6 +306,8 @@ mod wasm_hook {
                     .map(|m| Message {
                         role: m.role,
                         content: m.content,
+                        id: None,
+                        source_id: None,
                     })
                     .collect(),
             ))
@@ -334,6 +336,8 @@ mod wasm_hook {
                 .map(|m| InferenceMessage {
                     role: m.role,
                     content: m.content,
+                    id: None,
+                    source_id: None,
                 })
                 .collect(),
             system_prompt: Some(call.system_prompt),
