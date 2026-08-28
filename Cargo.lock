@@ -1312,12 +1312,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "murmur-hook-memory-jsonl"
+name = "murmur-hook-memory"
 version = "0.7.0"
 dependencies = [
- "serde",
  "serde_json",
- "tempfile",
  "wit-bindgen 0.59.0",
 ]
 

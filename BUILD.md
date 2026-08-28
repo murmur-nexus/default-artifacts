@@ -75,13 +75,15 @@ for hooks, `wit/guest/deps/murmur-tool/tool.wit` for tools. A component left
 unrebuilt across a WIT version bump exports the old version and is rejected here
 rather than failing to link at `mur run`.
 
-The script also checks a hook's `murmur:*` imports against an allowlist, which
-currently holds `murmur:runtime/inference` and `murmur:hook/lifecycle`. An import
-declared in `world hook` but never called is not emitted into the built
-component, so vendoring an interface does not trip the check — but the first hook
-that actually calls `murmur:conversation/read`'s `read-messages` will fail with
-`unexpected import 'murmur:conversation/read'` until that allowlist grows a third
-entry.
+The script also checks a hook's `murmur:*` imports against an allowlist: the
+four interfaces `world hook` declares — `murmur:runtime/inference`,
+`murmur:runtime/tokens`, `murmur:task-io/read` and `murmur:conversation/read` —
+plus the type-only `murmur:hook/lifecycle` instance the first and last of those
+pull in. An import declared in `world hook` but never called is not emitted into
+the built component, so most hooks carry far fewer than four;
+`murmur-hook-memory` is the one that carries them all. An import outside the
+world's own set fails here with `unexpected import '<id>'`, which is the case
+the allowlist exists to catch — the host would refuse to link it at `mur run`.
 
 Run bare, the script validates every `.wasm` in the build output and exits
 non-zero if any failed — this is exactly what CI runs:
@@ -206,7 +208,7 @@ repo's `wit/hook/` mirror and the only version murmur v0.2.0's host accepts:
 | `murmur-hook-diff-summary` | 0.3.0 | `murmur:hook/lifecycle@0.5.0` |
 | `murmur-hook-eval` | 0.3.0 | `murmur:hook/lifecycle@0.5.0` |
 | `murmur-hook-grafana` | 0.3.0 | `murmur:hook/lifecycle@0.5.0` |
-| `murmur-hook-memory-jsonl` | 0.3.0 | `murmur:hook/lifecycle@0.5.0` |
+| `murmur-hook-memory` | 0.3.0 | `murmur:hook/lifecycle@0.5.0` |
 | `murmur-hook-regression-verifier` | 0.2.0 | `murmur:hook/lifecycle@0.5.0` |
 | `murmur-hook-shell-desc` | 0.2.0 | `murmur:hook/lifecycle@0.5.0` |
 
@@ -214,6 +216,10 @@ The `v0.4.0` and `v0.5.0` releases that produced these binaries were both cut
 after commit `04ee889` vendored the `@0.5.0` WIT, so the published set never
 lagged the contract. Nothing is owed here: no rebuild, no version bump, no
 republish.
+
+The binary in that snapshot shipped under the artifact's former name,
+`murmur-hook-memory-jsonl`; the row carries the current name so the artifact is
+findable, and the version column is left as the dated check recorded it.
 
 The table above is a snapshot of one check, not a mapping to keep current.
 Re-run the check after any `murmur:hook` version bump rather than reading it:

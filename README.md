@@ -25,7 +25,7 @@ WASM components (`runtime: hook`) that attach to lifecycle events. Each hook dec
 | `murmur-hook-debug` | `hooks/murmur-hook-debug/` | *(all events)* | async | none | Writes a JSONL event log to `workdir/hook-debug.jsonl` |
 | `murmur-hook-compact` | `hooks/murmur-hook-compact/` | `on-compaction` | blocking | replace-context | Compacts conversation history when the session token threshold is reached |
 | `murmur-hook-diff-summary` | `hooks/murmur-hook-diff-summary/` | *(all events)* | blocking | none | Snapshots files before each editor tool call and emits a structured unified-diff summary at end of turn |
-| `murmur-hook-memory-jsonl` | `hooks/murmur-hook-memory-jsonl/` | *(all events)* | blocking | replace-context | Durable per-Turn Memory Log — appends each Turn to a JSONL file, reloads prior Turns at task start |
+| `murmur-hook-memory` | `hooks/murmur-hook-memory/` | `on-task-start` | blocking | seed-context | Seeds a task with the relevant part of the conversation that came before it, read from the runtime's durable conversation record |
 | `murmur-hook-shell-desc` | `hooks/murmur-hook-shell-desc/` | `on-stage` | blocking | write-manifests | Returns enriched tool manifests for common shell binaries at staging time |
 | `murmur-hook-eval` | `hooks/murmur-hook-eval/` | *(all events)* | async | none | Scores sessions against configured scorers and writes `eval.jsonl` |
 | `murmur-hook-grafana` | `hooks/murmur-hook-grafana/` | *(all events)* | async | none | Exports OTel spans to a Grafana Tempo OTLP/HTTP endpoint |
@@ -89,12 +89,15 @@ any hook without a manifest change on the artifact side. What each one provides:
 |---|---|---|
 | `inference` | One LLM completion through the capsule's already-configured inference driver | Always available |
 | `tokens` | Token counting against the capsule's model | Always available |
-| `murmur:task-io/read@0.1.0` | The task's input | Always available |
+| `murmur:task-io/read@0.1.0` | The task's input and the result text its agent loop produced | `capabilities.task_io.read: true` on the hook's entry in the capsule's `murmur.yaml` |
 | `murmur:conversation/read@0.1.0` | Paged, newest-first reads of the runtime's durable conversation record, without a `filesystem` grant | `capabilities.conversation.read: true` on the hook's entry in the capsule's `murmur.yaml` |
 
-`murmur:conversation/read` is default-deny: an ungranted hook still links and
-still runs, and `read-messages` returns `not-granted`. No hook in this repo calls
-it yet.
+`murmur:conversation/read` and `murmur:task-io/read` are both default-deny: an
+ungranted hook still links and still runs, and its functions return
+`not-granted`. There is no staging-time check for either grant, so a hook that
+needs one has to detect the refusal itself and say so.
+[`murmur-hook-memory`](./hooks/murmur-hook-memory/) calls all three of
+`murmur:conversation/read`, `murmur:runtime/tokens` and `murmur:task-io/read`.
 
 The `wit-sync` CI job verifies the mirror stays byte-identical to the murmur commit pinned in
 [.github/workflows/ci.yml](./.github/workflows/ci.yml); the mirror and the pin always move together.
