@@ -66,9 +66,35 @@ system prompt.
 
 The `wit/` directory is vendored from `murmur/crates/capsule-runtime/wit/` and synced manually whenever the interfaces change. The mirror is deliberately partial: it carries only the artifact-facing subtrees (`guest/`, `hook/`) and omits murmur's host-side world, the dead `runtime/` tree, and murmur's docs-reference top-level copies, none of which any artifact in this repo consumes. The relevant worlds:
 
-- `wit/hook/` — `world hook { export murmur:hook/lifecycle; }` — implemented by all hook artifacts
+- `wit/hook/` — `world hook` — implemented by all hook artifacts
 - `wit/guest/` — `world driver { ... export murmur:tool/run; }` — implemented by inference drivers
 - `wit/guest/` — `world tool { ... export murmur:tool/run; }` — implemented by tool artifacts
+
+`world hook` in full, from [wit/hook/worlds.wit](./wit/hook/worlds.wit):
+
+```wit
+world hook {
+  import inference;
+  import tokens;
+  import murmur:task-io/read@0.1.0;
+  import murmur:conversation/read@0.1.0;
+  export murmur:hook/lifecycle@0.6.0;
+}
+```
+
+Every hook is generated against the whole world, so each import is available to
+any hook without a manifest change on the artifact side. What each one provides:
+
+| Import | Provides | Granted by |
+|---|---|---|
+| `inference` | One LLM completion through the capsule's already-configured inference driver | Always available |
+| `tokens` | Token counting against the capsule's model | Always available |
+| `murmur:task-io/read@0.1.0` | The task's input | Always available |
+| `murmur:conversation/read@0.1.0` | Paged, newest-first reads of the runtime's durable conversation record, without a `filesystem` grant | `capabilities.conversation.read: true` on the hook's entry in the capsule's `murmur.yaml` |
+
+`murmur:conversation/read` is default-deny: an ungranted hook still links and
+still runs, and `read-messages` returns `not-granted`. No hook in this repo calls
+it yet.
 
 The `wit-sync` CI job verifies the mirror stays byte-identical to the murmur commit pinned in
 [.github/workflows/ci.yml](./.github/workflows/ci.yml); the mirror and the pin always move together.
