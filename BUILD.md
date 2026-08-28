@@ -75,6 +75,14 @@ for hooks, `wit/guest/deps/murmur-tool/tool.wit` for tools. A component left
 unrebuilt across a WIT version bump exports the old version and is rejected here
 rather than failing to link at `mur run`.
 
+The script also checks a hook's `murmur:*` imports against an allowlist, which
+currently holds `murmur:runtime/inference` and `murmur:hook/lifecycle`. An import
+declared in `world hook` but never called is not emitted into the built
+component, so vendoring an interface does not trip the check — but the first hook
+that actually calls `murmur:conversation/read`'s `read-messages` will fail with
+`unexpected import 'murmur:conversation/read'` until that allowlist grows a third
+entry.
+
 Run bare, the script validates every `.wasm` in the build output and exits
 non-zero if any failed — this is exactly what CI runs:
 
