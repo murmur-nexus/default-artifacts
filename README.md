@@ -41,7 +41,7 @@ dependencies (SQLite, tree-sitter, TLS) do not cross-compile to wasm32-wasip2 (s
 | Artifact | Location | Implementation | Description |
 |---|---|---|---|
 | `murmur-tool-corpus` | `tools/murmur-tool-corpus/` | WASM | Append-only record store (`append`, `get`, `read_recent`, `search`, `verify`); requires a `capabilities.state` grant and a `config:` block on its manifest entry declaring the record types |
-| `murmur-tool-create` | `tools/murmur-tool-create/` | WASM | Scaffolds new tool artifact directories |
+| `murmur-tool-create` | `tools/murmur-tool-create/` | WASM | Scaffolds a new artifact directory (`murmur.yaml`, stub payload, README) for a `native` tool, a `wasm` tool, or a `hook` |
 | `murmur-tool-editor` | `tools/murmur-tool-editor/` | WASM | File read/write/patch operations (`read_file`, `write_file`, `replace_in_file`, `find_in_files`) |
 | `murmur-tool-request-input` | `tools/murmur-tool-request-input/` | WASM | HITL pause gate — suspends the agent loop and waits for human input via `message/send` |
 | `murmur-tool-git` | `tools/murmur-tool-git/` | native | Git operations (clone, checkout, status, diff, commit, push, worktree, and more) |

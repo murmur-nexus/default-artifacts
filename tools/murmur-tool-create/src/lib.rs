@@ -223,6 +223,11 @@ pub mod logic {
         let run_path = bin_dir.join(name);
         fs::write(&run_path, stub).map_err(|e| format!("failed to write bin/{name}: {e}"))?;
 
+        // Only the host build reaches this. `wasm32-wasip2` is not `cfg(unix)` and WASI has no
+        // chmod, so the shipped component leaves the stub at the umask default and `mur build`
+        // packs whatever mode it finds. The generated README carries the `chmod +x` step for
+        // that reason; the capsule runtime re-applies 0755 when it extracts the payload, so a
+        // non-executable archive entry costs the author a local run rather than a broken install.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -310,6 +315,14 @@ mod wasm_hook {
             Kind::Hook => "This is a hook artifact. It implements `murmur:hook/lifecycle` and receives synchronous lifecycle events from the runtime. Keep handlers fast and return `Ok(HookOutput::None)` unless the event truly could not be recorded.\n\n",
             Kind::Wasm | Kind::Native => "",
         };
+        // `mur build` packs the payload with the mode it has on disk, and a scaffold written by
+        // the wasm component arrives without the executable bit — WASI cannot set one.
+        let exec_note = match kind {
+            Kind::Native => format!(
+                "\nThe payload must be executable before you build: `chmod +x bin/{name}`.\n"
+            ),
+            Kind::Wasm | Kind::Hook => String::new(),
+        };
         // The generator's own version, read from the crate rather than written as a literal:
         // `scripts/apply-versions.sh` rewrites manifests and `Cargo.toml`s, and cannot see
         // inside a Rust string.
@@ -324,7 +337,8 @@ mod wasm_hook {
              ## What was created\n\
              \n\
              - `murmur.yaml` — pre-filled manifest. Review the `input` and `output` fields and update the schema to match your tool's contract.\n\
-             - {stub_file} — executable stub. Replace the stub body with your implementation.\n\
+             - {stub_file} — stub implementation. Replace the stub body with your implementation.\n\
+             {exec_note}\
              \n\
              {hook_note}\
              \n\
@@ -480,6 +494,30 @@ mod wasm_hook {
             ] {
                 assert!(source.contains(func), "generated hook is missing {func}");
             }
+        }
+
+        /// The scaffolder sets the executable bit only on the host build; built for
+        /// `wasm32-wasip2` it cannot, and `mur build` packs the mode it finds. The README has to
+        /// carry the step, or the stub the README tells the author to run is not runnable.
+        #[test]
+        fn native_readme_asks_for_the_executable_bit() {
+            let tmp = TempDir::new().unwrap();
+            scaffold_tool_in(tmp.path(), "my-tool", "native").unwrap();
+            let readme =
+                fs::read_to_string(tmp.path().join("tools/my-tool/README.md")).unwrap();
+            assert!(
+                readme.contains("`chmod +x bin/my-tool`"),
+                "native README should name the chmod step; got:\n{readme}"
+            );
+
+            // A wasm payload is produced by a cargo build and is never exec'd directly.
+            scaffold_tool_in(tmp.path(), "other-tool", "wasm").unwrap();
+            let wasm_readme =
+                fs::read_to_string(tmp.path().join("tools/other-tool/README.md")).unwrap();
+            assert!(
+                !wasm_readme.contains("chmod"),
+                "wasm README should not mention chmod; got:\n{wasm_readme}"
+            );
         }
 
         #[test]
