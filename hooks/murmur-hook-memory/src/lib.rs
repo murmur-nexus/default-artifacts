@@ -21,6 +21,8 @@
 pub mod recall {
     use serde_json::Value;
 
+    pub use murmur_hook_transcript::{extract_text, unwrap_tool_envelope, TOOL_MARKER};
+
     /// Page size asked of `read-messages`. The host clamps `limit` to `1..=100`, so asking
     /// for more buys nothing and asking for less only costs round trips.
     pub const PAGE_LIMIT: u32 = 100;
@@ -53,11 +55,6 @@ pub mod recall {
     /// turn a `seeded` outcome into a `trimmed` one.
     pub const BUDGET_HEADROOM_PERCENT: u64 = 5;
 
-    /// Marker the runtime folds into a `"tool"`-role message's `content`, because a tool
-    /// result carries more than the one string `content` has room for. Kept in sync with
-    /// `TOOL_MARKER` in murmur's `capsule-runtime/src/agent.rs`.
-    pub const TOOL_MARKER: &str = "__murmur_tool_msg__";
-
     /// The exact error text `read-messages` returns when this hook's entry does not
     /// declare `capabilities.conversation.read: true`.
     pub const NOT_GRANTED: &str = "not-granted";
@@ -69,11 +66,15 @@ pub mod recall {
 
     /// One message as the conversation record holds it, independent of the WIT bindings so
     /// it can be built and asserted on in host tests.
+    ///
+    /// `source_id` is the record line's own join key, which is what [`drop_reseeded`]
+    /// reads to tell an earlier seed's copy apart from the message it was copied from.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct RecordMessage {
         pub role: String,
         pub content: String,
         pub id: Option<String>,
+        pub source_id: Option<String>,
     }
 
     /// One page of the record, newest first — the bindings-free form of the WIT
@@ -112,56 +113,6 @@ pub mod recall {
             out.push(current);
         }
         out
-    }
-
-    /// Readable text out of a message's `content`, which is stored as its JSON
-    /// serialization (an array of content blocks, or a plain string).
-    pub fn extract_text(content: &str) -> String {
-        if let Ok(Value::Array(blocks)) = serde_json::from_str(content) {
-            let parts: Vec<&str> = blocks
-                .iter()
-                .filter_map(|b| {
-                    if b.get("type").and_then(Value::as_str) == Some("text") {
-                        b.get("text").and_then(Value::as_str)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if !parts.is_empty() {
-                return parts.join(" ");
-            }
-        }
-        if let Ok(Value::String(s)) = serde_json::from_str(content) {
-            return s;
-        }
-        content.to_string()
-    }
-
-    /// Unwrap a [`TOOL_MARKER`] envelope into readable text naming the call it answers and
-    /// flagging a failure. `None` when the content is not an envelope — not JSON, not an
-    /// object, or the marker absent or `false` — so the caller falls back to plain
-    /// [`extract_text`] handling.
-    pub fn unwrap_tool_envelope(content: &str) -> Option<String> {
-        let parsed: Value = serde_json::from_str(content).ok()?;
-        if parsed.get(TOOL_MARKER).and_then(Value::as_bool) != Some(true) {
-            return None;
-        }
-
-        let tool_call_id = parsed
-            .get("tool_call_id")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let failed = parsed.get("is_error").and_then(Value::as_bool) == Some(true);
-        let body = match parsed.get("body") {
-            None | Some(Value::Null) => String::new(),
-            Some(body) => extract_text(&body.to_string()),
-        };
-
-        let status = if failed { " (error)" } else { "" };
-        Some(format!(
-            "[tool result for call {tool_call_id}{status}]\n{body}"
-        ))
     }
 
     /// Render one record message into a seedable one, or `None` for a message that must
@@ -297,6 +248,39 @@ pub mod recall {
         format!("{ARTIFACT_NAME}: reading the conversation record failed: {error}")
     }
 
+    /// Drop the copies an earlier seed left behind in the record.
+    ///
+    /// A committed seed is appended to the record like any other message, carrying
+    /// `source-id` set to the message it was copied from. Left in, the next task seeds the
+    /// original and the copy both, and the task after that seeds all four — the seed
+    /// doubles per run until the budget caps it, and the model is shown the same turn over
+    /// and over in place of history it has not seen yet.
+    ///
+    /// A message whose `source-id` names another message in this same walk is exactly such
+    /// a copy, and the message it names is still here to be seeded in its place. One whose
+    /// `source-id` names something outside the walk — a corpus record, a compaction
+    /// summary, or an original the scan cap cut off — is content in its own right and is
+    /// kept.
+    pub fn drop_reseeded(record: Vec<RecordMessage>) -> Vec<RecordMessage> {
+        let ids: std::collections::HashSet<&str> = record
+            .iter()
+            .filter_map(|m| m.id.as_deref())
+            .collect();
+        let reseeded: Vec<bool> = record
+            .iter()
+            .map(|m| {
+                m.source_id
+                    .as_deref()
+                    .is_some_and(|source| ids.contains(source))
+            })
+            .collect();
+        record
+            .into_iter()
+            .zip(reseeded)
+            .filter_map(|(message, is_copy)| (!is_copy).then_some(message))
+            .collect()
+    }
+
     /// Choose which candidates to seed, chronological in and chronological out.
     ///
     /// With `task_text`, each candidate scores as the fraction of the task's distinct terms
@@ -339,7 +323,10 @@ pub mod recall {
                 break;
             }
             let cost = count(&wire_form(&candidates[index]));
-            if spent + cost > budget {
+            // Saturating, because `count` is the host's answer rather than this hook's: a
+            // count near `u64::MAX` would overflow the sum and admit the message instead
+            // of rejecting it.
+            if spent.saturating_add(cost) > budget {
                 continue;
             }
             spent += cost;
@@ -377,7 +364,7 @@ pub mod recall {
             return Ok(Vec::new());
         }
 
-        let record = collect_record(read_page)?;
+        let record = drop_reseeded(collect_record(read_page)?);
         if record.is_empty() {
             return Ok(Vec::new());
         }
@@ -489,7 +476,9 @@ mod wasm_hook {
 
     /// One page of the record. The `message` a page hands back is the *import*-side
     /// `murmur::hook::lifecycle::Message`, a distinct type from the export-side `Message`
-    /// [`seed`] builds, so the conversion is explicit in both directions.
+    /// [`seed`] builds, so the conversion is explicit in both directions. A record
+    /// message's `source-id` is carried through, because it is what marks the line as a
+    /// copy an earlier seed left behind — see `recall::drop_reseeded`.
     fn fetch_page(cursor: Option<String>) -> Result<RecordPage, String> {
         let page = read_messages(cursor.as_deref(), recall::PAGE_LIMIT)?;
         Ok(RecordPage {
@@ -500,6 +489,7 @@ mod wasm_hook {
                     role: m.role,
                     content: m.content,
                     id: m.id,
+                    source_id: m.source_id,
                 })
                 .collect(),
             next_cursor: page.next_cursor,
@@ -551,9 +541,9 @@ mod tests {
     use std::cell::RefCell;
 
     use super::recall::{
-        collect_record, effective_budget, plan_seed, render, select, should_decline, terms,
-        unwrap_tool_envelope, wire_form, RecordMessage, RecordPage, SeedMessage,
-        MAX_SEEDED_MESSAGES, NOT_GRANTED, TOOL_MARKER,
+        collect_record, drop_reseeded, effective_budget, plan_seed, render, select,
+        should_decline, terms, unwrap_tool_envelope, wire_form, RecordMessage, RecordPage,
+        SeedMessage, MAX_SEEDED_MESSAGES, NOT_GRANTED, TOOL_MARKER,
     };
 
     fn record(role: &str, content: &str, id: &str) -> RecordMessage {
@@ -561,6 +551,15 @@ mod tests {
             role: role.to_string(),
             content: serde_json::to_string(content).unwrap(),
             id: Some(id.to_string()),
+            source_id: None,
+        }
+    }
+
+    /// A record line an earlier seed left behind: a copy of `source`, with an id of its own.
+    fn reseeded(role: &str, content: &str, id: &str, source: &str) -> RecordMessage {
+        RecordMessage {
+            source_id: Some(source.to_string()),
+            ..record(role, content, id)
         }
     }
 
@@ -710,6 +709,7 @@ mod tests {
             role: "tool".to_string(),
             content: wrapped,
             id: Some("msg_t".to_string()),
+            source_id: None,
         })
         .expect("a tool result seeds");
 
@@ -731,6 +731,7 @@ mod tests {
             role: "tool".to_string(),
             content: failed,
             id: None,
+            source_id: None,
         })
         .unwrap();
         assert!(rendered.content.contains("(error)"), "{}", rendered.content);
@@ -746,6 +747,7 @@ mod tests {
             role: "tool".to_string(),
             content: bare,
             id: None,
+            source_id: None,
         })
         .unwrap();
         assert!(rendered.content.contains("unknown"), "{}", rendered.content);
@@ -763,6 +765,7 @@ mod tests {
             role: "tool".to_string(),
             content: r#"{"body":"x"}"#.to_string(),
             id: None,
+            source_id: None,
         })
         .unwrap();
         assert_eq!(json_not_envelope.content, r#""{\"body\":\"x\"}""#);
@@ -771,6 +774,7 @@ mod tests {
             role: "tool".to_string(),
             content: "raw output".to_string(),
             id: None,
+            source_id: None,
         })
         .unwrap();
         assert_eq!(not_json.content, r#""raw output""#);
@@ -933,6 +937,45 @@ mod tests {
             "oldest first, with the system message dropped"
         );
         assert_eq!(seeds[2].role, "assistant");
+    }
+
+    #[test]
+    fn an_earlier_seeds_copies_are_dropped_so_the_seed_does_not_double_each_run() {
+        // What the record holds after one seeded run: the first task's two turns, the
+        // second task, then the copies the seed committed, then the second reply.
+        let fake = FakeRecord::new(vec![Ok(page(
+            vec![
+                record("assistant", "reply two", "msg_f"),
+                reseeded("assistant", "reply one", "msg_e", "msg_b"),
+                reseeded("user", "task one", "msg_d", "msg_a"),
+                record("user", "task two", "msg_c"),
+                record("assistant", "reply one", "msg_b"),
+                record("user", "task one", "msg_a"),
+            ],
+            None,
+        ))]);
+
+        let seeds = plan_seed(10_000, 0, |c| fake.read(c), || None, word_count).unwrap();
+
+        assert_eq!(
+            ids(&seeds),
+            vec!["msg_a", "msg_b", "msg_c", "msg_f"],
+            "each turn is seeded once, from the line it originated on"
+        );
+    }
+
+    #[test]
+    fn a_source_id_pointing_outside_the_walk_is_content_in_its_own_right() {
+        let kept = vec![
+            reseeded("user", "a corpus note", "msg_a", "rec_00000000"),
+            record("assistant", "an ordinary turn", "msg_b"),
+        ];
+
+        assert_eq!(
+            drop_reseeded(kept.clone()),
+            kept,
+            "only a copy of a message still in the walk is dropped"
+        );
     }
 
     #[test]

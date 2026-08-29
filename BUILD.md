@@ -36,7 +36,7 @@ each crate's own manifest and classifies every `[workspace] members` entry:
 | `native-artifact` | `murmur.yaml` says `implementation: native` | excluded |
 | `internal-bin` | no `murmur.yaml`, and Cargo.toml declares a `[[bin]]` — a host-side helper, e.g. `murmur-tool-git-validate` | excluded |
 | `wasm-artifact` | `murmur.yaml` says `implementation: wasm`, or omits the key (drivers and hooks) | built |
-| `internal-lib` | no `murmur.yaml`, library only — linked into wasm artifacts, e.g. `murmur-test-parse` | built |
+| `internal-lib` | no `murmur.yaml`, library only — linked into wasm artifacts, e.g. `murmur-test-parse`, `murmur-hook-transcript` | built |
 
 A member matching none of the four is a hard error, not a guess.
 
@@ -140,11 +140,16 @@ or is built by a matrix that disagrees with its `implementation:` — so a nativ
 tool added to `build-wasm`, or one whose `implementation:` changes without its
 matrix entry moving, fails CI rather than a release.
 
-> **Note — `murmur-hook-regression-verifier`.** The internal
-> `libs/murmur-test-parse` crate added alongside this hook (card `7e8ff809`) is
-> *not* an artifact and must never be added to `artifacts.toml` or a
-> `build.yml` matrix — it is a shared, unpublished library, not a shippable
-> component.
+> **Note — the crates under `libs/`.** They are *not* artifacts and must never
+> be added to `artifacts.toml` or a `build.yml` matrix — they are shared,
+> unpublished libraries, not shippable components. Each is compiled into the
+> artifacts that depend on it, so changing one changes every dependent
+> component's binary.
+
+| Library | Holds | Used by |
+|---|---|---|
+| `libs/murmur-test-parse` | The four test-runner output parsers plus format auto-detection | `murmur-hook-regression-verifier`, `murmur-tool-test-report` |
+| `libs/murmur-hook-transcript` | The host's tool-result envelope marker and the readers that turn a lifecycle `message`'s `content` into driver-safe text | `murmur-hook-compact`, `murmur-hook-memory` |
 
 ## Version management
 

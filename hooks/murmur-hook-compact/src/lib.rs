@@ -16,7 +16,7 @@
 
 // ── Pure, host-testable logic (no WASM bindings, no `cfg`) ────────────────────
 pub mod logic {
-    use serde_json::Value;
+    pub use murmur_hook_transcript::{extract_text, unwrap_tool_envelope, TOOL_MARKER};
 
     /// The hook's own summarisation system prompt, used when the host supplies no
     /// `event.system-prompt` override. When an override *is* present, [`build_request`]
@@ -39,12 +39,6 @@ pub mod logic {
     /// ends on a `user` turn and always names the task explicitly.
     pub const SUMMARY_INSTRUCTION: &str =
         "The conversation above is the session to compact. Write the summary now.";
-
-    /// Marker the host folds into a `"tool"`-role message's `content` before dispatching
-    /// a compaction event, because the WIT `message` record has no room for the sibling
-    /// `tool_call_id`/`is_error` fields every inference driver requires. Kept in sync with
-    /// `TOOL_MARKER` in murmur's `capsule-runtime/src/agent.rs`.
-    pub const TOOL_MARKER: &str = "__murmur_tool_msg__";
 
     /// A role-tagged message, independent of the WIT bindings so it can be constructed
     /// and asserted on in host tests.
@@ -72,30 +66,6 @@ pub mod logic {
         pub model: Option<String>,
     }
 
-    /// Extract readable text from a message's content field. The content is stored as its
-    /// JSON serialization (either an array of content blocks or a plain string).
-    pub fn extract_text(content: &str) -> String {
-        if let Ok(Value::Array(blocks)) = serde_json::from_str(content) {
-            let parts: Vec<&str> = blocks
-                .iter()
-                .filter_map(|b| {
-                    if b.get("type").and_then(Value::as_str) == Some("text") {
-                        b.get("text").and_then(Value::as_str)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if !parts.is_empty() {
-                return parts.join(" ");
-            }
-        }
-        if let Ok(Value::String(s)) = serde_json::from_str(content) {
-            return s;
-        }
-        content.to_string()
-    }
-
     /// Render one incoming event message into a transcript message safe to forward to a
     /// driver.
     ///
@@ -114,37 +84,12 @@ pub mod logic {
         };
 
         if message.role == "tool" {
-            if let Some(text) = render_tool_envelope(&message.content) {
+            if let Some(text) = unwrap_tool_envelope(&message.content) {
                 return PlainMessage::new(role, text);
             }
         }
 
         PlainMessage::new(role, extract_text(&message.content))
-    }
-
-    /// Unwrap a [`TOOL_MARKER`] envelope into readable text. Returns `None` when the
-    /// content is not an envelope (not JSON, not an object, or marker absent/false), so
-    /// the caller falls back to plain [`extract_text`] handling.
-    fn render_tool_envelope(content: &str) -> Option<String> {
-        let parsed: Value = serde_json::from_str(content).ok()?;
-        if parsed.get(TOOL_MARKER).and_then(Value::as_bool) != Some(true) {
-            return None;
-        }
-
-        let tool_call_id = parsed
-            .get("tool_call_id")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let failed = parsed.get("is_error").and_then(Value::as_bool) == Some(true);
-        let body = match parsed.get("body") {
-            None | Some(Value::Null) => String::new(),
-            Some(body) => extract_text(&body.to_string()),
-        };
-
-        let status = if failed { " (error)" } else { "" };
-        Some(format!(
-            "[tool result for call {tool_call_id}{status}]\n{body}"
-        ))
     }
 
     /// Build the transcript handed to `run-inference`: every event message rendered by

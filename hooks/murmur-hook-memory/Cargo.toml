@@ -10,3 +10,4 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 serde_json.workspace = true
 wit-bindgen.workspace = true
+murmur-hook-transcript = { path = "../../libs/murmur-hook-transcript" }

@@ -19,6 +19,22 @@ writer. The hook's whole job is deciding what to load.
 It also has no dependency on any other artifact. `murmur-tool-corpus` in
 particular is unrelated and need not be installed.
 
+## What gets seeded
+
+Every message the record holds, oldest first, minus the ones below.
+
+| Dropped | Why |
+|---|---|
+| `system` messages | The capsule's system prompt is sent on every request anyway. |
+| Messages that render to nothing but whitespace | Nothing to read. |
+| Copies an earlier seed committed | A committed seed is appended to the record like any other message, carrying `source-id`. Seeding it again alongside the message it came from would show the model the same turn twice, and the run after that four times. |
+
+`tool`-role messages are kept, but unwrapped out of the runtime's tool-result
+envelope and re-roled to `user` — a tool result seeded on its own, with no
+matching tool call ahead of it, is an error for every driver.
+
+Roles in the seed are therefore only ever `user` and `assistant`.
+
 ## Configuration
 
 Declare it on your capsule `murmur.yaml`:
