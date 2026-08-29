@@ -55,9 +55,9 @@ path = "hooks/murmur-hook-grafana"
 version = "0.4.0"
 
 [[artifact]]
-name = "murmur-hook-memory-jsonl"
-path = "hooks/murmur-hook-memory-jsonl"
-version = "0.4.0"
+name = "murmur-hook-memory"
+path = "hooks/murmur-hook-memory"
+version = "0.5.0"
 
 [[artifact]]
 name = "murmur-hook-regression-verifier"

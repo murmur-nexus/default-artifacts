@@ -33,7 +33,10 @@
 # toolchain is what stabilises those versions, and gating on murmur:* namespace
 # membership is what catches an artifact importing something the host won't link):
 #
-#   HOOK: export set == { murmur:hook/lifecycle@<hook-wit-version> }; ZERO murmur:* imports.
+#   HOOK: export set == { murmur:hook/lifecycle@<hook-wit-version> }; murmur:* imports
+#         subset of the `world hook` import set — { murmur:runtime/inference,
+#         murmur:runtime/tokens, murmur:task-io/read, murmur:conversation/read } plus the
+#         type-only murmur:hook/lifecycle instance those pull in.
 #   TOOL: export set == { murmur:tool/run@<tool-wit-version> };       murmur:* imports subset of
 #         { murmur:text/chunks, murmur:task/task }.
 #
@@ -191,17 +194,20 @@ validate_one() {
   # ---- 4. murmur:* import check ----------------------------------------------
   local i
   if [ "$category" = "hook" ]; then
-    # Hooks may import only murmur:runtime/inference (the one-completion capability a
-    # compaction hook uses); most hooks import no murmur:* interface at all.
-    # murmur:hook/lifecycle rides along as a *type-only* instance whenever inference is
-    # imported, because inference.wit does `use murmur:hook/lifecycle.{message}`. It
-    # carries no functions, so wasmtime never asks the linker to satisfy it.
+    # A hook may import anything `world hook` declares and nothing else: inference (one
+    # completion), tokens (the host's own count), task-io/read (the task's text) and
+    # conversation/read (the durable conversation record). Only the interfaces a hook
+    # actually calls are emitted into its component, so most hooks land well inside this
+    # set and some import no murmur:* interface at all.
+    # murmur:hook/lifecycle rides along as a *type-only* instance whenever inference or
+    # conversation/read is imported, because each does `use murmur:hook/lifecycle.{message}`.
+    # It carries no functions, so wasmtime never asks the linker to satisfy it.
     while IFS= read -r i; do
       [ -n "$i" ] || continue
       case "$i" in
-        murmur:runtime/inference|murmur:hook/lifecycle) ;;
+        murmur:runtime/inference|murmur:runtime/tokens|murmur:task-io/read|murmur:conversation/read|murmur:hook/lifecycle) ;;
         *)
-          echo "FAIL: $base (hook): unexpected import '$i' — hook components may import only murmur:runtime/inference" >&2
+          echo "FAIL: $base (hook): unexpected import '$i' — hook components may import only the murmur:* interfaces 'world hook' declares (murmur:runtime/inference, murmur:runtime/tokens, murmur:task-io/read, murmur:conversation/read)" >&2
           fail=1
           ;;
       esac

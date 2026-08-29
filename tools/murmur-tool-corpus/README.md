@@ -158,19 +158,25 @@ Fix a bad line by editing `state/corpus.jsonl` directly. Deleting the line loses
 whatever it recorded; a line that is a mangled record is usually worth
 reconstructing by hand. Either way the tool will not do it for you, on purpose.
 
-## Compared to `murmur-hook-memory-jsonl`
+## Compared to `murmur-hook-memory`
 
-Both append JSON lines, and they are not alternatives:
+Two jobs, two mechanisms, no overlap. The corpus holds the notes an agent chose
+to write and reaches them again on demand, through its `search` operation.
+`murmur-hook-memory` is continuity: at task start it reads the runtime's durable
+conversation record and seeds the next task with the part of it that is relevant.
 
-| | `murmur-tool-corpus` | `murmur-hook-memory-jsonl` |
+| | `murmur-tool-corpus` | `murmur-hook-memory` |
 |---|---|---|
-| Kind | tool the agent calls | hook fired by the turn lifecycle |
-| Location | `state/`, behind `capabilities.state` | the capsule workdir |
-| Record shape | operator-declared types, schema-checked | fixed turn / task-close records |
-| Retrieval | `get`, capped `read_recent`, excerpt `search` | reloads prior turns into context |
+| Kind | tool the agent calls | hook bound to `on-task-start` |
+| Writes | appends records the agent asks it to | nothing — it is read-only |
+| Store | `state/corpus.jsonl`, behind `capabilities.state` | the runtime's conversation record, behind `capabilities.conversation.read` |
+| Content | operator-declared types, schema-checked | whatever the model was actually shown |
+| Retrieval | `get`, capped `read_recent`, excerpt `search` | seeds a budget-bounded slice ahead of the task |
 
-Reach for the corpus when a record must survive an agent that can edit files;
-reach for the memory log when a turn history should reload itself.
+Nothing seeds from the corpus and no hook reads it; the two artifacts share no
+store and no crate, and neither needs the other installed. Reach for the corpus
+when a record must survive an agent that can edit files; reach for the memory
+hook when the next task should start where the last one left off.
 
 ## Extending it
 

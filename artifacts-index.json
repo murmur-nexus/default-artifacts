@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-28T15:53:24Z",
+  "updated_at": "2026-08-29T00:15:37Z",
   "artifacts": [
     {
       "name": "murmur-driver-anthropic",
@@ -119,14 +119,13 @@
       ]
     },
     {
-      "name": "murmur-hook-memory-jsonl",
-      "version": "0.4.0",
+      "name": "murmur-hook-memory",
+      "version": "0.5.0",
       "runtime": "hook",
-      "description": "Durable per-Turn Memory Log \u2014 appends each Turn to a JSONL file in the capsule workdir, reloads prior Turns at task start, and writes a close-out marker at task end.",
+      "description": "Seeds a task with the relevant part of the conversation that came before it \u2014 pages the runtime's durable conversation record read-only, selects a budget-bounded chronological slice, and stamps each seeded message with the record message it came from.",
       "tags": [
         "hook",
-        "memory",
-        "jsonl"
+        "memory"
       ],
       "platforms": [
         "darwin-aarch64",

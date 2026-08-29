@@ -36,13 +36,12 @@ pub mod logic {
 
     // On-disk read-cache location, relative to the capsule workdir (the component's CWD /
     // preopened `.` at dispatch time). A plain relative path is how sibling artifacts scope
-    // per-session state to the workdir — `murmur-hook-compact` writes `checkpoints/`, and
-    // `murmur-hook-memory-jsonl` writes `memory-log.jsonl` the same way — so the cache is
-    // automatically isolated per session/capsule and never leaks across unrelated ones.
+    // per-session state to the workdir — `murmur-hook-compact` writes `checkpoints/` the
+    // same way — so the cache is automatically isolated per session/capsule and never leaks
+    // across unrelated ones.
     // The location is overridable via `MURMUR_TOOL_EDITOR_CACHE_DIR`, mirroring the
     // manifest-driven WASI-env override pattern already used by `murmur-hook-grafana`
-    // (`MURMUR_OTEL_ENDPOINT`), `murmur-hook-eval` (`MURMUR_EVAL_CONFIG`), and
-    // `murmur-hook-memory-jsonl` (`MURMUR_MEMORY_LOG_PATH`).
+    // (`MURMUR_OTEL_ENDPOINT`) and `murmur-hook-eval` (`MURMUR_EVAL_CONFIG`).
     const CACHE_DIR_ENV: &str = "MURMUR_TOOL_EDITOR_CACHE_DIR";
     const DEFAULT_CACHE_DIR: &str = ".murmur-tool-editor-cache";
 
