@@ -360,7 +360,7 @@ mod wasm_hook {
     }
 
     thread_local! {
-        static STATE: RefCell<Option<HookState>> = RefCell::new(None);
+        static STATE: RefCell<Option<HookState>> = const { RefCell::new(None) };
     }
 
     pub struct MurmurHookDiffSummary;

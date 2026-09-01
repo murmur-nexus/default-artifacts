@@ -141,3 +141,7 @@ to precede it are discarded rather than scored against a partially applied confi
 ## OTel integration
 
 When `MURMUR_OTEL_ENDPOINT` is set, eval scores are exported as OTLP log records to `{endpoint}/v1/logs` with attributes `eval.scorer`, `eval.result`, `eval.score`, and `eval.case_id`. The same `trace_id` derived from `session_id` links eval logs to the corresponding Grafana Tempo trace.
+
+Only `event_score` records are exported, so a session ending on `no_scores` or
+`config_error` sends nothing to the collector. `eval.jsonl` is still written in
+both cases — it is the complete record, and the collector is not.
