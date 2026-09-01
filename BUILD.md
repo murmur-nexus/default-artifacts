@@ -199,46 +199,36 @@ same murmur commit — both changes in one commit.
 Every published `.mur.zip` embeds the version of `murmur:hook/lifecycle` its
 component was built against. That embedded version is the string the host
 resolves an instantiation against, and it is a separate axis from the
-artifact's own release version in `artifacts.toml` — a hook at release
-`0.2.0` can, and does, export interface `@0.5.0`.
+artifact's own release version in `artifacts.toml` — a hook at release `0.4.0`
+can, and does, export interface `@0.7.0`.
 
-Checked live against the `official` registry on 2026-08-25, all eight
-`hooks/*` artifacts export `murmur:hook/lifecycle@0.5.0`, matching this
-repo's `wit/hook/` mirror and the only version murmur v0.2.0's host accepts:
+All eight `hooks/*` artifacts export `murmur:hook/lifecycle@0.7.0`, matching
+this repo's `wit/hook/` mirror. Murmur's host accepts that one version and keeps
+no fallback: `LIFECYCLE_IFACE` in `crates/capsule-runtime/src/hooks.rs` names a
+single instance, and a component exporting any other version is rejected at
+instantiation.
 
-| Artifact | Published version | Exported interface |
-| --- | --- | --- |
-| `murmur-hook-compact` | 0.4.0 | `murmur:hook/lifecycle@0.5.0` |
-| `murmur-hook-debug` | 0.3.0 | `murmur:hook/lifecycle@0.5.0` |
-| `murmur-hook-diff-summary` | 0.3.0 | `murmur:hook/lifecycle@0.5.0` |
-| `murmur-hook-eval` | 0.3.0 | `murmur:hook/lifecycle@0.5.0` |
-| `murmur-hook-grafana` | 0.3.0 | `murmur:hook/lifecycle@0.5.0` |
-| `murmur-hook-memory` | 0.3.0 | `murmur:hook/lifecycle@0.5.0` |
-| `murmur-hook-regression-verifier` | 0.2.0 | `murmur:hook/lifecycle@0.5.0` |
-| `murmur-hook-shell-desc` | 0.2.0 | `murmur:hook/lifecycle@0.5.0` |
+That is why a `murmur:hook` bump is never a partial change. Every hook is
+rebuilt against the new mirror and every hook's `version` in `artifacts.toml`
+moves, including hooks whose Rust source did not change: a rebuilt component
+exports a different interface version, so its bytes differ and the registry
+cannot serve the new component at the old artifact version.
 
-The `v0.4.0` and `v0.5.0` releases that produced these binaries were both cut
-after commit `04ee889` vendored the `@0.5.0` WIT, so the published set never
-lagged the contract. Nothing is owed here: no rebuild, no version bump, no
-republish.
-
-The binary in that snapshot shipped under the artifact's former name,
-`murmur-hook-memory-jsonl`; the row carries the current name so the artifact is
-findable, and the version column is left as the dated check recorded it.
-
-The table above is a snapshot of one check, not a mapping to keep current.
-Re-run the check after any `murmur:hook` version bump rather than reading it:
+To confirm what a published binary actually exports:
 
 ```bash
 mur install -g murmur-hook-compact
 unzip -o -d /tmp/hook-check \
-  ~/.murmur/artifacts/murmur-hook-compact/0.4.0/murmur-hook-compact-0.4.0.mur.zip
+  ~/.murmur/artifacts/murmur-hook-compact/<version>/murmur-hook-compact-<version>.mur.zip
 strings /tmp/hook-check/murmur_hook_compact.wasm \
   | grep -o 'murmur:hook/lifecycle@[0-9.]*' | sort -u
 ```
 
 `wasm-tools component wit <file>.wasm` prints the full interface if you need
-to confirm a specific record or variant case rather than the version alone.
+to confirm a specific record or variant case rather than the version alone. For
+a locally built component, `./scripts/validate-component.sh` checks the same
+thing across every artifact at once, reading the expected version out of
+`wit/hook/deps/murmur-hook/lifecycle.wit` rather than a value written down here.
 
 ## Running tests
 

@@ -570,14 +570,31 @@ mod wasm_hook {
         }
 
         fn on_tool_call(event: ToolEvent) -> Result<HookOutput, String> {
+            // `outcome: none` is the decision-point dispatch — the call has not run.
+            // Record nothing: `observe_tool` latches `first_edit_seen`, and that latch
+            // must mean "an edit has completed", not "an edit is about to be attempted".
+            // Latching early moves a test command run between the two dispatches out of
+            // the baseline bucket and into the current one, which reads an unchanged
+            // test suite as a regression. This hook observes; it never denies.
+            if event.outcome.is_none() {
+                return Ok(HookOutput::None);
+            }
             STATE.with(|s| s.borrow_mut().observe_tool(&event.tool_name));
             Ok(HookOutput::None)
         }
 
         fn on_shell(event: ShellEvent) -> Result<HookOutput, String> {
+            // `outcome: none` is the decision-point dispatch — the command has not run,
+            // so there is no test output to snapshot. Record nothing: snapshotting here
+            // would file an empty result under the command as if it had produced it, and
+            // then snapshot it a second time at the observation. This hook observes; it
+            // never denies.
+            let Some(outcome) = event.outcome else {
+                return Ok(HookOutput::None);
+            };
             STATE.with(|s| {
                 s.borrow_mut()
-                    .observe_shell(&event.command, &event.stdout, &event.stderr)
+                    .observe_shell(&event.command, &outcome.stdout, &outcome.stderr)
             });
             Ok(HookOutput::None)
         }

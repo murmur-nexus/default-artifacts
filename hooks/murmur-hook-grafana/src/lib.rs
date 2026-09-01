@@ -1,22 +1,130 @@
-/// murmur-hook-grafana: emits OTel spans to a Grafana Tempo OTLP/HTTP endpoint.
+//! murmur-hook-grafana: emits OTel spans to a Grafana Tempo OTLP/HTTP endpoint.
+//!
+//! Reads MURMUR_OTEL_ENDPOINT from the WASI environment (injected by the capsule runtime
+//! at instantiation time when observability.otel_endpoint is set in the capsule manifest).
+//!
+//! Behaviour when MURMUR_OTEL_ENDPOINT is absent or empty: logs a warning to stderr (which
+//! routes to logs/hook-murmur-hook-grafana.log) and becomes a no-op for the session.
+//!
+//! On each lifecycle callback the hook buffers a SpanData record. On on-session-end it
+//! finalises the root span and POSTs the full trace as OTLP/JSON to the configured endpoint.
+//! If the POST fails the error is logged and the session continues (non-fatal).
+//!
+//! TCP outbound connections are granted by the capsule runtime (inherit_network is set in
+//! the hook WASI context when any hook is instantiated).
+
+// ── span shaping ────────────────────────────────────────────────────────────
+//
+// The decision of *whether* a dispatch produces a span, and *which* attributes it
+// carries, lives here at the crate root rather than inside `wasm_hook`, over plain
+// mirrors of the WIT outcome records rather than over bindgen types. Everything
+// under `wasm_hook` is gated on `target_arch = "wasm32"` and so is unreachable from
+// `cargo test`; this seam is what makes one-span-per-call assertable natively.
+
+use serde_json::json;
+
+/// Plain mirror of `murmur:hook/lifecycle`'s `shell-outcome`. Carried on
+/// `shell-event.outcome` at the post-call observation dispatch, absent at the
+/// decision point.
+pub struct ShellOutcome {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub stdout_bytes: u64,
+    pub stderr_bytes: u64,
+    pub duration_ms: u64,
+}
+
+/// Plain mirror of `murmur:hook/lifecycle`'s `tool-outcome`. Carried on
+/// `tool-event.outcome` at the post-call observation dispatch, absent at the
+/// decision point.
+pub struct ToolOutcome {
+    pub output_bytes: u64,
+    pub duration_ms: u64,
+    pub status: String,
+}
+
+/// One span's worth of content, before it is given a span id and parented onto the
+/// session root.
+pub struct SpanShape {
+    pub attributes: Vec<(String, serde_json::Value)>,
+    pub ok: bool,
+    /// How far back from now the span starts. Zero-length is a legitimate value.
+    pub duration_ms: u64,
+}
+
+/// Ceiling on the `command` attribute. The host already truncates `shell-event.command`
+/// to this many characters; re-applying it here keeps the attribute bounded whatever
+/// the caller passes.
+const COMMAND_CHARS: usize = 200;
+
+/// Ceiling on the `stdout` and `stderr` attributes. Span attributes carry a sample of
+/// the output, not the whole of it — a build that prints megabytes must not turn into a
+/// megabyte span.
+const OUTPUT_CHARS: usize = 4096;
+
+/// Shape the span for one shell dispatch, or `None` when there is no span to emit.
 ///
-/// Reads MURMUR_OTEL_ENDPOINT from the WASI environment (injected by the capsule runtime
-/// at instantiation time when observability.otel_endpoint is set in the capsule manifest).
+/// `outcome` is `None` at the decision point — the dispatch at which the command has
+/// not run. This hook is an observer, not a policy: it returns `None` there and
+/// records nothing, because a span emitted at the decision point *plus* the span
+/// emitted at the observation double-counts every shell call in the trace, and the
+/// first copy would carry a fabricated exit code and duration for a command that may
+/// never run at all.
+pub fn shell_span(turn: u32, command: &str, outcome: Option<&ShellOutcome>) -> Option<SpanShape> {
+    let outcome = outcome?;
+    let cmd: String = command.chars().take(COMMAND_CHARS).collect();
+    let stdout: String = outcome.stdout.chars().take(OUTPUT_CHARS).collect();
+    let mut attributes = vec![
+        ("turn".to_string(), json!(turn)),
+        ("command".to_string(), json!(cmd)),
+        ("exit_code".to_string(), json!(outcome.exit_code)),
+        ("duration_ms".to_string(), json!(outcome.duration_ms.to_string())),
+        ("stdout".to_string(), json!(stdout)),
+    ];
+    if !outcome.stderr.is_empty() {
+        let stderr: String = outcome.stderr.chars().take(OUTPUT_CHARS).collect();
+        attributes.push(("stderr".to_string(), json!(stderr)));
+    }
+    Some(SpanShape {
+        attributes,
+        ok: outcome.exit_code == 0,
+        duration_ms: outcome.duration_ms,
+    })
+}
+
+/// Shape the span for one tool dispatch, or `None` when there is no span to emit.
 ///
-/// Behaviour when MURMUR_OTEL_ENDPOINT is absent or empty: logs a warning to stderr (which
-/// routes to logs/hook-murmur-hook-grafana.log) and becomes a no-op for the session.
-///
-/// On each lifecycle callback the hook buffers a SpanData record. On on-session-end it
-/// finalises the root span and POSTs the full trace as OTLP/JSON to the configured endpoint.
-/// If the POST fails the error is logged and the session continues (non-fatal).
-///
-/// TCP outbound connections are granted by the capsule runtime (inherit_network is set in
-/// the hook WASI context when any hook is instantiated).
+/// `outcome` is `None` at the decision point — the dispatch at which the call has not
+/// run. Same reasoning as [`shell_span`]: this hook observes and never denies, so it
+/// records nothing there rather than emitting a second, invented span per tool call.
+pub fn tool_span(
+    turn: u32,
+    tool_name: &str,
+    input_bytes: u64,
+    outcome: Option<&ToolOutcome>,
+) -> Option<SpanShape> {
+    let outcome = outcome?;
+    let attributes = vec![
+        ("turn".to_string(), json!(turn)),
+        ("tool_name".to_string(), json!(tool_name)),
+        ("input_bytes".to_string(), json!(input_bytes.to_string())),
+        ("output_bytes".to_string(), json!(outcome.output_bytes.to_string())),
+        ("duration_ms".to_string(), json!(outcome.duration_ms.to_string())),
+        ("status".to_string(), json!(outcome.status)),
+    ];
+    Some(SpanShape {
+        attributes,
+        ok: outcome.status == "ok",
+        duration_ms: outcome.duration_ms,
+    })
+}
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_hook {
     use std::cell::RefCell;
 
+    use super::{shell_span, tool_span, ShellOutcome, ToolOutcome};
     use utils::{parse_endpoint, send_http_post, session_id_to_trace_id, unix_now_ns};
 
     mod utils {
@@ -140,7 +248,7 @@ mod wasm_hook {
     }
 
     thread_local! {
-        static STATE: RefCell<Option<HookState>> = RefCell::new(None);
+        static STATE: RefCell<Option<HookState>> = const { RefCell::new(None) };
     }
 
     // ── hook implementation ───────────────────────────────────────────────────
@@ -227,23 +335,35 @@ mod wasm_hook {
         fn on_tool_call(
             event: exports::murmur::hook::lifecycle::ToolEvent,
         ) -> Result<HookOutput, String> {
+            // `outcome: none` is the decision-point dispatch — the call has not run.
+            // `tool_span` returns `None` there and this hook records nothing, because a
+            // span at the decision point plus a span at the observation double-counts
+            // every tool call in the trace. See `tool_span` for the full reasoning.
+            let outcome = event.outcome.map(|o| ToolOutcome {
+                output_bytes: o.output_bytes,
+                duration_ms: o.duration_ms,
+                status: o.status,
+            });
+            let Some(shape) =
+                tool_span(event.turn, &event.tool_name, event.input_bytes, outcome.as_ref())
+            else {
+                return Ok(HookOutput::None);
+            };
             STATE.with(|s| {
                 let mut guard = s.borrow_mut();
                 let Some(state) = guard.as_mut() else {
                     return;
                 };
                 let end_ns = unix_now_ns();
-                let start_ns = end_ns.saturating_sub(event.duration_ms * 1_000_000);
-                let ok = event.status == "ok";
-                let attrs = vec![
-                    ("turn".to_string(), json!(event.turn)),
-                    ("tool_name".to_string(), json!(event.tool_name)),
-                    ("input_bytes".to_string(), json!(event.input_bytes.to_string())),
-                    ("output_bytes".to_string(), json!(event.output_bytes.to_string())),
-                    ("duration_ms".to_string(), json!(event.duration_ms.to_string())),
-                    ("status".to_string(), json!(event.status)),
-                ];
-                push_span(state, "capsule.tool_call", start_ns, end_ns, attrs, ok);
+                let start_ns = end_ns.saturating_sub(shape.duration_ms * 1_000_000);
+                push_span(
+                    state,
+                    "capsule.tool_call",
+                    start_ns,
+                    end_ns,
+                    shape.attributes,
+                    shape.ok,
+                );
             });
             Ok(HookOutput::None)
         }
@@ -251,28 +371,37 @@ mod wasm_hook {
         fn on_shell(
             event: exports::murmur::hook::lifecycle::ShellEvent,
         ) -> Result<HookOutput, String> {
+            // `outcome: none` is the decision-point dispatch — the command has not run.
+            // `shell_span` returns `None` there and this hook records nothing, because a
+            // span at the decision point plus a span at the observation double-counts
+            // every shell call in the trace, the first copy carrying a fabricated exit
+            // code. See `shell_span` for the full reasoning.
+            let outcome = event.outcome.map(|o| ShellOutcome {
+                exit_code: o.exit_code,
+                stdout: o.stdout,
+                stderr: o.stderr,
+                stdout_bytes: o.stdout_bytes,
+                stderr_bytes: o.stderr_bytes,
+                duration_ms: o.duration_ms,
+            });
+            let Some(shape) = shell_span(event.turn, &event.command, outcome.as_ref()) else {
+                return Ok(HookOutput::None);
+            };
             STATE.with(|s| {
                 let mut guard = s.borrow_mut();
                 let Some(state) = guard.as_mut() else {
                     return;
                 };
                 let end_ns = unix_now_ns();
-                let start_ns = end_ns.saturating_sub(event.duration_ms * 1_000_000);
-                let ok = event.exit_code == 0;
-                let cmd: String = event.command.chars().take(200).collect();
-                let stdout: String = event.stdout.chars().take(4096).collect();
-                let mut attrs = vec![
-                    ("turn".to_string(), json!(event.turn)),
-                    ("command".to_string(), json!(cmd)),
-                    ("exit_code".to_string(), json!(event.exit_code)),
-                    ("duration_ms".to_string(), json!(event.duration_ms.to_string())),
-                    ("stdout".to_string(), json!(stdout)),
-                ];
-                if !event.stderr.is_empty() {
-                    let stderr: String = event.stderr.chars().take(4096).collect();
-                    attrs.push(("stderr".to_string(), json!(stderr)));
-                }
-                push_span(state, "capsule.shell", start_ns, end_ns, attrs, ok);
+                let start_ns = end_ns.saturating_sub(shape.duration_ms * 1_000_000);
+                push_span(
+                    state,
+                    "capsule.shell",
+                    start_ns,
+                    end_ns,
+                    shape.attributes,
+                    shape.ok,
+                );
             });
             Ok(HookOutput::None)
         }
@@ -453,4 +582,98 @@ mod wasm_hook {
     }
 
     export!(MurmurHookGrafana);
+}
+
+// ── native unit tests of the span-shaping seam ──────────────────────────────
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    fn attr<'a>(shape: &'a SpanShape, key: &str) -> &'a serde_json::Value {
+        &shape
+            .attributes
+            .iter()
+            .find(|(k, _)| k == key)
+            .unwrap_or_else(|| panic!("span carries no `{key}` attribute"))
+            .1
+    }
+
+    fn shell_outcome(exit_code: i32) -> ShellOutcome {
+        ShellOutcome {
+            exit_code,
+            stdout: "hello\n".to_string(),
+            stderr: String::new(),
+            stdout_bytes: 6,
+            stderr_bytes: 0,
+            duration_ms: 42,
+        }
+    }
+
+    fn tool_outcome(status: &str) -> ToolOutcome {
+        ToolOutcome {
+            output_bytes: 128,
+            duration_ms: 17,
+            status: status.to_string(),
+        }
+    }
+
+    /// One shell call is dispatched twice — decision point then observation — and
+    /// must yield exactly one span, carrying the observation's exit code.
+    #[test]
+    fn both_shell_dispatches_of_one_call_yield_one_span() {
+        let observed = shell_outcome(3);
+        let spans: Vec<SpanShape> = [
+            shell_span(1, "pytest -q", None),
+            shell_span(1, "pytest -q", Some(&observed)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        assert_eq!(spans.len(), 1, "one shell call must produce one span");
+        assert_eq!(attr(&spans[0], "exit_code"), &json!(3));
+        assert_eq!(attr(&spans[0], "duration_ms"), &json!("42"));
+        assert!(!spans[0].ok);
+    }
+
+    /// The same for one tool call.
+    #[test]
+    fn both_tool_dispatches_of_one_call_yield_one_span() {
+        let observed = tool_outcome("ok");
+        let spans: Vec<SpanShape> = [
+            tool_span(2, "editor", 64, None),
+            tool_span(2, "editor", 64, Some(&observed)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        assert_eq!(spans.len(), 1, "one tool call must produce one span");
+        assert_eq!(attr(&spans[0], "status"), &json!("ok"));
+        assert_eq!(attr(&spans[0], "output_bytes"), &json!("128"));
+        assert_eq!(attr(&spans[0], "input_bytes"), &json!("64"));
+        assert!(spans[0].ok);
+    }
+
+    /// A call that only ever reaches the decision point — denied by some other hook,
+    /// or never made — leaves no span behind at all.
+    #[test]
+    fn decision_point_only_call_yields_no_span() {
+        assert!(shell_span(1, "rm -rf /", None).is_none());
+        assert!(tool_span(1, "editor", 64, None).is_none());
+    }
+
+    #[test]
+    fn shell_span_omits_stderr_when_empty_and_keeps_it_otherwise() {
+        let quiet = shell_outcome(0);
+        let quiet_span = shell_span(1, "true", Some(&quiet)).expect("observation yields a span");
+        assert!(quiet_span.attributes.iter().all(|(k, _)| k != "stderr"));
+
+        let noisy = ShellOutcome {
+            stderr: "warning\n".to_string(),
+            ..shell_outcome(0)
+        };
+        let noisy_span = shell_span(1, "cc x.c", Some(&noisy)).expect("observation yields a span");
+        assert_eq!(attr(&noisy_span, "stderr"), &json!("warning\n"));
+    }
 }
