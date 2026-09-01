@@ -181,8 +181,7 @@ capabilities:
 ### 4.5 Spawn Capabilities (requires mur-roost)
 
 Grants the capsule permission to spawn named sub-capsules via the mur-roost daemon.
-`allow` lists the artifact names the capsule may spawn. `scoped: true` gives each spawned
-sub-capsule an isolated workdir subdirectory under the caller's workdir.
+`allow` lists the artifact names the capsule may spawn, and it is the only key in this block.
 
 ```yaml
 capabilities:
@@ -190,12 +189,13 @@ capabilities:
     allow:
       - worker-capsule-a
       - worker-capsule-b
-    scoped: true
 ```
 
-**Note:** Spawn capabilities require the mur-roost daemon. `mur run` does not currently parse
-`capabilities.spawn` from the manifest — spawn allowlists are configured in mur-roost. This
-YAML syntax is the intended declaration for future direct-run support.
+**Note:** `mur run` parses this block and reports it under `spawn allow` in
+`mur run --explain-scope`, but the spawning itself goes through the mur-roost daemon: roost reads
+the parent capsule's own `capabilities.spawn.allow` as the per-job allowlist, so a capsule can
+only spawn names its own manifest lists. Whether each spawned worker gets an isolated job root is
+a roost daemon setting (`--scoped`), not a manifest key.
 
 ---
 
@@ -419,13 +419,13 @@ context:
 ### Example 3: Orchestrator Capsule
 
 A capsule that decomposes tasks into parallel sub-capsules using mur-roost.
-`spawn.scoped: true` gives each sub-capsule an isolated workdir subdirectory.
+`spawn.allow` names every sub-capsule it may spawn.
 
 ```yaml
 name: orchestrator
 version: "0.1.0"
 runtime: tool
-description: "Orchestrator that spawns scoped sub-capsules for parallel task execution"
+description: "Orchestrator that spawns sub-capsules for parallel task execution"
 
 artifacts:
   - name: murmur-tool-editor
@@ -442,7 +442,6 @@ capabilities:
   spawn:
     allow:
       - worker-capsule
-    scoped: true
 
 inference:
   endpoint: https://api.anthropic.com
