@@ -56,14 +56,22 @@ mod wasm_hook {
         fn on_tool_call(
             event: exports::murmur::hook::lifecycle::ToolEvent,
         ) -> Result<HookOutput, String> {
+            // `outcome: none` is the decision-point dispatch — the call has not run, so
+            // three of the seven keys below have no value. This hook is an observer,
+            // not a policy: it writes one line per *completed* call and nothing here, so
+            // hook-debug.jsonl never carries a second line for the same call, nor a line
+            // for a call that was refused or never made.
+            let Some(outcome) = event.outcome else {
+                return Ok(HookOutput::None);
+            };
             write_event(json!({
                 "event": "tool-call",
                 "turn": event.turn,
                 "tool_name": event.tool_name,
                 "input_bytes": event.input_bytes,
-                "output_bytes": event.output_bytes,
-                "duration_ms": event.duration_ms,
-                "status": event.status,
+                "output_bytes": outcome.output_bytes,
+                "duration_ms": outcome.duration_ms,
+                "status": outcome.status,
             }))?;
             Ok(HookOutput::None)
         }
@@ -71,14 +79,21 @@ mod wasm_hook {
         fn on_shell(
             event: exports::murmur::hook::lifecycle::ShellEvent,
         ) -> Result<HookOutput, String> {
+            // `outcome: none` is the decision-point dispatch — the command has not run,
+            // so four of the seven keys below have no value. Same choice as
+            // `on_tool_call`: record only the completed call, so one shell call is one
+            // line in hook-debug.jsonl rather than two.
+            let Some(outcome) = event.outcome else {
+                return Ok(HookOutput::None);
+            };
             write_event(json!({
                 "event": "shell",
                 "turn": event.turn,
                 "command": event.command,
-                "exit_code": event.exit_code,
-                "stdout_bytes": event.stdout_bytes,
-                "stderr_bytes": event.stderr_bytes,
-                "duration_ms": event.duration_ms,
+                "exit_code": outcome.exit_code,
+                "stdout_bytes": outcome.stdout_bytes,
+                "stderr_bytes": outcome.stderr_bytes,
+                "duration_ms": outcome.duration_ms,
             }))?;
             Ok(HookOutput::None)
         }
