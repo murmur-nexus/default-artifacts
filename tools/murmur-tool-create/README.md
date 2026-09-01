@@ -91,7 +91,7 @@ The generated `src/lib.rs` has four top-level items, in this order:
 | Item | Holds |
 |---|---|
 | crate doc comment | the split, why it exists, and the reference hooks to read |
-| `pub mod logic` | plain mirrors of every `murmur:hook@0.7.0` record, `Event`, `Decision`, and `decide` |
+| `pub mod logic` | plain mirrors of every `murmur:hook@0.8.0` record, `Event`, `Decision`, and `decide` |
 | `#[cfg(target_arch = "wasm32")] mod wasm_hook` | the WIT bindings, all nine `Guest` methods, the conversions, `export!` |
 | `#[cfg(test)] mod tests` | one passing host test over `logic::decide` |
 

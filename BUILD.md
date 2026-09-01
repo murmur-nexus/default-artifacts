@@ -200,9 +200,9 @@ Every published `.mur.zip` embeds the version of `murmur:hook/lifecycle` its
 component was built against. That embedded version is the string the host
 resolves an instantiation against, and it is a separate axis from the
 artifact's own release version in `artifacts.toml` — a hook at release `0.4.0`
-can, and does, export interface `@0.7.0`.
+can, and does, export interface `@0.8.0`.
 
-All eight `hooks/*` artifacts export `murmur:hook/lifecycle@0.7.0`, matching
+All eight `hooks/*` artifacts export `murmur:hook/lifecycle@0.8.0`, matching
 this repo's `wit/hook/` mirror. Murmur's host accepts that one version and keeps
 no fallback: `LIFECYCLE_IFACE` in `crates/capsule-runtime/src/hooks.rs` names a
 single instance, and a component exporting any other version is rejected at
