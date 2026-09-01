@@ -86,10 +86,41 @@ requires_files:
   - event_sink.wasm
 ```
 
-The generated `src/lib.rs` implements all nine `murmur:hook/lifecycle`
-functions — `on_stage`, `on_session_start`, `on_task_start`, `on_inference`,
-`on_tool_call`, `on_shell`, `on_compaction`, `on_task_end`, `on_session_end`.
-`Guest` defaults none of them, so a stub short of any one does not compile.
+The generated `src/lib.rs` has four top-level items, in this order:
+
+| Item | Holds |
+|---|---|
+| crate doc comment | the split, why it exists, and the reference hooks to read |
+| `pub mod logic` | plain mirrors of every `murmur:hook@0.7.0` record, `Event`, `Decision`, and `decide` |
+| `#[cfg(target_arch = "wasm32")] mod wasm_hook` | the WIT bindings, all nine `Guest` methods, the conversions, `export!` |
+| `#[cfg(test)] mod tests` | one passing host test over `logic::decide` |
+
+`logic::decide(&Event) -> Result<Decision, String>` is the single entry point all
+nine dispatches route through, and mirrors the WIT `result<hook-output, string>`.
+The `logic` module names no WIT type and carries no `cfg`, so `cargo test` on a
+native host compiles and runs it. The adapter converts and nothing else: every
+`Guest` method builds an `Event`, calls `decide`, and maps the returned
+`Decision` onto the `HookOutput` case of the same name.
+
+`Guest` defaults none of its nine methods — `on_stage`, `on_session_start`,
+`on_task_start`, `on_inference`, `on_tool_call`, `on_shell`, `on_compaction`,
+`on_task_end`, `on_session_end` — so a stub short of any one does not compile.
+
+`ToolEvent::outcome` and `ShellEvent::outcome` are mirrored as `Option`, and the
+generated doc comments say what the two dispatches mean: `None` is the decision
+point, the one dispatch at which a returned `Decision::Deny` is honoured;
+`Some(..)` is the post-call observation, where nothing can be refused. Logic that
+ignores the field runs twice per call.
+
+The generated `Cargo.toml` declares `[dev-dependencies] tempfile = "3"`. It is
+unused by the generated test on purpose: the usual hook side effect is appending
+to a file under the workdir, and a host test for that needs a scratch directory,
+so the section is there before the author needs it.
+
+The generated README's checklist points step 2 at the `logic` module and step 3
+at `cargo test -p <crate name>`, which passes before a line of behaviour is
+written. See `BUILD.md`'s "Where a hook's logic lives" for the convention this
+follows.
 
 ## Native payload permissions
 
