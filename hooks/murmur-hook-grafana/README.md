@@ -6,6 +6,28 @@ lifecycle event.
 WASM hook component (`runtime: hook`, exports `murmur:hook/lifecycle`).
 Binding: all events · mode: async · commit policy: none.
 
+## Spans emitted
+
+One trace per session, rooted at `capsule.session`. Every other span is a child
+of it.
+
+| Span | Emitted at | Duration |
+|---|---|---|
+| `capsule.session` | session end | session start to session end |
+| `capsule.inference` | each inference | zero-length point |
+| `capsule.tool_call` | each completed tool call | the call's measured `duration_ms` |
+| `capsule.shell` | each completed shell command | the command's measured `duration_ms` |
+| `capsule.compaction` | each compaction | zero-length point |
+
+`capsule.inference` and `capsule.compaction` are points rather than intervals
+because the lifecycle events behind them carry no duration on the wire. They
+appear in Tempo at the instant they were recorded, with no width — read them as
+markers, not as latency.
+
+`capsule.tool_call` and `capsule.shell` are emitted only for the post-call
+observation dispatch. The decision-point dispatch, which fires before the call
+runs, produces no span.
+
 ## Configuration
 
 Declare in your capsule `murmur.yaml`:
@@ -13,7 +35,7 @@ Declare in your capsule `murmur.yaml`:
 ```yaml
 artifacts:
   - name: murmur-hook-grafana
-    version: 0.5.0
+    version: 0.6.0
     runtime: hook
     capabilities:
       network:
