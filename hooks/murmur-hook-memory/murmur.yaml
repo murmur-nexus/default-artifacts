@@ -1,5 +1,5 @@
 name: murmur-hook-memory
-version: 0.6.0
+version: 0.7.0
 runtime: hook
 binding: on-task-start
 execution_mode: blocking
