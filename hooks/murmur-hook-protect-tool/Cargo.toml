@@ -1,0 +1,15 @@
+[package]
+name = "murmur-hook-protect-tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wit-bindgen.workspace = true
+# The config parser, glob matcher and decision functions, shared with the other
+# half of this policy. It has no native-only dependencies, so it cross-compiles
+# to wasm32-wasip2; every decision this hook makes is host-tested there.
+murmur-path-policy = { path = "../../libs/murmur-path-policy" }

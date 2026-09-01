@@ -1,0 +1,9 @@
+name: murmur-hook-protect-tool
+version: 0.1.0
+runtime: hook
+binding: on-tool-call
+execution_mode: blocking
+commit_policy: deny
+description: "Refuses a tool call that would write a protected path, naming the path and the pattern that refused it."
+requires_files:
+  - murmur_hook_protect_tool.wasm

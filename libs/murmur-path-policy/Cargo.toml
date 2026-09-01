@@ -1,0 +1,21 @@
+[package]
+name = "murmur-path-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Internal-only shared library: the protected-path config parser, the hand-rolled
+# glob matcher, the tool-input target extractor and the shell write-form
+# recognizer, shared by murmur-hook-protect-tool and murmur-hook-protect-shell so
+# the two halves of one policy cannot drift apart. Every item is `cfg`-free, so
+# `cargo test` on the host exercises the whole decision path — a policy hook whose
+# logic only compiles for wasm32 ships untested and can brick a capsule.
+# It depends on serde_json alone, so it cross-compiles to wasm32-wasip2 cleanly.
+# NOT a publishable artifact — never listed in artifacts.toml.
+
+[lib]
+name = "murmur_path_policy"
+path = "src/lib.rs"
+
+[dependencies]
+serde_json.workspace = true

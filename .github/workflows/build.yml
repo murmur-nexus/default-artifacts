@@ -86,6 +86,8 @@ jobs:
           - { name: murmur-hook-eval,           path: hooks/murmur-hook-eval             }
           - { name: murmur-hook-grafana,        path: hooks/murmur-hook-grafana          }
           - { name: murmur-hook-memory,         path: hooks/murmur-hook-memory           }
+          - { name: murmur-hook-protect-shell,  path: hooks/murmur-hook-protect-shell    }
+          - { name: murmur-hook-protect-tool,   path: hooks/murmur-hook-protect-tool     }
           - { name: murmur-hook-regression-verifier, path: hooks/murmur-hook-regression-verifier }
           - { name: murmur-hook-shell-desc,     path: hooks/murmur-hook-shell-desc       }
           - { name: murmur-tool-request-input,  path: tools/murmur-tool-request-input    }

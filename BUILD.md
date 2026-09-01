@@ -150,6 +150,7 @@ matrix entry moving, fails CI rather than a release.
 |---|---|---|
 | `libs/murmur-test-parse` | The four test-runner output parsers plus format auto-detection | `murmur-hook-regression-verifier`, `murmur-tool-test-report` |
 | `libs/murmur-hook-transcript` | The host's tool-result envelope marker and the readers that turn a lifecycle `message`'s `content` into driver-safe text | `murmur-hook-compact`, `murmur-hook-memory` |
+| `libs/murmur-path-policy` | The protected-path config parser, the hand-rolled glob matcher, the tool-input write-target extractor and the shell write-form recognizer | `murmur-hook-protect-tool`, `murmur-hook-protect-shell` |
 
 ## Version management
 

@@ -1,0 +1,9 @@
+name: murmur-hook-protect-shell
+version: 0.1.0
+runtime: hook
+binding: on-shell
+execution_mode: blocking
+commit_policy: deny
+description: "Refuses a shell call whose recognized write form targets a protected path, naming the path, the form and the pattern that refused it."
+requires_files:
+  - murmur_hook_protect_shell.wasm
