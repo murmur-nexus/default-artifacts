@@ -37,7 +37,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, Mutex, Once},
+    sync::{Arc, Mutex, Once, OnceLock},
     thread,
 };
 
@@ -438,9 +438,63 @@ fn end_turn_response(text: &str) -> String {
 fn corpus_response(requests: &[Value], tool_id: &str) -> Value {
     let block = find_tool_result(requests, tool_id)
         .unwrap_or_else(|| panic!("no tool_result posted for {tool_id}"));
-    let text = extract_result_text(&block);
+    let text = unfence(&extract_result_text(&block), corpus_fence_source());
     serde_json::from_str(&text)
         .unwrap_or_else(|err| panic!("{tool_id} returned text that is not JSON ({err}): {text}"))
+}
+
+/// The closing marker of the runtime's untrusted fence, in full.
+///
+/// The runtime wraps every tool result it hands the model between
+/// `<untrusted-content source=tool:…>` and this, so what a driver serialises into a `tool_result`
+/// block is the fence, not the tool's own bytes. Mirrors `FENCE_CLOSE` in murmur's
+/// `crates/capsule-runtime/src/fence.rs`.
+const FENCE_CLOSE: &str = "</untrusted-content>";
+
+/// The `source=` name the runtime gives this tool's results.
+///
+/// Read from the same `murmur.yaml` [`pack`] packs rather than written out here, for the reason
+/// the version is: a literal would name what this test expects and not what the artifact is
+/// called, and the two would agree only until the artifact was renamed.
+fn corpus_fence_source() -> &'static str {
+    static SOURCE: OnceLock<String> = OnceLock::new();
+    SOURCE.get_or_init(|| {
+        let path = workspace_root().join(TOOL_CRATE).join("murmur.yaml");
+        let manifest = fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("reading {}: {err}", path.display()));
+        format!("tool:{}", manifest_field(&manifest, "name"))
+    })
+}
+
+/// Return what the untrusted fence wrapped, requiring that there was one.
+///
+/// The fence is asserted, not tolerated. Were it stripped only when present, this suite would go
+/// on passing against a runtime that had stopped fencing tool output altogether: the JSON inside
+/// would still parse, every assertion below would still hold, and the regression would ship with
+/// four green tests over it. A missing opening marker, or one naming another source, fails here.
+///
+/// Only the *final* closing marker is stripped. The runtime rewrites any closer found inside the
+/// content to `<!MURMUR-NEUTRALISED!/untrusted-content>`, so a fenced block closes exactly once,
+/// at its own last marker — but matching the first closer instead would truncate the body of a
+/// hostile payload that spelled one, and pass a half-record to `serde_json` as if that were what
+/// the tool returned.
+fn unfence(text: &str, expected_source: &str) -> String {
+    let expected_open = format!("<untrusted-content source={expected_source}>");
+    let Some((open, body)) = text.split_once('\n') else {
+        panic!(
+            "a tool result must arrive wrapped in the runtime's untrusted fence, opening with \
+             `{expected_open}` on its own line; got a single line:\n{text}"
+        )
+    };
+    assert_eq!(
+        open, expected_open,
+        "a tool result must open with the untrusted fence naming this tool; got:\n{text}"
+    );
+    body.strip_suffix(&format!("\n{FENCE_CLOSE}"))
+        .unwrap_or_else(|| {
+            panic!("a fenced tool result must end at `{FENCE_CLOSE}`; got:\n{text}")
+        })
+        .to_string()
 }
 
 /// The `tool_result` block a scripted server saw posted back for one `tool_use` id.
