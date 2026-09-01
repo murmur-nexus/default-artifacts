@@ -79,7 +79,10 @@ pub fn shell_span(turn: u32, command: &str, outcome: Option<&ShellOutcome>) -> O
         ("turn".to_string(), json!(turn)),
         ("command".to_string(), json!(cmd)),
         ("exit_code".to_string(), json!(outcome.exit_code)),
-        ("duration_ms".to_string(), json!(outcome.duration_ms.to_string())),
+        (
+            "duration_ms".to_string(),
+            json!(outcome.duration_ms.to_string()),
+        ),
         ("stdout".to_string(), json!(stdout)),
     ];
     if !outcome.stderr.is_empty() {
@@ -109,8 +112,14 @@ pub fn tool_span(
         ("turn".to_string(), json!(turn)),
         ("tool_name".to_string(), json!(tool_name)),
         ("input_bytes".to_string(), json!(input_bytes.to_string())),
-        ("output_bytes".to_string(), json!(outcome.output_bytes.to_string())),
-        ("duration_ms".to_string(), json!(outcome.duration_ms.to_string())),
+        (
+            "output_bytes".to_string(),
+            json!(outcome.output_bytes.to_string()),
+        ),
+        (
+            "duration_ms".to_string(),
+            json!(outcome.duration_ms.to_string()),
+        ),
         ("status".to_string(), json!(outcome.status)),
     ];
     Some(SpanShape {
@@ -120,11 +129,28 @@ pub fn tool_span(
     })
 }
 
+/// The `(start, end)` nanosecond window of a span that ended at `end_ns` after running
+/// for `duration_ms`.
+///
+/// A dispatch that carries no measured duration passes `0` and gets a zero-length point
+/// span: `inference-event` and `compaction-event` have no duration field on the wire, and
+/// a nominal figure in Tempo reads as a latency nobody measured.
+///
+/// Both arithmetic steps saturate. `duration_ms` arrives from the host as a `u64` of
+/// milliseconds; a value above `u64::MAX / 1_000_000` would otherwise wrap the multiply
+/// and place the span's start *after* its end.
+pub fn span_window(end_ns: u64, duration_ms: u64) -> (u64, u64) {
+    (
+        end_ns.saturating_sub(duration_ms.saturating_mul(1_000_000)),
+        end_ns,
+    )
+}
+
 #[cfg(target_arch = "wasm32")]
 mod wasm_hook {
     use std::cell::RefCell;
 
-    use super::{shell_span, tool_span, ShellOutcome, ToolOutcome};
+    use super::{shell_span, span_window, tool_span, ShellOutcome, ToolOutcome};
     use utils::{parse_endpoint, send_http_post, session_id_to_trace_id, unix_now_ns};
 
     mod utils {
@@ -159,7 +185,12 @@ mod wasm_hook {
             Ok((host, port, path_prefix))
         }
 
-        pub fn send_http_post(host: &str, port: u16, path: &str, body: &[u8]) -> Result<(), String> {
+        pub fn send_http_post(
+            host: &str,
+            port: u16,
+            path: &str,
+            body: &[u8],
+        ) -> Result<(), String> {
             let addr = format!("{host}:{port}");
             let mut stream =
                 TcpStream::connect(&addr).map_err(|e| format!("connect to {addr} failed: {e}"))?;
@@ -307,12 +338,18 @@ mod wasm_hook {
                 let Some(state) = guard.as_mut() else {
                     return;
                 };
-                let end_ns = unix_now_ns();
-                let start_ns = end_ns.saturating_sub(1_000_000);
+                // `inference-event` carries no duration, so this is a point span.
+                let (start_ns, end_ns) = span_window(unix_now_ns(), 0);
                 let mut attrs = vec![
                     ("turn".to_string(), json!(event.turn)),
-                    ("gen_ai.usage.input_tokens".to_string(), json!(event.input_tokens.to_string())),
-                    ("gen_ai.usage.output_tokens".to_string(), json!(event.output_tokens.to_string())),
+                    (
+                        "gen_ai.usage.input_tokens".to_string(),
+                        json!(event.input_tokens.to_string()),
+                    ),
+                    (
+                        "gen_ai.usage.output_tokens".to_string(),
+                        json!(event.output_tokens.to_string()),
+                    ),
                     ("decision".to_string(), json!(event.decision)),
                 ];
                 if let Some(name) = event.tool_name {
@@ -344,9 +381,12 @@ mod wasm_hook {
                 duration_ms: o.duration_ms,
                 status: o.status,
             });
-            let Some(shape) =
-                tool_span(event.turn, &event.tool_name, event.input_bytes, outcome.as_ref())
-            else {
+            let Some(shape) = tool_span(
+                event.turn,
+                &event.tool_name,
+                event.input_bytes,
+                outcome.as_ref(),
+            ) else {
                 return Ok(HookOutput::None);
             };
             STATE.with(|s| {
@@ -354,8 +394,7 @@ mod wasm_hook {
                 let Some(state) = guard.as_mut() else {
                     return;
                 };
-                let end_ns = unix_now_ns();
-                let start_ns = end_ns.saturating_sub(shape.duration_ms * 1_000_000);
+                let (start_ns, end_ns) = span_window(unix_now_ns(), shape.duration_ms);
                 push_span(
                     state,
                     "capsule.tool_call",
@@ -392,8 +431,7 @@ mod wasm_hook {
                 let Some(state) = guard.as_mut() else {
                     return;
                 };
-                let end_ns = unix_now_ns();
-                let start_ns = end_ns.saturating_sub(shape.duration_ms * 1_000_000);
+                let (start_ns, end_ns) = span_window(unix_now_ns(), shape.duration_ms);
                 push_span(
                     state,
                     "capsule.shell",
@@ -414,10 +452,13 @@ mod wasm_hook {
                 let Some(state) = guard.as_mut() else {
                     return;
                 };
-                let end_ns = unix_now_ns();
-                let start_ns = end_ns.saturating_sub(1_000_000);
+                // `compaction-event` carries no duration, so this is a point span.
+                let (start_ns, end_ns) = span_window(unix_now_ns(), 0);
                 let attrs = vec![
-                    ("session_tokens".to_string(), json!(event.session_tokens.to_string())),
+                    (
+                        "session_tokens".to_string(),
+                        json!(event.session_tokens.to_string()),
+                    ),
                     ("threshold".to_string(), json!(event.threshold)),
                     ("message_count".to_string(), json!(event.messages.len())),
                 ];
@@ -451,8 +492,14 @@ mod wasm_hook {
                     ("exit_status".to_string(), json!(event.exit_status)),
                     ("murmur.session_id".to_string(), json!(state.session_id)),
                     ("total_turns".to_string(), json!(event.total_turns)),
-                    ("total_input_tokens".to_string(), json!(event.total_input_tokens.to_string())),
-                    ("total_output_tokens".to_string(), json!(event.total_output_tokens.to_string())),
+                    (
+                        "total_input_tokens".to_string(),
+                        json!(event.total_input_tokens.to_string()),
+                    ),
+                    (
+                        "total_output_tokens".to_string(),
+                        json!(event.total_output_tokens.to_string()),
+                    ),
                 ],
                 ok,
             }];
@@ -462,7 +509,8 @@ mod wasm_hook {
             if let Ok(formation_id) = std::env::var("MURMUR_FORMATION_ID") {
                 if !formation_id.is_empty() {
                     if let Some(root) = all_spans.first_mut() {
-                        root.attributes.push(("murmur.formation_id".to_string(), json!(formation_id)));
+                        root.attributes
+                            .push(("murmur.formation_id".to_string(), json!(formation_id)));
                     }
                 }
             }
@@ -661,6 +709,25 @@ mod tests {
     fn decision_point_only_call_yields_no_span() {
         assert!(shell_span(1, "rm -rf /", None).is_none());
         assert!(tool_span(1, "editor", 64, None).is_none());
+    }
+
+    /// A `duration_ms` wide enough to overflow the nanosecond multiply saturates the
+    /// window to a start of zero instead of wrapping the span's start past its end.
+    #[test]
+    fn span_window_saturates_instead_of_wrapping() {
+        let end_ns = 1_700_000_000_000_000_000u64;
+        let (start_ns, returned_end) = span_window(end_ns, u64::MAX);
+        assert_eq!(start_ns, 0);
+        assert_eq!(returned_end, end_ns);
+        assert!(start_ns <= returned_end);
+    }
+
+    /// `inference-event` and `compaction-event` carry no duration, so their spans are
+    /// points in time rather than a nominal millisecond nobody measured.
+    #[test]
+    fn span_window_of_a_durationless_dispatch_is_a_point() {
+        let end_ns = 1_700_000_000_000_000_000u64;
+        assert_eq!(span_window(end_ns, 0), (end_ns, end_ns));
     }
 
     #[test]
