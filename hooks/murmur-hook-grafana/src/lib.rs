@@ -53,6 +53,16 @@ pub struct SpanShape {
     pub duration_ms: u64,
 }
 
+/// Ceiling on the `command` attribute. The host already truncates `shell-event.command`
+/// to this many characters; re-applying it here keeps the attribute bounded whatever
+/// the caller passes.
+const COMMAND_CHARS: usize = 200;
+
+/// Ceiling on the `stdout` and `stderr` attributes. Span attributes carry a sample of
+/// the output, not the whole of it — a build that prints megabytes must not turn into a
+/// megabyte span.
+const OUTPUT_CHARS: usize = 4096;
+
 /// Shape the span for one shell dispatch, or `None` when there is no span to emit.
 ///
 /// `outcome` is `None` at the decision point — the dispatch at which the command has
@@ -63,8 +73,8 @@ pub struct SpanShape {
 /// never run at all.
 pub fn shell_span(turn: u32, command: &str, outcome: Option<&ShellOutcome>) -> Option<SpanShape> {
     let outcome = outcome?;
-    let cmd: String = command.chars().take(200).collect();
-    let stdout: String = outcome.stdout.chars().take(4096).collect();
+    let cmd: String = command.chars().take(COMMAND_CHARS).collect();
+    let stdout: String = outcome.stdout.chars().take(OUTPUT_CHARS).collect();
     let mut attributes = vec![
         ("turn".to_string(), json!(turn)),
         ("command".to_string(), json!(cmd)),
@@ -73,7 +83,7 @@ pub fn shell_span(turn: u32, command: &str, outcome: Option<&ShellOutcome>) -> O
         ("stdout".to_string(), json!(stdout)),
     ];
     if !outcome.stderr.is_empty() {
-        let stderr: String = outcome.stderr.chars().take(4096).collect();
+        let stderr: String = outcome.stderr.chars().take(OUTPUT_CHARS).collect();
         attributes.push(("stderr".to_string(), json!(stderr)));
     }
     Some(SpanShape {

@@ -199,7 +199,7 @@ same murmur commit — both changes in one commit.
 Every published `.mur.zip` embeds the version of `murmur:hook/lifecycle` its
 component was built against. That embedded version is the string the host
 resolves an instantiation against, and it is a separate axis from the
-artifact's own release version in `artifacts.toml` — a hook at release `0.3.0`
+artifact's own release version in `artifacts.toml` — a hook at release `0.4.0`
 can, and does, export interface `@0.7.0`.
 
 All eight `hooks/*` artifacts export `murmur:hook/lifecycle@0.7.0`, matching

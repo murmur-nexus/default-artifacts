@@ -46,7 +46,7 @@ context:
 
 artifacts:
   - name: murmur-hook-memory
-    version: 0.5.0
+    version: 0.6.0
     runtime: hook
     capabilities:
       conversation:
