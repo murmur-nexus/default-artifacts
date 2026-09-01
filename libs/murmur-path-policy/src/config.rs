@@ -110,8 +110,9 @@ impl fmt::Display for ConfigError {
     }
 }
 
-/// The JSON type of a value, phrased to drop into "found ...".
-fn json_type(value: &Value) -> &'static str {
+/// The JSON type of a value, phrased to drop into "found ..." and into
+/// "is ... rather than a string".
+pub(crate) fn json_type(value: &Value) -> &'static str {
     match value {
         Value::Null => "null",
         Value::Bool(_) => "a boolean",

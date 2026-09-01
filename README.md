@@ -27,6 +27,8 @@ WASM components (`runtime: hook`) that attach to lifecycle events. Each hook dec
 | `murmur-hook-diff-summary` | `hooks/murmur-hook-diff-summary/` | *(all events)* | blocking | none | Snapshots files before each editor tool call and emits a structured unified-diff summary at end of turn |
 | `murmur-hook-memory` | `hooks/murmur-hook-memory/` | `on-task-start` | blocking | seed-context | Seeds a task with the relevant part of the conversation that came before it, read from the runtime's durable conversation record |
 | `murmur-hook-shell-desc` | `hooks/murmur-hook-shell-desc/` | `on-stage` | blocking | write-manifests | Returns enriched tool manifests for common shell binaries at staging time |
+| `murmur-hook-protect-tool` | `hooks/murmur-hook-protect-tool/` | `on-tool-call` | blocking | deny | Refuses a tool call that would write a protected path, naming the path and the pattern that refused it |
+| `murmur-hook-protect-shell` | `hooks/murmur-hook-protect-shell/` | `on-shell` | blocking | deny | Refuses a shell call whose recognized write form targets a protected path, naming the path, the form and the pattern |
 | `murmur-hook-eval` | `hooks/murmur-hook-eval/` | *(all events)* | async | none | Scores sessions against configured scorers and writes `eval.jsonl` |
 | `murmur-hook-grafana` | `hooks/murmur-hook-grafana/` | *(all events)* | async | none | Exports OTel spans to a Grafana Tempo OTLP/HTTP endpoint |
 

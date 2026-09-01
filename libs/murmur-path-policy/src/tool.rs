@@ -7,7 +7,7 @@
 
 use serde_json::Value;
 
-use crate::config::{PolicyConfig, ToolRule};
+use crate::config::{json_type, PolicyConfig, ToolRule};
 
 /// One write target a tool call names.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,18 +36,6 @@ pub enum ToolTargets {
     /// The write targets the rule found. May be empty when the input names none of
     /// the rule's `path_keys`.
     Targets(Vec<ToolWriteTarget>),
-}
-
-/// The JSON type of a value, phrased to drop into "is ... rather than a string".
-fn json_type(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "a boolean",
-        Value::Number(_) => "a number",
-        Value::String(_) => "a string",
-        Value::Array(_) => "a list",
-        Value::Object(_) => "an object",
-    }
 }
 
 /// The first rule whose `match` covers this tool name.
