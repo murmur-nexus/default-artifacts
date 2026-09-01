@@ -77,7 +77,7 @@ version = "0.2.0"
 [[artifact]]
 name = "murmur-tool-create"
 path = "tools/murmur-tool-create"
-version = "0.2.0"
+version = "0.3.0"
 
 [[artifact]]
 name = "murmur-tool-editor"

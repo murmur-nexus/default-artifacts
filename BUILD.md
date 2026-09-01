@@ -230,6 +230,31 @@ a locally built component, `./scripts/validate-component.sh` checks the same
 thing across every artifact at once, reading the expected version out of
 `wit/hook/deps/murmur-hook/lifecycle.wit` rather than a value written down here.
 
+## Where a hook's logic lives
+
+A hook crate is three layers:
+
+- a `cfg`-independent module at the crate root holding the pure decision logic —
+  plain mirrors of the WIT records and the functions that act on them;
+- a `#[cfg(target_arch = "wasm32")]` adapter that converts a WIT record into
+  those mirrors, calls the logic, and converts the result back into a
+  `HookOutput` — and holds no branch, threshold or string the runtime acts on;
+- a `#[cfg(test)] mod tests` at the crate root, which therefore runs on the host.
+
+Code behind `#[cfg(target_arch = "wasm32")]` does not exist for the host target.
+A crate written entirely behind that gate compiles to nothing when cargo builds
+it for the host, so `cargo test --workspace` reports a green run having executed
+none of its lines — and nothing in CI distinguishes "0 tests passed" from
+"20 tests passed". Splitting the logic out of the gate is what makes the crate
+testable at all; keeping the adapter free of decisions is what keeps the tests
+worth reading.
+
+`murmur-hook-compact`, `murmur-hook-memory` and `murmur-hook-regression-verifier`
+are the reference implementations. `murmur-tool-create`'s `hook` arm scaffolds
+this shape, so a new hook starts from it rather than needing to know it: the
+generated crate ships a `logic` module, a converting adapter and one passing
+test, and deleting that test is a deliberate edit visible in a diff.
+
 ## Running tests
 
 ```bash
@@ -264,4 +289,14 @@ resolves `mur` the same way, and fails rather than skipping when it finds none:
 
 ```bash
 MUR_BIN=/path/to/mur cargo test -p murmur-tool-create --test mur_manifest_shape -- --ignored
+```
+
+`tools/murmur-tool-create/tests/scaffolded_hook_tests.rs` is `#[ignore]`d because
+it runs a child `cargo test` inside a freshly scaffolded hook, which needs a
+cargo registry able to resolve that crate's `wit-bindgen` and `tempfile` pins. It
+asserts the child reports `1 passed` rather than `0 passed` — the assertion that
+a scaffolded hook is testable the moment it is generated:
+
+```bash
+cargo test -p murmur-tool-create --test scaffolded_hook_tests -- --ignored
 ```

@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-01T15:04:10Z",
+  "updated_at": "2026-09-01T15:31:38Z",
   "artifacts": [
     {
       "name": "murmur-driver-anthropic",
@@ -178,7 +178,7 @@
     },
     {
       "name": "murmur-tool-create",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "runtime": "tool",
       "description": "Scaffolds a new tool artifact directory with murmur.yaml, stub implementation, and README.md.",
       "tags": [
