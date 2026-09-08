@@ -21,6 +21,7 @@ members = [
   "tools/murmur-tool-git",
   "tools/murmur-tool-test-report",
   "tools/murmur-tool-registry-search",
+  "tools/murmur-tool-report",
   "tools/murmur-tool-request-input",
   "tools/murmur-tool-git/validate",
 ]
