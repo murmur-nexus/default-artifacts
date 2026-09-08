@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-01T22:12:34Z",
+  "updated_at": "2026-09-08T05:14:58Z",
   "artifacts": [
     {
       "name": "murmur-driver-anthropic",
@@ -272,6 +272,20 @@
         "tool",
         "request",
         "input"
+      ],
+      "platforms": [
+        "darwin-aarch64",
+        "linux-x86_64"
+      ]
+    },
+    {
+      "name": "murmur-tool-report",
+      "version": "0.1.0",
+      "runtime": "tool",
+      "description": "State this capsule's own conclusion where a consumer can find it.",
+      "tags": [
+        "tool",
+        "report"
       ],
       "platforms": [
         "darwin-aarch64",

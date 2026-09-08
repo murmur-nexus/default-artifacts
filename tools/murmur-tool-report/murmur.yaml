@@ -1,0 +1,131 @@
+name: murmur-tool-report
+version: 0.1.0
+runtime: tool
+implementation: wasm
+description: |
+  State this capsule's own conclusion where a consumer can find it. Two operations, one
+  file, no read-back.
+
+  | op       | inputs                                       | terminal |
+  |----------|----------------------------------------------|----------|
+  | report   | outcome, summary, deliverables?, notes_for?   | yes      |
+  | progress | note                                          | no       |
+
+  Both write `state/report.json` inside the durable store the capsule opens with
+  `capabilities.state`. Nothing else is written, no other file is read, and the report does
+  not appear in the trace — the consumer reads the file.
+
+  Call `report` once, when you are done, with the verdict you would give if asked. Call
+  `progress` while work is advancing, as often as is useful; it concludes nothing.
+  Reporting `blocked` or `failed` is a real answer and is preferred over a `success` you do
+  not believe: an outcome is routed by the consumer, not by you.
+
+  `outcome` is exactly one of success, rejected, blocked, failed. The four are a fixed
+  vocabulary so a caller that has never seen this capsule can route on them; this tool
+  validates the value and acts on none of them.
+
+  `deliverables` are references, never payloads. Each is exactly {name, kind, uri} — no
+  other key — where `uri` is a workspace path or a URI. A deliverable carrying content,
+  body, data, a data: URI, a newline or an over-long value is refused with
+  `inline_payload_refused` and nothing at all is written. Write the bytes to the workspace
+  and name the path.
+
+  `notes_for` entries are exactly {stage, body}. `stage` is an opaque operator-defined
+  string; this tool never interprets it.
+
+  The report file makes three states distinguishable, which is the point: absent means the
+  capsule never reported; present with `concluded: false` means it filed progress notes and
+  never concluded; present with `concluded: true` means its verdict is in `outcome`. The
+  first two are never success. A second `report` wins and bumps `revision`, and the verdict
+  it replaced is pushed onto `superseded` in the same file rather than lost.
+
+  The shape this capsule may emit is the `config:` block on this tool's entry in the
+  capsule's own murmur.yaml, delivered by the runtime and out of the agent's reach. The
+  block is optional: with none, any non-empty kind and any non-empty stage is accepted.
+  With one, the declared vocabularies are closed.
+
+      artifacts:
+        - name: murmur-tool-report
+          runtime: tool
+          capabilities:
+            state: {}
+          config:
+            config_version: 1
+            require_report: true
+            deliverables:
+              kinds: [diff, dataset, report]
+            notes_for:
+              stages: [review, deploy]
+
+  `require_report` is the operator's declaration that a report is expected, readable by a
+  consumer holding this manifest. This tool type-checks it and branches on it nowhere;
+  enforcing it is the consumer's job.
+
+  Without the state grant every operation returns `state_unavailable`; the tool never falls
+  back to the workdir. All responses: {ok: bool, operation: string, concluded: bool,
+  outcome: string|null, revision: int, superseded_count: int, progress_count: int,
+  report_path: string, error_kind?: string, message?: string}. error_kind is one of
+  invalid_input, unknown_operation, unknown_outcome, inline_payload_refused,
+  undeclared_kind, undeclared_stage, state_unavailable, config_invalid, io_error.
+
+input_schema:
+  type: object
+  properties:
+    operation:
+      type: string
+      enum:
+        - report
+        - progress
+      description: "report files this capsule's terminal verdict; progress records that work is advancing and concludes nothing."
+    outcome:
+      type: string
+      enum:
+        - success
+        - rejected
+        - blocked
+        - failed
+      description: "This capsule's verdict. Required for report. What each value means to the consumer is their configuration, not this tool's."
+    summary:
+      type: string
+      description: "The conclusion in your own words, for a person who did not watch the run. Required and non-empty for report."
+    deliverables:
+      type: array
+      description: "What this run produced, held by reference. Optional for report; omit it when there is nothing to point at."
+      items:
+        type: object
+        properties:
+          name:
+            type: string
+            description: "Short identifier, unique within one report."
+          kind:
+            type: string
+            description: "Operator-defined kind tag. Closed to the operator's declared kinds when they declared any."
+          uri:
+            type: string
+            description: "Workspace path or URI. Never inline content — a data: URI, a newline or an over-long value is refused."
+        required: [name, kind, uri]
+        additionalProperties: false
+    notes_for:
+      type: array
+      description: "Things a downstream stage should know. Optional for report."
+      items:
+        type: object
+        properties:
+          stage:
+            type: string
+            description: "Opaque operator-defined stage name. Closed to the operator's declared stages when they declared any."
+          body:
+            type: string
+            description: "What that stage should know."
+        required: [stage, body]
+        additionalProperties: false
+    note:
+      type: string
+      description: "One line of progress. Required for progress."
+  required:
+    - operation
+
+capabilities:
+  state: {}
+requires_files:
+  - murmur_tool_report.wasm

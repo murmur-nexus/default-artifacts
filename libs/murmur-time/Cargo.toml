@@ -1,0 +1,15 @@
+[package]
+name = "murmur-time"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Internal-only shared library: RFC 3339 UTC timestamps for artifacts that stamp a
+# time into a record they write, extracted verbatim from murmur-tool-corpus so it and
+# murmur-tool-report can share one copy. Depends on nothing but `std`, so it
+# cross-compiles to wasm32-wasip2 cleanly. NOT a publishable artifact — never listed
+# in artifacts.toml.
+
+[lib]
+name = "murmur_time"
+path = "src/lib.rs"

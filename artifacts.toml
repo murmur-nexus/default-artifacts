@@ -110,6 +110,11 @@ path = "tools/murmur-tool-request-input"
 version = "0.1.0"
 
 [[artifact]]
+name = "murmur-tool-report"
+path = "tools/murmur-tool-report"
+version = "0.1.0"
+
+[[artifact]]
 name = "murmur-tool-registry-search"
 path = "tools/murmur-tool-registry-search"
 version = "0.1.0"

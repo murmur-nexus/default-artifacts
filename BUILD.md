@@ -17,7 +17,7 @@ This repository contains the default Murmur artifacts: inference drivers, hooks,
 |---|---|---|
 | `drivers/` | WASM (`wasm32-wasip2`) | `.wasm` + `murmur.yaml` → `.mur.zip` |
 | `hooks/` | WASM (`wasm32-wasip2`) | `.wasm` + `murmur.yaml` → `.mur.zip` |
-| `tools/murmur-tool-request-input/`, `murmur-tool-create/`, `murmur-tool-editor/`, `murmur-tool-corpus/` | WASM (`wasm32-wasip2`) | `.wasm` + `murmur.yaml` → `.mur.zip` |
+| `tools/murmur-tool-request-input/`, `murmur-tool-create/`, `murmur-tool-editor/`, `murmur-tool-corpus/`, `murmur-tool-report/` | WASM (`wasm32-wasip2`) | `.wasm` + `murmur.yaml` → `.mur.zip` |
 | `tools/murmur-tool-git/`, `murmur-tool-registry-search/`, `murmur-tool-code-graph/`, `murmur-tool-test-report/`, `murmur-tool-code-coverage/` | Native binary | `bin/<name>` + `murmur.yaml` → `.mur.zip` |
 | `skills/` | Docs only | `skill.md` + `murmur.yaml` → `.mur.zip` |
 
@@ -150,6 +150,7 @@ matrix entry moving, fails CI rather than a release.
 |---|---|---|
 | `libs/murmur-test-parse` | The four test-runner output parsers plus format auto-detection | `murmur-hook-regression-verifier`, `murmur-tool-test-report` |
 | `libs/murmur-hook-transcript` | The host's tool-result envelope marker and the readers that turn a lifecycle `message`'s `content` into driver-safe text | `murmur-hook-compact`, `murmur-hook-memory` |
+| `libs/murmur-time` | RFC 3339 UTC timestamp rendering (millisecond precision, `Z` suffix) for artifacts that stamp a time into a record they write | `murmur-tool-corpus`, `murmur-tool-report` |
 
 ## Version management
 

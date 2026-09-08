@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 serde.workspace = true
 serde_json.workspace = true
 wit-bindgen.workspace = true
+murmur-time = { path = "../../libs/murmur-time" }
 
 # Host-target-only. Used solely by tests/wasm_component.rs to instantiate the compiled
 # wasm32-wasip2 component with two preopens (workdir at `.`, durable state at `state`)
