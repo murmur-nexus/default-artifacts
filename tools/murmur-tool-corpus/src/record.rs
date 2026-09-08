@@ -1,9 +1,11 @@
 //! The record written to the corpus, and the text a retrieval layer is allowed to see.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// Re-exported so a record's `created_at` and its formatter stay one import apart. The
+/// rendering lives in `libs/murmur-time`, shared with `murmur-tool-report`.
+pub use murmur_time::{format_rfc3339_millis, now_rfc3339_millis};
 
 /// One line of `corpus.jsonl`.
 ///
@@ -72,49 +74,6 @@ fn collect_strings(value: &Value, out: &mut Vec<String>) {
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
-}
-
-/// The current wall-clock instant as RFC 3339 UTC with millisecond precision.
-///
-/// `SystemTime::now()` resolves through `wasi:clocks/wall-clock` in a `wasm32-wasip2`
-/// guest, so this works identically on the host and in the component. Formatted by hand;
-/// a date-time crate would be a dependency bought for one `format!`.
-pub fn now_rfc3339_millis() -> String {
-    let since_epoch = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    format_rfc3339_millis(since_epoch.as_millis() as i64)
-}
-
-/// RFC 3339 UTC rendering of a Unix millisecond timestamp.
-pub fn format_rfc3339_millis(unix_ms: i64) -> String {
-    let days = unix_ms.div_euclid(86_400_000);
-    let ms_of_day = unix_ms.rem_euclid(86_400_000);
-    let (year, month, day) = civil_from_days(days);
-    let seconds_of_day = ms_of_day / 1000;
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
-        seconds_of_day / 3600,
-        (seconds_of_day / 60) % 60,
-        seconds_of_day % 60,
-        ms_of_day % 1000
-    )
-}
-
-/// Days since the Unix epoch to a proleptic Gregorian `(year, month, day)`, via Howard
-/// Hinnant's `civil_from_days`.
-fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
-    let z = days_since_epoch + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let day_of_era = (z - era * 146_097) as u64;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era as i64 + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let mp = (5 * day_of_year + 2) / 153;
-    let day = (day_of_year - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
 #[cfg(test)]

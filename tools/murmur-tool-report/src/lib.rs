@@ -27,6 +27,20 @@ pub mod ops;
 pub mod report;
 pub mod store;
 
+/// The JSON type of a value, named as an operator or an agent would recognise it. Every
+/// "must be a string, got …" message in the crate reads from this one list, so a caller
+/// reading a config refusal and one reading a call refusal see the same words.
+pub(crate) fn json_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
 /// Guest path of the durable-state directory the report lives in, granted by the capsule's
 /// `capabilities.state`. This is the only place the path is written down; every module
 /// below takes the directory as a parameter.

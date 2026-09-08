@@ -1352,6 +1352,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "murmur-time"
+version = "0.10.0"
+
+[[package]]
 name = "murmur-tool-code-coverage"
 version = "0.10.0"
 dependencies = [
@@ -1378,6 +1382,7 @@ dependencies = [
 name = "murmur-tool-corpus"
 version = "0.10.0"
 dependencies = [
+ "murmur-time",
  "serde",
  "serde_json",
  "tempfile",
@@ -1440,6 +1445,7 @@ dependencies = [
 name = "murmur-tool-report"
 version = "0.10.0"
 dependencies = [
+ "murmur-time",
  "serde",
  "serde_json",
  "wasmtime",

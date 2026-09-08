@@ -19,6 +19,8 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
+use crate::json_type_name;
+
 /// The only `config_version` this build understands.
 pub const SUPPORTED_CONFIG_VERSION: u64 = 1;
 
@@ -201,16 +203,6 @@ fn operator_error(key: &str, detail: &str) -> String {
     )
 }
 
-fn json_type_name(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
-}
 
 #[cfg(test)]
 mod tests {

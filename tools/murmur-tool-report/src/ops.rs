@@ -14,6 +14,7 @@ use std::path::Path;
 use serde_json::{json, Map, Value};
 
 use crate::config::{parse_config, ReportConfig};
+use crate::json_type_name;
 use crate::report::{now_rfc3339_millis, Deliverable, NoteFor, ReportDoc, RunIdentity};
 use crate::store::{Store, REPORT_FILE};
 
@@ -569,16 +570,5 @@ fn optional_array<'a>(
             kind::INVALID_INPUT,
             format!("\"{field}\" must be a list, got {}", json_type_name(other)),
         )),
-    }
-}
-
-fn json_type_name(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
     }
 }

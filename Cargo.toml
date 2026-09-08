@@ -13,6 +13,7 @@ members = [
   "hooks/murmur-hook-shell-desc",
   "libs/murmur-hook-transcript",
   "libs/murmur-test-parse",
+  "libs/murmur-time",
   "tools/murmur-tool-corpus",
   "tools/murmur-tool-create",
   "tools/murmur-tool-editor",
