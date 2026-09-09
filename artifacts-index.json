@@ -77,7 +77,7 @@
     },
     {
       "name": "murmur-hook-diff-summary",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "runtime": "hook",
       "description": "Snapshots files before each editor tool call and emits a structured unified-diff summary as an artifact event at end of turn.",
       "tags": [
