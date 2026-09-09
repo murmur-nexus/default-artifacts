@@ -24,7 +24,7 @@ WASM components (`runtime: hook`) that attach to lifecycle events. Each hook dec
 |---|---|---|---|---|---|
 | `murmur-hook-debug` | `hooks/murmur-hook-debug/` | *(all events)* | async | none | Writes a JSONL event log to `workdir/hook-debug.jsonl` |
 | `murmur-hook-compact` | `hooks/murmur-hook-compact/` | `on-compaction` | blocking | replace-context | Compacts conversation history when the session token threshold is reached |
-| `murmur-hook-diff-summary` | `hooks/murmur-hook-diff-summary/` | *(all events)* | blocking | none | Snapshots files before each editor tool call and emits a structured unified-diff summary at end of turn |
+| `murmur-hook-diff-summary` | `hooks/murmur-hook-diff-summary/` | *(all events)* | blocking | none | Snapshots files before each editor tool call and emits a structured unified-diff summary at end of turn; requires `murmur-tool-editor` 0.3.0 or later |
 | `murmur-hook-memory` | `hooks/murmur-hook-memory/` | `on-task-start` | blocking | seed-context | Seeds a task with the relevant part of the conversation that came before it, read from the runtime's durable conversation record |
 | `murmur-hook-shell-desc` | `hooks/murmur-hook-shell-desc/` | `on-stage` | blocking | write-manifests | Returns enriched tool manifests for common shell binaries at staging time |
 | `murmur-hook-eval` | `hooks/murmur-hook-eval/` | *(all events)* | async | none | Scores sessions against configured scorers and writes `eval.jsonl` |
@@ -42,7 +42,7 @@ binaries whose C dependencies (SQLite, tree-sitter, TLS) do not cross-compile to
 |---|---|---|---|
 | `murmur-tool-corpus` | `tools/murmur-tool-corpus/` | WASM | Append-only record store (`append`, `get`, `read_recent`, `search`, `verify`); requires a `capabilities.state` grant and a `config:` block on its manifest entry declaring the record types |
 | `murmur-tool-create` | `tools/murmur-tool-create/` | WASM | Scaffolds a new artifact directory (`murmur.yaml`, stub payload, README) for a `native` tool, a `wasm` tool, or a `hook` |
-| `murmur-tool-editor` | `tools/murmur-tool-editor/` | WASM | File read/write/patch operations (`read_file`, `write_file`, `replace_in_file`, `find_in_files`) |
+| `murmur-tool-editor` | `tools/murmur-tool-editor/` | WASM | File read/write/patch operations (`read_file`, `write_file`, `replace_in_file`, `find_in_files`); the writing operations take their target as `dest_path`, declared `format: murmur-destination` so a `capabilities.filesystem.read_only` grant is enforced against the declaration rather than guessed from property names |
 | `murmur-tool-report` | `tools/murmur-tool-report/` | WASM | The capsule states its own conclusion (`report`, `progress`) into `state/report.json`; requires a `capabilities.state` grant, and takes an optional `config:` block closing the deliverable-kind and note-stage vocabularies |
 | `murmur-tool-request-input` | `tools/murmur-tool-request-input/` | WASM | HITL pause gate — suspends the agent loop and waits for human input via `message/send` |
 | `murmur-tool-git` | `tools/murmur-tool-git/` | native | Git operations (clone, checkout, status, diff, commit, push, worktree, and more) |

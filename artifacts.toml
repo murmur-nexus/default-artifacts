@@ -42,7 +42,7 @@ version = "0.6.0"
 [[artifact]]
 name = "murmur-hook-diff-summary"
 path = "hooks/murmur-hook-diff-summary"
-version = "0.6.0"
+version = "0.7.0"
 
 [[artifact]]
 name = "murmur-hook-eval"
@@ -82,7 +82,7 @@ version = "0.3.0"
 [[artifact]]
 name = "murmur-tool-editor"
 path = "tools/murmur-tool-editor"
-version = "0.2.0"
+version = "0.3.0"
 
 [[artifact]]
 name = "murmur-tool-code-coverage"

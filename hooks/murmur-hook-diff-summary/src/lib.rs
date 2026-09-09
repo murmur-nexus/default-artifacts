@@ -46,9 +46,13 @@ pub fn extract_from_value(v: &Value) -> Option<String> {
     match v {
         Value::Object(map) => {
             let op = map.get("operation").and_then(|o| o.as_str());
-            let path_str = map.get("path").and_then(|p| p.as_str());
+            // The editor's write operations name their target `dest_path`, the property its
+            // input schema annotates `format: murmur-destination`. `path` on those calls is
+            // the pre-0.3.0 spelling, which the editor now rejects outright, so a write
+            // carrying it never reaches this hook.
+            let path_str = map.get("dest_path").and_then(|p| p.as_str());
 
-            // Direct tool input: {"operation":"write_file","path":"..."}
+            // Direct tool input: {"operation":"write_file","dest_path":"..."}
             if let Some(op_name) = op {
                 if is_write_op(op_name) {
                     return path_str.map(str::to_string);
@@ -687,33 +691,35 @@ mod tests {
     fn extract_write_path_reads_every_layout_the_runtime_delivers() {
         // Direct operation object.
         assert_eq!(
-            try_extract_write_path(r#"{"operation":"write_file","path":"src/a.rs"}"#),
+            try_extract_write_path(r#"{"operation":"write_file","dest_path":"src/a.rs"}"#),
             Some("src/a.rs".to_string())
         );
         // Anthropic tool_use block.
         assert_eq!(
             try_extract_write_path(
-                r#"{"type":"tool_use","input":{"operation":"replace_in_file","path":"src/b.rs"}}"#
+                r#"{"type":"tool_use","input":{"operation":"replace_in_file","dest_path":"src/b.rs"}}"#
             ),
             Some("src/b.rs".to_string())
         );
         // Runtime envelope carrying the inner JSON as a string.
         assert_eq!(
             try_extract_write_path(
-                r#"{"data":"{\"operation\":\"write_file\",\"path\":\"src/c.rs\"}"}"#
+                r#"{"data":"{\"operation\":\"write_file\",\"dest_path\":\"src/c.rs\"}"}"#
             ),
             Some("src/c.rs".to_string())
         );
         // Double-encoded JSON string.
         assert_eq!(
-            try_extract_write_path(r#""{\"operation\":\"write_file\",\"path\":\"src/d.rs\"}""#),
+            try_extract_write_path(
+                r#""{\"operation\":\"write_file\",\"dest_path\":\"src/d.rs\"}""#
+            ),
             Some("src/d.rs".to_string())
         );
         // `tools` is consulted before `output`.
         assert_eq!(
             extract_write_path(
-                Some(r#"{"operation":"write_file","path":"from-tools.rs"}"#),
-                Some(r#"{"operation":"write_file","path":"from-output.rs"}"#)
+                Some(r#"{"operation":"write_file","dest_path":"from-tools.rs"}"#),
+                Some(r#"{"operation":"write_file","dest_path":"from-output.rs"}"#)
             ),
             Some("from-tools.rs".to_string())
         );

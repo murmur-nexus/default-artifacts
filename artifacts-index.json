@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-09T20:24:12Z",
+  "updated_at": "2026-09-09T21:21:00Z",
   "artifacts": [
     {
       "name": "murmur-driver-anthropic",
@@ -77,7 +77,7 @@
     },
     {
       "name": "murmur-hook-diff-summary",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "runtime": "hook",
       "description": "Snapshots files before each editor tool call and emits a structured unified-diff summary as an artifact event at end of turn.",
       "tags": [
@@ -192,7 +192,7 @@
     },
     {
       "name": "murmur-tool-editor",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "runtime": "tool",
       "description": "Structured file editing interface for Murmur capsules.",
       "tags": [

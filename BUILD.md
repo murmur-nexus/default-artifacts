@@ -140,6 +140,46 @@ or is built by a matrix that disagrees with its `implementation:` — so a nativ
 tool added to `build-wasm`, or one whose `implementation:` changes without its
 matrix entry moving, fails CI rather than a release.
 
+### Declaring a tool's write destinations
+
+A capsule that grants `capabilities.filesystem.read_only` gets a dispatch-time
+check on every tool call. When a tool's `input_schema` says nothing about where
+it writes, the runtime guesses from property names and warns with `W-SEC-018`.
+A tool says so by annotating the property holding the write target:
+
+```yaml
+input_schema:
+  type: object
+  properties:
+    dest_path:
+      type: string
+      format: murmur-destination
+```
+
+| Annotation | Goes on | Means |
+|---|---|---|
+| `murmur-destination` | a string property | the value is a filesystem path this tool writes to |
+| `murmur-opaque` | an object or array property, or the schema's top level | the tool only stores this subtree; the key-name heuristic does not descend into it. Ignored on a string property |
+
+Three things to know before adding one:
+
+- **Annotate only what is actually written to.** The annotation is resolved
+  against the raw tool input and refuses when the value falls under a read-only
+  entry. Annotating a property a read operation also uses makes that read fail
+  under exactly the grant it should tolerate.
+- **A shared property cannot be a destination for some operations only.** An
+  annotation lowers to a location in the input — a sequence of object-key and
+  array-element steps — and carries no condition. There is no way to say "this
+  is a destination when `operation` is `write_file`". Give the destination its
+  own property name instead; it then resolves to a value only on the calls that
+  carry one. This is why `murmur-tool-editor` splits `dest_path` from `path`.
+- **One annotation silences `W-SEC-018` for the whole tool.** The warning stops
+  as soon as any annotation lowers, so a tool with several destinations must
+  annotate all of them — the warning will not remind you about the second.
+
+`murmur-tool-editor` is the worked example; see
+[tools/murmur-tool-editor/README.md](./tools/murmur-tool-editor/README.md).
+
 > **Note — the crates under `libs/`.** They are *not* artifacts and must never
 > be added to `artifacts.toml` or a `build.yml` matrix — they are shared,
 > unpublished libraries, not shippable components. Each is compiled into the

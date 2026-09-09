@@ -13,7 +13,7 @@ Declare in your capsule `murmur.yaml`:
 ```yaml
 artifacts:
   - name: murmur-hook-diff-summary
-    version: 0.5.0
+    version: 0.7.0
     runtime: hook
     capabilities:
       filesystem:
@@ -28,6 +28,21 @@ That path comes out of the tool-call payload and changes turn to turn, so the
 hook cannot know in advance which subtree the editor will touch — anything it
 cannot read is simply omitted from the summary rather than reported as an
 error.
+
+## Pairing with murmur-tool-editor
+
+This hook reads the write target out of each `murmur-tool-editor` tool call, so
+the two versions must agree on what that property is called:
+
+| Hook | Editor | Reads |
+|---|---|---|
+| 0.7.0 and later | 0.3.0 and later | `dest_path` |
+| 0.6.0 and earlier | 0.2.0 and earlier | `path` |
+
+There is no fallback in either direction. Pairing hook 0.7.0 with editor 0.2.0,
+or hook 0.6.0 with editor 0.3.0, produces an empty summary rather than an error:
+the hook finds no write target, takes no snapshot, and emits no file entry.
+Upgrade both together.
 
 No write access is needed beyond what the scope grant implies: the hook returns
 its summary as a `HookOutput::Artifact` event and never writes a file itself.
