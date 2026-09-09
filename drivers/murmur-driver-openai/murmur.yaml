@@ -1,6 +1,6 @@
 name: murmur-driver-openai
 version: 0.3.0
 runtime: driver
-description: OpenAI inference driver for Murmur agent capsules — Chat Completions, with Responses API for gpt-5 and later models. Reads store, thinking, reasoning_effort and verbosity from inference.driver.config, and rejects any other key.
+description: OpenAI inference driver for Murmur agent capsules — Chat Completions, with Responses API for gpt-5 and later models. Reads store, thinking, reasoning_effort and verbosity from inference.driver.config and rejects any other key; store grants server-side retention and with it stateful continuation via previous_response_id.
 requires_files:
   - murmur_driver_openai.wasm

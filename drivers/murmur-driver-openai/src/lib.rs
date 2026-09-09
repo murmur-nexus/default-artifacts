@@ -200,7 +200,6 @@ fn store_opt_in(driver_config: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
-
 // ── The `inference.driver.config` vocabulary ──────────────────────────────────
 //
 // The manifest object the host serializes into `MURMUR_INFERENCE_DRIVER_CONFIG` is this
