@@ -37,7 +37,8 @@
 #   0 — every declaration matches; enumeration printed
 #   1 — artifacts.toml, build.yml and artifacts-index.json disagree
 #   2 — bad usage, or a required input could not be read (missing file,
-#       unparseable native_platforms, `gh` unavailable under --release)
+#       unparseable native_platforms, an artifact with no version under
+#       --release, `gh` unavailable under --release)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -157,14 +158,31 @@ expected_native=$(printf '%s\n' "$declared_platforms" | sort | paste -sd, -)
 
 # ---------------------------------------------------------------------------
 # Every artifact, its implementation, and the platform set it declares.
-# artifacts.toml gives the name and path; the artifact's own murmur.yaml gives
-# `runtime:` and `implementation:`; artifacts-index.json gives what is published.
+# artifacts.toml gives the name, path and version; the artifact's own murmur.yaml
+# gives `runtime:` and `implementation:`; artifacts-index.json gives what is
+# published.
+#
+# One row per [[artifact]] block, flushed at the next block header and at EOF, so
+# a block is read as a whole rather than by the adjacency of its keys: `version`
+# stays attached to its name even with a comment or blank line between them, and a
+# block missing a key still produces a row (with that field empty) rather than
+# vanishing from every check below. `workspace_version` does not match the
+# `version` rule — that rule is anchored, and the key does not start with it.
 # ---------------------------------------------------------------------------
 artifact_rows=$(awk '
-    /^\[\[artifact\]\]/                        { name = ""; path = ""; next }
-    /^name[[:space:]]*=/                       { name = $0; sub(/^name[[:space:]]*=[[:space:]]*/, "", name); gsub(/"/, "", name) }
-    /^path[[:space:]]*=/                       { path = $0; sub(/^path[[:space:]]*=[[:space:]]*/, "", path); gsub(/"/, "", path)
-                                                 if (name != "") print name "\t" path }
+    function flush() {
+        if (name != "") print name "\t" path "\t" version
+        name = ""; path = ""; version = ""
+    }
+    function value(line, key) {
+        sub("^[[:space:]]*" key "[[:space:]]*=[[:space:]]*", "", line); gsub(/"/, "", line)
+        return line
+    }
+    /^\[\[artifact\]\]/                          { flush(); next }
+    /^[[:space:]]*name[[:space:]]*=/             { name    = value($0, "name");    next }
+    /^[[:space:]]*path[[:space:]]*=/             { path    = value($0, "path");    next }
+    /^[[:space:]]*version[[:space:]]*=/          { version = value($0, "version"); next }
+    END                                          { flush() }
 ' "$ARTIFACTS_TOML")
 
 if [ -z "$artifact_rows" ]; then
@@ -190,10 +208,11 @@ index_platforms_for() {
 
 printf '%-8s  %-40s  %s\n' "IMPL" "ARTIFACT" "PLATFORMS"
 
-native_names=""
+# Native artifacts only, as `<name><TAB><version>` — what --release checks below.
+native_rows=""
 native_count=0
 
-while IFS=$'\t' read -r name path; do
+while IFS=$'\t' read -r name path version; do
     [ -n "$name" ] || continue
     manifest="$REPO_ROOT/$path/murmur.yaml"
     if [ ! -f "$manifest" ]; then
@@ -220,7 +239,7 @@ while IFS=$'\t' read -r name path; do
     if [ "$implementation" = native ]; then
         expected="$expected_native"
         class=native
-        native_names="$native_names$name"$'\n'
+        native_rows="$native_rows$name	$version"$'\n'
         native_count=$((native_count + 1))
     else
         expected=""
@@ -297,9 +316,14 @@ if [ -n "$release_tag" ]; then
         exit 2
     fi
 
-    while IFS= read -r name; do
+    while IFS=$'\t' read -r name version; do
         [ -n "$name" ] || continue
-        version=$(grep -A2 "^name = \"$name\"\$" "$ARTIFACTS_TOML" | sed -n 's/^version[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' | head -1)
+        # Without a version there is no payload name to look for, and the
+        # per-platform check below would pass by finding nothing. Refuse instead.
+        if [ -z "$version" ]; then
+            echo "error: no version for '$name' in $ARTIFACTS_TOML; expected a 'version = \"x.y.z\"' line in its [[artifact]] block" >&2
+            exit 2
+        fi
         # Match on `<name>-<digit>` so one tool's name is not a prefix of another
         # artifact's asset.
         own_assets=$(printf '%s\n' "$assets" | grep -E "^${name}-[0-9]" || true)
@@ -336,7 +360,7 @@ if [ -n "$release_tag" ]; then
         else
             echo "NOTE               $name@$version is not in release $release_tag; it publishes $(printf '%s\n' "$own_assets" | paste -sd' ' -)."
         fi
-    done <<< "$(printf '%s\n' "$native_names" | grep . || true)"
+    done <<< "$(printf '%s\n' "$native_rows" | grep . || true)"
 
     if [ "$fail" -ne 0 ]; then
         echo ""
