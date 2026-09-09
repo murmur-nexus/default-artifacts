@@ -1,17 +1,17 @@
 name: murmur-tool-editor
-version: 0.2.0
+version: 0.3.0
 runtime: tool
 implementation: wasm
 description: |
   Structured file editing interface for Murmur capsules. Provides read, write,
   surgical patch, and search operations without requiring shell capability grants.
 
-  | op              | inputs                                    | outputs                                |
-  |-----------------|-------------------------------------------|----------------------------------------|
-  | read_file       | path, start_line?, end_line?              | content: string, total_lines: int      |
-  | write_file      | path, content                             | (file created/updated)                 |
-  | replace_in_file | path, old_string, new_string              | count: N replacements                  |
-  | find_in_files   | pattern, dir, recursive?, context_lines?  | matches: [{path, line, text}]          |
+  | op              | inputs                                         | outputs                                |
+  |-----------------|------------------------------------------------|----------------------------------------|
+  | read_file       | path, start_line?, end_line?                   | content: string, total_lines: int      |
+  | write_file      | dest_path, content                             | (file created/updated)                 |
+  | replace_in_file | dest_path, old_string, new_string              | count: N replacements                  |
+  | find_in_files   | pattern, dir, recursive?, context_lines?       | matches: [{path, line, text}]          |
 
   read_file start_line/end_line are 1-based inclusive; both optional. Omitting both
   reads the whole file. A ranged read returns only that span plus total_lines and the
@@ -20,6 +20,11 @@ description: |
 
   find_in_files context_lines (default 0, like `grep -C`, max 20) attaches
   context_before/context_after arrays to each match; 0 omits those keys entirely.
+
+  The two writing operations take their destination as dest_path; read_file and
+  find_in_files take path and dir. dest_path is the only input this tool declares as a
+  write destination, so a capsule's filesystem read_only grant is enforced against that
+  declaration rather than against the spelling of a property name.
 
   All responses: {ok:bool, message:string, error_kind?:string}
   Paths are relative to the capsule workdir (the binary's CWD at dispatch time).
@@ -37,7 +42,11 @@ input_schema:
       description: "Operation to perform."
     path:
       type: string
-      description: "File path relative to capsule workdir. Required for read_file, write_file, replace_in_file."
+      description: "File path to read, relative to capsule workdir. Required for read_file."
+    dest_path:
+      type: string
+      format: murmur-destination
+      description: "File path this call writes to, relative to capsule workdir. Required for write_file and replace_in_file."
     content:
       type: string
       description: "File content to write. Required for write_file."

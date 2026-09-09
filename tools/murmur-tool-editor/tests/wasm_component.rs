@@ -184,7 +184,7 @@ fn component_loads_and_runs_write_file() {
         &component,
         &lnk,
         &workdir,
-        r#"{"operation":"write_file","path":"out.txt","content":"written via wasm"}"#,
+        r#"{"operation":"write_file","dest_path":"out.txt","content":"written via wasm"}"#,
     );
     assert!(matches!(status, Status::Passed), "status: {status:?}");
     // write_file's `data` field is null in the old protocol, so ToolResult.data is None.
@@ -214,7 +214,7 @@ fn component_loads_and_runs_replace_in_file() {
         &component,
         &lnk,
         &workdir,
-        r#"{"operation":"replace_in_file","path":"patch.txt","old_string":"hello","new_string":"goodbye"}"#,
+        r#"{"operation":"replace_in_file","dest_path":"patch.txt","old_string":"hello","new_string":"goodbye"}"#,
     );
     assert!(matches!(status, Status::Passed), "status: {status:?}");
     assert_eq!(payload["count"], 2, "payload: {payload}");

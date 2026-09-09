@@ -439,9 +439,9 @@ pub mod logic {
     }
 
     fn op_write_file(op: &Value) -> Value {
-        let path = match op.get("path").and_then(|v| v.as_str()) {
+        let path = match op.get("dest_path").and_then(|v| v.as_str()) {
             Some(p) if !p.is_empty() => p.to_string(),
-            _ => return fail_msg("missing required field: path"),
+            _ => return fail_msg("missing required field: dest_path"),
         };
         let content = match op.get("content").and_then(|v| v.as_str()) {
             Some(c) => c.to_string(),
@@ -464,9 +464,9 @@ pub mod logic {
     }
 
     fn op_replace_in_file(op: &Value) -> Value {
-        let path = match op.get("path").and_then(|v| v.as_str()) {
+        let path = match op.get("dest_path").and_then(|v| v.as_str()) {
             Some(p) if !p.is_empty() => p.to_string(),
-            _ => return fail_msg("missing required field: path"),
+            _ => return fail_msg("missing required field: dest_path"),
         };
         let old_string = match op.get("old_string").and_then(|v| v.as_str()) {
             Some(s) => s.to_string(),
@@ -831,12 +831,75 @@ pub mod logic {
             fs::create_dir_all(&dir).unwrap();
             let path = dir.join("out.txt");
             let envelope = json!({
-                "data": { "operation": "write_file", "path": path.to_str().unwrap(), "content": "x" },
+                "data": { "operation": "write_file", "dest_path": path.to_str().unwrap(), "content": "x" },
                 "log_path": null,
             });
             let out = run(&envelope.to_string());
             assert_eq!(out["ok"], true, "write should succeed: {out:?}");
             assert_eq!(out["metadata"]["state_effect"], "mutate");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn write_file_rejects_the_legacy_path_spelling() {
+            // 0.2.0 spelled the write destination `path`. Falling back to it would leave the
+            // call judged by key name rather than by the `dest_path` destination the input
+            // schema declares, so the old spelling is rejected outright.
+            let dir = std::env::temp_dir().join("murmur_editor_write_legacy_spelling");
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("out.txt");
+            let out = op_write_file(&json!({
+                "operation": "write_file",
+                "path": path.to_str().unwrap(),
+                "content": "x",
+            }));
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["message"], "missing required field: dest_path");
+            assert!(!path.exists(), "a rejected write must not reach the filesystem");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn replace_in_file_rejects_the_legacy_path_spelling() {
+            let dir = std::env::temp_dir().join("murmur_editor_replace_legacy_spelling");
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("patch.txt");
+            fs::write(&path, "hello\n").unwrap();
+            let out = op_replace_in_file(&json!({
+                "operation": "replace_in_file",
+                "path": path.to_str().unwrap(),
+                "old_string": "hello",
+                "new_string": "goodbye",
+            }));
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["message"], "missing required field: dest_path");
+            assert_eq!(fs::read_to_string(&path).unwrap(), "hello\n");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn write_and_replace_take_dest_path() {
+            let dir = std::env::temp_dir().join("murmur_editor_dest_path_roundtrip");
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("out.txt");
+            let written = op_write_file(&json!({
+                "operation": "write_file",
+                "dest_path": path.to_str().unwrap(),
+                "content": "hello\n",
+            }));
+            assert_eq!(written["ok"], true, "write should succeed: {written:?}");
+
+            let replaced = op_replace_in_file(&json!({
+                "operation": "replace_in_file",
+                "dest_path": path.to_str().unwrap(),
+                "old_string": "hello",
+                "new_string": "goodbye",
+            }));
+            assert_eq!(replaced["ok"], true, "replace should succeed: {replaced:?}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye\n");
             let _ = fs::remove_dir_all(&dir);
         }
 
