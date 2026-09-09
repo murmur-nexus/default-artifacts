@@ -1034,6 +1034,26 @@ impl ResponsesStopReason {
             _ => None,
         }
     }
+
+    /// Borrowing test, so call sites can record whether the turn hit the output
+    /// cap before `into_error` consumes the value.
+    fn is_max_tokens(&self) -> bool {
+        matches!(self, Self::MaxTokens)
+    }
+}
+
+/// Error payload for a tool call whose arguments the output cap cut in half.
+///
+/// This is an error rather than a `max_tokens` turn because the arguments are
+/// unusable: the tool cannot be run, and reporting the turn as capped would let
+/// it degrade into a text turn and be recorded as an answer. The truncated
+/// arguments are deliberately left out of the message — they are kilobytes of
+/// noise, and the cap, not JSON syntax, is what the operator has to act on.
+fn truncated_tool_call_at_cap(name: &str) -> Value {
+    let name = if name.is_empty() { "<unnamed>" } else { name };
+    error_payload(&format!(
+        "driver: OpenAI Responses turn stopped at the inference.max_tokens output cap; tool call '{name}' was cut off mid-arguments and cannot be run — raise the cap and re-run"
+    ))
 }
 
 fn responses_stop_reason(
@@ -1093,6 +1113,7 @@ fn translate_responses_to_murmur(response: &Value) -> Result<Value, String> {
 
     let stop_reason = responses_stop_reason(status, has_function_call, incomplete_reason)?;
     let stop_reason_str = stop_reason.as_str();
+    let capped = stop_reason.is_max_tokens();
     if let Some(err_payload) = stop_reason.into_error() {
         return Ok(err_payload);
     }
@@ -1125,13 +1146,23 @@ fn translate_responses_to_murmur(response: &Value) -> Result<Value, String> {
             }
             Some("function_call") => {
                 let arguments_raw = item.get("arguments").and_then(Value::as_str).unwrap_or("{}");
-                let arguments: Value = serde_json::from_str(arguments_raw).map_err(|err| {
-                    format!("driver: failed to parse Responses function_call arguments JSON: {err}")
-                })?;
+                let name = item.get("name").and_then(Value::as_str).unwrap_or_default();
+                let arguments: Value = match serde_json::from_str(arguments_raw) {
+                    Ok(value) => value,
+                    // On a capped turn the arguments are the longest thing in the
+                    // response, so they are what truncation lands in; the parse
+                    // failure is a symptom of the cap, not a provider fault.
+                    Err(_) if capped => return Ok(truncated_tool_call_at_cap(name)),
+                    Err(err) => {
+                        return Err(format!(
+                            "driver: failed to parse Responses function_call arguments JSON: {err}"
+                        ));
+                    }
+                };
                 content.push(json!({
                     "type": "tool_call",
                     "id": item.get("call_id").and_then(Value::as_str).unwrap_or_default(),
-                    "name": item.get("name").and_then(Value::as_str).unwrap_or_default(),
+                    "name": name,
                     "input": arguments,
                 }));
             }
@@ -1640,15 +1671,24 @@ fn assemble_responses_streaming_response(
         incomplete_reason.as_deref(),
     )?;
     let stop_reason_str = stop_reason.as_str();
+    let capped = stop_reason.is_max_tokens();
     if let Some(err_payload) = stop_reason.into_error() {
         return Ok(err_payload);
     }
 
     let mut tool_content = Vec::new();
     for state in tool_states {
-        let input: Value = serde_json::from_str(&state.arguments).map_err(|err| {
-            format!("driver: failed to parse Responses function_call arguments JSON: {err}")
-        })?;
+        let input: Value = match serde_json::from_str(&state.arguments) {
+            Ok(value) => value,
+            // The stream stops mid-`function_call_arguments.delta` when the cap
+            // hits, leaving this state holding a prefix of the argument JSON.
+            Err(_) if capped => return Ok(truncated_tool_call_at_cap(&state.name)),
+            Err(err) => {
+                return Err(format!(
+                    "driver: failed to parse Responses function_call arguments JSON: {err}"
+                ));
+            }
+        };
         tool_content.push(json!({
             "type": "tool_call",
             "id": state.id,
@@ -3443,6 +3483,7 @@ mod tests {
         assert_eq!(responses["stream"], json!(true));
         assert!(responses.get("stream_options").is_none());
     }
+
     // ── `inference.driver.config` vocabulary ──────────────────────────────────
 
     /// The body `run_inner` would put on the wire: classify, translate, stamp the dials, stamp
@@ -3682,5 +3723,164 @@ mod tests {
             parse_at < endpoint_at,
             "the driver config must be parsed before the endpoint is looked up"
         );
+    }
+
+    /// Fixture: a Responses turn cut off at the output cap, its lone `function_call`
+    /// holding a prefix of the argument JSON.
+    fn capped_buffered_truncated_call(name: Option<&str>) -> Value {
+        let mut item = json!({
+            "type": "function_call",
+            "call_id": "call_1",
+            "arguments": "{\"task\":\"do the thi"
+        });
+        if let Some(name) = name {
+            item["name"] = json!(name);
+        }
+        json!({
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [item]
+        })
+    }
+
+    /// Same turn as `capped_buffered_truncated_call`, delivered as SSE.
+    fn capped_streaming_truncated_call(name: Option<&str>) -> String {
+        let name_field = match name {
+            Some(name) => format!(",\"name\":\"{name}\""),
+            None => String::new(),
+        };
+        format!(
+            concat!(
+                "data: {{\"type\":\"response.output_item.added\",\"output_index\":0,",
+                "\"item\":{{\"type\":\"function_call\",\"call_id\":\"call_1\"{name_field}}}}}\n",
+                "data: {{\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,",
+                "\"delta\":\"{{\\\"task\\\":\\\"do the thi\"}}\n",
+                "data: {{\"type\":\"response.incomplete\",\"response\":{{\"status\":\"incomplete\",",
+                "\"incomplete_details\":{{\"reason\":\"max_output_tokens\"}}}}}}\n",
+            ),
+            name_field = name_field
+        )
+    }
+
+    #[test]
+    fn responses_capped_truncated_tool_call_reports_the_cap() {
+        let translated =
+            translate_responses_to_murmur(&capped_buffered_truncated_call(Some("delegate-task")))
+                .unwrap();
+        assert_eq!(translated["stop_reason"], "error");
+        let message = translated["error"].as_str().unwrap();
+        assert!(message.contains("inference.max_tokens"), "{message}");
+        assert!(message.contains("delegate-task"), "{message}");
+        assert!(!message.contains("failed to parse"), "{message}");
+        assert!(!message.contains("do the thi"), "{message}");
+    }
+
+    #[test]
+    fn responses_streaming_capped_truncated_tool_call_reports_the_cap() {
+        let body = capped_streaming_truncated_call(Some("delegate-task"));
+        let result = parse_responses_sse_body(&body, &mut |_| {}, &mut |_| {}).unwrap();
+        assert_eq!(result["stop_reason"], "error");
+        let message = result["error"].as_str().unwrap();
+        assert!(message.contains("inference.max_tokens"), "{message}");
+        assert!(message.contains("delegate-task"), "{message}");
+        assert!(!message.contains("failed to parse"), "{message}");
+        assert!(!message.contains("do the thi"), "{message}");
+    }
+
+    #[test]
+    fn responses_capped_truncated_tool_call_message_is_identical_on_both_paths() {
+        let buffered =
+            translate_responses_to_murmur(&capped_buffered_truncated_call(Some("delegate-task")))
+                .unwrap();
+        let body = capped_streaming_truncated_call(Some("delegate-task"));
+        let streamed = parse_responses_sse_body(&body, &mut |_| {}, &mut |_| {}).unwrap();
+        assert_eq!(buffered["error"], streamed["error"]);
+    }
+
+    #[test]
+    fn responses_capped_truncated_tool_call_without_a_name_says_unnamed() {
+        let buffered = translate_responses_to_murmur(&capped_buffered_truncated_call(None)).unwrap();
+        let body = capped_streaming_truncated_call(None);
+        let streamed = parse_responses_sse_body(&body, &mut |_| {}, &mut |_| {}).unwrap();
+        assert!(
+            buffered["error"].as_str().unwrap().contains("'<unnamed>'"),
+            "{}",
+            buffered["error"]
+        );
+        assert_eq!(buffered["error"], streamed["error"]);
+    }
+
+    #[test]
+    fn responses_capped_names_the_first_tool_call_that_fails_to_parse() {
+        let response = json!({
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [
+                {"type": "function_call", "call_id": "c1", "name": "first", "arguments": "{\"a\":1}"},
+                {"type": "function_call", "call_id": "c2", "name": "second", "arguments": "{\"b\":2}"},
+                {"type": "function_call", "call_id": "c3", "name": "third", "arguments": "{\"c\":\"do the thi"}
+            ]
+        });
+        let translated = translate_responses_to_murmur(&response).unwrap();
+        assert_eq!(translated["stop_reason"], "error");
+        let message = translated["error"].as_str().unwrap();
+        assert!(message.contains("'third'"), "{message}");
+        assert!(!message.contains("first"), "{message}");
+    }
+
+    #[test]
+    fn responses_streaming_capped_names_the_first_tool_call_that_fails_to_parse() {
+        let body = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"first\"}}\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"call_id\":\"c2\",\"name\":\"second\"}}\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"function_call\",\"call_id\":\"c3\",\"name\":\"third\"}}\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"a\\\":1}\"}\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"delta\":\"{\\\"b\\\":2}\"}\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":2,\"delta\":\"{\\\"c\\\":\\\"do the thi\"}\n",
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n",
+        );
+        let result = parse_responses_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap();
+        assert_eq!(result["stop_reason"], "error");
+        let message = result["error"].as_str().unwrap();
+        assert!(message.contains("'third'"), "{message}");
+        assert!(!message.contains("first"), "{message}");
+    }
+
+    #[test]
+    fn responses_completed_malformed_tool_call_still_reports_a_parse_error() {
+        let response = json!({
+            "status": "completed",
+            "output": [
+                {"type": "function_call", "call_id": "c1", "name": "delegate-task", "arguments": "{\"task\": "}
+            ]
+        });
+        let err = translate_responses_to_murmur(&response).unwrap_err();
+        assert!(
+            err.starts_with("driver: failed to parse Responses function_call arguments JSON:"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn responses_streaming_completed_malformed_tool_call_still_reports_a_parse_error() {
+        let body = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"delegate-task\"}}\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"task\\\": \"}\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n",
+        );
+        let err = parse_responses_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap_err();
+        assert!(
+            err.starts_with("driver: failed to parse Responses function_call arguments JSON:"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn responses_capped_error_payload_carries_no_content_or_usage() {
+        let mut response = capped_buffered_truncated_call(Some("delegate-task"));
+        response["usage"] = json!({"input_tokens": 900, "output_tokens": 4096});
+        let translated = translate_responses_to_murmur(&response).unwrap();
+        assert!(translated.get("content").is_none());
+        assert!(translated.get("usage").is_none());
     }
 }
