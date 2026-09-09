@@ -14,6 +14,23 @@
 
 workspace_version = "0.10.0"
 
+# The platforms a release publishes a native payload for — one platform-tagged
+# .mur.zip per native tool per entry. This is the single home for that fact:
+# apply-versions.sh derives each index entry's `platforms` from it, and
+# check-platform-coverage.sh holds it to the `platform:` matrix in
+# .github/workflows/build.yml's build-native job in both directions.
+#
+# It names only what is built and published. A platform listed here with no
+# matrix row behind it puts an entry in artifacts-index.json that no release
+# asset answers, so resolution fails on a promise instead of falling back
+# visibly. To add one (e.g. linux-aarch64 via `ubuntu-24.04-arm`), add the
+# matrix row and this entry in the same commit, then run
+# ./scripts/apply-versions.sh.
+#
+# Applies to artifacts whose murmur.yaml says `implementation: native`; every
+# other artifact ships a single untagged payload and declares no platform.
+native_platforms = ["darwin-aarch64", "linux-x86_64"]
+
 [[artifact]]
 name = "murmur-driver-anthropic"
 path = "drivers/murmur-driver-anthropic"

@@ -73,6 +73,22 @@ jobs:
           chmod +x scripts/check-build-coverage.sh
           ./scripts/check-build-coverage.sh
 
+      # An artifact's platforms are derived, not asserted: artifacts.toml's
+      # native_platforms names what build-native has a runner for, and each index
+      # entry takes its set from that list plus the artifact's own
+      # `implementation:`. Without this check a platform added to the matrix
+      # leaves every native entry under-declaring, and a platform declared with no
+      # runner behind it puts an entry in artifacts-index.json that no release
+      # asset answers — so `mur install` fails on a promise instead of falling
+      # back visibly. Both directions fail here rather than at a release.
+      #
+      # Run with no flags: the offline checks only. Its --release <tag> mode needs
+      # network and a published release, so CI never depends on one.
+      - name: Verify declared platforms match what is built
+        run: |
+          chmod +x scripts/check-platform-coverage.sh
+          ./scripts/check-platform-coverage.sh
+
       - name: Cargo test
         run: cargo test --workspace
 
