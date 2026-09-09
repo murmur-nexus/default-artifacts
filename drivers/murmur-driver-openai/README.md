@@ -131,3 +131,43 @@ turns route to the machine holding the previous turn's cache entry.
 
 A `prompt_cache_key` set by the capsule author under `params` is overridden by
 the value Murmur supplies.
+
+## Stop reasons on the Responses surface
+
+The Responses API reports a turn the output cap cut short as
+`status: "incomplete"` with `incomplete_details.reason: "max_output_tokens"`.
+What the driver returns for that turn depends on what the cap landed in.
+
+| Responses turn | `stop_reason` | Response carries |
+|---|---|---|
+| `completed`, no tool call | `end_turn` | `content`, `usage` |
+| `completed`, tool call with parseable `arguments` | `tool_call` | `content`, `usage` |
+| `incomplete` / `max_output_tokens`, no tool call | `max_tokens` | the partial `content`, `usage` |
+| `incomplete` / `max_output_tokens`, tool call with parseable `arguments` | `max_tokens` | the tool call, `usage` |
+| `incomplete` / `max_output_tokens`, tool call with truncated `arguments` | `error` | `error` only |
+| `completed`, tool call with malformed `arguments` | `error` | `error` only |
+
+A tool call whose `arguments` the cap cut in half cannot be run, so the turn is
+an error rather than a capped turn — a capped turn is a fragment the runtime
+records as a result, which would let an unrunnable tool call pass for an answer.
+The message names the cap the capsule author set, not the JSON syntax that
+truncation produced:
+
+```
+driver: OpenAI Responses turn stopped at the inference.max_tokens output cap; tool call 'delegate-task' was cut off mid-arguments and cannot be run — raise the cap and re-run
+```
+
+Raise `inference.max_tokens` in `murmur.yaml` and re-run. Both the streaming and
+the non-streaming path emit this message byte-for-byte identically. When several
+tool calls arrive in one turn, the message names the first whose `arguments`
+fail to parse; a call whose name never arrived is named `'<unnamed>'`. The
+truncated `arguments` are not echoed into the message, and the response carries
+no `content` and no `usage`.
+
+A tool call malformed for any reason other than the cap keeps reporting the
+parse failure — `driver: failed to parse Responses function_call arguments
+JSON: …` — so a genuine provider fault is not mistaken for a cap.
+
+The Chat Completions surface maps `finish_reason: "length"` to the same
+`max_tokens` stop reason, and hard-errors on unparseable tool-call arguments
+with `driver: failed to parse OpenAI tool call arguments JSON: …`.

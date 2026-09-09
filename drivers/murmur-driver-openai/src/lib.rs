@@ -3769,9 +3769,14 @@ mod tests {
                 .unwrap();
         assert_eq!(translated["stop_reason"], "error");
         let message = translated["error"].as_str().unwrap();
-        assert!(message.contains("inference.max_tokens"), "{message}");
-        assert!(message.contains("delegate-task"), "{message}");
-        assert!(!message.contains("failed to parse"), "{message}");
+        // Pinned verbatim: operators grep for this line, and the streaming path
+        // is held to it in turn by the cross-path equality test below.
+        assert_eq!(
+            message,
+            "driver: OpenAI Responses turn stopped at the inference.max_tokens output cap; \
+             tool call 'delegate-task' was cut off mid-arguments and cannot be run — \
+             raise the cap and re-run"
+        );
         assert!(!message.contains("do the thi"), "{message}");
     }
 
@@ -3799,14 +3804,14 @@ mod tests {
 
     #[test]
     fn responses_capped_truncated_tool_call_without_a_name_says_unnamed() {
-        let buffered = translate_responses_to_murmur(&capped_buffered_truncated_call(None)).unwrap();
+        let buffered =
+            translate_responses_to_murmur(&capped_buffered_truncated_call(None)).unwrap();
         let body = capped_streaming_truncated_call(None);
         let streamed = parse_responses_sse_body(&body, &mut |_| {}, &mut |_| {}).unwrap();
-        assert!(
-            buffered["error"].as_str().unwrap().contains("'<unnamed>'"),
-            "{}",
-            buffered["error"]
-        );
+        let message = buffered["error"].as_str().unwrap();
+        assert!(message.contains("'<unnamed>'"), "{message}");
+        assert!(message.contains("inference.max_tokens"), "{message}");
+        assert!(!message.contains("failed to parse"), "{message}");
         assert_eq!(buffered["error"], streamed["error"]);
     }
 
