@@ -42,6 +42,11 @@ path = "drivers/murmur-driver-deepseek"
 version = "0.2.0"
 
 [[artifact]]
+name = "murmur-driver-moonshotai"
+path = "drivers/murmur-driver-moonshotai"
+version = "0.1.0"
+
+[[artifact]]
 name = "murmur-driver-openai"
 path = "drivers/murmur-driver-openai"
 version = "0.3.0"

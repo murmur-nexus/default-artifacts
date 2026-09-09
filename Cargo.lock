@@ -1260,6 +1260,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "murmur-driver-moonshotai"
+version = "0.10.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wasip2",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
 name = "murmur-driver-openai"
 version = "0.10.0"
 dependencies = [
