@@ -27,7 +27,7 @@ version = "0.2.0"
 [[artifact]]
 name = "murmur-driver-openai"
 path = "drivers/murmur-driver-openai"
-version = "0.2.0"
+version = "0.3.0"
 
 [[artifact]]
 name = "murmur-hook-compact"

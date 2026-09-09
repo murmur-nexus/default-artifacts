@@ -12,6 +12,87 @@ store grant.
 The API key is read from the `MURMUR_INFERENCE_API_KEY` environment variable at
 runtime. See [murmur.yaml](./murmur.yaml) for the full manifest.
 
+## Inference dials
+
+`inference.driver.config` is this driver's operator surface. Four keys are read; any other key
+fails the first inference call, before any request is dispatched.
+
+```yaml
+inference:
+  driver:
+    artifact: murmur-driver-openai
+    config: { thinking: enabled, reasoning_effort: high }
+```
+
+| Key | Type | Accepted values | Default | Effect |
+|---|---|---|---|---|
+| `store` | boolean | `true` / `false` | `false` | Server-side response retention, and with it the `previous_response_id` continuation feature. |
+| `thinking` | string | `enabled` / `disabled`, trimmed and case-insensitive | `disabled` | `enabled` asks the provider for a reasoning summary. |
+| `reasoning_effort` | string | forwarded verbatim — the provider decides which tiers exist | absent | The quality-against-cost dial on a reasoning model. |
+| `verbosity` | string | forwarded verbatim | absent | Output verbosity. |
+
+`thinking` and `reasoning_effort` are spelled as `murmur-driver-anthropic` and
+`murmur-driver-deepseek` spell them, so one concept keeps one name across the fleet.
+
+### Where each dial lands
+
+The API surface a model routes to decides which dials it can carry. A dial the surface has no
+field for is dropped, by the same rule that strips the sampling parameters an o-series model
+rejects.
+
+| Key | Responses (`gpt-<N≥5>`) | Chat Completions, o-series | Chat Completions, gpt-classic |
+|---|---|---|---|
+| `thinking: enabled` | `reasoning.summary = "auto"` | dropped | dropped |
+| `reasoning_effort` | `reasoning.effort` | top-level `reasoning_effort` | dropped |
+| `verbosity` | `text.verbosity` | dropped | dropped |
+| `store` | `store` | not applicable | not applicable |
+
+A dial set here overwrites a same-named key supplied under `params`, and a `reasoning` object
+supplied under `params` is replaced wholesale rather than merged.
+
+### Reasoning is unavailable on the o-series
+
+o-series models route to Chat Completions, which returns no reasoning content — only an effort
+parameter. A capsule on `o3` therefore cannot display reasoning, whatever `thinking` is set to.
+The key is still accepted there rather than rejected, so one manifest survives a model switch;
+it simply asks for nothing. Reasoning summaries arrive only on the Responses surface, which is
+`gpt-5` and later.
+
+### An unrecognised key is an error
+
+A key this driver does not read fails the call with the offending keys and the accepted set:
+
+```
+driver: unrecognised inference.driver.config key(s): beta_features, thinking_budget_tokens. Accepted keys: reasoning_effort, store, thinking, verbosity
+```
+
+A value this driver defines the meaning of is checked too:
+
+```
+driver: inference.driver.config 'thinking' must be "enabled" or "disabled", got "on"
+driver: inference.driver.config 'reasoning_effort' must be a string, got 3
+```
+
+`reasoning_effort: xhigh` is accepted and forwarded: only the provider knows which tiers exist,
+so a tier OpenAI ships tomorrow needs no rebuild of this artifact.
+
+`store` is the one carve-out. It keeps the lenient parse it has always had — `store: "true"` as
+a string is read as opt-out with no error — so a capsule that relies on that behaviour is
+unchanged.
+
+### `inference.driver.config` is not a scratch block
+
+Murmur delivers `inference.driver.config` to the driver, to every WASM tool and to every shell
+tool in the session, so a key parked there for one of those reaches this driver too — and is now
+rejected. A per-artifact setting belongs on that artifact's own `config:` block, which arrives as
+`MURMUR_ARTIFACT_CONFIG`:
+
+```yaml
+artifacts:
+  - name: my-tool
+    config: { my_setting: value }
+```
+
 ## Token usage
 
 Every translated response carries an optional top-level `usage` object, on both

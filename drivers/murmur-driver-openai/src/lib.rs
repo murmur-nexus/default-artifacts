@@ -200,6 +200,217 @@ fn store_opt_in(driver_config: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+// ── The `inference.driver.config` vocabulary ──────────────────────────────────
+//
+// The manifest object the host serializes into `MURMUR_INFERENCE_DRIVER_CONFIG` is this
+// driver's whole operator surface: `MurmurRequest.params` is a per-request channel no manifest
+// field populates today, so a dial that does not travel on this block does not reach the
+// provider at all.
+//
+// Every key here is read. A key that is not is a hard error on the first inference call, before
+// any HTTP request is dispatched — a declared setting that is parsed and ignored is a defect,
+// not a convenience. The consequence for capsule authors is that this block is not a place to
+// park a setting meant for something else: the host delivers it to every WASM and shell tool in
+// the session as well, and a per-artifact setting belongs on `artifacts[].config` instead.
+
+/// Every key `inference.driver.config` accepts on this driver, sorted so the error message
+/// listing them is stable. `store` is in the set but is read by `store_opt_in`, which keeps its
+/// lenient parse; the remaining keys are validated here.
+const ACCEPTED_CONFIG_KEYS: &[&str] = &["reasoning_effort", "store", "thinking", "verbosity"];
+
+/// The reasoning/verbosity dials read from `inference.driver.config`. `store` is deliberately
+/// absent: it is a retention grant rather than a provider dial, and `store_opt_in` remains its
+/// only reader.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct DriverConfig {
+    /// `thinking: enabled` — ask the provider for a reasoning summary. Default disabled, which
+    /// is what an unconfigured capsule sent before this key existed.
+    thinking: bool,
+    /// `reasoning_effort` — forwarded verbatim. Only the provider knows which tiers exist, so a
+    /// tier OpenAI ships tomorrow works without rebuilding this artifact.
+    reasoning_effort: Option<String>,
+    /// `verbosity` — forwarded verbatim, for the same reason.
+    verbosity: Option<String>,
+}
+
+/// Reads the driver-config JSON into the dial set, rejecting any key this driver does not
+/// implement and any ill-typed value on a key whose meaning it does implement.
+///
+/// Strict where it can be: the key vocabulary is this driver's own, as is the value vocabulary
+/// of `thinking`. Lenient where only the provider can judge: `reasoning_effort` and `verbosity`
+/// are type-checked and then forwarded verbatim.
+fn parse_driver_config(driver_config: Option<&str>) -> Result<DriverConfig, String> {
+    let Some(raw) = driver_config else {
+        return Ok(DriverConfig::default());
+    };
+    if raw.trim().is_empty() {
+        return Ok(DriverConfig::default());
+    }
+    let parsed: Value = serde_json::from_str(raw)
+        .map_err(|err| format!("driver: inference.driver.config is not valid JSON: {err}"))?;
+    let Some(config) = parsed.as_object() else {
+        return Err("driver: inference.driver.config must be a JSON object".to_string());
+    };
+
+    let unrecognised = config
+        .keys()
+        .filter(|key| !ACCEPTED_CONFIG_KEYS.contains(&key.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unrecognised.is_empty() {
+        // `config` is a serde_json Map, i.e. sorted, so the offending keys come out in a stable
+        // order and one manifest fix clears every one of them.
+        return Err(format!(
+            "driver: unrecognised inference.driver.config key(s): {}. Accepted keys: {}",
+            unrecognised.join(", "),
+            ACCEPTED_CONFIG_KEYS.join(", ")
+        ));
+    }
+
+    let thinking = match config.get("thinking") {
+        None => false,
+        Some(Value::String(value)) if value.trim().eq_ignore_ascii_case("enabled") => true,
+        Some(Value::String(value)) if value.trim().eq_ignore_ascii_case("disabled") => false,
+        Some(other) => {
+            return Err(format!(
+                "driver: inference.driver.config 'thinking' must be \"enabled\" or \"disabled\", got {other}"
+            ))
+        }
+    };
+
+    Ok(DriverConfig {
+        thinking,
+        reasoning_effort: verbatim_string_key(config, "reasoning_effort")?,
+        verbosity: verbatim_string_key(config, "verbosity")?,
+    })
+}
+
+/// A config value this driver type-checks but does not interpret. Absent means the dial is not
+/// set; a blank string means the same, so an emptied manifest field is not sent as an empty
+/// dial the provider would reject.
+fn verbatim_string_key(config: &Map<String, Value>, key: &str) -> Result<Option<String>, String> {
+    match config.get(key) {
+        None => Ok(None),
+        Some(Value::String(value)) => {
+            let trimmed = value.trim();
+            Ok((!trimmed.is_empty()).then(|| trimmed.to_string()))
+        }
+        Some(other) => Err(format!(
+            "driver: inference.driver.config '{key}' must be a string, got {other}"
+        )),
+    }
+}
+
+// ── Provider-field incompatibility ────────────────────────────────────────────
+
+/// Fields the Chat Completions surface does not define at all. Both are Responses-only
+/// containers: `reasoning` holds the effort and summary dials, `text` holds `verbosity`.
+const CHAT_COMPLETIONS_UNSUPPORTED_FIELDS: &[&str] = &["reasoning", "text"];
+
+/// Fields a non-reasoning gpt model rejects on Chat Completions. `reasoning_effort` is the
+/// o-series' dial; gpt-4.x and earlier 400 on it.
+const GPT_CLASSIC_UNSUPPORTED_FIELDS: &[&str] = &["reasoning_effort"];
+
+/// Whether a provider request field may appear in the body for this model family and API
+/// surface. The one incompatibility rule in this driver: the `params` pass-through loop on each
+/// surface and the config-derived dials all ask this, so a field is refused in exactly one
+/// place and the answer cannot drift between the two channels.
+fn provider_field_supported(field: &str, family: ModelFamily, surface: ApiSurface) -> bool {
+    match surface {
+        // The Responses surface has no unsupported-field row yet: it is reached only by
+        // gpt-<N>=5, which accepts every field either channel can put on the body.
+        ApiSurface::Responses => true,
+        ApiSurface::ChatCompletions => {
+            if CHAT_COMPLETIONS_UNSUPPORTED_FIELDS.contains(&field) {
+                return false;
+            }
+            match family {
+                ModelFamily::OSeriesReasoning => !O_SERIES_UNSUPPORTED_PARAMS.contains(&field),
+                ModelFamily::GptClassic => !GPT_CLASSIC_UNSUPPORTED_FIELDS.contains(&field),
+            }
+        }
+    }
+}
+
+/// The provider request fields the config dials ask for on `surface`, before the
+/// incompatibility filter. Each entry's name is the exact body field the dial lands in, which
+/// is also what `provider_field_supported` is asked about — so the table below and the filter
+/// speak the same vocabulary.
+///
+/// Chat Completions returns no reasoning content, only an effort parameter, so `thinking`
+/// contributes nothing there; on an o-series model it is accepted and has no effect.
+fn config_dial_fields(config: &DriverConfig, surface: ApiSurface) -> Vec<(&'static str, Value)> {
+    let mut fields = Vec::new();
+    match surface {
+        ApiSurface::Responses => {
+            let mut reasoning = Map::new();
+            if let Some(effort) = config.reasoning_effort.as_ref() {
+                reasoning.insert("effort".to_string(), Value::String(effort.clone()));
+            }
+            if config.thinking {
+                // "auto" lets the provider pick the best summary granularity it will give this
+                // account, rather than exposing a second spelling of one concept as a key.
+                reasoning.insert("summary".to_string(), Value::String("auto".to_string()));
+            }
+            if !reasoning.is_empty() {
+                fields.push(("reasoning", Value::Object(reasoning)));
+            }
+            if let Some(verbosity) = config.verbosity.as_ref() {
+                fields.push(("text", json!({ "verbosity": verbosity })));
+            }
+        }
+        ApiSurface::ChatCompletions => {
+            if let Some(effort) = config.reasoning_effort.as_ref() {
+                fields.push(("reasoning_effort", Value::String(effort.clone())));
+            }
+            if let Some(verbosity) = config.verbosity.as_ref() {
+                fields.push(("text", json!({ "verbosity": verbosity })));
+            }
+        }
+    }
+    fields
+}
+
+/// Stamps the config-derived dials onto a translated body, dropping each field the surface or
+/// model family does not accept. Applied after translation and before `stamp_streaming_flags`,
+/// so a dial overwrites a same-named `params` key rather than losing to it — the same
+/// precedence the host-supplied `prompt_cache_key` has. A `reasoning` object arriving through
+/// `params` is replaced wholesale, never merged.
+fn apply_config_dials(
+    body: &mut Value,
+    config: &DriverConfig,
+    family: ModelFamily,
+    surface: ApiSurface,
+) {
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    for (field, value) in config_dial_fields(config, surface) {
+        if provider_field_supported(field, family, surface) {
+            obj.insert(field.to_string(), value);
+        }
+    }
+}
+
+/// The complete provider request body for one murmur request: translation, then the
+/// config-derived dials, then the streaming flags. `run_inner` and the tests both build a body
+/// through this one path, so a test asserts on the bytes that go on the wire.
+fn build_provider_request(
+    request: &MurmurRequest,
+    config: &DriverConfig,
+    store: bool,
+    family: ModelFamily,
+    surface: ApiSurface,
+) -> Result<Value, String> {
+    let mut body = match surface {
+        ApiSurface::ChatCompletions => translate_murmur_request_to_openai(request, family)?,
+        ApiSurface::Responses => translate_murmur_request_to_responses(request, store)?,
+    };
+    apply_config_dials(&mut body, config, family, surface);
+    stamp_streaming_flags(&mut body, surface);
+    Ok(body)
+}
+
 /// The routing hint to forward, or `None` when the host sent no usable one. An absent, null,
 /// non-string, empty or whitespace-only value all mean "no key" and are never an error.
 fn prompt_cache_key(request: &MurmurRequest) -> Option<&str> {
@@ -282,9 +493,7 @@ fn translate_murmur_request_to_openai(
         if body.contains_key(key) {
             continue;
         }
-        if family == ModelFamily::OSeriesReasoning
-            && O_SERIES_UNSUPPORTED_PARAMS.contains(&key.as_str())
-        {
+        if !provider_field_supported(key, family, ApiSurface::ChatCompletions) {
             continue;
         }
         body.insert(key.clone(), value.clone());
@@ -510,8 +719,12 @@ fn translate_murmur_request_to_responses(
         body.insert(PROMPT_CACHE_KEY.to_string(), Value::String(key.to_string()));
     }
 
+    let family = classify_model(&request.model);
     for (key, value) in &request.params {
         if body.contains_key(key) {
+            continue;
+        }
+        if !provider_field_supported(key, family, ApiSurface::Responses) {
             continue;
         }
         body.insert(key.clone(), value.clone());
@@ -1455,9 +1668,8 @@ fn assemble_responses_streaming_response(
 mod wasm_driver {
     use super::{
         assemble_openai_streaming_response, assemble_responses_streaming_response,
-        classify_api_surface, classify_model, error_payload, process_openai_sse_line,
-        process_responses_sse_line, stamp_streaming_flags, store_opt_in,
-        translate_murmur_request_to_openai, translate_murmur_request_to_responses,
+        build_provider_request, classify_api_surface, classify_model, error_payload,
+        parse_driver_config, process_openai_sse_line, process_responses_sse_line, store_opt_in,
         translate_openai_response_to_murmur, translate_responses_to_murmur, ApiSurface,
         MurmurRequest, ThinkingState, ToolCallState, UsageTokens, CONTINUATION_ID_KEY,
     };
@@ -1529,12 +1741,18 @@ mod wasm_driver {
     fn run_inner(
         input: exports::murmur::tool::run::ToolInput,
     ) -> Result<(Value, Option<String>), String> {
+        // Read and validated before every other step, including the endpoint lookup: an
+        // unrecognised key must fail the call before any HTTP request is dispatched, and a
+        // capsule whose config is wrong should learn that rather than an endpoint complaint.
+        let driver_config = std::env::var("MURMUR_INFERENCE_DRIVER_CONFIG").ok();
+        let config = parse_driver_config(driver_config.as_deref())?;
+        // Capsule-level server-side retention grant (see `store_opt_in`). Gates
+        // `store: true` and, transitively, the whole continuation feature.
+        let store = store_opt_in(driver_config.as_deref());
+
         let endpoint = std::env::var("MURMUR_INFERENCE_ENDPOINT")
             .map_err(|_| "driver: missing MURMUR_INFERENCE_ENDPOINT".to_string())?;
         let api_key = std::env::var("MURMUR_INFERENCE_API_KEY").ok();
-        // Capsule-level server-side retention grant (see `store_opt_in`). Gates
-        // `store: true` and, transitively, the whole continuation feature.
-        let store = store_opt_in(std::env::var("MURMUR_INFERENCE_DRIVER_CONFIG").ok().as_deref());
 
         let raw = input
             .data
@@ -1546,18 +1764,12 @@ mod wasm_driver {
         let family = classify_model(&murmur_request.model);
         let surface = classify_api_surface(&murmur_request.model, family);
 
-        let (mut provider_request, url_suffix) = match surface {
-            ApiSurface::ChatCompletions => (
-                translate_murmur_request_to_openai(&murmur_request, family)?,
-                "chat/completions",
-            ),
-            ApiSurface::Responses => (
-                translate_murmur_request_to_responses(&murmur_request, store)?,
-                "responses",
-            ),
+        let provider_request =
+            build_provider_request(&murmur_request, &config, store, family, surface)?;
+        let url_suffix = match surface {
+            ApiSurface::ChatCompletions => "chat/completions",
+            ApiSurface::Responses => "responses",
         };
-
-        stamp_streaming_flags(&mut provider_request, surface);
 
         let body = serde_json::to_vec(&provider_request)
             .map_err(|err| format!("driver: failed to encode request body: {err}"))?;
@@ -1983,11 +2195,12 @@ mod wasm_driver {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_api_surface, classify_model, gpt_major_version, parse_openai_sse_body,
-        parse_responses_sse_body, process_responses_sse_line, stamp_streaming_flags, store_opt_in,
+        build_provider_request, classify_api_surface, classify_model, gpt_major_version,
+        parse_driver_config, parse_openai_sse_body, parse_responses_sse_body,
+        process_responses_sse_line, provider_field_supported, stamp_streaming_flags, store_opt_in,
         translate_murmur_request_to_openai, translate_murmur_request_to_responses,
         translate_openai_response_to_murmur, translate_responses_to_murmur, ApiSurface,
-        ModelFamily, MurmurRequest, ToolCallState, UsageTokens,
+        DriverConfig, ModelFamily, MurmurRequest, ToolCallState, UsageTokens,
     };
     use serde_json::{json, Value};
     use std::collections::HashMap;
@@ -3229,5 +3442,245 @@ mod tests {
         stamp_streaming_flags(&mut responses, ApiSurface::Responses);
         assert_eq!(responses["stream"], json!(true));
         assert!(responses.get("stream_options").is_none());
+    }
+    // ── `inference.driver.config` vocabulary ──────────────────────────────────
+
+    /// The body `run_inner` would put on the wire: classify, translate, stamp the dials, stamp
+    /// the streaming flags. Tests assert on this rather than on a bare translation.
+    fn provider_body(request: &MurmurRequest, config: &DriverConfig, store: bool) -> Value {
+        let family = classify_model(&request.model);
+        let surface = classify_api_surface(&request.model, family);
+        build_provider_request(request, config, store, family, surface).unwrap()
+    }
+
+    fn config(raw: &str) -> DriverConfig {
+        parse_driver_config(Some(raw)).unwrap()
+    }
+
+    fn request(model: &str) -> MurmurRequest {
+        serde_json::from_value(json!({
+            "model": model,
+            "max_tokens": 1024,
+            "system": "You are a careful assistant.",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "Why is the sky blue?"}]}]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn responses_body_with_reasoning_dials_matches_golden_fixture() {
+        let body = provider_body(
+            &request("gpt-5"),
+            &config(r#"{"thinking":"enabled","reasoning_effort":"high"}"#),
+            false,
+        );
+        assert_eq!(
+            format!("{}\n", serde_json::to_string_pretty(&body).unwrap()),
+            include_str!("../tests/fixtures/responses_gpt5_reasoning_effort_high.json"),
+        );
+        // The effort dial nests under `reasoning` on this surface; the Chat Completions
+        // spelling must not leak onto it.
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn verbosity_lands_under_text_and_asks_for_no_reasoning() {
+        let body = provider_body(&request("gpt-5.1"), &config(r#"{"verbosity":"low"}"#), false);
+        assert_eq!(body["text"], json!({"verbosity": "low"}));
+        assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn reasoning_summary_deltas_reach_the_host_as_thinking_chunks() {
+        let body = include_str!("../tests/fixtures/responses_reasoning_summary_stream.sse");
+        let mut text_chunks: Vec<String> = Vec::new();
+        let mut thinking_chunks: Vec<String> = Vec::new();
+        let result = parse_responses_sse_body(
+            body,
+            &mut |t| text_chunks.push(t.to_string()),
+            &mut |t| thinking_chunks.push(t.to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            thinking_chunks,
+            vec!["The sky scatters ", "short wavelengths, ", "so blue dominates."]
+        );
+        assert_eq!(text_chunks, vec!["Because of ", "Rayleigh scattering."]);
+        assert_eq!(result["content"][0]["type"], "thinking");
+        assert_eq!(
+            result["content"][0]["text"],
+            "The sky scatters short wavelengths, so blue dominates."
+        );
+        assert_eq!(result["content"][1]["type"], "text");
+        assert_eq!(result["content"][1]["text"], "Because of Rayleigh scattering.");
+    }
+
+    #[test]
+    fn unrecognised_config_key_names_the_key_and_the_accepted_set() {
+        let err = parse_driver_config(Some(r#"{"store":true,"reasoning_efort":"high"}"#))
+            .expect_err("an unread key must not be accepted");
+        assert_eq!(
+            err,
+            "driver: unrecognised inference.driver.config key(s): reasoning_efort. \
+             Accepted keys: reasoning_effort, store, thinking, verbosity"
+        );
+    }
+
+    #[test]
+    fn several_unrecognised_config_keys_are_reported_together_in_sorted_order() {
+        // An Anthropic driver config pasted onto this driver: one error, both keys, so the
+        // manifest is fixed once.
+        let err = parse_driver_config(Some(r#"{"thinking_budget_tokens":4096,"beta_features":"x"}"#))
+            .expect_err("both unread keys must be reported");
+        assert_eq!(
+            err,
+            "driver: unrecognised inference.driver.config key(s): beta_features, \
+             thinking_budget_tokens. Accepted keys: reasoning_effort, store, thinking, verbosity"
+        );
+    }
+
+    #[test]
+    fn thinking_accepts_only_enabled_or_disabled() {
+        assert!(config(r#"{"thinking":"enabled"}"#).thinking);
+        assert!(config(r#"{"thinking":"  ENABLED "}"#).thinking);
+        assert!(!config(r#"{"thinking":"disabled"}"#).thinking);
+        assert!(!config(r#"{}"#).thinking);
+
+        let err = parse_driver_config(Some(r#"{"thinking":"on"}"#))
+            .expect_err("an unrecognised thinking value must not be accepted");
+        assert_eq!(
+            err,
+            "driver: inference.driver.config 'thinking' must be \"enabled\" or \"disabled\", \
+             got \"on\""
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_is_type_checked_then_forwarded_verbatim() {
+        let err = parse_driver_config(Some(r#"{"reasoning_effort":3}"#))
+            .expect_err("a non-string effort must not be accepted");
+        assert_eq!(
+            err,
+            "driver: inference.driver.config 'reasoning_effort' must be a string, got 3"
+        );
+
+        // A tier this driver has never heard of is the provider's business, not its own.
+        let body = provider_body(
+            &request("gpt-5"),
+            &config(r#"{"reasoning_effort":"xhigh"}"#),
+            false,
+        );
+        assert_eq!(body["reasoning"], json!({"effort": "xhigh"}));
+    }
+
+    #[test]
+    fn verbosity_is_type_checked_the_same_way() {
+        let err = parse_driver_config(Some(r#"{"verbosity":true}"#))
+            .expect_err("a non-string verbosity must not be accepted");
+        assert_eq!(
+            err,
+            "driver: inference.driver.config 'verbosity' must be a string, got true"
+        );
+    }
+
+    #[test]
+    fn o_series_gets_the_effort_dial_and_no_reasoning_request() {
+        let body = provider_body(
+            &request("o3-mini"),
+            &config(r#"{"thinking":"enabled","reasoning_effort":"high","verbosity":"low"}"#),
+            false,
+        );
+        assert_eq!(body["reasoning_effort"], "high");
+        // Chat Completions defines neither container, so `thinking` and `verbosity` ask for
+        // nothing here — an o-series capsule cannot display reasoning at all.
+        assert!(body.get("reasoning").is_none());
+        assert!(body.get("text").is_none());
+        assert!(body.get("verbosity").is_none());
+    }
+
+    #[test]
+    fn gpt_classic_drops_the_effort_dial_through_the_incompatibility_predicate() {
+        let body = provider_body(&request("gpt-4o"), &config(r#"{"reasoning_effort":"high"}"#), false);
+        assert!(body.get("reasoning_effort").is_none());
+        // Dropped by the one predicate both the dials and the `params` loop consult.
+        assert!(!provider_field_supported(
+            "reasoning_effort",
+            ModelFamily::GptClassic,
+            ApiSurface::ChatCompletions
+        ));
+        assert!(provider_field_supported(
+            "reasoning_effort",
+            ModelFamily::OSeriesReasoning,
+            ApiSurface::ChatCompletions
+        ));
+    }
+
+    #[test]
+    fn an_unconfigured_capsule_sends_what_it_sent_before_the_dials_existed() {
+        for raw in [None, Some("{}")] {
+            let parsed = parse_driver_config(raw).unwrap();
+            assert_eq!(parsed, DriverConfig::default());
+
+            let responses = provider_body(&request("gpt-5"), &parsed, false);
+            assert!(responses.get("reasoning").is_none());
+            assert!(responses.get("text").is_none());
+            assert_eq!(responses["store"], false);
+
+            let chat = provider_body(&request("gpt-4o"), &parsed, false);
+            assert!(chat.get("reasoning_effort").is_none());
+            assert!(chat.get("text").is_none());
+        }
+    }
+
+    #[test]
+    fn store_keeps_its_lenient_parse_under_the_strict_key_check() {
+        // `store` is in the accepted set, so a non-boolean value is not a key error — and
+        // `store_opt_in` still reads it as opt-out.
+        assert_eq!(config(r#"{"store":"true"}"#), DriverConfig::default());
+        assert!(!store_opt_in(Some(r#"{"store":"true"}"#)));
+    }
+
+    #[test]
+    fn a_config_dial_overwrites_a_same_named_params_key_wholesale() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-5",
+            "max_tokens": 256,
+            "messages": [],
+            "params": {"reasoning": {"effort": "low", "generate_summary": "concise"}}
+        }))
+        .unwrap();
+        let body = provider_body(&request, &config(r#"{"reasoning_effort":"high"}"#), false);
+        assert_eq!(body["reasoning"], json!({"effort": "high"}));
+    }
+
+    #[test]
+    fn malformed_or_non_object_config_is_an_error_not_a_silent_default() {
+        assert!(parse_driver_config(Some("not json")).is_err());
+        assert!(parse_driver_config(Some("[]")).is_err());
+        // An unset variable and a variable the host set to nothing both mean "no config".
+        assert_eq!(parse_driver_config(None).unwrap(), DriverConfig::default());
+        assert_eq!(parse_driver_config(Some("  ")).unwrap(), DriverConfig::default());
+    }
+
+    #[test]
+    fn config_parse_precedes_the_endpoint_lookup_in_run_inner() {
+        // With the endpoint unset, the config error must still be the one an operator sees —
+        // which is the proof that no HTTP request can be dispatched with a rejected config.
+        // `run_inner` is wasm-only, so its statement order is asserted from the source.
+        let source = include_str!("lib.rs");
+        let run_inner = &source[source
+            .find("fn run_inner(")
+            .expect("run_inner must exist")..];
+        let parse_at = run_inner
+            .find("parse_driver_config(")
+            .expect("run_inner must parse the driver config");
+        let endpoint_at = run_inner
+            .find("MURMUR_INFERENCE_ENDPOINT")
+            .expect("run_inner must read the endpoint");
+        assert!(
+            parse_at < endpoint_at,
+            "the driver config must be parsed before the endpoint is looked up"
+        );
     }
 }
