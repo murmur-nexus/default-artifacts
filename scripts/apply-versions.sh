@@ -3,7 +3,10 @@
 #   - [workspace.package] version in root Cargo.toml
 #   - version: field in each artifact's murmur.yaml
 #   - VERSION= variable in each artifact's package.sh (when present)
-# Then regenerates artifacts-index.json from artifacts.toml + each murmur.yaml.
+# Then regenerates artifacts-index.json from artifacts.toml + each murmur.yaml,
+# including each entry's `platforms` — derived from artifacts.toml's
+# native_platforms and the artifact's own `implementation:` (see platforms_for
+# below), never from a list kept here.
 #
 # Usage: ./scripts/apply-versions.sh
 #
@@ -27,6 +30,21 @@ workspace_version=$(grep '^workspace_version' "$ARTIFACTS_TOML" \
 
 if [ -z "$workspace_version" ]; then
     echo "error: could not parse workspace_version from artifacts.toml" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Parse native_platforms — the platforms a release publishes a native payload
+# for. artifacts.toml is the only home for this fact; the index entries below
+# derive their `platforms` from it, and scripts/check-platform-coverage.sh holds
+# it to build.yml's build-native `platform:` matrix.
+# ---------------------------------------------------------------------------
+native_platforms=$(sed -n 's/^native_platforms[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' "$ARTIFACTS_TOML" \
+    | tr ',' '\n' | tr -d '"' | tr -d '[:blank:]' | grep . || true)
+
+if [ -z "$native_platforms" ]; then
+    echo "error: could not parse a non-empty native_platforms list from artifacts.toml" >&2
+    echo "       expected a top-level line such as: native_platforms = [\"darwin-aarch64\", \"linux-x86_64\"]" >&2
     exit 1
 fi
 
@@ -138,11 +156,13 @@ done < "$tmpdata"
 # Regenerate artifacts-index.json
 # ---------------------------------------------------------------------------
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-python3 - "$REPO_ROOT" "$TIMESTAMP" "$tmpdata" > "$REPO_ROOT/artifacts-index.json" <<'PYEOF'
+python3 - "$REPO_ROOT" "$TIMESTAMP" "$tmpdata" $native_platforms > "$REPO_ROOT/artifacts-index.json" <<'PYEOF'
 import sys, json, re
 from pathlib import Path
 
 repo_root, timestamp, tmpdata_path = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+# artifacts.toml's native_platforms, one per argument.
+native_platforms = sys.argv[4:]
 
 RUNTIME_TAGS = {
     "driver": ["driver", "inference"],
@@ -150,11 +170,6 @@ RUNTIME_TAGS = {
     "tool":   ["tool"],
     "skill":  ["skill"],
 }
-# Must match the `platform` matrix in .github/workflows/build.yml's build-native job.
-# Advertising a platform with no runner behind it puts an entry in the index that
-# has no release asset, so `mur install` fails for that platform. To add a platform
-# (e.g. linux-aarch64 via `ubuntu-24.04-arm`), add it to both lists together.
-ALL_PLAT = ["darwin-aarch64", "linux-x86_64"]
 
 
 def first_sentence(s):
@@ -187,6 +202,20 @@ def get_field(name, text):
     return ''
 
 
+def platforms_for(text):
+    """The platform set an artifact's payloads are tagged with.
+
+    Derived from the artifact's own `implementation:`, using the same
+    absent-means-wasm rule as scripts/classify-crates.sh: a native tool ships one
+    platform-tagged .mur.zip per platform in artifacts.toml's native_platforms,
+    and every wasm artifact and skill ships a single untagged payload — so it
+    declares no platform, which is what the registry records for an untagged
+    payload in the local store.
+    """
+    implementation = get_field('implementation', text) or 'wasm'
+    return list(native_platforms) if implementation == 'native' else []
+
+
 def name_tags(name, runtime, base_tags):
     # Extract keywords from the artifact name beyond the murmur- prefix and runtime type
     parts = name.replace('murmur-', '').split('-')
@@ -204,7 +233,7 @@ with open(tmpdata_path) as f:
         text = (repo_root / rel_path / 'murmur.yaml').read_text()
         runtime = get_field('runtime', text) or 'tool'
         description = get_description(text)
-        platforms = [] if runtime == 'skill' else list(ALL_PLAT)
+        platforms = platforms_for(text)
         base_tags = list(RUNTIME_TAGS.get(runtime, ["tool"]))
         tags = name_tags(name, runtime, base_tags)
         artifacts.append({

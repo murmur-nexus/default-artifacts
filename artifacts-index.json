@@ -12,10 +12,7 @@
         "inference",
         "anthropic"
       ],
-      "platforms": [
-        "darwin-aarch64",
-        "linux-x86_64"
-      ]
+      "platforms": []
     },
     {
       "name": "murmur-driver-deepseek",
@@ -27,10 +24,7 @@
         "inference",
         "deepseek"
       ],
-      "platforms": [
-        "darwin-aarch64",
-        "linux-x86_64"
-      ]
+      "platforms": []
     },
     {
       "name": "murmur-driver-openai",
@@ -42,10 +36,7 @@
         "inference",
         "openai"
       ],
-      "platforms": [
-        "darwin-aarch64",
-        "linux-x86_64"
-      ]
+      "platforms": []
     },
     {
       "name": "murmur-hook-compact",
@@ -56,10 +47,7 @@
         "hook",
         "compact"
       ],
-      "platforms": [
-        "darwin-aarch64",
-        "linux-x86_64"
-      ]
+      "platforms": []
     },
     {
       "name": "murmur-hook-debug",
@@ -70,10 +58,7 @@
         "hook",
         "debug"
       ],
-      "platforms": [
-        "darwin-aarch64",
-        "linux-x86_64"
-      ]
+      "platforms": []
     },
     {
       "name": "murmur-hook-diff-summary",
@@ -85,10 +70,7 @@
         "diff",
         "summary"
       ],
-      "platforms": [
-        "darwin-aarch64",
-        "linux-x86_64"
-      ]
+      "platforms": []
     },
     {
       "name": "murmur-hook-eval",
@@ -99,10 +81,7 @@
         "hook",
         "eval"
       ],
-      "platforms": [
-        "darwin-aarch64",
-        "linux-x86_64"
-      ]
+      "platforms": []
     },
     {
       "name": "murmur-hook-grafana",
@@ -113,10 +92,7 @@
         "hook",
         "grafana"
       ],
-      "platforms": [
-        "darwin-aarch64",
-        "linux-x86_64"
-      ]
+      "platforms": []
     },
     {
       "name": "murmur-hook-memory",
@@ -127,10 +103,7 @@
         "hook",
         "memory"
       ],
-      "platforms": [
-        "darwin-aarch64",
-        "linux-x86_64"
-      ]
+      "platforms": []
     },
     {
       "name": "murmur-hook-regression-verifier",
@@ -142,10 +115,7 @@
         "regression",
         "verifier"
       ],
-      "platforms": [
-        "darwin-aarch64",
-        "linux-x86_64"
-      ]
+      "platforms": []
     },
     {
       "name": "murmur-hook-shell-desc",
@@ -157,10 +127,7 @@
         "shell",
         "desc"
       ],
-      "platforms": [
-        "darwin-aarch64",
-        "linux-x86_64"
-      ]
+      "platforms": []
     },
     {
       "name": "murmur-tool-corpus",
@@ -171,10 +138,7 @@
         "tool",
         "corpus"
       ],
-      "platforms": [
-        "darwin-aarch64",
-        "linux-x86_64"
-      ]
+      "platforms": []
     },
     {
       "name": "murmur-tool-create",
@@ -185,10 +149,7 @@
         "tool",
         "create"
       ],
-      "platforms": [
-        "darwin-aarch64",
-        "linux-x86_64"
-      ]
+      "platforms": []
     },
     {
       "name": "murmur-tool-editor",
@@ -199,10 +160,7 @@
         "tool",
         "editor"
       ],
-      "platforms": [
-        "darwin-aarch64",
-        "linux-x86_64"
-      ]
+      "platforms": []
     },
     {
       "name": "murmur-tool-code-coverage",
@@ -273,10 +231,7 @@
         "request",
         "input"
       ],
-      "platforms": [
-        "darwin-aarch64",
-        "linux-x86_64"
-      ]
+      "platforms": []
     },
     {
       "name": "murmur-tool-report",
@@ -287,10 +242,7 @@
         "tool",
         "report"
       ],
-      "platforms": [
-        "darwin-aarch64",
-        "linux-x86_64"
-      ]
+      "platforms": []
     },
     {
       "name": "murmur-tool-registry-search",

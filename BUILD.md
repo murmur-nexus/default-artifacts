@@ -110,6 +110,46 @@ cd tools/murmur-tool-git        # or any other native tool
 
 Output: `tools/<name>/<name>-<version>-<platform>.mur.zip` (gitignored).
 
+### Platform coverage
+
+A native tool's payload is always platform-tagged, so a release carries one
+`.mur.zip` per native tool per platform; every WASM artifact and skill carries a
+single untagged one. The platforms a release builds for live in one place —
+`native_platforms` at the top of `artifacts.toml`:
+
+```toml
+native_platforms = ["darwin-aarch64", "linux-x86_64"]
+```
+
+Nothing else states them. `apply-versions.sh` derives each
+`artifacts-index.json` entry's `platforms` from that list plus the artifact's own
+`implementation:`, using the same absent-means-`wasm` rule as
+`classify-crates.sh` — a native tool gets the full list, and a wasm artifact or
+skill gets `[]`, which is what the local store records for an untagged payload.
+So a sixth native tool picks up its platforms from its `murmur.yaml` with no
+script edit.
+
+`scripts/check-platform-coverage.sh` (run by CI) prints that enumeration and
+fails if it has drifted:
+
+```bash
+./scripts/check-platform-coverage.sh                  # offline — what CI runs
+./scripts/check-platform-coverage.sh --release v0.11.0 # also check a release's assets
+```
+
+The offline run holds `native_platforms` to the `platform:` matrix in
+`build.yml`'s `build-native` job in **both** directions, and holds every index
+entry to the derivation. `--release <tag>` adds the one check that needs network
+and a published release: that every asset belonging to a native tool carries a
+declared platform tag, since an untagged native payload is the only thing a
+generic-path resolve could come from.
+
+To add a build platform, add its `platform:` row to `build-native` **and** its
+name to `native_platforms` in the same commit, then run
+`./scripts/apply-versions.sh`. Either half alone fails CI. A platform is declared
+only once a runner builds it: declaring one with no payload behind it makes
+`mur install` fail on a promise instead of falling back visibly.
+
 ## Adding a new artifact
 
 A new artifact is a four-file change, enforced by CI:
@@ -134,7 +174,10 @@ what each arm generates.
 
 A native tool needs no further change: `implementation: native` in its
 `murmur.yaml` is what excludes it from the wasm build, via
-`scripts/classify-crates.sh`. `scripts/check-build-coverage.sh` (run by CI) fails
+`scripts/classify-crates.sh`, and what gives its index entry the platforms in
+`artifacts.toml`'s `native_platforms` (see
+[Platform coverage](#platform-coverage)).
+`scripts/check-build-coverage.sh` (run by CI) fails
 if an artifact in `artifacts.toml` is not built by exactly one `build.yml` matrix,
 or is built by a matrix that disagrees with its `implementation:` — so a native
 tool added to `build-wasm`, or one whose `implementation:` changes without its
@@ -202,7 +245,9 @@ All artifact versions are controlled from a single file: **`artifacts.toml`** at
 
 This updates `[workspace.package] version` in the root `Cargo.toml`, the
 `version:` field in each artifact's `murmur.yaml`, the `VERSION=` variable in
-each native tool's `package.sh`, and regenerates `artifacts-index.json`.
+each native tool's `package.sh`, and regenerates `artifacts-index.json` —
+including each entry's derived `platforms` (see
+[Platform coverage](#platform-coverage)).
 CI rejects any push where these surfaces are out of sync with `artifacts.toml` —
 never bump a version by hand in an individual file.
 
