@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-08T05:14:58Z",
+  "updated_at": "2026-09-09T19:56:47Z",
   "artifacts": [
     {
       "name": "murmur-driver-anthropic",
@@ -34,7 +34,7 @@
     },
     {
       "name": "murmur-driver-openai",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "runtime": "driver",
       "description": "OpenAI inference driver for Murmur agent capsules \u2014 Chat Completions, with Responses API for gpt-5 and later models.",
       "tags": [

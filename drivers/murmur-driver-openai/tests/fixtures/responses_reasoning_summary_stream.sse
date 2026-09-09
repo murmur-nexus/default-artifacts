@@ -1,0 +1,16 @@
+data: {"type":"response.created","response":{"id":"resp_fixture_1","status":"in_progress"}}
+
+data: {"type":"response.reasoning_summary_text.delta","delta":"The sky scatters "}
+
+data: {"type":"response.reasoning_summary_text.delta","delta":"short wavelengths, "}
+
+data: {"type":"response.output_text.delta","delta":"Because of "}
+
+data: {"type":"response.reasoning_summary_text.delta","delta":"so blue dominates."}
+
+data: {"type":"response.output_text.delta","delta":"Rayleigh scattering."}
+
+data: {"type":"response.completed","response":{"id":"resp_fixture_1","status":"completed"}}
+
+data: [DONE]
+
