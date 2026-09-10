@@ -669,7 +669,15 @@ fn translate_moonshot_response_to_murmur(response: &Value) -> Result<Value, Stri
         content.push(json!({"type": "thinking", "text": rc}));
     }
 
-    if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+    // An OpenAI-compatible server may report `tool_calls: []` on a plain answer turn. Taking the
+    // tool-call branch on an empty array would drop the answer text, so the branch is chosen on
+    // a call actually being present rather than on the member being present.
+    let tool_calls = message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .filter(|calls| !calls.is_empty());
+
+    if let Some(tool_calls) = tool_calls {
         for call in tool_calls {
             let arguments_raw = call
                 .get("function")
@@ -1857,6 +1865,25 @@ mod tests {
             ]),
             "the reasoning stays a thinking block; the payload lands byte-identical in text"
         );
+    }
+
+    #[test]
+    fn an_empty_tool_calls_array_still_yields_the_answer_text() {
+        // An OpenAI-compatible server may report `tool_calls: []` on a plain answer turn. The
+        // buffered path must read that as "no tool call" rather than as a tool-call turn with
+        // nothing in it, or the answer is dropped and the turn comes back empty.
+        let buffered = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"content": "Rayleigh scattering.", "tool_calls": []}
+            }]
+        });
+        let response = translate_moonshot_response_to_murmur(&buffered).unwrap();
+        assert_eq!(
+            response["content"],
+            json!([{"type": "text", "text": "Rayleigh scattering."}])
+        );
+        assert_eq!(response["stop_reason"], json!("end_turn"));
     }
 
     // ── Scenario 15 — token usage ─────────────────────────────────────────────
