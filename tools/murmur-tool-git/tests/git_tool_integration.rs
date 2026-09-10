@@ -137,7 +137,7 @@ fn binary_should_manage_worktree_lifecycle() {
 
     let create_result = run_tool_in(
         &repo_path,
-        json!({ "operation": "create_worktree", "path": worktree_rel, "branch": branch }),
+        json!({ "operation": "create_worktree", "dest": worktree_rel, "branch": branch }),
     );
     assert!(
         create_result.ok,
@@ -194,7 +194,7 @@ fn binary_should_manage_worktree_lifecycle() {
     // Attempt to create another worktree on the same branch — should fail
     let duplicate_result = run_tool_in(
         &repo_path,
-        json!({ "operation": "create_worktree", "path": "wt-duplicate", "branch": branch }),
+        json!({ "operation": "create_worktree", "dest": "wt-duplicate", "branch": branch }),
     );
     assert!(
         !duplicate_result.ok,
@@ -224,7 +224,7 @@ fn status_shows_modified_file() {
 
     run_tool_in(
         &repo_path,
-        json!({ "operation": "create_worktree", "path": "wt-status", "branch": branch }),
+        json!({ "operation": "create_worktree", "dest": "wt-status", "branch": branch }),
     );
 
     // Modify a file in the worktree (unstaged)

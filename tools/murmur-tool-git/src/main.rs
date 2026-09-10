@@ -333,21 +333,21 @@ fn op_restore(op: &Value, log: Option<&str>) -> Value {
         Err(e) => return fail_msg(e),
     };
 
-    let paths: Vec<String> = match op.get("paths") {
+    let paths: Vec<String> = match op.get("dest_paths") {
         Some(Value::Array(arr)) => arr
             .iter()
             .filter_map(|v| v.as_str().map(String::from))
             .collect(),
-        _ => return fail_msg("missing required field: paths (must be an array of strings)"),
+        _ => return fail_msg("missing required field: dest_paths (must be an array of strings)"),
     };
 
     if paths.is_empty() {
-        return fail_msg("paths must not be empty");
+        return fail_msg("dest_paths must not be empty");
     }
 
     let staged = op.get("staged").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    log_write(log, &format!("restore: repo={repo:?} staged={staged} paths={paths:?}\n"));
+    log_write(log, &format!("restore: repo={repo:?} staged={staged} dest_paths={paths:?}\n"));
 
     let mut args: Vec<&str> = vec!["-C", &repo, "restore"];
     if staged {
@@ -1719,18 +1719,18 @@ fn op_worktree(op: &Value, log: Option<&str>) -> Value {
 }
 
 fn worktree_add(repo: &str, op: &Value, log: Option<&str>) -> Value {
-    let path = match op.get("path").and_then(|v| v.as_str()) {
+    let dest = match op.get("dest").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => p.to_string(),
-        _ => return fail_msg("missing required field: path"),
+        _ => return fail_msg("missing required field: dest"),
     };
     let branch = match op.get("branch").and_then(|v| v.as_str()) {
         Some(b) if !b.is_empty() => b.to_string(),
         _ => return fail_msg("missing required field: branch"),
     };
 
-    log_write(log, &format!("worktree add: repo={repo:?} path={path:?} branch={branch:?}\n"));
+    log_write(log, &format!("worktree add: repo={repo:?} dest={dest:?} branch={branch:?}\n"));
 
-    let out = git(&["-C", repo, "worktree", "add", &path, &branch]);
+    let out = git(&["-C", repo, "worktree", "add", &dest, &branch]);
     if !out.success {
         let combined = format!("{}\n{}", out.stdout, out.stderr);
         if combined.contains("is already checked out")
@@ -1746,8 +1746,8 @@ fn worktree_add(repo: &str, op: &Value, log: Option<&str>) -> Value {
     }
 
     ok_with(
-        format!("worktree created at {path} on branch {branch}"),
-        json!({ "path": path, "branch": branch }),
+        format!("worktree created at {dest} on branch {branch}"),
+        json!({ "path": dest, "branch": branch }),
     )
 }
 
@@ -1810,30 +1810,30 @@ fn worktree_list(repo: &str, log: Option<&str>) -> Value {
 }
 
 fn worktree_remove(repo: &str, op: &Value, log: Option<&str>) -> Value {
-    let path = match op.get("path").and_then(|v| v.as_str()) {
+    let dest = match op.get("dest").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => p.to_string(),
-        _ => return fail_msg("missing required field: path"),
+        _ => return fail_msg("missing required field: dest"),
     };
     let force = op.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    log_write(log, &format!("worktree remove: repo={repo:?} path={path:?} force={force}\n"));
+    log_write(log, &format!("worktree remove: repo={repo:?} dest={dest:?} force={force}\n"));
 
     let mut args: Vec<&str> = vec!["-C", repo, "worktree", "remove"];
     if force {
         args.push("--force");
     }
-    args.push(&path);
+    args.push(&dest);
 
     let out = git(&args);
     if !out.success {
         let combined = format!("{}\n{}", out.stdout, out.stderr);
         if combined.contains("is not a worktree") || combined.contains("not a working tree") {
-            return err_result(err::NOT_FOUND, format!("'{path}' is not a worktree"));
+            return err_result(err::NOT_FOUND, format!("'{dest}' is not a worktree"));
         }
         if combined.contains("contains modified or untracked files") || combined.contains("unclean") {
             return err_result(
                 err::DIRTY,
-                format!("worktree '{path}' has uncommitted changes; use force=true to remove"),
+                format!("worktree '{dest}' has uncommitted changes; use force=true to remove"),
             );
         }
         return fail_msg(format!(
@@ -1842,14 +1842,14 @@ fn worktree_remove(repo: &str, op: &Value, log: Option<&str>) -> Value {
         ));
     }
 
-    ok_with(format!("worktree removed: {path}"), json!({ "path": path }))
+    ok_with(format!("worktree removed: {dest}"), json!({ "path": dest }))
 }
 
 // ── BACKWARD-COMPAT operations ────────────────────────────────────────────────
 
 /// Backward-compatible alias for `worktree / add`. Retained so existing capsule
 /// calls and the original integration test suite keep working without modification.
-/// The op must carry `path` and `branch` at the top level, which `worktree_add` reads.
+/// The op must carry `dest` and `branch` at the top level, which `worktree_add` reads.
 fn op_create_worktree(op: &Value, log: Option<&str>) -> Value {
     let repo = match resolve_repo(op) {
         Ok(r) => r,

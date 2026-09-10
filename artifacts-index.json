@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-10T00:45:14Z",
+  "updated_at": "2026-09-10T03:01:54Z",
   "artifacts": [
     {
       "name": "murmur-driver-anthropic",
@@ -206,7 +206,7 @@
     },
     {
       "name": "murmur-tool-git",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "runtime": "tool",
       "description": "Structured git interface for Murmur capsules.",
       "tags": [

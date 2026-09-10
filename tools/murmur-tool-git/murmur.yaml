@@ -1,5 +1,5 @@
 name: murmur-tool-git
-version: 0.1.0
+version: 0.2.0
 runtime: tool
 implementation: native
 description: |
@@ -12,7 +12,7 @@ description: |
   | status      |                  | repo                               | entries:[{path,status_code}]     |
   | add         |                  | repo, paths[]                      | staged:[]                        |
   | diff        |                  | repo, staged?, path?               | diff:string                      |
-  | restore     |                  | repo, paths[], staged?             | restored:[]                      |
+  | restore     |                  | repo, dest_paths[], staged?        | restored:[]                      |
   | stash       | push/pop/list    | repo, message?, index?             | stash_ref / entries:[]           |
   | log         |                  | repo, n?, author?, since?, path?   | commits:[{hash,short_hash,...}]  |
   | show        |                  | repo, ref?                         | commit:{...}, diff:string        |
@@ -31,10 +31,14 @@ description: |
   | remote      | list/add/remove  | repo, name?, url?                  | remotes:[] / name                |
   | tag         | list/create      | repo, name?, ref?, message?        | tags:[] / name,ref               |
   | merge       |                  | repo, branch, message?, ff_only?   | merged_commit, fast_forward      |
-  | worktree    | add/list/remove  | repo, path?, branch?, force?       | path / worktrees:[]              |
+  | worktree    | add/list/remove  | repo, dest?, branch?, force?       | path / worktrees:[]              |
 
   All responses: {ok:bool, message:string, error_kind?:string, ...fields}
   repo: absolute path to repo root. Resolved automatically if omitted.
+  create_worktree: alias for worktree/add; takes the same repo, dest, branch.
+  dest and dest_paths are this tool's declared write destinations. A capsule
+  granting capabilities.filesystem.read_only has their values checked against
+  that grant before the call is dispatched.
 
 input_schema:
   type: object
@@ -66,6 +70,12 @@ input_schema:
         - worktree
         - create_worktree
       description: "Operation to perform."
+    # `repo` carries no destination annotation on purpose. It is an operating
+    # context, not a destination: what a call writes under it depends on the operation,
+    # and log, diff, show and status write nothing at all. Annotating it would make
+    # every git call a write and those four refuse under a read_only grant — the failure
+    # the annotation exists to prevent. The vocabulary has no term for an operating
+    # context whose write target depends on the operation; do not invent one here.
     repo:
       type: string
       description: "Absolute path to the git repository root. Auto-discovered from CWD if omitted."
@@ -79,7 +89,7 @@ input_schema:
       type: array
       items:
         type: string
-      description: "Required for add and restore. Array of file paths relative to the repo root."
+      description: "Required for add. Array of file paths relative to the repo root."
     ref:
       type: string
       description: "Required for cherry_pick and checkout. Optional (defaults to HEAD) for show, reset, and tag/create."
@@ -97,10 +107,17 @@ input_schema:
       description: "Required for clone and remote/add."
     dest:
       type: string
-      description: "Required for clone. Destination directory path."
+      format: murmur-destination
+      description: "Directory this call creates or removes. Required for clone (destination for the new tree), worktree/add and create_worktree (the new worktree directory), and worktree/remove (the worktree directory to delete)."
+    dest_paths:
+      type: array
+      items:
+        type: string
+        format: murmur-destination
+      description: "Required for restore. Array of working-tree file paths, relative to the repo root, that restore overwrites."
     path:
       type: string
-      description: "Required for worktree/add and worktree/remove. Absolute path for the worktree directory."
+      description: "Optional pathspec filter for diff and log, limiting output to that path. Also accepted by status as a legacy alias for repo. Read-only in every case — the worktree operations take dest instead."
     symbol_id:
       type: string
       description: "Required for symbol_history. Stable symbol id from murmur-tool-code-graph (rust://<package>/<module>#<qualified_name>(<signature>)); resolved verbatim against the indexed symbols table to find the symbol's current file and line range."
@@ -134,7 +151,7 @@ allowed_flags:
     positionals: ["path"]
   restore:
     flags: ["--staged"]
-    positionals: ["paths"]
+    positionals: ["dest_paths"]
   stash:
     subcommands: ["push", "pop", "list"]
     flags: ["-m", "--message"]
@@ -193,10 +210,10 @@ allowed_flags:
   worktree:
     subcommands: ["add", "list", "remove"]
     flags: ["--force"]
-    positionals: ["path", "branch"]
+    positionals: ["dest", "branch"]
   create_worktree:
     flags: []
-    positionals: ["path", "branch"]
+    positionals: ["dest", "branch"]
 
 capabilities:
   shell:

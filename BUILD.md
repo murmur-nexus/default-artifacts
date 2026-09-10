@@ -204,6 +204,22 @@ input_schema:
 | `murmur-destination` | a string property | the value is a filesystem path this tool writes to |
 | `murmur-opaque` | an object or array property, or the schema's top level | the tool only stores this subtree; the key-name heuristic does not descend into it. Ignored on a string property |
 
+A destination that arrives as an array of paths is annotated on the **items**,
+never on the array property. The annotation lowers to a location, and a location
+resolves to string values only — on the array itself it names the array and
+yields nothing to check, silently declaring no destination at all:
+
+```yaml
+    dest_paths:
+      type: array
+      items:
+        type: string
+        format: murmur-destination
+```
+
+The runtime renders that location `dest_paths[]`, and a refusal names it that
+way.
+
 Three things to know before adding one:
 
 - **Annotate only what is actually written to.** The annotation is resolved
@@ -220,8 +236,18 @@ Three things to know before adding one:
   as soon as any annotation lowers, so a tool with several destinations must
   annotate all of them — the warning will not remind you about the second.
 
-`murmur-tool-editor` is the worked example; see
-[tools/murmur-tool-editor/README.md](./tools/murmur-tool-editor/README.md).
+Two worked examples:
+
+| Tool | Shows |
+|---|---|
+| [`murmur-tool-editor`](./tools/murmur-tool-editor/README.md) | the single-destination case — `dest_path` split out of the shared `path` |
+| [`murmur-tool-git`](./tools/murmur-tool-git/README.md) | several destinations at once, the array-items form (`dest_paths[]`), and a property left deliberately bare because no annotation can describe it |
+
+`murmur-tool-git` is also where the third rule bites hardest: `repo` is an
+operating context, not a destination — what a call writes under it depends on
+the operation. Annotating it would make `log`, `diff`, `show` and `status`
+refuse. It stays undeclared, and because the tool annotates two other
+properties, `W-SEC-018` no longer says so.
 
 > **Note — the crates under `libs/`.** They are *not* artifacts and must never
 > be added to `artifacts.toml` or a `build.yml` matrix — they are shared,

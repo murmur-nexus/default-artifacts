@@ -340,7 +340,7 @@ fn run_commit(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>, commit_h
     }
 
     // restore README.md modified in the diff group — we need a clean tree for nothing_to_commit
-    let _ = call(bin, &json!({ "operation": "restore", "repo": repo, "paths": ["README.md"] }));
+    let _ = call(bin, &json!({ "operation": "restore", "repo": repo, "dest_paths": ["README.md"] }));
 
     // nothing to commit
     let input = json!({ "operation": "commit", "repo": repo, "message": "empty" });
@@ -490,7 +490,7 @@ fn run_stash(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
 
     // nothing_to_stash (repo clean after pop, README was modified but now restored)
     // First restore README so we have a truly clean repo
-    let restore_input = json!({ "operation": "restore", "repo": repo, "paths": ["README.md"] });
+    let restore_input = json!({ "operation": "restore", "repo": repo, "dest_paths": ["README.md"] });
     let _ = call(bin, &restore_input);
 
     let input = json!({ "operation": "stash", "repo": repo, "subcommand": "push" });
@@ -512,7 +512,7 @@ fn run_restore(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
     writeln!(f, "dirty again").unwrap();
     drop(f);
 
-    let input = json!({ "operation": "restore", "repo": repo, "paths": ["README.md"] });
+    let input = json!({ "operation": "restore", "repo": repo, "dest_paths": ["README.md"] });
     match call(bin, &input) {
         Err(e) => fail_err(results, "restore — README", &input, &e),
         Ok(res) => {
@@ -678,7 +678,7 @@ fn run_switch_checkout(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>)
     };
 
     // always restore README before continuing (even if the test above failed and checkout succeeded)
-    let restore = json!({ "operation": "restore", "repo": repo, "paths": ["README.md"] });
+    let restore = json!({ "operation": "restore", "repo": repo, "dest_paths": ["README.md"] });
     let _ = call(bin, &restore);
     // if checkout succeeded unexpectedly, switch back to main
     if !dirty_wt_ok {
@@ -1232,7 +1232,7 @@ fn run_worktree(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
     // add worktree on feature-b
     let input = json!({
         "operation": "worktree", "repo": repo, "subcommand": "add",
-        "path": wt_path, "branch": "feature-b"
+        "dest": wt_path, "branch": "feature-b"
     });
     match call(bin, &input) {
         Err(e) => fail_err(results, "worktree — add", &input, &e),
@@ -1274,7 +1274,7 @@ fn run_worktree(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
     let wt_conflict = pg.worktrees().join("wt-conflict").to_string_lossy().to_string();
     let input = json!({
         "operation": "worktree", "repo": repo, "subcommand": "add",
-        "path": wt_conflict, "branch": "feature-b"
+        "dest": wt_conflict, "branch": "feature-b"
     });
     match call(bin, &input) {
         Err(e) => fail_err(results, "worktree — branch_conflict", &input, &e),
@@ -1286,7 +1286,7 @@ fn run_worktree(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
 
     // remove worktree
     let input = json!({
-        "operation": "worktree", "repo": repo, "subcommand": "remove", "path": wt_path
+        "operation": "worktree", "repo": repo, "subcommand": "remove", "dest": wt_path
     });
     match call(bin, &input) {
         Err(e) => fail_err(results, "worktree — remove", &input, &e),
@@ -1308,7 +1308,7 @@ fn run_create_worktree(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>)
     let input = json!({
         "operation": "create_worktree",
         "repo": repo,
-        "path": wt_compat,
+        "dest": wt_compat,
         "branch": "feature-a"
     });
     match call(bin, &input) {
@@ -1324,7 +1324,7 @@ fn run_create_worktree(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>)
     }
 
     // cleanup: remove the compat worktree
-    let rm = json!({ "operation": "worktree", "repo": repo, "subcommand": "remove", "path": wt_compat });
+    let rm = json!({ "operation": "worktree", "repo": repo, "subcommand": "remove", "dest": wt_compat });
     let _ = call(bin, &rm);
 }
 
