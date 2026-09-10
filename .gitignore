@@ -24,3 +24,8 @@
 # murmur-tool-code-graph on-disk graph db + slice payloads — created under a target
 # repo's .murmur/ at index/slice time; a runtime artifact, never committed.
 **/.murmur/
+
+# Host-test fixture trees. The editor tool refuses absolute path inputs, so its host tests
+# address fixtures relative to the crate root instead of under /tmp; a runtime artifact of
+# `cargo test`, never committed.
+**/.test-scratch/

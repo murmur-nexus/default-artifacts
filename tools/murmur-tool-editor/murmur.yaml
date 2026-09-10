@@ -1,5 +1,5 @@
 name: murmur-tool-editor
-version: 0.3.0
+version: 0.4.0
 runtime: tool
 implementation: wasm
 description: |
@@ -27,7 +27,10 @@ description: |
   declaration rather than against the spelling of a property name.
 
   All responses: {ok:bool, message:string, error_kind?:string}
-  Paths are relative to the capsule workdir (the binary's CWD at dispatch time).
+  Paths are relative to the capsule workdir (the binary's CWD at dispatch time). An
+  absolute value on path, dest_path or dir is refused rather than resolved: it returns
+  error_kind absolute_path naming the offending value and the relative form to send, and
+  the operation touches no file. Send 'results.txt', not '/app/results.txt'.
 
 input_schema:
   type: object
@@ -42,11 +45,11 @@ input_schema:
       description: "Operation to perform."
     path:
       type: string
-      description: "File path to read, relative to capsule workdir. Required for read_file."
+      description: "File path to read, relative to capsule workdir; an absolute value is refused. Required for read_file."
     dest_path:
       type: string
       format: murmur-destination
-      description: "File path this call writes to, relative to capsule workdir. Required for write_file and replace_in_file."
+      description: "File path this call writes to, relative to capsule workdir; an absolute value is refused. Required for write_file and replace_in_file."
     content:
       type: string
       description: "File content to write. Required for write_file."
@@ -61,7 +64,7 @@ input_schema:
       description: "Regex pattern to search for. Required for find_in_files."
     dir:
       type: string
-      description: "Directory to search in (relative to workdir). Required for find_in_files."
+      description: "Directory to search in, relative to workdir; an absolute value is refused. Required for find_in_files."
     recursive:
       type: boolean
       description: "Whether to search recursively. Optional for find_in_files. Defaults to true."

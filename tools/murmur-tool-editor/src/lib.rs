@@ -71,6 +71,10 @@ pub mod logic {
         pub const RANGE_TOO_LARGE: &str = "range_too_large";
         // find_in_files context_lines is negative or exceeds MAX_CONTEXT_LINES.
         pub const CONTEXT_TOO_LARGE: &str = "context_too_large";
+        // A path input (`path`, `dest_path` or `dir`) was given as an absolute value, which
+        // the manifest's contract forbids: every path this tool takes is relative to the
+        // capsule workdir.
+        pub const ABSOLUTE_PATH: &str = "absolute_path";
     }
 
     // ── Read cache: keyed by (path, line_range, mtime), persisted on disk ────────
@@ -281,6 +285,9 @@ pub mod logic {
             Some(p) if !p.is_empty() => p.to_string(),
             _ => return fail_msg("missing required field: path"),
         };
+        if let Some(refusal) = reject_absolute("path", &path) {
+            return refusal;
+        }
 
         // Get file metadata for mtime
         let metadata = match std::fs::metadata(&path) {
@@ -443,6 +450,11 @@ pub mod logic {
             Some(p) if !p.is_empty() => p.to_string(),
             _ => return fail_msg("missing required field: dest_path"),
         };
+        // Before `content` is read and before `create_dir_all` below, so an absolute
+        // destination never manufactures the directory tree it names.
+        if let Some(refusal) = reject_absolute("dest_path", &path) {
+            return refusal;
+        }
         let content = match op.get("content").and_then(|v| v.as_str()) {
             Some(c) => c.to_string(),
             None => return fail_msg("missing required field: content"),
@@ -468,6 +480,9 @@ pub mod logic {
             Some(p) if !p.is_empty() => p.to_string(),
             _ => return fail_msg("missing required field: dest_path"),
         };
+        if let Some(refusal) = reject_absolute("dest_path", &path) {
+            return refusal;
+        }
         let old_string = match op.get("old_string").and_then(|v| v.as_str()) {
             Some(s) => s.to_string(),
             None => return fail_msg("missing required field: old_string"),
@@ -515,6 +530,12 @@ pub mod logic {
             Some(d) => d.to_string(),
             None => return fail_msg("missing required field: dir"),
         };
+        // An absolute scope is refused ahead of the scope check below: `/` is neither empty,
+        // "." nor "./", so search_too_broad would otherwise let it through to a full walk of
+        // the preopen.
+        if let Some(refusal) = reject_absolute("dir", &dir) {
+            return refusal;
+        }
         let recursive = op.get("recursive").and_then(|v| v.as_bool()).unwrap_or(true);
 
         // Optional grep-style context window. Default 0 reproduces the historical match shape
@@ -725,12 +746,59 @@ pub mod logic {
         })
     }
 
+    /// The refusal for an absolute path input, or `None` when `value` is relative.
+    ///
+    /// Under the single WASI preopen a tool is dispatched with, an absolute value resolves
+    /// *inside* the preopen: `/app/results.txt` lands at `<workdir>/app/results.txt`, which a
+    /// later read of the same value resolves identically, so nothing inside the capsule can
+    /// see the divergence from what the caller named. Refusing is therefore the only way the
+    /// contract in `murmur.yaml` — every path is relative to the capsule workdir — is
+    /// observable at all.
+    ///
+    /// `property` is the key the caller actually wrote (`path`, `dest_path` or `dir`), so the
+    /// message names the field to fix. The suggestion is the value's final component: the tool
+    /// cannot know which leading components the caller mistook for a root, but under a
+    /// `Sealed` capsule the workdir is the only writable location, so the bare file name is
+    /// the likely intended target. Values with no final component (`/`, or one ending in
+    /// `..`) get no suggestion rather than an empty one.
+    fn reject_absolute(property: &str, value: &str) -> Option<Value> {
+        let path = Path::new(value);
+        if !path.is_absolute() {
+            return None;
+        }
+        let suggestion = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => format!(" (did you mean '{name}'?)"),
+            None => String::new(),
+        };
+        Some(err_result(
+            err::ABSOLUTE_PATH,
+            format!(
+                "'{property}' must be relative to the capsule workdir; got '{value}'{suggestion}"
+            ),
+        ))
+    }
+
     // ── Unit tests ──────────────────────────────────────────────────────────────
 
     #[cfg(test)]
     mod tests {
         use super::*;
         use std::fs;
+
+        // Fixture root for every test that drives an operation, relative to the process CWD
+        // (the crate root, under `cargo test`). Every operation refuses an absolute path
+        // input, so a fixture under `std::env::temp_dir()` is unreachable through the tool —
+        // a workdir-relative tree is the only shape a host test can address, and it is also
+        // the shape a real capsule uses. Gitignored; each test removes its own subtree.
+        const SCRATCH_ROOT: &str = ".test-scratch";
+
+        // An empty fixture directory at `.test-scratch/<tag>`, as a relative path.
+        fn scratch(tag: &str) -> std::path::PathBuf {
+            let dir = std::path::PathBuf::from(SCRATCH_ROOT).join(tag);
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).expect("failed to create scratch dir");
+            dir
+        }
 
         #[test]
         fn fail_msg_returns_ok_false() {
@@ -760,6 +828,7 @@ pub mod logic {
                 err::INVALID_RANGE,
                 err::RANGE_TOO_LARGE,
                 err::CONTEXT_TOO_LARGE,
+                err::ABSOLUTE_PATH,
             ];
             for (i, a) in kinds.iter().enumerate() {
                 for (j, b) in kinds.iter().enumerate() {
@@ -809,9 +878,7 @@ pub mod logic {
 
         #[test]
         fn read_file_declares_read_effect() {
-            let dir = std::env::temp_dir().join("murmur_editor_state_effect_read");
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).unwrap();
+            let dir = scratch("state_effect_read");
             let path = dir.join("hello.txt");
             fs::write(&path, "hi\n").unwrap();
             let envelope = json!({
@@ -826,9 +893,7 @@ pub mod logic {
 
         #[test]
         fn write_file_declares_mutate_effect() {
-            let dir = std::env::temp_dir().join("murmur_editor_state_effect_write");
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).unwrap();
+            let dir = scratch("state_effect_write");
             let path = dir.join("out.txt");
             let envelope = json!({
                 "data": { "operation": "write_file", "dest_path": path.to_str().unwrap(), "content": "x" },
@@ -845,9 +910,7 @@ pub mod logic {
             // 0.2.0 spelled the write destination `path`. Falling back to it would leave the
             // call judged by key name rather than by the `dest_path` destination the input
             // schema declares, so the old spelling is rejected outright.
-            let dir = std::env::temp_dir().join("murmur_editor_write_legacy_spelling");
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).unwrap();
+            let dir = scratch("write_legacy_spelling");
             let path = dir.join("out.txt");
             let out = op_write_file(&json!({
                 "operation": "write_file",
@@ -862,9 +925,7 @@ pub mod logic {
 
         #[test]
         fn replace_in_file_rejects_the_legacy_path_spelling() {
-            let dir = std::env::temp_dir().join("murmur_editor_replace_legacy_spelling");
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).unwrap();
+            let dir = scratch("replace_legacy_spelling");
             let path = dir.join("patch.txt");
             fs::write(&path, "hello\n").unwrap();
             let out = op_replace_in_file(&json!({
@@ -881,9 +942,7 @@ pub mod logic {
 
         #[test]
         fn write_and_replace_take_dest_path() {
-            let dir = std::env::temp_dir().join("murmur_editor_dest_path_roundtrip");
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).unwrap();
+            let dir = scratch("dest_path_roundtrip");
             let path = dir.join("out.txt");
             let written = op_write_file(&json!({
                 "operation": "write_file",
@@ -978,6 +1037,232 @@ pub mod logic {
             assert!(out["message"].as_str().unwrap().contains("missing required field"));
         }
 
+        // ── Absolute path refusal ───────────────────────────────────────────────
+        //
+        // Every path input is relative to the capsule workdir. Under the single WASI preopen a
+        // tool is dispatched with, an absolute value resolves *inside* the preopen rather than
+        // failing, and every operation resolves it the same way — so the only place the
+        // divergence from the contract shows up is outside the capsule. Each operation
+        // therefore refuses an absolute value before it reaches the filesystem.
+
+        #[test]
+        fn reject_absolute_renders_one_message_shape_for_every_property() {
+            assert!(
+                reject_absolute("path", "src/main.rs").is_none(),
+                "a relative value is not refused"
+            );
+            assert!(
+                reject_absolute("dir", "").is_none(),
+                "an empty value is not absolute — it is the scope check's business"
+            );
+
+            for (property, value, expected) in [
+                (
+                    "path",
+                    "/etc/hosts",
+                    "'path' must be relative to the capsule workdir; got '/etc/hosts' (did you mean 'hosts'?)",
+                ),
+                (
+                    "dest_path",
+                    "/app/results.txt",
+                    "'dest_path' must be relative to the capsule workdir; got '/app/results.txt' (did you mean 'results.txt'?)",
+                ),
+                (
+                    "dir",
+                    "/app",
+                    "'dir' must be relative to the capsule workdir; got '/app' (did you mean 'app'?)",
+                ),
+                // No final component to suggest: the parenthetical is omitted entirely rather
+                // than rendered empty.
+                ("dir", "/", "'dir' must be relative to the capsule workdir; got '/'"),
+                (
+                    "dest_path",
+                    "/app/..",
+                    "'dest_path' must be relative to the capsule workdir; got '/app/..'",
+                ),
+            ] {
+                let out = reject_absolute(property, value).expect("an absolute value is refused");
+                assert_eq!(out["ok"], false);
+                assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
+                assert_eq!(out["message"], expected);
+                assert_eq!(out["summary"], expected);
+            }
+        }
+
+        #[test]
+        fn read_file_refuses_an_absolute_path_even_when_the_file_exists() {
+            // The behaviour this refusal removes: an absolute value that a previous write
+            // already created reads back "correctly" from the wrong place. The fixture exists,
+            // so a not-found cannot stand in for the contract error.
+            let dir = scratch("absolute_read");
+            let file = dir.join("results.txt");
+            fs::write(&file, "content from the wrong place\n").unwrap();
+            let absolute = fs::canonicalize(&file).unwrap().to_string_lossy().to_string();
+
+            let out = op_read_file(&json!({ "operation": "read_file", "path": &absolute }));
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
+            assert!(out["content"].is_null(), "a refused read returns no content: {out:?}");
+            let msg = out["message"].as_str().unwrap();
+            assert!(
+                msg.starts_with("'path' must be relative to the capsule workdir"),
+                "the refusal names the property the caller wrote: {msg}"
+            );
+            assert!(msg.contains("did you mean 'results.txt'"), "{msg}");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn write_file_refuses_an_absolute_dest_path_before_creating_directories() {
+            // The `create_dir_all` in op_write_file is what manufactured `<workdir>/app/` for
+            // `/app/results.txt`. The refusal lands ahead of it, so a rejected write leaves no
+            // stray directory behind.
+            let dir = scratch("absolute_write");
+            let absolute = fs::canonicalize(&dir)
+                .unwrap()
+                .join("app")
+                .join("results.txt")
+                .to_string_lossy()
+                .to_string();
+
+            let out = op_write_file(&json!({
+                "operation": "write_file",
+                "dest_path": &absolute,
+                "content": "written to the wrong place",
+            }));
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
+            assert!(
+                out["message"].as_str().unwrap().contains("'dest_path'"),
+                "the refusal names dest_path, not path: {out:?}"
+            );
+            assert!(
+                !dir.join("app").exists(),
+                "a refused write must not create the directories it named"
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn absolute_write_through_dispatch_declares_no_mutation() {
+            // Through `run`, so the state_effect wrapper is in play: a refused write is not
+            // recorded as a mutation.
+            let envelope = json!({
+                "data": {
+                    "operation": "write_file",
+                    "dest_path": "/app/results.txt",
+                    "content": "written to the wrong place",
+                },
+                "log_path": null,
+            });
+            let out = run(&envelope.to_string());
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
+            assert!(out["metadata"].is_null(), "a refused write declares no effect: {out:?}");
+        }
+
+        #[test]
+        fn replace_in_file_refuses_an_absolute_dest_path_and_edits_nothing() {
+            let dir = scratch("absolute_replace");
+            let file = dir.join("patch.txt");
+            fs::write(&file, "hello world\n").unwrap();
+            let absolute = fs::canonicalize(&file).unwrap().to_string_lossy().to_string();
+
+            let out = op_replace_in_file(&json!({
+                "operation": "replace_in_file",
+                "dest_path": &absolute,
+                "old_string": "hello",
+                "new_string": "goodbye",
+            }));
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
+            assert!(out["message"].as_str().unwrap().contains("'dest_path'"), "{out:?}");
+            assert_eq!(
+                fs::read_to_string(&file).unwrap(),
+                "hello world\n",
+                "a refused replacement leaves the file byte-identical"
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn find_in_files_refuses_an_absolute_dir() {
+            let out = op_find_in_files(&json!({
+                "operation": "find_in_files",
+                "pattern": "needle",
+                "dir": "/app",
+                "recursive": true,
+            }));
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
+            let msg = out["message"].as_str().unwrap();
+            assert!(msg.contains("'dir'"), "{msg}");
+            assert!(msg.contains("did you mean 'app'"), "{msg}");
+            assert!(out["matches"].is_null(), "a refused search performs no walk: {out:?}");
+        }
+
+        #[test]
+        fn find_in_files_refuses_the_bare_root_ahead_of_the_scope_check() {
+            // "/" is neither empty, "." nor "./", so the search_too_broad check does not catch
+            // it — it would walk the whole preopen. The absolute check runs first, and with no
+            // final component there is nothing to suggest.
+            let out = op_find_in_files(&json!({
+                "operation": "find_in_files",
+                "pattern": "needle",
+                "dir": "/",
+                "recursive": true,
+            }));
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
+            let msg = out["message"].as_str().unwrap();
+            assert!(msg.contains("'dir'"), "{msg}");
+            assert!(msg.contains("got '/'"), "{msg}");
+            assert!(!msg.contains("did you mean"), "no file name to suggest: {msg}");
+        }
+
+        #[test]
+        fn an_absent_path_input_still_reports_the_missing_field() {
+            // The absolute check only runs on a value that was successfully extracted, so an
+            // absent input keeps its missing-field message and carries no error_kind.
+            for out in [
+                op_read_file(&json!({ "operation": "read_file" })),
+                op_write_file(&json!({ "operation": "write_file", "content": "x" })),
+                op_find_in_files(&json!({ "operation": "find_in_files", "pattern": "needle" })),
+            ] {
+                assert_eq!(out["ok"], false);
+                assert!(
+                    out["error_kind"].is_null(),
+                    "a missing field is not an absolute-path refusal: {out:?}"
+                );
+                assert!(
+                    out["message"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("missing required field: "),
+                    "{out:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn an_absolute_dest_path_is_reported_ahead_of_a_missing_sibling_field() {
+            // dest_path is validated at its extraction site, before `content` is read, so the
+            // caller hears about the path they cannot use rather than a second field.
+            let out = op_write_file(&json!({
+                "operation": "write_file",
+                "dest_path": "/app/results.txt",
+            }));
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
+            assert!(
+                !out["message"].as_str().unwrap().contains("content"),
+                "the absolute path is the first thing reported: {out:?}"
+            );
+        }
+
         #[test]
         fn find_in_files_enforces_size_ceiling() {
             // This fixture is sized to catch the ~2x accounting bug specifically: the sum of
@@ -985,9 +1270,7 @@ pub mod logic {
             // the 500KB ceiling, but the real serialized output — in which `ok_with` emits
             // the matches array twice — is comfortably OVER it. The old accounting therefore
             // passed this input; correct accounting must reject it.
-            let temp_dir = std::env::temp_dir().join("murmur_test_find_2x_ceiling");
-            let _ = fs::remove_dir_all(&temp_dir);
-            fs::create_dir_all(&temp_dir).expect("failed to create temp dir");
+            let temp_dir = scratch("find_2x_ceiling");
 
             let test_file = temp_dir.join("large_match_file.txt");
             // Each line -> a match object of ~230 bytes serialized. 1400 lines -> single-count
@@ -1041,9 +1324,7 @@ pub mod logic {
         #[test]
         fn find_in_files_respects_specific_dir() {
             // This test verifies that find works with a valid specific directory
-            let temp_dir = std::env::temp_dir().join("murmur_test_find_valid");
-            let _ = fs::remove_dir_all(&temp_dir);
-            fs::create_dir_all(&temp_dir).expect("failed to create temp dir");
+            let temp_dir = scratch("find_valid");
 
             let test_file = temp_dir.join("test.txt");
             fs::write(&test_file, "hello world\nfoo bar\n").expect("failed to write test file");
@@ -1067,9 +1348,7 @@ pub mod logic {
 
         #[test]
         fn read_file_returns_content_and_cache_ref() {
-            let temp_dir = std::env::temp_dir().join("murmur_test_read");
-            let _ = fs::remove_dir_all(&temp_dir);
-            fs::create_dir_all(&temp_dir).expect("failed to create temp dir");
+            let temp_dir = scratch("read");
 
             let test_file = temp_dir.join("test.txt");
             fs::write(&test_file, "test content").expect("failed to write test file");
@@ -1113,7 +1392,7 @@ pub mod logic {
         fn read_file_whole_file_reports_total_lines() {
             // A whole-file read (no start/end) keeps its content and cache_ref unchanged, and
             // now additionally reports total_lines — but adds NO start_line/end_line keys.
-            let dir = std::env::temp_dir().join("murmur_test_read_wholefile_total");
+            let dir = scratch("read_wholefile_total");
             let _guard = cache_env_guard(&dir.join("cache"));
             let path = write_numbered_file(&dir, "f.txt", 5);
             let op = json!({ "operation": "read_file", "path": &path });
@@ -1131,7 +1410,7 @@ pub mod logic {
 
         #[test]
         fn read_file_ranged_happy_path() {
-            let dir = std::env::temp_dir().join("murmur_test_read_ranged");
+            let dir = scratch("read_ranged");
             let _guard = cache_env_guard(&dir.join("cache"));
             let path = write_numbered_file(&dir, "f.txt", 10);
             let op = json!({ "operation": "read_file", "path": &path, "start_line": 2, "end_line": 4 });
@@ -1150,7 +1429,7 @@ pub mod logic {
 
         #[test]
         fn read_file_ranged_start_only_reads_to_eof() {
-            let dir = std::env::temp_dir().join("murmur_test_read_start_only");
+            let dir = scratch("read_start_only");
             let _guard = cache_env_guard(&dir.join("cache"));
             let path = write_numbered_file(&dir, "f.txt", 6);
             let op = json!({ "operation": "read_file", "path": &path, "start_line": 5 });
@@ -1166,7 +1445,7 @@ pub mod logic {
 
         #[test]
         fn read_file_ranged_end_only_reads_from_top() {
-            let dir = std::env::temp_dir().join("murmur_test_read_end_only");
+            let dir = scratch("read_end_only");
             let _guard = cache_env_guard(&dir.join("cache"));
             let path = write_numbered_file(&dir, "f.txt", 6);
             let op = json!({ "operation": "read_file", "path": &path, "end_line": 3 });
@@ -1182,7 +1461,7 @@ pub mod logic {
 
         #[test]
         fn read_file_ranged_inverted_span_errors() {
-            let dir = std::env::temp_dir().join("murmur_test_read_inverted");
+            let dir = scratch("read_inverted");
             let _guard = cache_env_guard(&dir.join("cache"));
             let path = write_numbered_file(&dir, "f.txt", 10);
             let op = json!({ "operation": "read_file", "path": &path, "start_line": 5, "end_line": 2 });
@@ -1197,7 +1476,7 @@ pub mod logic {
 
         #[test]
         fn read_file_ranged_start_below_one_errors() {
-            let dir = std::env::temp_dir().join("murmur_test_read_start_zero");
+            let dir = scratch("read_start_zero");
             let _guard = cache_env_guard(&dir.join("cache"));
             let path = write_numbered_file(&dir, "f.txt", 10);
             let op = json!({ "operation": "read_file", "path": &path, "start_line": 0 });
@@ -1214,7 +1493,7 @@ pub mod logic {
         fn read_file_ranged_start_beyond_eof_errors() {
             // start past EOF errors and states the real line count — never silently falls back
             // to the whole file.
-            let dir = std::env::temp_dir().join("murmur_test_read_start_eof");
+            let dir = scratch("read_start_eof");
             let _guard = cache_env_guard(&dir.join("cache"));
             let path = write_numbered_file(&dir, "f.txt", 4);
             let op = json!({ "operation": "read_file", "path": &path, "start_line": 99 });
@@ -1232,7 +1511,7 @@ pub mod logic {
         #[test]
         fn read_file_ranged_end_beyond_eof_clamps() {
             // The one asymmetric case: end past EOF clamps to total_lines rather than erroring.
-            let dir = std::env::temp_dir().join("murmur_test_read_end_eof");
+            let dir = scratch("read_end_eof");
             let _guard = cache_env_guard(&dir.join("cache"));
             let path = write_numbered_file(&dir, "f.txt", 4);
             let op = json!({ "operation": "read_file", "path": &path, "start_line": 3, "end_line": 999 });
@@ -1248,7 +1527,7 @@ pub mod logic {
 
         #[test]
         fn read_file_ranged_oversized_span_errors() {
-            let dir = std::env::temp_dir().join("murmur_test_read_oversized");
+            let dir = scratch("read_oversized");
             let _guard = cache_env_guard(&dir.join("cache"));
             // A file larger than the cap, requested whole via an explicit span.
             let path = write_numbered_file(&dir, "big.txt", MAX_READ_RANGE_LINES + 500);
@@ -1271,7 +1550,7 @@ pub mod logic {
         fn read_file_ranged_cache_ref_differs_from_whole_file() {
             // Different ranges of the same file cache under distinct keys, so a whole-file read
             // and a ranged read return different cache_refs and never collide.
-            let dir = std::env::temp_dir().join("murmur_test_read_cache_distinct");
+            let dir = scratch("read_cache_distinct");
             let _guard = cache_env_guard(&dir.join("cache"));
             let path = write_numbered_file(&dir, "f.txt", 10);
 
@@ -1310,7 +1589,7 @@ pub mod logic {
         fn find_in_files_default_has_no_context_keys() {
             // context_lines omitted → the match shape is byte-for-byte the historical one:
             // {path, line, text} with NO context_before/context_after keys at all.
-            let dir = std::env::temp_dir().join("murmur_test_find_no_ctx");
+            let dir = scratch("find_no_ctx");
             let dir_name = write_find_fixture(&dir, "a.txt", "one\ntwo needle\nthree\n");
             let op = json!({ "operation": "find_in_files", "pattern": "needle", "dir": &dir_name, "recursive": false });
 
@@ -1327,7 +1606,7 @@ pub mod logic {
 
         #[test]
         fn find_in_files_context_lines_happy_path() {
-            let dir = std::env::temp_dir().join("murmur_test_find_ctx");
+            let dir = scratch("find_ctx");
             let dir_name = write_find_fixture(&dir, "a.txt", "L1\nL2\nL3 needle\nL4\nL5\n");
             let op = json!({
                 "operation": "find_in_files", "pattern": "needle",
@@ -1348,7 +1627,7 @@ pub mod logic {
         fn find_in_files_context_clamped_at_boundaries() {
             // A match on the first line gets an empty context_before (clamped, never padded)
             // and a context_after shortened to the lines that exist.
-            let dir = std::env::temp_dir().join("murmur_test_find_ctx_boundary");
+            let dir = scratch("find_ctx_boundary");
             let dir_name = write_find_fixture(&dir, "a.txt", "head needle\nb\nc\n");
             let op = json!({
                 "operation": "find_in_files", "pattern": "needle",
@@ -1367,7 +1646,7 @@ pub mod logic {
 
         #[test]
         fn find_in_files_rejects_oversized_context() {
-            let dir = std::env::temp_dir().join("murmur_test_find_ctx_toobig");
+            let dir = scratch("find_ctx_toobig");
             let dir_name = write_find_fixture(&dir, "a.txt", "needle\n");
             for bad in [MAX_CONTEXT_LINES + 1, -1] {
                 let op = json!({
@@ -1387,9 +1666,7 @@ pub mod logic {
             // The fixture is under the 500KB ceiling with NO context, but the same search with
             // a non-zero context window blows past it — proving the size accounting measures
             // the context text, not just the match lines.
-            let dir = std::env::temp_dir().join("murmur_test_find_ctx_ceiling");
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).expect("failed to create temp dir");
+            let dir = scratch("find_ctx_ceiling");
 
             let padding = "x".repeat(200);
             let mut content = String::new();
@@ -1512,9 +1789,7 @@ pub mod logic {
 
         #[test]
         fn read_file_cache_hit_returns_ref_only() {
-            let temp_dir = std::env::temp_dir().join("murmur_test_read_cache");
-            let _ = fs::remove_dir_all(&temp_dir);
-            fs::create_dir_all(&temp_dir).expect("failed to create temp dir");
+            let temp_dir = scratch("read_cache");
             let _guard = cache_env_guard(&temp_dir.join("cache"));
 
             let test_file = temp_dir.join("cached.txt");
@@ -1539,9 +1814,7 @@ pub mod logic {
 
         #[test]
         fn read_file_cache_miss_on_mtime_change() {
-            let temp_dir = std::env::temp_dir().join("murmur_test_read_mtime");
-            let _ = fs::remove_dir_all(&temp_dir);
-            fs::create_dir_all(&temp_dir).expect("failed to create temp dir");
+            let temp_dir = scratch("read_mtime");
             let _guard = cache_env_guard(&temp_dir.join("cache"));
 
             let test_file = temp_dir.join("mtime.txt");
