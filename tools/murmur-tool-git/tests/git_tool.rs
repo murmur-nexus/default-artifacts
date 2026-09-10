@@ -319,7 +319,7 @@ fn slice1_restore_unstaged() {
         json!({
             "operation": "restore",
             "repo": repo.to_str().unwrap(),
-            "paths": ["README.md"],
+            "dest_paths": ["README.md"],
             "staged": false,
         }),
     );
@@ -1248,7 +1248,7 @@ fn slice4_worktree_add_success() {
             "operation": "worktree",
             "subcommand": "add",
             "repo": repo.to_str().unwrap(),
-            "path": wt_path.to_str().unwrap(),
+            "dest": wt_path.to_str().unwrap(),
             "branch": "wt-branch",
         }),
     );
@@ -1276,7 +1276,7 @@ fn slice4_worktree_list() {
             "operation": "worktree",
             "subcommand": "add",
             "repo": repo.to_str().unwrap(),
-            "path": wt_a.to_str().unwrap(),
+            "dest": wt_a.to_str().unwrap(),
             "branch": "branch-a",
         }),
     );
@@ -1286,7 +1286,7 @@ fn slice4_worktree_list() {
             "operation": "worktree",
             "subcommand": "add",
             "repo": repo.to_str().unwrap(),
-            "path": wt_b.to_str().unwrap(),
+            "dest": wt_b.to_str().unwrap(),
             "branch": "branch-b",
         }),
     );
@@ -1335,7 +1335,7 @@ fn slice4_worktree_remove() {
             "operation": "worktree",
             "subcommand": "add",
             "repo": repo.to_str().unwrap(),
-            "path": wt_path.to_str().unwrap(),
+            "dest": wt_path.to_str().unwrap(),
             "branch": "removable",
         }),
     );
@@ -1347,7 +1347,7 @@ fn slice4_worktree_remove() {
             "operation": "worktree",
             "subcommand": "remove",
             "repo": repo.to_str().unwrap(),
-            "path": wt_path.to_str().unwrap(),
+            "dest": wt_path.to_str().unwrap(),
         }),
     );
 
@@ -1375,7 +1375,7 @@ fn slice4_worktree_branch_conflict() {
             "operation": "worktree",
             "subcommand": "add",
             "repo": repo.to_str().unwrap(),
-            "path": wt_path.to_str().unwrap(),
+            "dest": wt_path.to_str().unwrap(),
             "branch": current_branch,
         }),
     );
@@ -1403,7 +1403,7 @@ fn slice4_create_worktree_compat() {
         json!({
             "operation": "create_worktree",
             "repo": repo.to_str().unwrap(),
-            "path": wt_path.to_str().unwrap(),
+            "dest": wt_path.to_str().unwrap(),
             "branch": "compat-branch",
         }),
     );
@@ -1910,4 +1910,146 @@ fn slice2_reset_hard() {
         status_text.trim().is_empty(),
         "working directory should be clean after hard reset; status:\n{status_text}"
     );
+}
+
+// ── 0.2.0 RENAMES: the old spellings are rejected, never honoured ─────────────
+//
+// `restore` moved from `paths` to `dest_paths`, and the three worktree-directory
+// operations from `path` to `dest`, so each destination sits on a property carrying
+// `format: murmur-destination` that no read operation shares. A fallback to the old
+// spelling would put the call back on the key-name heuristic these annotations
+// replace, so a stale caller must fail loudly rather than quietly write.
+
+#[test]
+fn restore_with_the_old_paths_spelling_is_rejected_and_restores_nothing() {
+    let td = TestDir::new();
+    let repo = td.path().join("repo");
+    init_git_repo(&repo);
+
+    fs::write(repo.join("README.md"), "dirty\n").unwrap();
+
+    let res = run_tool_in(
+        &repo,
+        json!({
+            "operation": "restore",
+            "repo": repo.to_str().unwrap(),
+            "paths": ["README.md"],
+        }),
+    );
+
+    assert_eq!(res["ok"], false, "`paths` must not be honoured by restore");
+    assert_eq!(
+        res["message"],
+        "missing required field: dest_paths (must be an array of strings)"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("README.md")).unwrap(),
+        "dirty\n",
+        "a rejected restore must not touch the working tree"
+    );
+}
+
+#[test]
+fn restore_with_an_empty_dest_paths_is_rejected() {
+    let td = TestDir::new();
+    let repo = td.path().join("repo");
+    init_git_repo(&repo);
+
+    let res = run_tool_in(
+        &repo,
+        json!({
+            "operation": "restore",
+            "repo": repo.to_str().unwrap(),
+            "dest_paths": [],
+        }),
+    );
+
+    assert_eq!(res["ok"], false);
+    assert_eq!(res["message"], "dest_paths must not be empty");
+}
+
+#[test]
+fn worktree_add_with_the_old_path_spelling_is_rejected_and_creates_nothing() {
+    let td = TestDir::new();
+    let repo = td.path().join("repo");
+    init_git_repo(&repo);
+    run_git(["-C", repo.to_str().unwrap(), "branch", "feature"]);
+
+    let wt_path = td.path().join("old-spelling-wt");
+    let res = run_tool_in(
+        &repo,
+        json!({
+            "operation": "worktree",
+            "repo": repo.to_str().unwrap(),
+            "subcommand": "add",
+            "path": wt_path.to_str().unwrap(),
+            "branch": "feature",
+        }),
+    );
+
+    assert_eq!(res["ok"], false, "`path` must not be honoured by worktree/add");
+    assert_eq!(res["message"], "missing required field: dest");
+    assert!(!wt_path.exists(), "a rejected worktree/add must create nothing");
+}
+
+#[test]
+fn worktree_remove_with_the_old_path_spelling_is_rejected_and_deletes_nothing() {
+    let td = TestDir::new();
+    let repo = td.path().join("repo");
+    init_git_repo(&repo);
+    run_git(["-C", repo.to_str().unwrap(), "branch", "feature"]);
+
+    let wt_path = td.path().join("keep-me-wt");
+    let added = run_tool_in(
+        &repo,
+        json!({
+            "operation": "worktree",
+            "repo": repo.to_str().unwrap(),
+            "subcommand": "add",
+            "dest": wt_path.to_str().unwrap(),
+            "branch": "feature",
+        }),
+    );
+    assert_eq!(added["ok"], true, "setup add failed: {}", added["message"]);
+    assert!(wt_path.exists());
+
+    let res = run_tool_in(
+        &repo,
+        json!({
+            "operation": "worktree",
+            "repo": repo.to_str().unwrap(),
+            "subcommand": "remove",
+            "path": wt_path.to_str().unwrap(),
+        }),
+    );
+
+    assert_eq!(res["ok"], false, "`path` must not be honoured by worktree/remove");
+    assert_eq!(res["message"], "missing required field: dest");
+    assert!(wt_path.exists(), "a rejected worktree/remove must delete nothing");
+}
+
+#[test]
+fn create_worktree_with_the_old_path_spelling_is_rejected_and_creates_nothing() {
+    let td = TestDir::new();
+    let repo = td.path().join("repo");
+    init_git_repo(&repo);
+    run_git(["-C", repo.to_str().unwrap(), "branch", "feature"]);
+
+    let wt_path = td.path().join("compat-old-spelling-wt");
+    let res = run_tool_in(
+        &repo,
+        json!({
+            "operation": "create_worktree",
+            "repo": repo.to_str().unwrap(),
+            "path": wt_path.to_str().unwrap(),
+            "branch": "feature",
+        }),
+    );
+
+    assert_eq!(
+        res["ok"], false,
+        "the alias delegates to worktree_add, so it requires `dest` too"
+    );
+    assert_eq!(res["message"], "missing required field: dest");
+    assert!(!wt_path.exists(), "a rejected create_worktree must create nothing");
 }
