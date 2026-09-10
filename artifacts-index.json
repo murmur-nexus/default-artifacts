@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-09T21:21:00Z",
+  "updated_at": "2026-09-10T00:08:56Z",
   "artifacts": [
     {
       "name": "murmur-driver-anthropic",
@@ -23,6 +23,18 @@
         "driver",
         "inference",
         "deepseek"
+      ],
+      "platforms": []
+    },
+    {
+      "name": "murmur-driver-moonshotai",
+      "version": "0.1.0",
+      "runtime": "driver",
+      "description": "Moonshot AI inference driver \u2014 kimi-k3 on the Chat Completions surface, with reasoning_effort and response_format config keys",
+      "tags": [
+        "driver",
+        "inference",
+        "moonshotai"
       ],
       "platforms": []
     },

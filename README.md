@@ -12,9 +12,10 @@ WASM components (`runtime: driver`). Export `murmur:tool/run` (`world driver`) a
 |---|---|---|
 | `murmur-driver-anthropic` | `drivers/murmur-driver-anthropic/` | Anthropic Messages API, with extended thinking and prompt-cache breakpoints; caching is tuned by a `config:` block on its manifest entry |
 | `murmur-driver-deepseek` | `drivers/murmur-driver-deepseek/` | DeepSeek API — `deepseek-v4-flash` and `deepseek-v4-pro`, with thinking mode |
+| `murmur-driver-moonshotai` | `drivers/murmur-driver-moonshotai/` | Moonshot AI Chat Completions API — `kimi-k3` only, which always reasons; reasoning effort and `json_schema` structured output are tuned by `inference.driver.config`, which rejects any key it does not read |
 | `murmur-driver-openai` | `drivers/murmur-driver-openai/` | OpenAI-compatible Chat Completions API, with Responses API for `gpt-5` and later models; reasoning summaries, effort and verbosity are tuned by `inference.driver.config`, which rejects any key it does not read |
 
-All three report the provider's own token counts on an optional top-level `usage` object of the response — `input_tokens`, `output_tokens`, `cached_tokens`, `cache_write_tokens` — which Murmur carries onto the `inference` trace event. Each member is independently optional and is omitted, never zero-filled, when the provider did not report it. `murmur-driver-openai` also forwards Murmur's `prompt_cache_key` routing hint into the provider body; the other two drop it, because neither provider API defines a cache-key field. See each driver's own README for the per-provider field mapping.
+All four report the provider's own token counts on an optional top-level `usage` object of the response — `input_tokens`, `output_tokens`, `cached_tokens`, `cache_write_tokens` — which Murmur carries onto the `inference` trace event. Each member is independently optional and is omitted, never zero-filled, when the provider did not report it. `murmur-driver-openai` also forwards Murmur's `prompt_cache_key` routing hint into the provider body; the other three drop it, because none of those provider APIs defines a cache-key field. See each driver's own README for the per-provider field mapping.
 
 ## Hooks
 

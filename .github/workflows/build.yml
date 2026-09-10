@@ -80,6 +80,7 @@ jobs:
         artifact:
           - { name: murmur-driver-anthropic,    path: drivers/murmur-driver-anthropic    }
           - { name: murmur-driver-deepseek,     path: drivers/murmur-driver-deepseek     }
+          - { name: murmur-driver-moonshotai,   path: drivers/murmur-driver-moonshotai   }
           - { name: murmur-driver-openai,       path: drivers/murmur-driver-openai       }
           - { name: murmur-hook-compact,        path: hooks/murmur-hook-compact          }
           - { name: murmur-hook-debug,          path: hooks/murmur-hook-debug            }
