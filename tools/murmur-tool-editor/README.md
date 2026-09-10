@@ -46,15 +46,15 @@ value:
 'dir' must be relative to the capsule workdir; got '/'
 ```
 
-Refusing rather than resolving is the whole point. A tool is dispatched with one
-WASI preopen mapped to the capsule workdir, so an absolute value resolves
-*inside* that preopen: `write_file` with `dest_path: /app/results.txt` used to
-create `<workdir>/app/`, write the file there, and report `ok: true` with a byte
-count, and a later `read_file` of the same value returned that content — every
-operation agreeing with every other, while anything outside the capsule looking
-where the manifest said the file would be found nothing. A refused call creates
-no directory, writes nothing, and declares no `state_effect`, so it is not
-recorded as a mutation.
+Refusing rather than resolving is deliberate. A tool is dispatched with one WASI
+preopen mapped to the capsule workdir, so an absolute value cannot escape it —
+`/app/results.txt` resolves to `<workdir>/app/results.txt`. Left unchecked,
+`write_file` would create that directory, write the file there, and report
+`ok: true` with a byte count, and a later `read_file` of the same value would
+return that content: every operation agreeing with every other, while anything
+outside the capsule looking where the manifest said the file would be finds
+nothing. A refused call creates no directory, writes nothing, and declares no
+`state_effect`, so it is not recorded as a mutation.
 
 ## How `read_only` is enforced
 
