@@ -121,6 +121,20 @@ fn run_editor(
     workdir: &Path,
     data_payload: &str,
 ) -> (Status, Value, Vec<(String, String)>) {
+    let (status, payload, _summary, meta) =
+        run_editor_reporting(engine, component, linker, workdir, data_payload);
+    (status, payload, meta)
+}
+
+/// [`run_editor`] plus `ToolResult.summary` — the field a refusal's message travels in, since a
+/// failing envelope carries a null `data`.
+fn run_editor_reporting(
+    engine: &Engine,
+    component: &Component,
+    linker: &Linker<HostState>,
+    workdir: &Path,
+    data_payload: &str,
+) -> (Status, Value, Option<String>, Vec<(String, String)>) {
     let mut store = store_for(engine, workdir);
     let tool = Tool::instantiate(&mut store, component, linker).expect("instantiate component");
     let input = ToolInput { data: Some(data_payload.to_string()), log_path: None };
@@ -133,11 +147,26 @@ fn run_editor(
         .as_deref()
         .map(|s| serde_json::from_str(s).expect("ToolResult.data is JSON"))
         .unwrap_or(Value::Null);
-    (result.status, payload, result.metadata)
+    (result.status, payload, result.summary, result.metadata)
 }
 
+/// The workdir's immediate entries, sorted — the "did the call leave anything behind" check.
+fn dir_entries(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("read workdir")
+        .map(|e| e.expect("dir entry").file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+/// A preopen workdir at `.test-scratch/wasm_<tag>_<pid>`, relative to the process CWD (the
+/// crate root, under `cargo test`). Relative rather than under `std::env::temp_dir()` because
+/// the tool refuses an absolute path input: the host-native baseline in the benchmark below
+/// addresses the same tree through `logic::run`, which only accepts a workdir-relative value.
+/// Gitignored; each test removes its own subtree.
 fn unique_workdir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("murmur_editor_wasm_{tag}_{}", std::process::id()));
+    let dir = PathBuf::from(".test-scratch").join(format!("wasm_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create workdir");
     dir
@@ -226,6 +255,99 @@ fn component_loads_and_runs_replace_in_file() {
         std::fs::read_to_string(workdir.join("patch.txt")).unwrap(),
         "goodbye world, goodbye again"
     );
+
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+// The two absolute-path tests below are the ones that need the real preopen. On the host an
+// absolute value escapes the fixture tree and fails on its own; under the single preopen a tool
+// is dispatched with, `/app/results.txt` resolves to `<workdir>/app/results.txt` — which is
+// exactly why the tool used to create it, report success, and read it back "correctly" after.
+//
+// `error_kind` is a field of the old-protocol envelope, which the WIT adapter maps to
+// `Status::Error` plus the message in `summary` (the envelope's `data` is null on a failure, so
+// `ToolResult.data` is None). These assert what crosses the component boundary; the
+// `error_kind: "absolute_path"` value itself is pinned by the unit tests in `src/lib.rs`.
+#[test]
+fn component_refuses_an_absolute_dest_path_and_leaves_the_workdir_untouched() {
+    let eng = engine();
+    let component = Component::from_file(&eng, component_path()).expect("load component");
+    let lnk = linker(&eng);
+    let workdir = unique_workdir("absolute_write");
+    let before = dir_entries(&workdir);
+
+    let (status, payload, summary, meta) = run_editor_reporting(
+        &eng,
+        &component,
+        &lnk,
+        &workdir,
+        r#"{"operation":"write_file","dest_path":"/app/results.txt","content":"written to the wrong place"}"#,
+    );
+    assert!(matches!(status, Status::Error), "status: {status:?}");
+    assert!(payload.is_null(), "payload: {payload}");
+    assert_eq!(
+        summary.as_deref(),
+        Some(
+            "'dest_path' must be relative to the capsule workdir; got '/app/results.txt' \
+             (did you mean 'results.txt'?)"
+        ),
+    );
+    assert!(
+        meta.is_empty(),
+        "a refused write declares no state_effect, got {meta:?}"
+    );
+
+    assert_eq!(
+        dir_entries(&workdir),
+        before,
+        "a refused write must leave the workdir exactly as it found it — no `app`, no results.txt"
+    );
+    assert!(!workdir.join("app").exists());
+    assert!(!workdir.join("results.txt").exists());
+
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn component_refuses_an_absolute_read_path_even_when_the_file_exists() {
+    let eng = engine();
+    let component = Component::from_file(&eng, component_path()).expect("load component");
+    let lnk = linker(&eng);
+    let workdir = unique_workdir("absolute_read");
+    // Created directly, not through the tool: the file an absolute write used to manufacture is
+    // present, so the refusal cannot be a not-found in disguise.
+    std::fs::create_dir_all(workdir.join("app")).unwrap();
+    std::fs::write(workdir.join("app/results.txt"), "content from the wrong place").unwrap();
+
+    let (status, payload, summary, _meta) = run_editor_reporting(
+        &eng,
+        &component,
+        &lnk,
+        &workdir,
+        r#"{"operation":"read_file","path":"/app/results.txt"}"#,
+    );
+    assert!(matches!(status, Status::Error), "status: {status:?}");
+    assert!(
+        payload.is_null(),
+        "a refused read must not return the file's content: {payload}"
+    );
+    let msg = summary.expect("a refusal carries its message in summary");
+    assert!(
+        msg.starts_with("'path' must be relative to the capsule workdir; got '/app/results.txt'"),
+        "the refusal names `path`, the property this operation reads: {msg}"
+    );
+
+    // The same value read relatively still resolves — the refusal is about the spelling of the
+    // input, not about the file being unreachable.
+    let (ok_status, ok_payload, _m) = run_editor(
+        &eng,
+        &component,
+        &lnk,
+        &workdir,
+        r#"{"operation":"read_file","path":"app/results.txt"}"#,
+    );
+    assert!(matches!(ok_status, Status::Passed), "status: {ok_status:?}");
+    assert_eq!(ok_payload["content"], "content from the wrong place");
 
     let _ = std::fs::remove_dir_all(&workdir);
 }
@@ -385,11 +507,12 @@ fn find_in_files_benchmark_no_orders_of_magnitude_regression() {
     // wasm: the walk uses a workdir-relative dir under the single preopen.
     let rel_payload = r#"{"operation":"find_in_files","pattern":"NEEDLE","dir":"bench_tree","recursive":true}"#;
 
-    // Host-native baseline: the SAME logic, host-compiled, over the same tree via an
-    // absolute path (host `logic::run` takes the stdin-envelope shape).
-    let abs_dir = tree.to_string_lossy().to_string();
+    // Host-native baseline: the SAME logic, host-compiled, over the same tree. The dir is
+    // workdir-relative like the wasm payload's — the tool refuses an absolute value — so both
+    // sides walk the identical tree (host `logic::run` takes the stdin-envelope shape).
+    let host_dir = tree.to_string_lossy().to_string();
     let envelope = serde_json::json!({
-        "data": { "operation": "find_in_files", "pattern": "NEEDLE", "dir": abs_dir, "recursive": true }
+        "data": { "operation": "find_in_files", "pattern": "NEEDLE", "dir": host_dir, "recursive": true }
     })
     .to_string();
 

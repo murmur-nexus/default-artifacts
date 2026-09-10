@@ -10,7 +10,8 @@ exports `murmur:tool/run`).
 ## Operations
 
 Every call takes an `operation` field. All paths are relative to the capsule
-workdir (the component's CWD at dispatch time).
+workdir (the component's CWD at dispatch time); an absolute value is
+[refused](#absolute-paths-are-refused).
 
 | Operation | Required | Optional | Writes to |
 |---|---|---|---|
@@ -21,6 +22,39 @@ workdir (the component's CWD at dispatch time).
 
 The two writing operations name their target `dest_path`; the two reading
 operations take `path` and `dir`. The split is not cosmetic — see below.
+
+## Absolute paths are refused
+
+`path`, `dest_path` and `dir` are workdir-relative by contract, and a value
+beginning with `/` is refused before the operation touches the filesystem:
+
+```json
+{
+  "ok": false,
+  "error_kind": "absolute_path",
+  "message": "'dest_path' must be relative to the capsule workdir; got '/app/results.txt' (did you mean 'results.txt'?)"
+}
+```
+
+The message names the property the call actually wrote — `path` for `read_file`,
+`dest_path` for `write_file` and `replace_in_file`, `dir` for `find_in_files` —
+and suggests the value's final component. A value with no final component (`/`,
+or one ending in `..`) gets no suggestion, so the message ends at the offending
+value:
+
+```text
+'dir' must be relative to the capsule workdir; got '/'
+```
+
+Refusing rather than resolving is deliberate. A tool is dispatched with one WASI
+preopen mapped to the capsule workdir, so an absolute value cannot escape it —
+`/app/results.txt` resolves to `<workdir>/app/results.txt`. Left unchecked,
+`write_file` would create that directory, write the file there, and report
+`ok: true` with a byte count, and a later `read_file` of the same value would
+return that content: every operation agreeing with every other, while anything
+outside the capsule looking where the manifest said the file would be finds
+nothing. A refused call creates no directory, writes nothing, and declares no
+`state_effect`, so it is not recorded as a mutation.
 
 ## How `read_only` is enforced
 
