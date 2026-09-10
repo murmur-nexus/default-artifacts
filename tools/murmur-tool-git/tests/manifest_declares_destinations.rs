@@ -84,7 +84,10 @@ fn dest_paths_declares_its_destination_on_the_items() {
         .position(|line| line == "items:")
         .map(|at| &body[at + 1..])
         .expect("`dest_paths` must declare an `items` schema");
-    let element: Vec<&String> = items.iter().take_while(|line| !line.starts_with("description:")).collect();
+    let element: Vec<&String> = items
+        .iter()
+        .take_while(|line| !line.starts_with("description:"))
+        .collect();
 
     assert!(
         element.iter().any(|line| *line == "type: string"),
@@ -99,10 +102,7 @@ fn dest_paths_declares_its_destination_on_the_items() {
          values from a declared location. Got: {element:?}"
     );
 
-    let array_keys: Vec<&String> = body
-        .iter()
-        .take_while(|line| *line != "items:")
-        .collect();
+    let array_keys: Vec<&String> = body.iter().take_while(|line| *line != "items:").collect();
     assert!(
         !array_keys.iter().any(|line| line.starts_with("format:")),
         "the annotation must sit on `dest_paths`' items, not on the array property. Got: {array_keys:?}"
