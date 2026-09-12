@@ -4,3 +4,8 @@ runtime: driver
 description: "Moonshot AI inference driver — kimi-k3 on the Chat Completions surface, with reasoning_effort and response_format config keys"
 requires_files:
   - murmur_driver_moonshotai.wasm
+
+# How this provider expects the inference credential to be presented; the runtime substitutes {key}.
+inference_auth:
+  header: Authorization
+  value: "Bearer {key}"
