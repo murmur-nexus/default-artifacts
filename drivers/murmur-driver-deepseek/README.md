@@ -7,14 +7,16 @@ WASM component (`runtime: driver`, world `driver`, exports `murmur:tool/run`).
 Translates between the Murmur canonical inference format and the DeepSeek API,
 including SSE streaming.
 
-The API key is read from the `MURMUR_INFERENCE_API_KEY` environment variable at
-runtime. See [murmur.yaml](./murmur.yaml) for the full manifest.
+The driver reads no provider key and sends no authentication header. Murmur's
+runtime authenticates each call with the header declared under
+`inference_auth:` in [murmur.yaml](./murmur.yaml), the full manifest; the
+capsule author still supplies the key as `inference.api_key`.
 
-The endpoint arrives the same way, in `MURMUR_INFERENCE_ENDPOINT`, resolved from
-the capsule manifest's `inference.endpoint`. That field is required, and the
-driver carries no provider URL of its own to fall back on: a value that never
-arrives fails the call with `driver: missing MURMUR_INFERENCE_ENDPOINT`, and one
-that arrives empty or whitespace-only with
+The endpoint arrives in the `MURMUR_INFERENCE_ENDPOINT` environment variable,
+resolved from the capsule manifest's `inference.endpoint`. That field is
+required, and the driver carries no provider URL of its own to fall back on: a
+value that never arrives fails the call with `driver: missing
+MURMUR_INFERENCE_ENDPOINT`, and one that arrives empty or whitespace-only with
 `driver: MURMUR_INFERENCE_ENDPOINT is set but empty`. Neither reaches the
 network. A usable value is trimmed and used exactly as given.
 

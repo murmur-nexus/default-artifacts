@@ -988,10 +988,6 @@ mod wasm_driver {
                 .ok()
                 .as_deref(),
         )?;
-        // The only place a provider key is read. There is no MOONSHOT_API_KEY variable in the
-        // driver environment; a capsule author writes `api_key: ${MOONSHOT_API_KEY}` under
-        // `inference:` and the runtime delivers the resolved value here.
-        let api_key = std::env::var("MURMUR_INFERENCE_API_KEY").ok();
 
         let raw = input
             .data
@@ -1009,14 +1005,10 @@ mod wasm_driver {
 
         let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
 
-        let mut headers = vec![
+        let headers = vec![
             ("content-type", "application/json".to_string()),
             ("content-length", body.len().to_string()),
         ];
-
-        if let Some(key) = api_key.as_ref().map(|k| k.trim()).filter(|k| !k.is_empty()) {
-            headers.push(("authorization", format!("Bearer {key}")));
-        }
 
         let response = dispatch_request(&url, headers, &body)?;
         let status = response.status();
@@ -1639,7 +1631,6 @@ mod tests {
             .expect("run_inner must parse the driver config");
         for later in [
             "INFERENCE_ENDPOINT_VAR",
-            "MURMUR_INFERENCE_API_KEY",
             "dispatch_request(",
         ] {
             let at = run_inner
@@ -2136,5 +2127,25 @@ mod tests {
             include_str!("../murmur.yaml").contains(BLOCK),
             "drivers/murmur-driver-moonshotai/murmur.yaml must contain verbatim:\n{BLOCK}"
         );
+    }
+
+    #[test]
+    fn the_driver_neither_reads_a_credential_nor_builds_an_auth_header() {
+        // The runtime attaches the header declared under `inference_auth:`, so a driver-side
+        // credential read would put the key back in the guest.
+        let source = include_str!("lib.rs");
+        let non_test = source[..source.find("\nmod tests {").expect("mod tests must exist")]
+            .to_lowercase();
+        for needle in [
+            concat!("murmur_inference_", "api_key"),
+            concat!("\"author", "ization\""),
+            concat!("\"x-api", "-key\""),
+            concat!("bear", "er "),
+        ] {
+            assert!(
+                !non_test.contains(needle),
+                "murmur-driver-moonshotai: non-test source must not contain {needle}"
+            );
+        }
     }
 }

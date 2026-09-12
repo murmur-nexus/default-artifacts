@@ -1795,7 +1795,6 @@ mod wasm_driver {
                 .ok()
                 .as_deref(),
         )?;
-        let api_key = std::env::var("MURMUR_INFERENCE_API_KEY").ok();
 
         let raw = input
             .data
@@ -1819,14 +1818,10 @@ mod wasm_driver {
 
         let url = format!("{}/{}", endpoint.trim_end_matches('/'), url_suffix);
 
-        let mut headers = vec![
+        let headers = vec![
             ("content-type", "application/json".to_string()),
             ("content-length", body.len().to_string()),
         ];
-
-        if let Some(key) = api_key.as_ref().map(|k| k.trim()).filter(|k| !k.is_empty()) {
-            headers.push(("authorization", format!("Bearer {key}")));
-        }
 
         let response = dispatch_request(&url, headers, &body)?;
         let status = response.status();
@@ -3932,5 +3927,25 @@ mod tests {
             include_str!("../murmur.yaml").contains(BLOCK),
             "drivers/murmur-driver-openai/murmur.yaml must contain verbatim:\n{BLOCK}"
         );
+    }
+
+    #[test]
+    fn the_driver_neither_reads_a_credential_nor_builds_an_auth_header() {
+        // The runtime attaches the header declared under `inference_auth:`, so a driver-side
+        // credential read would put the key back in the guest.
+        let source = include_str!("lib.rs");
+        let non_test = source[..source.find("\nmod tests {").expect("mod tests must exist")]
+            .to_lowercase();
+        for needle in [
+            concat!("murmur_inference_", "api_key"),
+            concat!("\"author", "ization\""),
+            concat!("\"x-api", "-key\""),
+            concat!("bear", "er "),
+        ] {
+            assert!(
+                !non_test.contains(needle),
+                "murmur-driver-openai: non-test source must not contain {needle}"
+            );
+        }
     }
 }
