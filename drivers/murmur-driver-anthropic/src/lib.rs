@@ -2242,4 +2242,16 @@ mod tests {
         assert_eq!(hourly.ttl, CacheTtl::OneHour);
         assert_eq!(hourly.marker(), json!({"type": "ephemeral", "ttl": "1h"}));
     }
+
+    #[test]
+    fn manifest_declares_the_inference_auth_scheme_the_gateway_will_read() {
+        // The runtime builds the auth header from these two fields, so a dropped quote pair
+        // (`value: {key}` is a YAML flow mapping, not a string) or a renamed key leaves the
+        // gateway with no scheme to apply and every request unauthenticated.
+        const BLOCK: &str = "inference_auth:\n  header: x-api-key\n  value: \"{key}\"\n";
+        assert!(
+            include_str!("../murmur.yaml").contains(BLOCK),
+            "drivers/murmur-driver-anthropic/murmur.yaml must contain verbatim:\n{BLOCK}"
+        );
+    }
 }

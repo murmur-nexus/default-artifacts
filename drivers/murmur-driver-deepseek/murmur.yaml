@@ -1,6 +1,11 @@
 name: murmur-driver-deepseek
-version: 0.2.0
+version: 0.3.0
 runtime: driver
 description: "DeepSeek inference driver — deepseek-v4-flash and deepseek-v4-pro with thinking mode"
 requires_files:
   - murmur_driver_deepseek.wasm
+
+# How this provider expects the inference credential to be presented; the runtime substitutes {key}.
+inference_auth:
+  header: Authorization
+  value: "Bearer {key}"
