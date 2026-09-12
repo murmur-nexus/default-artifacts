@@ -249,6 +249,56 @@ the operation. Annotating it would make `log`, `diff`, `show` and `status`
 refuse. It stays undeclared, and because the tool annotates two other
 properties, `W-SEC-018` no longer says so.
 
+### Declaring a driver's authentication scheme
+
+Every `drivers/` artifact declares how its provider expects the inference
+credential to be presented, as a top-level `inference_auth:` block in the
+driver's own `murmur.yaml`:
+
+```yaml
+inference_auth:
+  header: x-api-key
+  value: "{key}"
+```
+
+| Key | Type | Means |
+|---|---|---|
+| `header` | string | the HTTP header name the provider expects the credential on, sent as written |
+| `value` | string | a template for that header's value, containing exactly one `{key}` placeholder |
+
+Both keys are required whenever the block is present. `{key}` is the single
+substitution point: the runtime replaces it with the capsule's
+`inference.api_key` and sends the result as the value of `header:`. Anthropic
+wants the bare key, so its template carries no prefix; the other three want
+bearer form.
+
+| Driver | `header:` | `value:` |
+|---|---|---|
+| `murmur-driver-anthropic` | `x-api-key` | `"{key}"` |
+| `murmur-driver-deepseek` | `Authorization` | `"Bearer {key}"` |
+| `murmur-driver-moonshotai` | `Authorization` | `"Bearer {key}"` |
+| `murmur-driver-openai` | `Authorization` | `"Bearer {key}"` |
+
+Three things to know before adding one:
+
+- **Quote the `value:`.** A bare `value: {key}` is a YAML flow mapping and
+  parses to `{"key": null}` — the wrong type, with no error anywhere. Each
+  driver crate carries a guard test asserting its own `murmur.yaml` contains
+  its block verbatim, and that test is what catches a dropped quote pair.
+- **Header capitalisation is the provider's, not the code's.** `Authorization`
+  is capitalised and `x-api-key` is not, matching what each provider documents.
+  The drivers' own header-building code emits lowercase; HTTP header names are
+  case-insensitive, so neither spelling needs correcting to match the other.
+- **Nothing reads the block today.** An artifact's own `murmur.yaml` is parsed
+  for a fixed set of keys and every other key is ignored, so adding it changes
+  no behaviour — a driver keeps building its own auth header. The declaration
+  lands ahead of the runtime's credential gateway so that no driver is left
+  without a scheme once the gateway reads these two fields.
+
+This is a contributor-facing key, not a capsule-facing one: a capsule author
+never edits an installed artifact's manifest, and `inference_auth:` set in a
+capsule's own `murmur.yaml` means nothing.
+
 > **Note — the crates under `libs/`.** They are *not* artifacts and must never
 > be added to `artifacts.toml` or a `build.yml` matrix — they are shared,
 > unpublished libraries, not shippable components. Each is compiled into the
