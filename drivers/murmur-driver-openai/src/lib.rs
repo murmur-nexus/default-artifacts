@@ -1790,8 +1790,11 @@ mod wasm_driver {
         // `store: true` and, transitively, the whole continuation feature.
         let store = store_opt_in(driver_config.as_deref());
 
-        let endpoint = std::env::var("MURMUR_INFERENCE_ENDPOINT")
-            .map_err(|_| "driver: missing MURMUR_INFERENCE_ENDPOINT".to_string())?;
+        let endpoint = murmur_driver_env::require_endpoint(
+            std::env::var(murmur_driver_env::INFERENCE_ENDPOINT_VAR)
+                .ok()
+                .as_deref(),
+        )?;
         let api_key = std::env::var("MURMUR_INFERENCE_API_KEY").ok();
 
         let raw = input
@@ -3717,7 +3720,7 @@ mod tests {
             .find("parse_driver_config(")
             .expect("run_inner must parse the driver config");
         let endpoint_at = run_inner
-            .find("MURMUR_INFERENCE_ENDPOINT")
+            .find("INFERENCE_ENDPOINT_VAR")
             .expect("run_inner must read the endpoint");
         assert!(
             parse_at < endpoint_at,
@@ -3887,5 +3890,35 @@ mod tests {
         let translated = translate_responses_to_murmur(&response).unwrap();
         assert!(translated.get("content").is_none());
         assert!(translated.get("usage").is_none());
+    }
+
+    #[test]
+    fn no_provider_url_is_hardcoded_anywhere_in_the_crate() {
+        // Where inference goes is the host's fact. A literal provider URL in a driver is a
+        // value that would become silently effective the moment the host stopped supplying
+        // one, and it would carry the capsule's credentials with it. The needle is assembled
+        // rather than written out so that this assertion does not itself become the only
+        // occurrence of what it forbids.
+        let provider_url = concat!("https://", "api.");
+        assert!(
+            !include_str!("lib.rs").contains(provider_url),
+            "the driver must not name a provider URL; the endpoint comes from the host"
+        );
+    }
+
+    #[test]
+    fn run_inner_resolves_the_endpoint_through_the_shared_contract() {
+        // One implementation of "a missing endpoint is a refusal" exists, in
+        // murmur-driver-env. An inline `std::env::var` read here would be a second one, free
+        // to disagree with it again. `run_inner` is wasm-only, so this is asserted from the
+        // source; the needle is assembled so that this test is not its own evidence.
+        let source = include_str!("lib.rs");
+        let run_inner = &source[source
+            .find("fn run_inner(")
+            .expect("run_inner must exist")..];
+        assert!(
+            run_inner.contains(concat!("require_", "endpoint(")),
+            "run_inner must resolve the endpoint through murmur_driver_env::require_endpoint"
+        );
     }
 }

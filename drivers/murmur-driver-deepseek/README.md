@@ -10,6 +10,14 @@ including SSE streaming.
 The API key is read from the `MURMUR_INFERENCE_API_KEY` environment variable at
 runtime. See [murmur.yaml](./murmur.yaml) for the full manifest.
 
+The endpoint arrives the same way, in `MURMUR_INFERENCE_ENDPOINT`, resolved from
+the capsule manifest's `inference.endpoint`. That field is required, and the
+driver carries no provider URL of its own to fall back on: a value that never
+arrives fails the call with `driver: missing MURMUR_INFERENCE_ENDPOINT`, and one
+that arrives empty or whitespace-only with
+`driver: MURMUR_INFERENCE_ENDPOINT is set but empty`. Neither reaches the
+network. A usable value is trimmed and used exactly as given.
+
 ## Token usage
 
 Every translated response carries an optional top-level `usage` object, on both

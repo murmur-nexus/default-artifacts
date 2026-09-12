@@ -17,6 +17,12 @@ WASM components (`runtime: driver`). Export `murmur:tool/run` (`world driver`) a
 
 All four report the provider's own token counts on an optional top-level `usage` object of the response — `input_tokens`, `output_tokens`, `cached_tokens`, `cache_write_tokens` — which Murmur carries onto the `inference` trace event. Each member is independently optional and is omitted, never zero-filled, when the provider did not report it. `murmur-driver-openai` also forwards Murmur's `prompt_cache_key` routing hint into the provider body; the other three drop it, because none of those provider APIs defines a cache-key field. See each driver's own README for the per-provider field mapping.
 
+All four also take the endpoint they talk to from the host, in
+`MURMUR_INFERENCE_ENDPOINT`, and none of them carries a provider URL of its own.
+`inference.endpoint` is therefore required in the capsule manifest for every one
+of them: an endpoint that is absent, empty or whitespace-only is refused before
+any request is built, never replaced with a provider default.
+
 ## Hooks
 
 WASM components (`runtime: hook`) that attach to lifecycle events. Each hook declares its `binding`, `execution_mode`, and `commit_policy` in its own `murmur.yaml`; where a field is omitted the runtime defaults apply (all events, async, no commit).

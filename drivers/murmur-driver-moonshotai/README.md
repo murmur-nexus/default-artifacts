@@ -14,6 +14,14 @@ capsule author writes `api_key: ${MOONSHOT_API_KEY}` under `inference:` and the
 manifest parser resolves it, after which the runtime delivers the value under
 the name above. See [murmur.yaml](./murmur.yaml) for the full manifest.
 
+The endpoint arrives the same way, in `MURMUR_INFERENCE_ENDPOINT`, resolved from
+the capsule manifest's `inference.endpoint`. That field is required, and the
+driver carries no provider URL of its own to fall back on: a value that never
+arrives fails the call with `driver: missing MURMUR_INFERENCE_ENDPOINT`, and one
+that arrives empty or whitespace-only with
+`driver: MURMUR_INFERENCE_ENDPOINT is set but empty`. Neither reaches the
+network. A usable value is trimmed and used exactly as given.
+
 ## Using it from a capsule manifest
 
 ```yaml
@@ -29,7 +37,7 @@ inference:
 |---|---|---|
 | `inference.driver.artifact` | yes | — |
 | `inference.model` | yes | — (must be `kimi-k3`) |
-| `inference.endpoint` | no | `https://api.moonshot.ai/v1` |
+| `inference.endpoint` | yes | — |
 | `inference.api_key` | no in form, yes in practice | unset — requests go out unauthenticated and Moonshot rejects them |
 | `inference.max_tokens` | no | `8192`, from the host; ceiling `1048576` |
 | `inference.driver.config` | no | `{}` — see below |
