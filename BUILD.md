@@ -307,6 +307,7 @@ capsule's own `murmur.yaml` means nothing.
 
 | Library | Holds | Used by |
 |---|---|---|
+| `libs/murmur-driver-env` | The name of the environment variable carrying the inference endpoint, and the one resolution of it — absent or empty is a refusal, never a default | `murmur-driver-anthropic`, `murmur-driver-deepseek`, `murmur-driver-moonshotai`, `murmur-driver-openai` |
 | `libs/murmur-test-parse` | The four test-runner output parsers plus format auto-detection | `murmur-hook-regression-verifier`, `murmur-tool-test-report` |
 | `libs/murmur-hook-transcript` | The host's tool-result envelope marker and the readers that turn a lifecycle `message`'s `content` into driver-safe text | `murmur-hook-compact`, `murmur-hook-memory` |
 | `libs/murmur-time` | RFC 3339 UTC timestamp rendering (millisecond precision, `Z` suffix) for artifacts that stamp a time into a record they write | `murmur-tool-corpus`, `murmur-tool-report` |

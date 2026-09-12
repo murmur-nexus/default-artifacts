@@ -1,0 +1,16 @@
+[package]
+name = "murmur-driver-env"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Internal-only shared library: the name of the environment variable the runtime delivers
+# the inference endpoint in, and the one resolution of it every driver uses. It exists so
+# the four drivers cannot disagree about whether a missing endpoint is a refusal — they
+# did, and two of them fell back to a hardcoded provider URL. Depends on nothing but
+# `std`, so it cross-compiles to wasm32-wasip2 cleanly. NOT a publishable artifact —
+# never listed in artifacts.toml.
+
+[lib]
+name = "murmur_driver_env"
+path = "src/lib.rs"
