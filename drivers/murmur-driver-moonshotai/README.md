@@ -29,7 +29,7 @@ inference:
 |---|---|---|
 | `inference.driver.artifact` | yes | — |
 | `inference.model` | yes | — (must be `kimi-k3`) |
-| `inference.endpoint` | no | `https://api.moonshot.ai/v1` |
+| `inference.endpoint` | yes | — |
 | `inference.api_key` | no in form, yes in practice | unset — requests go out unauthenticated and Moonshot rejects them |
 | `inference.max_tokens` | no | `8192`, from the host; ceiling `1048576` |
 | `inference.driver.config` | no | `{}` — see below |
