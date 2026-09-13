@@ -947,7 +947,6 @@ mod wasm_driver {
                 .ok()
                 .as_deref(),
         )?;
-        let api_key = std::env::var("MURMUR_INFERENCE_API_KEY").ok();
         let driver_config = std::env::var("MURMUR_INFERENCE_DRIVER_CONFIG").ok();
         // Prompt caching is configured per artifact, not per driver role: `cache_control`
         // breakpoints exist only in the Messages API, so the keys travel on this artifact's own
@@ -992,10 +991,6 @@ mod wasm_driver {
             ("anthropic-version", ANTHROPIC_VERSION.to_string()),
             ("content-length", body.len().to_string()),
         ];
-
-        if let Some(key) = api_key.as_ref().map(|k| k.trim()).filter(|k| !k.is_empty()) {
-            headers.push(("x-api-key", key.to_string()));
-        }
 
         if let Some(beta) = beta_features {
             headers.push(("anthropic-beta", beta));
@@ -2286,5 +2281,25 @@ mod tests {
             include_str!("../murmur.yaml").contains(BLOCK),
             "drivers/murmur-driver-anthropic/murmur.yaml must contain verbatim:\n{BLOCK}"
         );
+    }
+
+    #[test]
+    fn the_driver_neither_reads_a_credential_nor_builds_an_auth_header() {
+        // The runtime attaches the header declared under `inference_auth:`, so a driver-side
+        // credential read would put the key back in the guest.
+        let source = include_str!("lib.rs");
+        let non_test = source[..source.find("\nmod tests {").expect("mod tests must exist")]
+            .to_lowercase();
+        for needle in [
+            concat!("murmur_inference_", "api_key"),
+            concat!("\"author", "ization\""),
+            concat!("\"x-api", "-key\""),
+            concat!("bear", "er "),
+        ] {
+            assert!(
+                !non_test.contains(needle),
+                "murmur-driver-anthropic: non-test source must not contain {needle}"
+            );
+        }
     }
 }

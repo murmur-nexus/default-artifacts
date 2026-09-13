@@ -285,15 +285,16 @@ Three things to know before adding one:
   parses to `{"key": null}` — the wrong type, with no error anywhere. Each
   driver crate carries a guard test asserting its own `murmur.yaml` contains
   its block verbatim, and that test is what catches a dropped quote pair.
-- **Header capitalisation is the provider's, not the code's.** `Authorization`
-  is capitalised and `x-api-key` is not, matching what each provider documents.
-  The drivers' own header-building code emits lowercase; HTTP header names are
-  case-insensitive, so neither spelling needs correcting to match the other.
-- **Nothing reads the block today.** An artifact's own `murmur.yaml` is parsed
-  for a fixed set of keys and every other key is ignored, so adding it changes
-  no behaviour — a driver keeps building its own auth header. The declaration
-  lands ahead of the runtime's credential gateway so that no driver is left
-  without a scheme once the gateway reads these two fields.
+- **Header capitalisation is the provider's.** `Authorization` is capitalised
+  and `x-api-key` is not, matching what each provider documents. The runtime
+  sends `header:` as written, and HTTP header names are case-insensitive, so
+  neither spelling needs correcting to match the other.
+- **The declaration is the only statement of the scheme.** The runtime reads
+  these two fields and attaches the header to every inference call the driver
+  makes. A driver never reads a credential or builds an auth header itself;
+  each driver crate's
+  `the_driver_neither_reads_a_credential_nor_builds_an_auth_header` test fails
+  if its non-test source mentions the key variable or either auth header.
 
 This is a contributor-facing key, not a capsule-facing one: a capsule author
 never edits an installed artifact's manifest, and `inference_auth:` set in a
