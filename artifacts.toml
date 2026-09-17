@@ -79,7 +79,7 @@ version = "0.7.0"
 [[artifact]]
 name = "murmur-hook-memory"
 path = "hooks/murmur-hook-memory"
-version = "0.7.0"
+version = "0.8.0"
 
 [[artifact]]
 name = "murmur-hook-regression-verifier"
