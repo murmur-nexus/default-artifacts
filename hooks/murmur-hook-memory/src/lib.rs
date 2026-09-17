@@ -668,6 +668,7 @@ mod wasm_hook {
             content: message.content,
             id: None,
             source_id: message.source_id,
+            inserted_by: None,
         }
     }
 

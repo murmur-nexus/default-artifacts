@@ -253,6 +253,7 @@ mod wasm_hook {
                         content: m.content,
                         id: None,
                         source_id: None,
+                        inserted_by: None,
                     })
                     .collect(),
             ))
@@ -283,6 +284,7 @@ mod wasm_hook {
                     content: m.content,
                     id: None,
                     source_id: None,
+                    inserted_by: None,
                 })
                 .collect(),
             system_prompt: Some(call.system_prompt),

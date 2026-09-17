@@ -283,7 +283,7 @@ pub mod logic {
         // and one host test. A crate written entirely behind the gate compiles to nothing
         // for the host target, so `cargo test` runs none of it and reports green anyway —
         // the scaffold hands the author the shape that cannot do that.
-        let lib_rs = r#"//! A `murmur:hook/lifecycle@0.8.0` hook, split so its decision logic is testable on the
+        let lib_rs = r#"//! A `murmur:hook/lifecycle@0.9.0` hook, split so its decision logic is testable on the
 //! host from the moment it is generated.
 //!
 //! Three layers, in the order they appear below:
@@ -675,6 +675,7 @@ mod wasm_hook {
             content: m.content,
             id: m.id,
             source_id: m.source_id,
+            inserted_by: None,
         }
     }
 

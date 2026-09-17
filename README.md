@@ -85,8 +85,8 @@ world hook {
   import inference;
   import tokens;
   import murmur:task-io/read@0.1.0;
-  import murmur:conversation/read@0.1.0;
-  export murmur:hook/lifecycle@0.8.0;
+  import murmur:conversation/read@0.2.0;
+  export murmur:hook/lifecycle@0.9.0;
 }
 ```
 
@@ -98,7 +98,7 @@ any hook without a manifest change on the artifact side. What each one provides:
 | `inference` | One LLM completion through the capsule's already-configured inference driver | Always available |
 | `tokens` | Token counting against the capsule's model | Always available |
 | `murmur:task-io/read@0.1.0` | The task's input and the result text its agent loop produced | `capabilities.task_io.read: true` on the hook's entry in the capsule's `murmur.yaml` |
-| `murmur:conversation/read@0.1.0` | Paged, newest-first reads of the runtime's durable conversation record, without a `filesystem` grant | `capabilities.conversation.read: true` on the hook's entry in the capsule's `murmur.yaml` |
+| `murmur:conversation/read@0.2.0` | Paged, newest-first reads of the runtime's durable conversation record, without a `filesystem` grant | `capabilities.conversation.read: true` on the hook's entry in the capsule's `murmur.yaml` |
 
 `murmur:conversation/read` and `murmur:task-io/read` are both default-deny: an
 ungranted hook still links and still runs, and its functions return
