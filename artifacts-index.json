@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-13T12:02:48Z",
+  "updated_at": "2026-09-17T01:33:11Z",
   "artifacts": [
     {
       "name": "murmur-driver-anthropic",
@@ -108,7 +108,7 @@
     },
     {
       "name": "murmur-hook-memory",
-      "version": "0.7.0",
+      "version": "0.8.0",
       "runtime": "hook",
       "description": "Seeds a task with the relevant part of the conversation that came before it \u2014 pages the runtime's durable conversation record read-only, selects a budget-bounded chronological slice, and stamps each seeded message with the record message it came from.",
       "tags": [

@@ -12,6 +12,12 @@
 //! `source-id` is the join key back to the record: it is what lets a `context_seed` trace
 //! line be traced to the turns it came from.
 //!
+//! Which record roles may be seeded is the operator's call, through `seed_roles` in the
+//! `config:` block on this hook's capsule entry. The filter reads each record message's own
+//! role, after an earlier seed's copies are dropped and before [`recall::render`] folds
+//! every non-`assistant` role into `user`. Without it every role but `system` is seeded. A
+//! block the hook cannot fully honour is an error, never a quiet fall back to that default.
+//!
 //! Split the way `murmur-hook-compact` is: a `cfg`-independent [`recall`] module holding
 //! the whole control flow (paging termination, rendering, selection, budget accounting,
 //! ordering) with every impure step injected as a closure, and a `wasm_hook` module
@@ -63,6 +69,119 @@ pub mod recall {
     /// `workdir/logs/hook-murmur-hook-memory.log` is attributable without cross-referencing
     /// the capsule manifest.
     pub const ARTIFACT_NAME: &str = "murmur-hook-memory";
+
+    /// The environment variable the runtime sets, in this hook's WASI context only, to the
+    /// `config:` mapping on its capsule entry as compact JSON. Unset when there is no
+    /// `config:` key, which is not the same as `{}` but is treated the same.
+    pub const ARTIFACT_CONFIG_ENV: &str = "MURMUR_ARTIFACT_CONFIG";
+
+    /// The one key this hook's `config:` block accepts.
+    pub const SEED_ROLES_KEY: &str = "seed_roles";
+
+    /// The operator's `config:` block, as far as this hook reads it.
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct MemoryConfig {
+        /// `None`: every role except `system` is admitted — the unconfigured behaviour.
+        pub seed_roles: Option<Vec<String>>,
+    }
+
+    /// Parse the [`ARTIFACT_CONFIG_ENV`] JSON, failing closed.
+    ///
+    /// An operator who wrote a filter asked for a narrower seed, so anything short of a
+    /// filter this hook can apply exactly is an `Err` rather than the unfiltered default: an
+    /// unknown key (a `seed_role` typo would otherwise widen the seed back to every role), a
+    /// `seed_roles` that is not a non-empty list of non-empty strings, and a list naming
+    /// `system`, which is never seeded. Roles are open strings matched exactly, so a
+    /// misspelled role can only narrow the seed. Duplicates are harmless and kept.
+    pub fn parse_config(raw: Option<&str>) -> Result<MemoryConfig, String> {
+        let Some(raw) = raw else {
+            return Ok(MemoryConfig::default());
+        };
+
+        let value: Value = serde_json::from_str(raw)
+            .map_err(|e| config_error(format!("the `config:` block is not valid JSON ({e}).")))?;
+        let Value::Object(map) = value else {
+            return Err(config_error(
+                "the `config:` block must be a mapping of keys to values.".to_string(),
+            ));
+        };
+
+        if let Some(unknown) = map.keys().find(|k| k.as_str() != SEED_ROLES_KEY) {
+            return Err(config_error(format!(
+                "`config.{unknown}` is not a key this hook understands; \
+                 `{SEED_ROLES_KEY}` is the only key accepted."
+            )));
+        }
+
+        let Some(roles) = map.get(SEED_ROLES_KEY) else {
+            return Ok(MemoryConfig::default());
+        };
+        let Value::Array(roles) = roles else {
+            return Err(config_error(format!(
+                "`config.{SEED_ROLES_KEY}` must be a list of role names, such as \
+                 `[user, assistant]`."
+            )));
+        };
+        if roles.is_empty() {
+            return Err(config_error(format!(
+                "`config.{SEED_ROLES_KEY}` is empty, which would seed nothing; list at least \
+                 one role, or remove this hook from the capsule."
+            )));
+        }
+
+        let mut out = Vec::with_capacity(roles.len());
+        for role in roles {
+            let role = match role {
+                Value::String(role) if !role.trim().is_empty() => role,
+                _ => {
+                    return Err(config_error(format!(
+                        "every entry in `config.{SEED_ROLES_KEY}` must be a non-empty role \
+                         name; found `{role}`."
+                    )))
+                }
+            };
+            if role == "system" {
+                return Err(config_error(format!(
+                    "`config.{SEED_ROLES_KEY}` names `system`, but `system` messages are never \
+                     seeded; remove it from the list."
+                )));
+            }
+            out.push(role.clone());
+        }
+
+        Ok(MemoryConfig {
+            seed_roles: Some(out),
+        })
+    }
+
+    /// Whether a record message of `role` may reach the seed. Exact and case-sensitive.
+    /// With no `seed_roles`, everything is admitted and [`render`] still drops `system`.
+    pub fn admits_role(config: &MemoryConfig, role: &str) -> bool {
+        match &config.seed_roles {
+            None => true,
+            Some(roles) => roles.iter().any(|r| r == role),
+        }
+    }
+
+    /// Keep only the record messages whose own role [`admits_role`].
+    ///
+    /// This must run after [`drop_reseeded`] and before [`render`]. After, because an
+    /// earlier unfiltered seed's copy of a `tool` result is `user`-roled: filtering first
+    /// would remove the `tool` original, leave the copy with no original in the walk, and
+    /// keep it as a user turn. Before, because `render` erases the record's role.
+    pub fn filter_roles(record: Vec<RecordMessage>, config: &MemoryConfig) -> Vec<RecordMessage> {
+        record
+            .into_iter()
+            .filter(|message| admits_role(config, &message.role))
+            .collect()
+    }
+
+    fn config_error(detail: String) -> String {
+        format!(
+            "{ARTIFACT_NAME}: {detail} Nothing was seeded. The block is `config:` on this \
+             hook's own entry under `artifacts:` in the capsule's murmur.yaml."
+        )
+    }
 
     /// One message as the conversation record holds it, independent of the WIT bindings so
     /// it can be built and asserted on in host tests.
@@ -127,6 +246,9 @@ pub mod recall {
     /// envelope, and an unpaired tool result at the head of a context is a driver error
     /// even when kept. Everything that is not an `assistant` turn becomes `user`, so the
     /// seed only ever holds the two roles every driver accepts.
+    ///
+    /// That erases the record's role, which is why [`filter_roles`] runs before this: a
+    /// seeded `user` message is a record `user` turn only when `seed_roles` excluded the rest.
     pub fn render(message: &RecordMessage) -> Option<SeedMessage> {
         if message.role == "system" {
             return None;
@@ -345,10 +467,14 @@ pub mod recall {
 
     /// The whole `on-task-start` decision, with every host call injected.
     ///
-    /// The order matters and is asserted on: the decline checks run before `read_page` and
-    /// before `task_text` are ever called, so a task that cannot be seeded costs no host
-    /// call at all. An empty return means "seed nothing" and is not an error.
+    /// The order matters and is asserted on: the config is parsed first, so a block the
+    /// hook cannot honour is an error even for a task that would have declined; the decline
+    /// checks run before `read_page` and before `task_text` are ever called, so a task that
+    /// cannot be seeded costs no host call at all; and [`filter_roles`] runs between
+    /// [`drop_reseeded`] and [`render`]. An empty return means "seed nothing" and is not an
+    /// error.
     pub fn plan_seed<R, T, C>(
+        raw_config: Option<&str>,
         budget_tokens: u64,
         prior_tokens: u64,
         read_page: R,
@@ -360,11 +486,13 @@ pub mod recall {
         T: FnOnce() -> Option<String>,
         C: FnMut(&str) -> u64,
     {
+        let config = parse_config(raw_config)?;
+
         if should_decline(budget_tokens, prior_tokens).is_some() {
             return Ok(Vec::new());
         }
 
-        let record = drop_reseeded(collect_record(read_page)?);
+        let record = filter_roles(drop_reseeded(collect_record(read_page)?), &config);
         if record.is_empty() {
             return Ok(Vec::new());
         }
@@ -427,6 +555,7 @@ mod wasm_hook {
     impl Guest for MurmurMemory {
         fn on_task_start(event: TaskStartEvent) -> Result<HookOutput, String> {
             let seeds = recall::plan_seed(
+                std::env::var(recall::ARTIFACT_CONFIG_ENV).ok().as_deref(),
                 event.budget_tokens,
                 event.prior_tokens,
                 fetch_page,
@@ -541,9 +670,10 @@ mod tests {
     use std::cell::RefCell;
 
     use super::recall::{
-        collect_record, drop_reseeded, effective_budget, plan_seed, render, select,
-        should_decline, terms, unwrap_tool_envelope, wire_form, RecordMessage, RecordPage,
-        SeedMessage, MAX_SEEDED_MESSAGES, NOT_GRANTED, TOOL_MARKER,
+        admits_role, collect_record, drop_reseeded, effective_budget, filter_roles, parse_config,
+        plan_seed, render, select, should_decline, terms, unwrap_tool_envelope, wire_form,
+        MemoryConfig, RecordMessage, RecordPage, SeedMessage, MAX_SEEDED_MESSAGES, NOT_GRANTED,
+        TOOL_MARKER,
     };
 
     fn record(role: &str, content: &str, id: &str) -> RecordMessage {
@@ -612,6 +742,7 @@ mod tests {
             let mut pages_read = 0;
             let mut task_reads = 0;
             let out = plan_seed(
+                None,
                 budget,
                 prior,
                 |_| {
@@ -928,7 +1059,7 @@ mod tests {
             )),
         ]);
 
-        let seeds = plan_seed(10_000, 0, |c| fake.read(c), || None, word_count)
+        let seeds = plan_seed(None, 10_000, 0, |c| fake.read(c), || None, word_count)
             .expect("seeding succeeded");
 
         assert_eq!(
@@ -955,7 +1086,7 @@ mod tests {
             None,
         ))]);
 
-        let seeds = plan_seed(10_000, 0, |c| fake.read(c), || None, word_count).unwrap();
+        let seeds = plan_seed(None, 10_000, 0, |c| fake.read(c), || None, word_count).unwrap();
 
         assert_eq!(
             ids(&seeds),
@@ -981,7 +1112,232 @@ mod tests {
     #[test]
     fn an_empty_record_plans_no_seed_without_erroring() {
         let fake = FakeRecord::new(vec![Ok(page(Vec::new(), None))]);
-        let seeds = plan_seed(10_000, 0, |c| fake.read(c), || None, word_count).unwrap();
+        let seeds = plan_seed(None, 10_000, 0, |c| fake.read(c), || None, word_count).unwrap();
         assert!(seeds.is_empty());
+    }
+
+    // ── role filter ───────────────────────────────────────────────────────────
+
+    const USER_AND_ASSISTANT: &str = r#"{"seed_roles":["user","assistant"]}"#;
+
+    fn tool_result(id: &str, body: &str) -> RecordMessage {
+        RecordMessage {
+            role: "tool".to_string(),
+            content: envelope(
+                serde_json::json!("call_1"),
+                serde_json::Value::Null,
+                serde_json::json!(body),
+            ),
+            id: Some(id.to_string()),
+            source_id: None,
+        }
+    }
+
+    /// One record message of every kind of role this hook can meet, newest first as a page
+    /// holds it.
+    fn mixed_record() -> FakeRecord {
+        FakeRecord::new(vec![Ok(page(
+            vec![
+                record("system", "you are a helpful agent", "msg_s"),
+                record("critic", "a critic note", "msg_k"),
+                record("developer", "a developer note", "msg_v"),
+                tool_result("msg_t", "3 tests passed"),
+                record("assistant", "running the tests", "msg_a"),
+                record("user", "run the tests", "msg_u"),
+            ],
+            None,
+        ))])
+    }
+
+    #[test]
+    fn no_config_and_an_empty_block_are_the_unconfigured_behaviour() {
+        assert_eq!(parse_config(None).unwrap(), MemoryConfig::default());
+        assert_eq!(parse_config(Some("{}")).unwrap(), MemoryConfig::default());
+
+        let unconfigured =
+            plan_seed(None, 10_000, 0, |c| mixed_record().read(c), || None, word_count).unwrap();
+        let empty_block =
+            plan_seed(Some("{}"), 10_000, 0, |c| mixed_record().read(c), || None, word_count)
+                .unwrap();
+
+        assert_eq!(ids(&unconfigured), vec!["msg_u", "msg_a", "msg_t", "msg_v", "msg_k"]);
+        assert_eq!(unconfigured, empty_block);
+    }
+
+    #[test]
+    fn seed_roles_excludes_every_role_not_listed() {
+        let fake = mixed_record();
+        let seeds =
+            plan_seed(Some(USER_AND_ASSISTANT), 10_000, 0, |c| fake.read(c), || None, word_count)
+                .unwrap();
+
+        assert_eq!(ids(&seeds), vec!["msg_u", "msg_a"], "oldest first, user and assistant only");
+        assert_eq!(seeds[0].role, "user");
+        assert_eq!(seeds[1].role, "assistant");
+    }
+
+    #[test]
+    fn the_role_filter_runs_after_an_earlier_seeds_copies_are_dropped() {
+        // An earlier, unfiltered seed re-roled the tool result `msg_t` to `user` and the
+        // runtime appended that copy as `msg_c`. Filtering first would remove `msg_t`, leave
+        // `msg_c` with no original in the walk, and keep it: the tool result would come back
+        // as a user turn. Dropping copies first removes `msg_c` while `msg_t` is still there
+        // to name, and the filter then removes `msg_t`.
+        let fake = FakeRecord::new(vec![Ok(page(
+            vec![
+                record("user", "what did the tests say", "msg_n"),
+                reseeded("user", "tool result call_1: 3 tests passed", "msg_c", "msg_t"),
+                tool_result("msg_t", "3 tests passed"),
+            ],
+            None,
+        ))]);
+
+        let seeds =
+            plan_seed(Some(USER_AND_ASSISTANT), 10_000, 0, |c| fake.read(c), || None, word_count)
+                .unwrap();
+
+        assert_eq!(ids(&seeds), vec!["msg_n"]);
+    }
+
+    #[test]
+    fn tool_can_be_readmitted_and_is_still_unwrapped_into_a_user_turn() {
+        let fake = mixed_record();
+        let seeds = plan_seed(
+            Some(r#"{"seed_roles":["user","assistant","tool"]}"#),
+            10_000,
+            0,
+            |c| fake.read(c),
+            || None,
+            word_count,
+        )
+        .unwrap();
+
+        assert_eq!(ids(&seeds), vec!["msg_u", "msg_a", "msg_t"], "developer stays excluded");
+        let tool = &seeds[2];
+        assert_eq!(tool.role, "user");
+        assert!(tool.content.contains("3 tests passed"), "{}", tool.content);
+        assert!(!tool.content.contains(TOOL_MARKER), "{}", tool.content);
+    }
+
+    #[test]
+    fn a_config_the_hook_cannot_honour_fails_closed() {
+        for raw in [
+            "not json",
+            "[]",
+            r#""x""#,
+            r#"{"seed_role":["user"]}"#,
+            r#"{"seed_roles":"user"}"#,
+            r#"{"seed_roles":[]}"#,
+            r#"{"seed_roles":["user",1]}"#,
+            r#"{"seed_roles":["user",""]}"#,
+            r#"{"seed_roles":["user","   "]}"#,
+            r#"{"seed_roles":["user","system"]}"#,
+            r#"{"seed_roles":["user"],"extra":true}"#,
+        ] {
+            let err = parse_config(Some(raw)).expect_err(raw);
+            assert!(err.contains("murmur-hook-memory"), "{raw}: {err}");
+            assert!(err.contains("config:"), "{raw}: {err}");
+            assert!(err.contains("murmur.yaml"), "{raw}: {err}");
+        }
+
+        let typo = parse_config(Some(r#"{"seed_role":["user"]}"#)).unwrap_err();
+        assert!(typo.contains("seed_role`"), "{typo}");
+        assert!(typo.contains("seed_roles"), "{typo}");
+
+        let system = parse_config(Some(r#"{"seed_roles":["user","system"]}"#)).unwrap_err();
+        assert!(system.contains("system"), "{system}");
+    }
+
+    #[test]
+    fn a_valid_list_is_kept_as_written() {
+        assert_eq!(
+            parse_config(Some(r#"{"seed_roles":["user","assistant","user","developer"]}"#))
+                .unwrap(),
+            MemoryConfig {
+                seed_roles: Some(
+                    ["user", "assistant", "user", "developer"].map(str::to_string).to_vec()
+                ),
+            }
+        );
+    }
+
+    #[test]
+    fn a_config_error_costs_no_host_call() {
+        let mut pages_read = 0;
+        let mut task_reads = 0;
+        let out = plan_seed(
+            Some(r#"{"seed_roles":[]}"#),
+            10_000,
+            0,
+            |_| {
+                pages_read += 1;
+                Ok(page(vec![record("user", "hi", "msg_a")], None))
+            },
+            || {
+                task_reads += 1;
+                None
+            },
+            word_count,
+        );
+
+        assert!(out.is_err());
+        assert_eq!(pages_read, 0);
+        assert_eq!(task_reads, 0);
+    }
+
+    #[test]
+    fn declines_stay_silent_with_a_valid_config_and_do_not_mask_an_invalid_one() {
+        for (budget, prior) in [(0u64, 0u64), (4_000, 128)] {
+            let mut pages_read = 0;
+            let mut task_reads = 0;
+            let out = plan_seed(
+                Some(USER_AND_ASSISTANT),
+                budget,
+                prior,
+                |_| {
+                    pages_read += 1;
+                    Ok(page(Vec::new(), None))
+                },
+                || {
+                    task_reads += 1;
+                    None
+                },
+                word_count,
+            )
+            .expect("declining is not an error");
+            assert!(out.is_empty());
+            assert_eq!(pages_read, 0);
+            assert_eq!(task_reads, 0);
+
+            let invalid = plan_seed(
+                Some(r#"{"seed_role":["user"]}"#),
+                budget,
+                prior,
+                |_| Ok(page(Vec::new(), None)),
+                || None,
+                word_count,
+            );
+            assert!(invalid.is_err(), "a decline must not hide a broken config");
+        }
+    }
+
+    #[test]
+    fn admits_role_matches_exactly() {
+        let config = parse_config(Some(USER_AND_ASSISTANT)).unwrap();
+        assert!(admits_role(&config, "user"));
+        assert!(admits_role(&config, "assistant"));
+        assert!(!admits_role(&config, "User"));
+        assert!(!admits_role(&config, "assistant "));
+        assert!(!admits_role(&config, "tool"));
+
+        let unconfigured = MemoryConfig::default();
+        assert!(admits_role(&unconfigured, "tool"));
+        assert!(admits_role(&unconfigured, "anything"));
+
+        let kept = filter_roles(
+            vec![record("tool", "x", "msg_1"), record("user", "y", "msg_2")],
+            &config,
+        );
+        assert_eq!(kept, vec![record("user", "y", "msg_2")]);
     }
 }
