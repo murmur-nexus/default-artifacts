@@ -78,6 +78,12 @@ pub mod recall {
     /// The one key this hook's `config:` block accepts.
     pub const SEED_ROLES_KEY: &str = "seed_roles";
 
+    /// The record roles `seed_roles` may name: every role a record message can hold that
+    /// [`render`] can seed. The runtime writes `user`, `assistant` and `tool`; `developer`
+    /// arrives in records imported from, or written by drivers for, providers that use it.
+    /// `system` is excluded because it is never seeded.
+    pub const SEEDABLE_ROLES: [&str; 4] = ["user", "assistant", "tool", "developer"];
+
     /// The operator's `config:` block, as far as this hook reads it.
     #[derive(Clone, Debug, Default, PartialEq, Eq)]
     pub struct MemoryConfig {
@@ -90,9 +96,10 @@ pub mod recall {
     /// An operator who wrote a filter asked for a narrower seed, so anything short of a
     /// filter this hook can apply exactly is an `Err` rather than the unfiltered default: an
     /// unknown key (a `seed_role` typo would otherwise widen the seed back to every role), a
-    /// `seed_roles` that is not a non-empty list of non-empty strings, and a list naming
-    /// `system`, which is never seeded. Roles are open strings matched exactly, so a
-    /// misspelled role can only narrow the seed. Duplicates are harmless and kept.
+    /// `seed_roles` that is not a non-empty list of strings, a list naming `system`, which is
+    /// never seeded, and a list naming any role outside [`SEEDABLE_ROLES`], so a misspelled
+    /// or wrongly cased role is reported rather than silently seeding less. Duplicates are
+    /// harmless and kept.
     pub fn parse_config(raw: Option<&str>) -> Result<MemoryConfig, String> {
         let Some(raw) = raw else {
             return Ok(MemoryConfig::default());
@@ -131,19 +138,22 @@ pub mod recall {
 
         let mut out = Vec::with_capacity(roles.len());
         for role in roles {
-            let role = match role {
-                Value::String(role) if !role.trim().is_empty() => role,
-                _ => {
-                    return Err(config_error(format!(
-                        "every entry in `config.{SEED_ROLES_KEY}` must be a non-empty role \
-                         name; found `{role}`."
-                    )))
-                }
+            let Value::String(role) = role else {
+                return Err(config_error(format!(
+                    "every entry in `config.{SEED_ROLES_KEY}` must be a role name; found `{role}`."
+                )));
             };
             if role == "system" {
                 return Err(config_error(format!(
                     "`config.{SEED_ROLES_KEY}` names `system`, but `system` messages are never \
                      seeded; remove it from the list."
+                )));
+            }
+            if !SEEDABLE_ROLES.contains(&role.as_str()) {
+                return Err(config_error(format!(
+                    "`config.{SEED_ROLES_KEY}` names `{role}`, which is not a role the \
+                     conversation record holds; the roles that can be seeded are {}.",
+                    SEEDABLE_ROLES.map(|r| format!("`{r}`")).join(", ")
                 )));
             }
             out.push(role.clone());
@@ -673,7 +683,7 @@ mod tests {
         admits_role, collect_record, drop_reseeded, effective_budget, filter_roles, parse_config,
         plan_seed, render, select, should_decline, terms, unwrap_tool_envelope, wire_form,
         MemoryConfig, RecordMessage, RecordPage, SeedMessage, MAX_SEEDED_MESSAGES, NOT_GRANTED,
-        TOOL_MARKER,
+        SEEDABLE_ROLES, TOOL_MARKER,
     };
 
     fn record(role: &str, content: &str, id: &str) -> RecordMessage {
@@ -844,7 +854,7 @@ mod tests {
         })
         .expect("a tool result seeds");
 
-        assert_eq!(rendered.role, "user", "a tool-role message is always dropped");
+        assert_eq!(rendered.role, "user", "a tool result is seeded, re-roled to user");
         assert!(rendered.content.contains("call_42"), "{}", rendered.content);
         assert!(rendered.content.contains("3 tests passed"), "{}", rendered.content);
         assert!(!rendered.content.contains(TOOL_MARKER), "no raw envelope JSON is seeded");
@@ -1172,8 +1182,29 @@ mod tests {
                 .unwrap();
 
         assert_eq!(ids(&seeds), vec!["msg_u", "msg_a"], "oldest first, user and assistant only");
-        assert_eq!(seeds[0].role, "user");
-        assert_eq!(seeds[1].role, "assistant");
+
+        // The seed's own role says nothing, since `render` folds every role into `user` or
+        // `assistant`. What is asserted is the role each seeded message had in the record.
+        let record = collect_record(|c| mixed_record().read(c)).unwrap();
+        let record_role = |source_id: &Option<String>| {
+            record
+                .iter()
+                .find(|m| &m.id == source_id)
+                .map(|m| m.role.as_str())
+                .expect("every seeded message names a record message")
+        };
+        let seeded_record_roles: Vec<&str> =
+            seeds.iter().map(|m| record_role(&m.source_id)).collect();
+        assert_eq!(seeded_record_roles, vec!["user", "assistant"]);
+        for excluded in ["tool", "developer", "critic", "system"] {
+            let with_role: Vec<&Option<String>> =
+                record.iter().filter(|m| m.role == excluded).map(|m| &m.id).collect();
+            assert_eq!(with_role.len(), 1, "the record holds one {excluded} message");
+            assert!(
+                seeds.iter().all(|m| &m.source_id != with_role[0]),
+                "the {excluded} message is excluded, not re-roled"
+            );
+        }
     }
 
     #[test]
@@ -1232,6 +1263,9 @@ mod tests {
             r#"{"seed_roles":["user",""]}"#,
             r#"{"seed_roles":["user","   "]}"#,
             r#"{"seed_roles":["user","system"]}"#,
+            r#"{"seed_roles":["user","critic"]}"#,
+            r#"{"seed_roles":["User"]}"#,
+            r#"{"seed_roles":["assistant "]}"#,
             r#"{"seed_roles":["user"],"extra":true}"#,
         ] {
             let err = parse_config(Some(raw)).expect_err(raw);
@@ -1245,7 +1279,13 @@ mod tests {
         assert!(typo.contains("seed_roles"), "{typo}");
 
         let system = parse_config(Some(r#"{"seed_roles":["user","system"]}"#)).unwrap_err();
-        assert!(system.contains("system"), "{system}");
+        assert!(system.contains("`system` messages are never seeded"), "{system}");
+
+        let unknown = parse_config(Some(r#"{"seed_roles":["user","critic"]}"#)).unwrap_err();
+        assert!(unknown.contains("`critic`"), "{unknown}");
+        for role in SEEDABLE_ROLES {
+            assert!(unknown.contains(&format!("`{role}`")), "lists {role}: {unknown}");
+        }
     }
 
     #[test]
@@ -1339,5 +1379,49 @@ mod tests {
             &config,
         );
         assert_eq!(kept, vec![record("user", "y", "msg_2")]);
+    }
+
+    #[test]
+    fn the_hook_never_writes() {
+        // The hook's only effect is the `seed-context` output the runtime commits. The
+        // adapter is wasm-only, so this is asserted from the source and the manifest; each
+        // needle is assembled so that this test is not its own evidence.
+        let source = include_str!("lib.rs");
+        let non_test = &source[..source.find("\nmod tests {").expect("mod tests must exist")];
+
+        for needle in [
+            concat!("std::", "fs"),
+            concat!("Open", "Options"),
+            concat!("File::", "create"),
+            concat!("create_", "dir"),
+            concat!("fs::", "write"),
+            concat!("std::", "io::Write"),
+            concat!("murmur::", "hook::inference"),
+        ] {
+            assert!(!non_test.contains(needle), "the hook must not use `{needle}`");
+        }
+
+        let host_imports: Vec<&str> = non_test
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with(concat!("use ", "murmur::")))
+            .collect();
+        assert_eq!(
+            host_imports,
+            vec![
+                "use murmur::conversation::read::read_messages;",
+                "use murmur::runtime::tokens::count;",
+                "use murmur::task_io::read::{input_len, read_input, TaskInputForm};",
+            ],
+            "the only host calls are the three read-only ones"
+        );
+        assert!(
+            non_test.contains(concat!("HookOutput::", "SeedContext(")),
+            "seed-context is the hook's only output"
+        );
+
+        let manifest = include_str!("../murmur.yaml");
+        assert!(manifest.contains("commit_policy: seed-context\n"), "{manifest}");
+        assert!(!manifest.contains("capabilities"), "the artifact declares no grant: {manifest}");
     }
 }

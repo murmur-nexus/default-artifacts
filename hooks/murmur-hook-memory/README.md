@@ -72,13 +72,17 @@ artifacts:
         read: true
 ```
 
-| Key | Required | What it buys |
-|---|---|---|
-| `capabilities.conversation.read: true` | yes | The conversation record. Without it the hook can read nothing and fails loudly — see below. |
-| `capabilities.task_io.read: true` | no | Relevance selection instead of recency: the hook scores each candidate message by how much of the task's wording it shares. Without it, or when the task is not yet in scope, the newest messages are seeded instead. |
-| `context.max_tokens` | yes | The hook's seed budget is `context.max_tokens × context.seed_budget`. |
-| `context.seed_budget` | no | Fraction of `max_tokens` a seed may occupy; defaults to `0.10`. |
-| `config.seed_roles` | no | Which record roles may be seeded. See below. |
+| Key | Read by | Required | What it buys |
+|---|---|---|---|
+| `capabilities.conversation.read: true` | runtime | yes | The conversation record. Without it the hook can read nothing and fails loudly — see below. |
+| `capabilities.task_io.read: true` | runtime | no | Relevance selection instead of recency: the hook scores each candidate message by how much of the task's wording it shares. Without it, or when the task is not yet in scope, the newest messages are seeded instead. |
+| `context.max_tokens` | runtime | yes | The hook's seed budget is `context.max_tokens × context.seed_budget`. |
+| `context.seed_budget` | runtime | no | Fraction of `max_tokens` a seed may occupy; defaults to `0.10`. |
+| `config.seed_roles` | this hook | no | Which record roles may be seeded. See below. |
+
+The runtime consumes the `capabilities:` and `context:` keys: it gates the host
+calls and computes the budget the hook receives. The hook never parses them. The
+`config:` block is the hook's own; the runtime passes it through unread.
 
 Both capability keys are booleans and are never inferred: a `conversation:` block
 that omits `read` fails staging with `E-MAN-003`.
@@ -101,11 +105,16 @@ and prints `W-SEC-016`.
 | unset, or no `config:` block | Every role except `system` is seeded; non-`assistant` roles arrive as `user`. |
 | a list of role names, such as `[user, assistant]` | Only record messages whose role is on the list are seeded. |
 
-Role names match the record's role exactly and case-sensitively. Any string is
-accepted, so `[user, assistant, developer]` admits `developer` messages, and
-`tool` re-admits tool results (still unwrapped and seeded as `user`). A
-misspelled role can only narrow the seed, never widen it. Listing a role twice
-is harmless.
+| Role | In the record |
+|---|---|
+| `user` | A user turn. |
+| `assistant` | A model turn, including one that only calls tools. |
+| `tool` | A tool result. Still unwrapped and seeded as `user` when listed. |
+| `developer` | A developer message, from a provider that uses the role. Seeded as `user` when listed. |
+
+Role names match the record's role exactly and case-sensitively. A name outside
+this table, including a different case such as `User`, is an error rather than a
+role that silently matches nothing. Listing a role twice is harmless.
 
 The block is read fail-closed: anything the hook cannot fully honour is an
 error, and the hook seeds nothing rather than falling back to the unfiltered
@@ -116,11 +125,13 @@ default.
 | Any key other than `seed_roles`, such as `seed_role` | Names the key and says `seed_roles` is the only key accepted. |
 | `seed_roles` that is not a list | `config.seed_roles` must be a list of role names. |
 | `seed_roles: []` | Would seed nothing; list a role or remove the hook. |
-| An entry that is not a string, or is empty or blank | Every entry must be a non-empty role name. |
+| An entry that is not a string | Every entry must be a role name. |
 | `system` in the list | `system` messages are never seeded. |
+| Any other role not in the table above, such as `critic` or `User` | Names the role and lists the roles that can be seeded. |
 
-Every error names `murmur-hook-memory` and lands in
-`workdir/logs/hook-murmur-hook-memory.log`; the session continues unseeded.
+Every error names `murmur-hook-memory` and lands in the session's
+`logs/hook-murmur-hook-memory.log`, under `.murmur/<session-id>/` in the
+workdir; the session continues unseeded.
 
 ## When the hook seeds nothing
 
@@ -139,8 +150,8 @@ Two cases are loud. The first is a `config:` block the hook cannot honour — se
 `read-messages` returns `not-granted` — which, left unhandled, would be
 indistinguishable from an empty record. So the hook fails instead, with an error
 naming itself, the missing key, and where the key belongs. Hook errors are
-non-fatal: the session continues and the message is written to
-`workdir/logs/hook-murmur-hook-memory.log`.
+non-fatal: the session continues and the message is written to the session's
+`logs/hook-murmur-hook-memory.log`, under `.murmur/<session-id>/` in the workdir.
 
 ## Confirming it worked
 
