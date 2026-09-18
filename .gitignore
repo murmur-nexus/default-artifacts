@@ -16,11 +16,6 @@
 **/workdir/
 .nexus/
 
-# murmur-tool-editor on-disk read cache — created in the CWD at dispatch time and by the
-# crate's host-target cache unit tests; a runtime artifact, never committed. The broader
-# **/ glob subsumes the narrower tools/murmur-tool-editor/-scoped rule this replaces.
-**/.murmur-tool-editor-cache/
-
 # murmur-tool-code-graph on-disk graph db + slice payloads — created under a target
 # repo's .murmur/ at index/slice time; a runtime artifact, never committed.
 **/.murmur/

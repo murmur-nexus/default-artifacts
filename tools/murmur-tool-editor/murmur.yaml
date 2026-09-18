@@ -1,5 +1,5 @@
 name: murmur-tool-editor
-version: 0.4.0
+version: 0.5.0
 runtime: tool
 implementation: wasm
 description: |
@@ -16,7 +16,9 @@ description: |
   read_file start_line/end_line are 1-based inclusive; both optional. Omitting both
   reads the whole file. A ranged read returns only that span plus total_lines and the
   resolved start_line/end_line. Ranges are capped (max 2000 lines); an oversized or
-  inverted range errors rather than silently widening the read.
+  inverted range errors rather than silently widening the read. read_file returns the
+  requested content on every successful call, including a repeat read of an unchanged
+  file, and writes nothing.
 
   find_in_files context_lines (default 0, like `grep -C`, max 20) attaches
   context_before/context_after arrays to each match; 0 omits those keys entirely.
@@ -80,9 +82,5 @@ input_schema:
   required:
     - operation
 
-capabilities:
-  filesystem:
-    allow:
-      - "."
 requires_files:
   - murmur_tool_editor.wasm

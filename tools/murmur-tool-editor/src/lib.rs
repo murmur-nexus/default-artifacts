@@ -1,8 +1,8 @@
 //! Structured file editor tool, packaged as a `wasm32-wasip2` component exporting
 //! `murmur:tool/run` (world `tool`).
 //!
-//! The dispatch logic (operation parsing, the on-disk read cache, the file operations,
-//! and the old-protocol output envelope) is deliberately split into a `cfg`-independent
+//! The dispatch logic (operation parsing, the file operations, and the old-protocol
+//! output envelope) is deliberately split into a `cfg`-independent
 //! [`logic`] module so it can be unit-tested on the host with `cargo test` — exactly the
 //! split every hook crate uses (see `hooks/murmur-hook-compact/src/lib.rs`). The
 //! `wasm_tool` module (compiled only for `wasm32`) is a thin adapter: it rewraps the
@@ -12,7 +12,7 @@
 // ── Pure, host-testable dispatch logic (no WASM bindings, no `cfg`) ────────────
 pub mod logic {
     use std::collections::HashSet;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use regex::Regex;
     use serde_json::{json, Value};
@@ -33,25 +33,6 @@ pub mod logic {
     // would realistically ask for. Beyond this the context stops being "the surrounding
     // function" and starts re-transmitting whole files, defeating the bounded-read intent.
     const MAX_CONTEXT_LINES: i64 = 20;
-
-    // On-disk read-cache location, relative to the capsule workdir (the component's CWD /
-    // preopened `.` at dispatch time). A plain relative path is how sibling artifacts scope
-    // per-session state to the workdir — `murmur-hook-compact` writes `checkpoints/` the
-    // same way — so the cache is automatically isolated per session/capsule and never leaks
-    // across unrelated ones.
-    // The location is overridable via `MURMUR_TOOL_EDITOR_CACHE_DIR`, mirroring the
-    // manifest-driven WASI-env override pattern already used by `murmur-hook-grafana`
-    // (`MURMUR_OTEL_ENDPOINT`) and `murmur-hook-eval` (`MURMUR_EVAL_CONFIG`).
-    const CACHE_DIR_ENV: &str = "MURMUR_TOOL_EDITOR_CACHE_DIR";
-    const DEFAULT_CACHE_DIR: &str = ".murmur-tool-editor-cache";
-
-    // Bound on the number of on-disk cache entries. Each entry is a small (~100-byte) JSON
-    // file, so 1024 entries cap the cache at roughly a hundred KB. When the bound is reached
-    // we evict oldest-by-file-mtime entries before writing a new one. A hard bound (rather
-    // than unbounded growth) keeps a long-running session's workdir from accumulating a
-    // stale pointer for every file ever read; the cache is best-effort, so eviction only
-    // costs an occasional re-read of a long-untouched file.
-    const MAX_CACHE_ENTRIES: usize = 1024;
 
     // ── Error kind constants ────────────────────────────────────────────────────
 
@@ -75,149 +56,6 @@ pub mod logic {
         // the manifest's contract forbids: every path this tool takes is relative to the
         // capsule workdir.
         pub const ABSOLUTE_PATH: &str = "absolute_path";
-    }
-
-    // ── Read cache: keyed by (path, line_range, mtime), persisted on disk ────────
-    //
-    // The tool is a one-shot dispatch — one operation per component instantiation — so an
-    // in-memory cache could never see a second `read_file` call. The cache therefore lives
-    // on disk in the workdir, keyed by (path, line_range, mtime), so a *later* invocation
-    // against an unchanged file returns a `cache_ref` pointer instead of re-transmitting the
-    // content. A whole-file read keys on `LineRange::whole_file()` (both fields `None`), so
-    // ranged reads of the same file cache under distinct keys and never collide with the
-    // whole-file entry or each other.
-    //
-    // Retrieval is keyed by (path, line_range, mtime) directly; the generated `cache_id`
-    // (`content.len() ^ mtime`) is only an opaque label returned to the caller and is never
-    // used as a lookup key, so its collision-proneness is not exploitable.
-
-    // A resolved 1-based, inclusive line span, or the whole file when both fields are `None`.
-    // (Historically named `ByteRange`; its two `Option<usize>` fields now carry line numbers,
-    // which is all the cache key ever needs.)
-    #[derive(Clone, Copy)]
-    struct LineRange {
-        start: Option<usize>,
-        end: Option<usize>,
-    }
-
-    impl LineRange {
-        fn whole_file() -> Self {
-            LineRange { start: None, end: None }
-        }
-    }
-
-    // Resolve the cache directory: the `MURMUR_TOOL_EDITOR_CACHE_DIR` override wins when set
-    // and non-empty; otherwise the default workdir-relative directory is used.
-    fn resolve_cache_dir() -> PathBuf {
-        match std::env::var(CACHE_DIR_ENV) {
-            Ok(p) if !p.trim().is_empty() => PathBuf::from(p),
-            _ => PathBuf::from(DEFAULT_CACHE_DIR),
-        }
-    }
-
-    // FNV-1a 64-bit hash — stable and dependency-free — used only to derive a cache filename
-    // from the lookup key. Hash collisions are harmless: each entry stores its full key and
-    // is re-validated on read, so a colliding lookup is simply treated as a miss.
-    fn fnv1a(bytes: &[u8]) -> u64 {
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        for &b in bytes {
-            hash ^= b as u64;
-            hash = hash.wrapping_mul(0x100_0000_01b3);
-        }
-        hash
-    }
-
-    fn cache_key_string(path: &str, range: LineRange, mtime: u64) -> String {
-        let start = range.start.map(|n| n.to_string()).unwrap_or_default();
-        let end = range.end.map(|n| n.to_string()).unwrap_or_default();
-        // NUL separators can't appear in any component, so the encoding is unambiguous.
-        format!("{path}\u{0}{start}\u{0}{end}\u{0}{mtime}")
-    }
-
-    fn cache_entry_path(cache_dir: &Path, key: &str) -> PathBuf {
-        cache_dir.join(format!("{:016x}.json", fnv1a(key.as_bytes())))
-    }
-
-    // A per-write unique-ish token for the atomic-publish temp filename. The native binary
-    // used `std::process::id()` for this; on `wasm32-wasip2` that call *traps* (it is not a
-    // supported syscall under the sandboxed component model), which would abort every
-    // cache-miss `read_file`. So we derive uniqueness portably instead: a process-wide
-    // monotonic counter (unique across writes within one instantiation) mixed with a
-    // `RandomState` seed (backed by `wasi:random` under wasip2, OS entropy on the host, so
-    // it differs across instantiations). This changes only the temp-name source — the
-    // write-temp-then-atomic-rename publish story is unchanged.
-    fn unique_token() -> u64 {
-        use std::hash::{BuildHasher, Hasher};
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let seed = std::collections::hash_map::RandomState::new()
-            .build_hasher()
-            .finish();
-        seed ^ COUNTER.fetch_add(1, Ordering::Relaxed)
-    }
-
-    // Look up a cached cache_id for this exact key. Returns None on a miss, on a corrupt or
-    // partially-written entry file (fails to parse), or on a hash collision (stored key does
-    // not match) — all of which the caller safely handles as a cache miss.
-    fn cache_lookup(cache_dir: &Path, key: &str) -> Option<String> {
-        let raw = std::fs::read_to_string(cache_entry_path(cache_dir, key)).ok()?;
-        let v: Value = serde_json::from_str(&raw).ok()?;
-        if v.get("key").and_then(Value::as_str) == Some(key) {
-            v.get("cache_id").and_then(Value::as_str).map(str::to_string)
-        } else {
-            None
-        }
-    }
-
-    // Persist a cache entry. Best-effort: any I/O failure just means the next read re-reads.
-    fn cache_store(cache_dir: &Path, key: &str, cache_id: &str) {
-        if std::fs::create_dir_all(cache_dir).is_err() {
-            return;
-        }
-        evict_if_needed(cache_dir);
-
-        let payload = json!({ "key": key, "cache_id": cache_id }).to_string();
-
-        // Atomic publish: write to a unique temp file, then rename into place. Two
-        // invocations racing to cache the same key produce identical payloads (cache_id is a
-        // deterministic function of content length and mtime), so last-writer-wins is safe,
-        // and a reader never observes a torn file because rename is atomic on POSIX. The
-        // temp name mixes a portable per-write token (see `unique_token`) with the key hash.
-        let tmp = cache_dir.join(format!(
-            ".tmp-{:016x}-{:016x}",
-            unique_token(),
-            fnv1a(key.as_bytes())
-        ));
-        if std::fs::write(&tmp, payload).is_ok() {
-            let _ = std::fs::rename(&tmp, cache_entry_path(cache_dir, key));
-        }
-    }
-
-    // Evict oldest-by-mtime entries when the cache is at capacity, leaving room for one more.
-    fn evict_if_needed(cache_dir: &Path) {
-        let entries: Vec<PathBuf> = match std::fs::read_dir(cache_dir) {
-            Ok(rd) => rd
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
-                .collect(),
-            Err(_) => return,
-        };
-        if entries.len() < MAX_CACHE_ENTRIES {
-            return;
-        }
-        let mut by_mtime: Vec<(std::time::SystemTime, PathBuf)> = entries
-            .into_iter()
-            .filter_map(|p| {
-                let mt = std::fs::metadata(&p).and_then(|m| m.modified()).ok()?;
-                Some((mt, p))
-            })
-            .collect();
-        by_mtime.sort_by_key(|(mt, _)| *mt);
-        let remove_count = by_mtime.len().saturating_sub(MAX_CACHE_ENTRIES - 1);
-        for (_, p) in by_mtime.into_iter().take(remove_count) {
-            let _ = std::fs::remove_file(p);
-        }
     }
 
     // ── Dispatch entry point ────────────────────────────────────────────────────
@@ -289,21 +127,6 @@ pub mod logic {
             return refusal;
         }
 
-        // Get file metadata for mtime
-        let metadata = match std::fs::metadata(&path) {
-            Ok(m) => m,
-            Err(e) => return err_result(io_error_kind(&e), format!("{path}: {e}")),
-        };
-
-        let mtime = metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
-        let cache_dir = resolve_cache_dir();
-
         // Optional 1-based, inclusive line bounds. Reading through `as_i64` (not `as_u64`) is
         // deliberate: a negative or zero `start_line` must surface as an INVALID_RANGE error,
         // not be silently dropped as "absent". A field present as anything non-integer (or
@@ -311,34 +134,17 @@ pub mod logic {
         let start_arg = op.get("start_line").and_then(Value::as_i64);
         let end_arg = op.get("end_line").and_then(Value::as_i64);
 
-        // Whole-file path: byte-for-byte the pre-slice behavior and the pre-slice cache key,
-        // so cache entries written before this feature keep hitting. The only addition is the
-        // `total_lines` field on a cache miss (additive — omitted on a hit, where the file is
-        // not read), letting an agent learn a file's size for a follow-up ranged read.
+        // Whole-file read: the content verbatim, plus `total_lines` so an agent can size a
+        // follow-up ranged read.
         if start_arg.is_none() && end_arg.is_none() {
-            let key = cache_key_string(&path, LineRange::whole_file(), mtime);
-
-            if let Some(cache_id) = cache_lookup(&cache_dir, &key) {
-                return ok_with(
-                    format!("read {path} (cached)"),
-                    json!({ "cache_ref": cache_id }),
-                    format!("cache hit: {cache_id}"),
-                );
-            }
-
             return match std::fs::read_to_string(&path) {
                 Ok(content) => {
                     let byte_count = content.len();
                     let total_lines = content.lines().count();
-                    let cache_id = format!("cache_{:x}", content.len() ^ (mtime as usize));
-
-                    cache_store(&cache_dir, &key, &cache_id);
-
                     ok_with(
                         format!("read {path}"),
                         json!({
                             "content": content,
-                            "cache_ref": cache_id,
                             "total_lines": total_lines,
                         }),
                         format!("{byte_count} bytes"),
@@ -348,10 +154,7 @@ pub mod logic {
             };
         }
 
-        // Ranged path. The file must be read to count its lines and validate the span, even on
-        // a cache hit — but the cache still earns its keep by returning only a `cache_ref`
-        // (never the content) once a given (path, resolved-range, mtime) has been seen, so the
-        // saving is the transmission of the slice, not the local disk read.
+        // Ranged read. The whole file is read to count its lines and validate the span.
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
             Err(e) => return err_result(io_error_kind(&e), format!("{path}: {e}")),
@@ -398,27 +201,6 @@ pub mod logic {
             );
         }
 
-        // Key on the *resolved* range so different ranges of the same file cache independently
-        // and never collide with the whole-file entry.
-        let key = cache_key_string(
-            &path,
-            LineRange { start: Some(start), end: Some(end) },
-            mtime,
-        );
-
-        if let Some(cache_id) = cache_lookup(&cache_dir, &key) {
-            return ok_with(
-                format!("read {path} lines {start}-{end} (cached)"),
-                json!({
-                    "cache_ref": cache_id,
-                    "total_lines": total_lines,
-                    "start_line": start,
-                    "end_line": end,
-                }),
-                format!("cache hit: {cache_id}"),
-            );
-        }
-
         // Slice `[start-1, end)` (0-based half-open), join with "\n". `lines()` already strips
         // line terminators, so the join reproduces the original text of the span.
         let sliced: String = content
@@ -428,15 +210,11 @@ pub mod logic {
             .collect::<Vec<&str>>()
             .join("\n");
         let byte_count = sliced.len();
-        let cache_id = format!("cache_{:x}", sliced.len() ^ (mtime as usize));
-
-        cache_store(&cache_dir, &key, &cache_id);
 
         ok_with(
             format!("read {path} lines {start}-{end}"),
             json!({
                 "content": sliced,
-                "cache_ref": cache_id,
                 "total_lines": total_lines,
                 "start_line": start,
                 "end_line": end,
@@ -1346,15 +1124,27 @@ pub mod logic {
             let _ = fs::remove_dir_all(&temp_dir);
         }
 
+        // Asserts a successful result's `data` carries exactly `keys` — no more, no fewer — so
+        // a key the contract does not name cannot ride along unnoticed.
+        fn assert_data_keys(out: &Value, keys: &[&str]) {
+            let mut got: Vec<&str> = out["data"]
+                .as_object()
+                .unwrap_or_else(|| panic!("data is not an object: {out:?}"))
+                .keys()
+                .map(String::as_str)
+                .collect();
+            got.sort_unstable();
+            let mut want = keys.to_vec();
+            want.sort_unstable();
+            assert_eq!(got, want, "{out:?}");
+        }
+
         #[test]
-        fn read_file_returns_content_and_cache_ref() {
+        fn read_file_returns_content_and_total_lines_only() {
             let temp_dir = scratch("read");
 
             let test_file = temp_dir.join("test.txt");
             fs::write(&test_file, "test content").expect("failed to write test file");
-
-            // Point the cache at a fresh temp dir so this test is isolated from any other.
-            let _guard = cache_env_guard(&temp_dir.join("cache"));
 
             let path = test_file.to_string_lossy().to_string();
             let op = json!({
@@ -1365,16 +1155,15 @@ pub mod logic {
             let out = op_read_file(&op);
             assert_eq!(out["ok"], true);
             assert_eq!(out["content"], "test content");
-            assert!(out["cache_ref"].is_string());
+            assert_data_keys(&out, &["content", "total_lines"]);
 
             let _ = fs::remove_dir_all(&temp_dir);
         }
 
         // ── Bounded read_file (start_line / end_line) ────────────────────────────
         //
-        // Each test isolates the disk cache to its own temp dir via `cache_env_guard`, so a
-        // cache hit from a prior test can never mask a miss here. A shared helper writes a
-        // file of `n` numbered lines ("line 1".."line n"), the fixture every range test slices.
+        // A shared helper writes a file of `n` numbered lines ("line 1".."line n"), the fixture
+        // every range test slices.
 
         fn write_numbered_file(dir: &std::path::Path, name: &str, n: usize) -> String {
             let _ = fs::remove_dir_all(dir);
@@ -1390,10 +1179,9 @@ pub mod logic {
 
         #[test]
         fn read_file_whole_file_reports_total_lines() {
-            // A whole-file read (no start/end) keeps its content and cache_ref unchanged, and
-            // now additionally reports total_lines — but adds NO start_line/end_line keys.
+            // A whole-file read (no start/end) returns its content and total_lines — but NO
+            // start_line/end_line keys.
             let dir = scratch("read_wholefile_total");
-            let _guard = cache_env_guard(&dir.join("cache"));
             let path = write_numbered_file(&dir, "f.txt", 5);
             let op = json!({ "operation": "read_file", "path": &path });
 
@@ -1401,7 +1189,7 @@ pub mod logic {
             assert_eq!(out["ok"], true, "{out:?}");
             assert_eq!(out["content"], "line 1\nline 2\nline 3\nline 4\nline 5\n");
             assert_eq!(out["total_lines"], 5);
-            assert!(out["cache_ref"].is_string());
+            assert_data_keys(&out, &["content", "total_lines"]);
             assert!(out["start_line"].is_null(), "whole-file read must not add start_line");
             assert!(out["end_line"].is_null(), "whole-file read must not add end_line");
 
@@ -1411,7 +1199,6 @@ pub mod logic {
         #[test]
         fn read_file_ranged_happy_path() {
             let dir = scratch("read_ranged");
-            let _guard = cache_env_guard(&dir.join("cache"));
             let path = write_numbered_file(&dir, "f.txt", 10);
             let op = json!({ "operation": "read_file", "path": &path, "start_line": 2, "end_line": 4 });
 
@@ -1422,7 +1209,7 @@ pub mod logic {
             assert_eq!(out["total_lines"], 10);
             assert_eq!(out["start_line"], 2);
             assert_eq!(out["end_line"], 4);
-            assert!(out["cache_ref"].is_string());
+            assert_data_keys(&out, &["content", "total_lines", "start_line", "end_line"]);
 
             let _ = fs::remove_dir_all(&dir);
         }
@@ -1430,7 +1217,6 @@ pub mod logic {
         #[test]
         fn read_file_ranged_start_only_reads_to_eof() {
             let dir = scratch("read_start_only");
-            let _guard = cache_env_guard(&dir.join("cache"));
             let path = write_numbered_file(&dir, "f.txt", 6);
             let op = json!({ "operation": "read_file", "path": &path, "start_line": 5 });
 
@@ -1446,7 +1232,6 @@ pub mod logic {
         #[test]
         fn read_file_ranged_end_only_reads_from_top() {
             let dir = scratch("read_end_only");
-            let _guard = cache_env_guard(&dir.join("cache"));
             let path = write_numbered_file(&dir, "f.txt", 6);
             let op = json!({ "operation": "read_file", "path": &path, "end_line": 3 });
 
@@ -1462,7 +1247,6 @@ pub mod logic {
         #[test]
         fn read_file_ranged_inverted_span_errors() {
             let dir = scratch("read_inverted");
-            let _guard = cache_env_guard(&dir.join("cache"));
             let path = write_numbered_file(&dir, "f.txt", 10);
             let op = json!({ "operation": "read_file", "path": &path, "start_line": 5, "end_line": 2 });
 
@@ -1477,7 +1261,6 @@ pub mod logic {
         #[test]
         fn read_file_ranged_start_below_one_errors() {
             let dir = scratch("read_start_zero");
-            let _guard = cache_env_guard(&dir.join("cache"));
             let path = write_numbered_file(&dir, "f.txt", 10);
             let op = json!({ "operation": "read_file", "path": &path, "start_line": 0 });
 
@@ -1494,7 +1277,6 @@ pub mod logic {
             // start past EOF errors and states the real line count — never silently falls back
             // to the whole file.
             let dir = scratch("read_start_eof");
-            let _guard = cache_env_guard(&dir.join("cache"));
             let path = write_numbered_file(&dir, "f.txt", 4);
             let op = json!({ "operation": "read_file", "path": &path, "start_line": 99 });
 
@@ -1512,7 +1294,6 @@ pub mod logic {
         fn read_file_ranged_end_beyond_eof_clamps() {
             // The one asymmetric case: end past EOF clamps to total_lines rather than erroring.
             let dir = scratch("read_end_eof");
-            let _guard = cache_env_guard(&dir.join("cache"));
             let path = write_numbered_file(&dir, "f.txt", 4);
             let op = json!({ "operation": "read_file", "path": &path, "start_line": 3, "end_line": 999 });
 
@@ -1528,7 +1309,6 @@ pub mod logic {
         #[test]
         fn read_file_ranged_oversized_span_errors() {
             let dir = scratch("read_oversized");
-            let _guard = cache_env_guard(&dir.join("cache"));
             // A file larger than the cap, requested whole via an explicit span.
             let path = write_numbered_file(&dir, "big.txt", MAX_READ_RANGE_LINES + 500);
             let op = json!({
@@ -1546,32 +1326,109 @@ pub mod logic {
             let _ = fs::remove_dir_all(&dir);
         }
 
+        // ── Repeat reads: every successful read returns the bytes ────────────────
+        //
+        // Nothing an earlier read did can change what a later read returns: the tool keeps no
+        // state between calls and writes nothing, so each read reflects the file as it is now.
+
         #[test]
-        fn read_file_ranged_cache_ref_differs_from_whole_file() {
-            // Different ranges of the same file cache under distinct keys, so a whole-file read
-            // and a ranged read return different cache_refs and never collide.
-            let dir = scratch("read_cache_distinct");
-            let _guard = cache_env_guard(&dir.join("cache"));
+        fn read_file_repeat_whole_file_read_returns_content_again() {
+            let dir = scratch("read_repeat_whole");
+            let path = write_numbered_file(&dir, "f.txt", 5);
+            let op = json!({ "operation": "read_file", "path": &path });
+
+            let first = op_read_file(&op);
+            let second = op_read_file(&op);
+            for out in [&first, &second] {
+                assert_eq!(out["ok"], true, "{out:?}");
+                assert_eq!(out["content"], "line 1\nline 2\nline 3\nline 4\nline 5\n");
+                assert_eq!(out["total_lines"], 5);
+                assert_eq!(out["message"], format!("read {path}"));
+                assert_data_keys(out, &["content", "total_lines"]);
+            }
+            assert_eq!(first, second);
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_repeat_ranged_read_returns_content_again() {
+            let dir = scratch("read_repeat_ranged");
             let path = write_numbered_file(&dir, "f.txt", 10);
+            let op =
+                json!({ "operation": "read_file", "path": &path, "start_line": 3, "end_line": 5 });
 
-            let whole = op_read_file(&json!({ "operation": "read_file", "path": &path }));
-            let ranged = op_read_file(&json!({
-                "operation": "read_file", "path": &path, "start_line": 2, "end_line": 4
-            }));
-            assert_eq!(whole["ok"], true);
-            assert_eq!(ranged["ok"], true);
-            assert_ne!(
-                whole["cache_ref"].as_str().unwrap(),
-                ranged["cache_ref"].as_str().unwrap(),
-                "whole-file and ranged reads must not share a cache_ref"
-            );
+            for _ in 0..2 {
+                let out = op_read_file(&op);
+                assert_eq!(out["ok"], true, "{out:?}");
+                assert_eq!(out["content"], "line 3\nline 4\nline 5");
+                assert_eq!(out["total_lines"], 10);
+                assert_eq!(out["start_line"], 3);
+                assert_eq!(out["end_line"], 5);
+                assert_eq!(out["message"], format!("read {path} lines 3-5"));
+                assert_data_keys(&out, &["content", "total_lines", "start_line", "end_line"]);
+            }
 
-            // And the ranged read is itself cacheable: a second identical ranged read hits.
-            let ranged2 = op_read_file(&json!({
-                "operation": "read_file", "path": &path, "start_line": 2, "end_line": 4
-            }));
-            assert_eq!(ranged2["cache_ref"], ranged["cache_ref"]);
-            assert!(ranged2["content"].is_null(), "ranged cache hit must not resend content");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_sees_a_same_second_same_length_edit() {
+            // No pause: the rewrite lands within the same second as the first read and keeps
+            // the byte length, so neither a whole-second mtime nor the size tells them apart.
+            let dir = scratch("read_same_second_edit");
+            let file = dir.join("f.txt");
+            fs::write(&file, "aaaa").unwrap();
+            let path = file.to_string_lossy().to_string();
+            let op = json!({ "operation": "read_file", "path": &path });
+
+            let before = op_read_file(&op);
+            assert_eq!(before["content"], "aaaa", "{before:?}");
+
+            fs::write(&file, "bbbb").unwrap();
+            let after = op_read_file(&op);
+            assert_eq!(after["ok"], true, "{after:?}");
+            assert_eq!(after["content"], "bbbb");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_of_a_missing_file_is_not_found_and_declares_no_effect() {
+            let dir = scratch("read_missing");
+            let path = dir.join("absent.txt").to_string_lossy().to_string();
+
+            for extra in [json!({}), json!({ "start_line": 1, "end_line": 2 })] {
+                let mut data = json!({ "operation": "read_file", "path": &path });
+                data.as_object_mut()
+                    .unwrap()
+                    .extend(extra.as_object().unwrap().clone());
+                let out = run(&json!({ "data": data }).to_string());
+                assert_eq!(out["ok"], false, "{out:?}");
+                assert_eq!(out["error_kind"], err::NOT_FOUND, "{out:?}");
+                let message = out["message"].as_str().unwrap();
+                assert!(message.starts_with(&format!("{path}: ")), "{out:?}");
+                assert!(
+                    out["metadata"].is_null(),
+                    "a failed read declares no effect: {out:?}"
+                );
+            }
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_ignores_unknown_inputs() {
+            let dir = scratch("read_unknown_inputs");
+            let path = write_numbered_file(&dir, "f.txt", 3);
+
+            let out = run(&json!({
+                "data": { "operation": "read_file", "path": &path, "no_cache": true }
+            })
+            .to_string());
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(out["content"], "line 1\nline 2\nline 3\n");
+            assert_eq!(out["metadata"]["state_effect"], "read");
 
             let _ = fs::remove_dir_all(&dir);
         }
@@ -1700,145 +1557,6 @@ pub mod logic {
 
             let _ = fs::remove_dir_all(&dir);
         }
-
-        // ── On-disk cache mechanism (unit-level) ────────────────────────────────
-        //
-        // These exercise the disk cache primitives directly with an explicit cache dir, so
-        // they don't rely on process-global state. The authoritative proof that the cache
-        // works the way it is actually invoked — across two separate component
-        // instantiations — lives in tests/wasm_component.rs, since that is the only shape
-        // that reflects the one-op-per-dispatch reality of this tool.
-
-        #[test]
-        fn cache_store_then_lookup_roundtrips() {
-            let dir = std::env::temp_dir().join("murmur_test_cache_roundtrip");
-            let _ = fs::remove_dir_all(&dir);
-            let key = cache_key_string("some/file.rs", LineRange::whole_file(), 12345);
-
-            assert!(cache_lookup(&dir, &key).is_none(), "empty cache must miss");
-            cache_store(&dir, &key, "cache_abc123");
-            assert_eq!(cache_lookup(&dir, &key).as_deref(), Some("cache_abc123"));
-
-            // A different key (different mtime) must miss.
-            let other = cache_key_string("some/file.rs", LineRange::whole_file(), 99999);
-            assert!(cache_lookup(&dir, &other).is_none());
-
-            let _ = fs::remove_dir_all(&dir);
-        }
-
-        #[test]
-        fn cache_lookup_treats_corrupt_entry_as_miss() {
-            let dir = std::env::temp_dir().join("murmur_test_cache_corrupt");
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).unwrap();
-            let key = cache_key_string("x.txt", LineRange::whole_file(), 1);
-
-            // Write a truncated/garbage file at the entry path.
-            fs::write(cache_entry_path(&dir, &key), b"{ this is not json").unwrap();
-            assert!(cache_lookup(&dir, &key).is_none());
-
-            let _ = fs::remove_dir_all(&dir);
-        }
-
-        #[test]
-        fn cache_eviction_bounds_entry_count() {
-            let dir = std::env::temp_dir().join("murmur_test_cache_evict");
-            let _ = fs::remove_dir_all(&dir);
-            // Store more than MAX_CACHE_ENTRIES distinct keys; the directory must stay bounded.
-            for i in 0..(MAX_CACHE_ENTRIES + 50) {
-                let key = cache_key_string("f.txt", LineRange::whole_file(), i as u64);
-                cache_store(&dir, &key, &format!("cache_{i:x}"));
-            }
-            let count = fs::read_dir(&dir)
-                .unwrap()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().map(|x| x == "json").unwrap_or(false))
-                .count();
-            assert!(
-                count <= MAX_CACHE_ENTRIES,
-                "cache grew past the bound: {count} > {MAX_CACHE_ENTRIES}"
-            );
-
-            let _ = fs::remove_dir_all(&dir);
-        }
-
-        // Serializes env-var mutation across the cache-env tests so parallel tests don't race
-        // on the shared process environment. Returns a guard that restores the prior value.
-        static CACHE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-        struct CacheEnvGuard {
-            _lock: std::sync::MutexGuard<'static, ()>,
-            prev: Option<String>,
-        }
-
-        impl Drop for CacheEnvGuard {
-            fn drop(&mut self) {
-                match &self.prev {
-                    Some(v) => std::env::set_var(CACHE_DIR_ENV, v),
-                    None => std::env::remove_var(CACHE_DIR_ENV),
-                }
-            }
-        }
-
-        fn cache_env_guard(dir: &std::path::Path) -> CacheEnvGuard {
-            let lock = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let prev = std::env::var(CACHE_DIR_ENV).ok();
-            std::env::set_var(CACHE_DIR_ENV, dir);
-            CacheEnvGuard { _lock: lock, prev }
-        }
-
-        #[test]
-        fn read_file_cache_hit_returns_ref_only() {
-            let temp_dir = scratch("read_cache");
-            let _guard = cache_env_guard(&temp_dir.join("cache"));
-
-            let test_file = temp_dir.join("cached.txt");
-            fs::write(&test_file, "cached content").expect("failed to write test file");
-
-            let path = test_file.to_string_lossy().to_string();
-            let op = json!({ "operation": "read_file", "path": &path });
-
-            let out1 = op_read_file(&op);
-            assert_eq!(out1["ok"], true);
-            let cache_ref1 = out1["cache_ref"].as_str().unwrap().to_string();
-            assert!(out1["content"].is_string());
-
-            // Second read of the unchanged file hits the on-disk cache: ref, no content.
-            let out2 = op_read_file(&op);
-            assert_eq!(out2["ok"], true);
-            assert_eq!(out2["cache_ref"].as_str().unwrap(), cache_ref1);
-            assert!(out2["content"].is_null());
-
-            let _ = fs::remove_dir_all(&temp_dir);
-        }
-
-        #[test]
-        fn read_file_cache_miss_on_mtime_change() {
-            let temp_dir = scratch("read_mtime");
-            let _guard = cache_env_guard(&temp_dir.join("cache"));
-
-            let test_file = temp_dir.join("mtime.txt");
-            fs::write(&test_file, "original content").expect("failed to write test file");
-
-            let path = test_file.to_string_lossy().to_string();
-            let op = json!({ "operation": "read_file", "path": &path });
-
-            let out1 = op_read_file(&op);
-            assert_eq!(out1["ok"], true);
-            assert_eq!(out1["content"], "original content");
-
-            // Filesystem mtime can have 1-second granularity, so wait before rewriting.
-            std::thread::sleep(std::time::Duration::from_millis(1500));
-            fs::write(&test_file, "modified content").expect("failed to modify test file");
-            std::thread::sleep(std::time::Duration::from_millis(100));
-
-            // The mtime changed, so the key changed: this is a miss and returns fresh content.
-            let out2 = op_read_file(&op);
-            assert_eq!(out2["ok"], true);
-            assert_eq!(out2["content"], "modified content");
-
-            let _ = fs::remove_dir_all(&temp_dir);
-        }
     }
 }
 
@@ -1896,9 +1614,9 @@ mod wasm_tool {
             // Map `data` exactly as the host's native dispatch did from the tool's stdout
             // (crates/capsule-runtime dispatch_native_tool): the envelope's `data` *field* —
             // a string used verbatim, else a non-null value re-serialized, else None. This
-            // reproduces the pre-port `ToolResult.data` byte-for-byte (e.g. read miss ->
-            // `{"content":...,"cache_ref":...}`, cache hit -> `{"cache_ref":...}`,
-            // write/error -> None). Status/summary/state_effect carry the rest.
+            // reproduces the pre-port `ToolResult.data` byte-for-byte (e.g. whole-file read ->
+            // `{"content":...,"total_lines":...}`, ranged read -> the same plus
+            // `start_line`/`end_line`, write/error -> None). Status/summary/state_effect carry the rest.
             let data = result
                 .get("data")
                 .and_then(Value::as_str)

@@ -87,6 +87,15 @@ have made every read under that subtree a refusal.
 `find_in_files` results carry a `path` key per match. That is an output, not an
 input — the runtime scans tool input only.
 
+## Breaking change in 0.5.0
+
+`read_file` now returns `content` on every successful call, including a repeat
+read of an unchanged file, and never returns a `cache_ref`. The
+`MURMUR_TOOL_EDITOR_CACHE_DIR` environment override is no longer read, and the
+tool no longer creates `.murmur-tool-editor-cache/` in the workdir; one left by
+an earlier version is ignored and safe to delete. Any caller that reads
+`cache_ref` must stop.
+
 ## Breaking change in 0.3.0
 
 `write_file` and `replace_in_file` no longer accept `path`. Sent the old way the
