@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-17T13:46:31Z",
+  "updated_at": "2026-09-18T16:22:34Z",
   "artifacts": [
     {
       "name": "murmur-driver-anthropic",
@@ -165,7 +165,7 @@
     },
     {
       "name": "murmur-tool-editor",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "runtime": "tool",
       "description": "Structured file editing interface for Murmur capsules.",
       "tags": [

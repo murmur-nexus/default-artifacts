@@ -1,13 +1,12 @@
 //! Host-target integration test for the compiled `murmur-tool-editor` **wasm32-wasip2
 //! component**, run through Wasmtime.
 //!
-//! This replaces the old `tests/cross_process_cache.rs`, which spawned the native binary
-//! as two OS processes via `env!("CARGO_BIN_EXE_murmur-tool-editor")` — a symbol that no
-//! longer exists once the `[[bin]]` target is dropped in the wasm port. The on-disk
-//! read-cache invariant it proved (cache hit / miss-on-mtime-change across two *separate*
-//! invocations) is reproduced here across two independent Wasmtime `Store`/instantiation
-//! calls against the same preopened workdir — the component-model analogue of two OS
-//! processes.
+//! Every call runs in its own Wasmtime `Store`/instantiation against a preopened workdir —
+//! the component-model analogue of the one-op-per-dispatch reality of this tool. Across
+//! separate instantiations it proves that a repeat `read_file` of an unchanged file returns
+//! the content again, that reads leave the workdir's entries exactly as they found them, and
+//! that a `.murmur-tool-editor-cache/` left behind by an earlier version is neither read nor
+//! modified.
 //!
 //! It also validates the compiled artifact loads as a real component
 //! (`Component::from_file` is the validation gate — there is no `wasm-tools` CLI dependency
@@ -98,8 +97,8 @@ fn linker(engine: &Engine) -> Linker<HostState> {
 
 /// A fresh Store whose only preopen is `workdir` mapped to `.` (DirPerms/FilePerms::all) —
 /// exactly what the capsule runtime's `build_wasi_ctx` grants a tool at dispatch time. Env
-/// is deliberately NOT inherited, so the editor's cache resolves to its default
-/// workdir-relative `.murmur-tool-editor-cache`.
+/// is deliberately NOT inherited, so the component sees nothing of the test process's
+/// environment.
 fn store_for(engine: &Engine, workdir: &Path) -> Store<HostState> {
     let mut builder = WasiCtxBuilder::new();
     builder
@@ -190,9 +189,12 @@ fn component_loads_and_runs_read_file() {
     );
     assert!(matches!(status, Status::Passed), "status: {status:?}");
     // ToolResult.data carries the operation's `data` field (as the host's native dispatch
-    // mapped it) — for a read miss that is `{"content":...,"cache_ref":...}`.
-    assert_eq!(payload["content"], "hi there", "payload: {payload}");
-    assert!(payload["cache_ref"].is_string());
+    // mapped it) — for a whole-file read that is exactly `{"content":...,"total_lines":...}`.
+    assert_eq!(
+        payload,
+        serde_json::json!({ "content": "hi there", "total_lines": 1 }),
+        "payload: {payload}"
+    );
     assert!(
         meta.iter().any(|(k, v)| k == "state_effect" && v == "read"),
         "expected state_effect=read, got {meta:?}"
@@ -353,51 +355,96 @@ fn component_refuses_an_absolute_read_path_even_when_the_file_exists() {
 }
 
 #[test]
-fn read_cache_persists_across_component_instantiations() {
+fn repeat_reads_across_instantiations_return_content_and_leave_the_workdir_untouched() {
     let eng = engine();
     let component = Component::from_file(&eng, component_path()).expect("load component");
     let lnk = linker(&eng);
-    let workdir = unique_workdir("cache");
-    std::fs::write(workdir.join("target.txt"), "hello from the disk cache").unwrap();
+    let workdir = unique_workdir("repeat_read");
+    std::fs::write(workdir.join("target.txt"), "l1\nl2\nl3\nl4\nl5\n").unwrap();
+    let before = dir_entries(&workdir);
 
-    let payload = r#"{"operation":"read_file","path":"target.txt"}"#;
+    let whole = r#"{"operation":"read_file","path":"target.txt"}"#;
+    let ranged = r#"{"operation":"read_file","path":"target.txt","start_line":2,"end_line":3}"#;
 
-    // Instantiation #1 — cache miss: full content plus a cache_ref.
-    let (s1, first, _m) = run_editor(&eng, &component, &lnk, &workdir, payload);
-    assert!(matches!(s1, Status::Passed), "first read status: {s1:?}");
-    assert_eq!(first["content"], "hello from the disk cache");
-    let cache_ref = first["cache_ref"]
-        .as_str()
-        .expect("first read must return a cache_ref")
-        .to_string();
+    // Each call is a separate Store against the same preopened workdir, so nothing an earlier
+    // instantiation held in memory can reach a later one.
+    for _ in 0..2 {
+        let (status, payload, meta) = run_editor(&eng, &component, &lnk, &workdir, whole);
+        assert!(matches!(status, Status::Passed), "status: {status:?}");
+        assert_eq!(
+            payload,
+            serde_json::json!({ "content": "l1\nl2\nl3\nl4\nl5\n", "total_lines": 5 }),
+            "every whole-file read returns the bytes"
+        );
+        assert!(
+            meta.iter().any(|(k, v)| k == "state_effect" && v == "read"),
+            "expected state_effect=read, got {meta:?}"
+        );
 
-    // Instantiation #2 — a *separate* Store against the unchanged file: ref, no content.
-    // This is the scenario an in-memory cache could never satisfy.
-    let (s2, second, _m) = run_editor(&eng, &component, &lnk, &workdir, payload);
-    assert!(matches!(s2, Status::Passed), "second read status: {s2:?}");
+        let (status, payload, _meta) = run_editor(&eng, &component, &lnk, &workdir, ranged);
+        assert!(matches!(status, Status::Passed), "status: {status:?}");
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "content": "l2\nl3",
+                "total_lines": 5,
+                "start_line": 2,
+                "end_line": 3,
+            }),
+            "every ranged read returns the bytes"
+        );
+    }
+
+    // A same-length rewrite with no pause is visible to the very next read.
+    std::fs::write(workdir.join("target.txt"), "L1\nL2\nL3\nL4\nL5\n").unwrap();
+    let (_s, payload, _m) = run_editor(&eng, &component, &lnk, &workdir, whole);
+    assert_eq!(payload["content"], "L1\nL2\nL3\nL4\nL5\n");
+
     assert_eq!(
-        second["cache_ref"].as_str().unwrap(),
-        cache_ref,
-        "cache_ref must be stable across instantiations"
+        dir_entries(&workdir),
+        before,
+        "read_file must leave the workdir's entries exactly as it found them"
     );
-    assert!(
-        second["content"].is_null(),
-        "cache hit must NOT resend content, got: {}",
-        second["content"]
-    );
+    assert!(!workdir.join(".murmur-tool-editor-cache").exists());
 
-    // Rewrite the file; mtime granularity can be 1s, so wait first. The (path, range,
-    // mtime) key changes, so instantiation #3 is a miss returning fresh content.
-    std::thread::sleep(std::time::Duration::from_millis(1500));
-    std::fs::write(workdir.join("target.txt"), "changed content").unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let _ = std::fs::remove_dir_all(&workdir);
+}
 
-    let (s3, third, _m) = run_editor(&eng, &component, &lnk, &workdir, payload);
-    assert!(matches!(s3, Status::Passed), "third read status: {s3:?}");
-    assert_eq!(
-        third["content"], "changed content",
-        "post-rewrite read must return fresh content, not a stale pointer"
+#[test]
+fn a_leftover_cache_directory_from_an_earlier_version_is_inert() {
+    let eng = engine();
+    let component = Component::from_file(&eng, component_path()).expect("load component");
+    let lnk = linker(&eng);
+    let workdir = unique_workdir("stale_cache");
+    std::fs::write(workdir.join("target.txt"), "fresh bytes").unwrap();
+
+    // The shape a 0.4.0 session leaves behind: small JSON entries plus an arbitrary file.
+    let stale = workdir.join(".murmur-tool-editor-cache");
+    std::fs::create_dir_all(&stale).unwrap();
+    let seeded: Vec<(&str, &[u8])> = vec![
+        ("00000000deadbeef.json", br#"{"key":"target.txt\u0000\u0000\u00000","cache_id":"cache_b"}"#),
+        ("0123456789abcdef.json", b"{ not json at all"),
+        ("ffffffffffffffff.json", b""),
+    ];
+    for (name, bytes) in &seeded {
+        std::fs::write(stale.join(name), bytes).unwrap();
+    }
+    let before = dir_entries(&stale);
+
+    let (status, payload, _meta) = run_editor(
+        &eng,
+        &component,
+        &lnk,
+        &workdir,
+        r#"{"operation":"read_file","path":"target.txt"}"#,
     );
+    assert!(matches!(status, Status::Passed), "status: {status:?}");
+    assert_eq!(payload["content"], "fresh bytes", "payload: {payload}");
+
+    assert_eq!(dir_entries(&stale), before, "the stale directory's entries are untouched");
+    for (name, bytes) in &seeded {
+        assert_eq!(&std::fs::read(stale.join(name)).unwrap(), bytes, "{name} was modified");
+    }
 
     let _ = std::fs::remove_dir_all(&workdir);
 }
