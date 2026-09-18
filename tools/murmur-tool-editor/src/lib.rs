@@ -1146,7 +1146,6 @@ pub mod logic {
             let test_file = temp_dir.join("test.txt");
             fs::write(&test_file, "test content").expect("failed to write test file");
 
-
             let path = test_file.to_string_lossy().to_string();
             let op = json!({
                 "operation": "read_file",
@@ -1163,7 +1162,8 @@ pub mod logic {
 
         // ── Bounded read_file (start_line / end_line) ────────────────────────────
         //
-        // A shared helper writes a file of `n` numbered lines ("line 1".."line n"), the fixture every range test slices.
+        // A shared helper writes a file of `n` numbered lines ("line 1".."line n"), the fixture
+        // every range test slices.
 
         fn write_numbered_file(dir: &std::path::Path, name: &str, n: usize) -> String {
             let _ = fs::remove_dir_all(dir);
@@ -1355,7 +1355,8 @@ pub mod logic {
         fn read_file_repeat_ranged_read_returns_content_again() {
             let dir = scratch("read_repeat_ranged");
             let path = write_numbered_file(&dir, "f.txt", 10);
-            let op = json!({ "operation": "read_file", "path": &path, "start_line": 3, "end_line": 5 });
+            let op =
+                json!({ "operation": "read_file", "path": &path, "start_line": 3, "end_line": 5 });
 
             for _ in 0..2 {
                 let out = op_read_file(&op);
@@ -1388,6 +1389,30 @@ pub mod logic {
             let after = op_read_file(&op);
             assert_eq!(after["ok"], true, "{after:?}");
             assert_eq!(after["content"], "bbbb");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_of_a_missing_file_is_not_found_and_declares_no_effect() {
+            let dir = scratch("read_missing");
+            let path = dir.join("absent.txt").to_string_lossy().to_string();
+
+            for extra in [json!({}), json!({ "start_line": 1, "end_line": 2 })] {
+                let mut data = json!({ "operation": "read_file", "path": &path });
+                data.as_object_mut()
+                    .unwrap()
+                    .extend(extra.as_object().unwrap().clone());
+                let out = run(&json!({ "data": data }).to_string());
+                assert_eq!(out["ok"], false, "{out:?}");
+                assert_eq!(out["error_kind"], err::NOT_FOUND, "{out:?}");
+                let message = out["message"].as_str().unwrap();
+                assert!(message.starts_with(&format!("{path}: ")), "{out:?}");
+                assert!(
+                    out["metadata"].is_null(),
+                    "a failed read declares no effect: {out:?}"
+                );
+            }
 
             let _ = fs::remove_dir_all(&dir);
         }

@@ -422,7 +422,10 @@ fn a_leftover_cache_directory_from_an_earlier_version_is_inert() {
     let stale = workdir.join(".murmur-tool-editor-cache");
     std::fs::create_dir_all(&stale).unwrap();
     let seeded: Vec<(&str, &[u8])> = vec![
-        ("00000000deadbeef.json", br#"{"key":"target.txt\u0000\u0000\u00000","cache_id":"cache_b"}"#),
+        (
+            "00000000deadbeef.json",
+            br#"{"key":"target.txt\u0000\u0000\u00000","cache_id":"cache_b"}"#,
+        ),
         ("0123456789abcdef.json", b"{ not json at all"),
         ("ffffffffffffffff.json", b""),
     ];
@@ -441,9 +444,17 @@ fn a_leftover_cache_directory_from_an_earlier_version_is_inert() {
     assert!(matches!(status, Status::Passed), "status: {status:?}");
     assert_eq!(payload["content"], "fresh bytes", "payload: {payload}");
 
-    assert_eq!(dir_entries(&stale), before, "the stale directory's entries are untouched");
+    assert_eq!(
+        dir_entries(&stale),
+        before,
+        "the stale directory's entries are untouched"
+    );
     for (name, bytes) in &seeded {
-        assert_eq!(&std::fs::read(stale.join(name)).unwrap(), bytes, "{name} was modified");
+        assert_eq!(
+            &std::fs::read(stale.join(name)).unwrap(),
+            bytes,
+            "{name} was modified"
+        );
     }
 
     let _ = std::fs::remove_dir_all(&workdir);
