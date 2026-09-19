@@ -26,6 +26,7 @@ members = [
   "tools/murmur-tool-registry-search",
   "tools/murmur-tool-report",
   "tools/murmur-tool-request-input",
+  "tools/murmur-tool-tavily",
   "tools/murmur-tool-git/validate",
 ]
 resolver = "2"

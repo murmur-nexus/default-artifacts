@@ -274,9 +274,10 @@ impl Staging {
             .collect()
     }
 
-    /// Write the capsule manifest, pointing inference at `endpoint` and allowing it on the
-    /// network. Called again before every launch, because the endpoint a scripted server binds is
-    /// not known until it has bound one.
+    /// Write the capsule manifest, pointing the driver's credential gateway at `endpoint`. Called
+    /// again before every launch, because the endpoint a scripted server binds is not known until
+    /// it has bound one. The gateway's requests are not checked against `network.allow`, so the
+    /// endpoint needs no network grant.
     fn write_manifest(
         &self,
         capsule: &str,
@@ -296,10 +297,10 @@ impl Staging {
             self.manifest(),
             format!(
                 "name: {capsule}\nversion: 0.1.0\nartifacts:\n  - name: {}\n    version: {}\n    \
-                 runtime: driver\n  - name: {}\n    version: {}\n    runtime: \
-                 tool\n{capabilities}{config}capabilities:\n  network:\n    allow:\n      - \
-                 {endpoint}\ninference:\n  transport: http\n  endpoint: {endpoint}\n  model: \
-                 test-model\n  api_key: test-key\n  driver:\n    artifact: {}\n",
+                 runtime: driver\n    gateway:\n      endpoint: {endpoint}\n      api_key: \
+                 test-key\n  - name: {}\n    version: {}\n    runtime: \
+                 tool\n{capabilities}{config}inference:\n  transport: http\n  model: \
+                 test-model\n  driver:\n    artifact: {}\n",
                 driver.name, driver.version, tool.name, tool.version, driver.name
             ),
         )
