@@ -227,14 +227,23 @@ fn upstream_failure(reply: &HttpReply) -> Response {
     let mut extra = Map::new();
     extra.insert("http_status".to_string(), json!(status));
     let (error_kind, message) = match status {
-        401 | 403 => (
-            kind::UPSTREAM_UNAUTHORIZED,
-            format!(
-                "Tavily refused the key (HTTP {status}): {detail}. The runtime already re-read \
-                 the credential once and resent; check gateway.api_key on this tool's entry and \
-                 the value stored in credentials.<NAME> it names"
-            ),
-        ),
+        401 | 403 => {
+            // The gateway looks only at a 401: it re-reads the credential and resends once,
+            // and only when the value changed. A 403 comes back untouched.
+            let reread = if status == 401 {
+                " The runtime already re-read the credential and resent if its value had changed;"
+            } else {
+                ""
+            };
+            (
+                kind::UPSTREAM_UNAUTHORIZED,
+                format!(
+                    "Tavily refused the key (HTTP {status}): {detail}.{reread} check \
+                     gateway.api_key on this tool's entry and the value stored in \
+                     credentials.<NAME> it names"
+                ),
+            )
+        }
         429 => {
             if let Some(retry_after) = &reply.retry_after {
                 extra.insert("retry_after".to_string(), json!(retry_after));

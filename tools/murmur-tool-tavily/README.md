@@ -212,7 +212,7 @@ the extra fields below. `summary` is the message and `metadata` is empty.
 | `invalid_input` | `failed` | The input breaks a rule above | — |
 | `config_invalid` | `error` | The `config:` block breaks a rule above | — |
 | `gateway_missing` | `error` | The entry has no `gateway:`. The message shows the block to add and the `mur config set` command | — |
-| `upstream_unauthorized` | `error` | HTTP 401 or 403, after the runtime's single re-read. The message names `gateway.api_key` and `credentials.<NAME>` | `http_status` |
+| `upstream_unauthorized` | `error` | HTTP 401 or 403. On a 401 the runtime has already re-read the credential and resent once if its value changed. The message names `gateway.api_key` and `credentials.<NAME>` | `http_status` |
 | `rate_limited` | `error` | HTTP 429. The tool never sleeps or retries | `http_status`, `retry_after` when Tavily sent one |
 | `quota_exceeded` | `error` | HTTP 432 (plan limit) or 433 (pay-as-you-go limit) | `http_status` |
 | `upstream_rejected` | `error` | HTTP 400 or 422 | `http_status` |

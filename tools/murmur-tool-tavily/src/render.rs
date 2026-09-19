@@ -156,8 +156,13 @@ pub fn render(
     }
     if shown == 0 && total > 0 {
         let room = available.saturating_sub(text.len());
-        text.push_str(&cut(&result_block(0, &response.results[0]), room));
-        shown = 1;
+        let first = cut(&result_block(0, &response.results[0]), room);
+        // A header and answer that already fill the budget leave no room at all, and the
+        // trailer must not then claim a result was shown.
+        if !first.is_empty() {
+            text.push_str(&first);
+            shown = 1;
+        }
     }
     // Only a pathological header or answer can still be over; cut it rather than the bound.
     if text.len() > available {

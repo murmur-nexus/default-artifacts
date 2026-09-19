@@ -1575,7 +1575,6 @@ dependencies = [
 name = "murmur-tool-tavily"
 version = "0.18.0"
 dependencies = [
- "serde",
  "serde_json",
  "tempfile",
  "wasip2",

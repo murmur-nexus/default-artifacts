@@ -709,6 +709,29 @@ fn a_long_answer_is_capped_at_half_the_budget() {
 }
 
 #[test]
+fn a_header_and_answer_that_fill_the_budget_claim_no_result_shown() {
+    // A 400-character query of four-byte characters plus an answer at its half-budget cap
+    // leaves no room for any part of a result at the smallest budget.
+    let query = "😀".repeat(400);
+    let body = json!({"answer": "a".repeat(3000), "results": [{"title": "t", "url": "u", "content": "c"}], "request_id": "r1"});
+    let config = r#"{"config_version":1,"include_answer":"advanced","max_output_bytes":2048}"#;
+    let mut fake = Fake::ok(&body);
+    let (response, _o) = call(
+        &mut fake,
+        Some(config),
+        &json!({"query": query}).to_string(),
+    );
+    assert_eq!(response.status, OpStatus::Passed);
+    assert!(response.data.len() <= 2048, "{} bytes", response.data.len());
+    assert!(response.truncated);
+    assert!(
+        response.data.contains("[truncated: 0 of 1 results shown"),
+        "{}",
+        response.data
+    );
+}
+
+#[test]
 fn spill_names_fall_back_to_the_first_free_search_number() {
     let out = tempfile::tempdir().unwrap();
     let config = r#"{"config_version":1,"max_output_bytes":2048}"#;
@@ -807,9 +830,19 @@ fn unauthorized_names_where_the_key_is_bound() {
     let (response, _o) = call(&mut fake, None, r#"{"query":"q"}"#);
     assert!(response
         .summary
-        .contains("already re-read the credential once"));
+        .contains("already re-read the credential and resent if its value had changed"));
     assert!(response.summary.contains("gateway.api_key"));
     assert!(response.summary.contains("credentials.<NAME>"));
+
+    // The gateway re-reads only on a 401, so a 403 must not claim it did.
+    let mut fake = Fake::answering(403, r#"{"detail":{"error":"Forbidden"}}"#);
+    let (response, _o) = call(&mut fake, None, r#"{"query":"q"}"#);
+    assert!(
+        !response.summary.contains("re-read"),
+        "{}",
+        response.summary
+    );
+    assert!(response.summary.contains("gateway.api_key"));
 }
 
 #[test]
