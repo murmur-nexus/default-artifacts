@@ -20,6 +20,21 @@ launch plan. It holds no credential and declares no auth block: the harness auth
 itself, which is the whole point of process transport. A turn spends a Claude subscription
 rather than an API key.
 
+## Which murmur this needs
+
+`transport: process` with an `inference.driver` is newer than any published murmur release.
+A murmur that does not have it refuses the manifest below before the driver is ever loaded:
+
+```
+error[E-MAN-003]: murmur.yaml: invalid inference config for 'inference.driver.artifact':
+is not valid with transport: process
+```
+
+`mur --version` does not distinguish the two — the version string was not bumped when the
+process-driver runner landed. If you see that error, your murmur predates the runner and no
+setting in this artifact will change it; build `mur` from a murmur that has it, or wait for the
+release that carries it.
+
 ## The manifest an operator writes
 
 ```yaml

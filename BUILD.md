@@ -280,7 +280,6 @@ to be presented, as a top-level `inference_auth:` block in the driver's own
 `murmur.yaml`. A process driver declares none: the harness holds its own
 credentials, and the driver never sees one.
 
-
 ```yaml
 inference_auth:
   header: x-api-key

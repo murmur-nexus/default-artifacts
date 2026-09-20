@@ -1,7 +1,3 @@
-// Functions and types are only referenced from the wasm_driver module (cfg-gated to wasm32)
-// or from cfg(test). Suppress dead_code noise in plain host library builds.
-#![cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
-
 //! The process driver for Claude Code.
 //!
 //! Every fact about the `claude` CLI — its flags, the shape of its MCP config, how it spells a
