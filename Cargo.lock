@@ -1343,6 +1343,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "murmur-driver-claude-code"
+version = "0.18.0"
+dependencies = [
+ "serde_json",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
 name = "murmur-driver-deepseek"
 version = "0.18.0"
 dependencies = [

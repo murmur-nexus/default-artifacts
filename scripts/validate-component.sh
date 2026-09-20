@@ -15,6 +15,7 @@
 # entry):
 #
 #   murmur-hook-*                      -> HOOK   category
+#   murmur-driver-claude-code          -> PROCESS-DRIVER category
 #   murmur-driver-*                    -> TOOL   category
 #   murmur-tool-request-input          -> TOOL   category
 #   murmur-tool-{create,editor,corpus, -> TOOL   category (ported to wasm32-wasip2
@@ -39,9 +40,21 @@
 #         type-only murmur:hook/lifecycle instance those pull in.
 #   TOOL: export set == { murmur:tool/run@<tool-wit-version> };       murmur:* imports subset of
 #         { murmur:text/chunks, murmur:task/task }.
+#   PROCESS-DRIVER: export set == { murmur:driver/process@<process-driver-wit-version> }; zero
+#         murmur:* imports. The runtime instantiates a process driver on an empty WASI context
+#         with no murmur host import at all, so any murmur:* import is a component that cannot
+#         load — there is nothing to satisfy it with.
+#
+# A process driver is told apart from an http driver by the interface it exports, not by its
+# name: both are `murmur-driver-*` artifacts with `runtime: driver`. So the `murmur-driver-*`
+# wildcard below cannot decide between them, and every process driver is listed here by name in
+# its own `case` arm ahead of that wildcard — a `case` takes its first matching arm, so a new
+# process driver added after the wildcard would be validated as an http driver and fail on its
+# export. The second one goes beside `murmur-driver-claude-code`.
 #
 # The exported interface's version is read from the vendored WIT that the
-# components are built against ($HOOK_WIT / $TOOL_WIT below), never hardcoded, so
+# components are built against ($HOOK_WIT / $TOOL_WIT / $PROCESS_DRIVER_WIT below), never
+# hardcoded, so
 # a WIT package bump propagates here with no edit to this script. The host links
 # exactly one version of each interface, so a component built against a stale
 # vendored WIT is unloadable at `mur run` — this check is what catches it at
@@ -69,6 +82,7 @@ BUILD_DIR="$REPO_ROOT/target/wasm32-wasip2/release"
 # version read here is the version the host will link.
 HOOK_WIT="$REPO_ROOT/wit/hook/deps/murmur-hook/lifecycle.wit"
 TOOL_WIT="$REPO_ROOT/wit/guest/deps/murmur-tool/tool.wit"
+PROCESS_DRIVER_WIT="$REPO_ROOT/wit/process-driver/process.wit"
 
 if [ "$#" -gt 1 ]; then
   echo "usage: $0 [<path-to-.wasm>]" >&2
@@ -100,6 +114,7 @@ wit_package_version() {
 
 hook_version="$(wit_package_version "$HOOK_WIT" "murmur:hook")"
 tool_version="$(wit_package_version "$TOOL_WIT" "murmur:tool")"
+process_driver_version="$(wit_package_version "$PROCESS_DRIVER_WIT" "murmur:driver")"
 
 # ---- single-artifact validation ----------------------------------------------
 # Returns 0 pass / 1 validation failure / 2 unrecognised artifact name.
@@ -120,6 +135,11 @@ validate_one() {
       category="hook"
       expected_export="murmur:hook/lifecycle"
       expected_version="$hook_version"
+      ;;
+    murmur-driver-claude-code)
+      category="process-driver"
+      expected_export="murmur:driver/process"
+      expected_version="$process_driver_version"
       ;;
     murmur-driver-*|murmur-tool-request-input|murmur-tool-create|murmur-tool-editor|murmur-tool-corpus|murmur-tool-report|murmur-tool-tavily)
       category="tool"
@@ -193,7 +213,15 @@ validate_one() {
 
   # ---- 4. murmur:* import check ----------------------------------------------
   local i
-  if [ "$category" = "hook" ]; then
+  if [ "$category" = "process-driver" ]; then
+    # `world process-driver` imports nothing of Murmur's, and the runtime gives a process driver
+    # an empty WASI context with no host import to link against.
+    while IFS= read -r i; do
+      [ -n "$i" ] || continue
+      echo "FAIL: $base (process-driver): unexpected import '$i' — a process driver must import no murmur:* interface; the runtime instantiates it with none available" >&2
+      fail=1
+    done <<< "$murmur_imports"
+  elif [ "$category" = "hook" ]; then
     # A hook may import anything `world hook` declares and nothing else: inference (one
     # completion), tokens (the host's own count), task-io/read (the task's text) and
     # conversation/read (the durable conversation record). Only the interfaces a hook

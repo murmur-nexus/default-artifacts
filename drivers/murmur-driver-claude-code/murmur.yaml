@@ -1,0 +1,27 @@
+name: murmur-driver-claude-code
+version: 0.1.0
+runtime: driver
+description: |
+  Process driver for Claude Code. It tells a `transport: process` capsule how to drive the
+  `claude` CLI: the argument list for one turn, the JSON line the task goes out on, the MCP
+  config that points the harness at the capsule's tool bridge, and the control request that
+  interrupts a turn.
+
+  Unlike an HTTP driver, it holds no credential and makes no request — the harness authenticates
+  itself, which is the point of process transport: a turn spends a Claude subscription rather
+  than an API key. The driver is granted nothing at all: no network, no filesystem, no
+  environment.
+
+  The capsule must allow the variables the harness cannot run without:
+
+      inference:
+        transport: process
+        driver:
+          artifact: murmur-driver-claude-code
+      capabilities:
+        env:
+          allow: [HOME, PATH]
+
+  At 0.1.0 the driver plans turns but does not yet read the harness's output back into events.
+requires_files:
+  - murmur_driver_claude_code.wasm

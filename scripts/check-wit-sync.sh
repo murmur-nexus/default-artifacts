@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Check that artifact-facing WIT files (guest/ and hook/) are in sync with murmur/capsule-runtime.
+# Check that artifact-facing WIT files (guest/, hook/ and process-driver/) are in sync with
+# murmur/capsule-runtime.
 #
-# Only guest/ and hook/ are compared — those are the subdirectories used by wit_bindgen::generate!
-# in every WASM artifact. Top-level files (host/, runtime/, worlds.wit) are trimmed reference
-# copies that intentionally omit runtime-internal interfaces and are not compared here.
+# Only guest/, hook/ and process-driver/ are compared — those are the subdirectories used by
+# wit_bindgen::generate! in every WASM artifact. Top-level files (host/, runtime/, worlds.wit,
+# process-driver.wit) are trimmed reference copies that intentionally omit runtime-internal
+# interfaces and are not compared here.
 #
 # The vendored subtrees are not a freely-trimmable subset: each one must be closed under the
 # imports and exports its own world declarations name. A world that references an interface no
@@ -181,9 +183,11 @@ check_interface_ref() {
 
 compare_subtree "guest"
 compare_subtree "hook"
+compare_subtree "process-driver"
 
 check_subtree_closure "guest"
 check_subtree_closure "hook"
+check_subtree_closure "process-driver"
 
 echo ""
 echo "Results:"

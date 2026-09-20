@@ -71,12 +71,30 @@ time on the WASM `cdylib` tools — build native tools with `-p <name>` instead.
 ### Validating a built component
 
 Every WASM artifact must be a well-formed component whose world-level
-imports/exports match its category (hooks export `murmur:hook/lifecycle`;
-drivers and wasm tools export `murmur:tool/run`), at the exact interface version
-declared by the vendored WIT it is built against — `wit/hook/deps/murmur-hook/lifecycle.wit`
-for hooks, `wit/guest/deps/murmur-tool/tool.wit` for tools. A component left
-unrebuilt across a WIT version bump exports the old version and is rejected here
-rather than failing to link at `mur run`.
+imports/exports match its category, at the exact interface version declared by
+the vendored WIT it is built against. There are three categories:
+
+| Category | Exports | Version read from |
+|---|---|---|
+| hook | `murmur:hook/lifecycle` | `wit/hook/deps/murmur-hook/lifecycle.wit` |
+| tool | `murmur:tool/run` — http drivers and wasm tools alike | `wit/guest/deps/murmur-tool/tool.wit` |
+| process driver | `murmur:driver/process` | `wit/process-driver/process.wit` |
+
+A component left unrebuilt across a WIT version bump exports the old version and
+is rejected here rather than failing to link at `mur run`.
+
+A process driver is told apart from an http driver by the interface it exports,
+not by its name: both live in `drivers/` and both are `runtime: driver`. The
+script's `murmur-driver-*` wildcard therefore cannot decide between them, so
+every process driver is listed by name in its own `case` arm **ahead of** that
+wildcard — a `case` takes its first matching arm, and a process driver added
+after the wildcard would be validated as an http driver and fail on its export.
+`murmur-driver-claude-code` is the first one.
+
+A process driver must import **zero** `murmur:*` interfaces. The runtime
+instantiates it on an empty WASI context with no Murmur host import at all, so
+an import here is a component that cannot load — there is nothing to satisfy it
+with.
 
 The script also checks a hook's `murmur:*` imports against an allowlist: the
 four interfaces `world hook` declares — `murmur:runtime/inference`,
@@ -164,9 +182,12 @@ A new artifact is a four-file change, enforced by CI:
 4. `scripts/validate-component.sh` — add the name to the category map (WASM
    components only). The script refuses to skip a name it does not recognise and
    exits `2`, so leaving this out fails CI rather than silently validating
-   nothing. A name matching `murmur-hook-*` or `murmur-driver-*` is already
-   covered by its wildcard; a `murmur-tool-*` WASM component must be listed
-   explicitly, because most tools are native binaries the script skips.
+   nothing. A name matching `murmur-hook-*`, or a `murmur-driver-*` that exports
+   `murmur:tool/run`, is already covered by its wildcard; a `murmur-tool-*` WASM
+   component must be listed explicitly, because most tools are native binaries
+   the script skips, and so must a process driver, because it shares the
+   `murmur-driver-*` wildcard with the http drivers but exports a different
+   interface (see [Validating a built component](#validating-a-built-component)).
 
 To start the artifact directory itself, `murmur-tool-create` scaffolds one for a
 `native` tool, a `wasm` tool, or a `hook` — emitting a `murmur.yaml` that already
@@ -254,9 +275,11 @@ properties, `W-SEC-018` no longer says so.
 
 ### Declaring a driver's authentication scheme
 
-Every `drivers/` artifact declares how its provider expects the inference
-credential to be presented, as a top-level `inference_auth:` block in the
-driver's own `murmur.yaml`:
+Every **http** driver declares how its provider expects the inference credential
+to be presented, as a top-level `inference_auth:` block in the driver's own
+`murmur.yaml`. A process driver declares none: the harness holds its own
+credentials, and the driver never sees one.
+
 
 ```yaml
 inference_auth:
@@ -350,16 +373,23 @@ per platform), and creates a GitHub Release with all zips attached.
 
 ## WIT sync
 
-The artifact-facing WIT lives as a file mirror under `wit/guest/` and
-`wit/hook/`, vendored from `murmur/crates/capsule-runtime/wit/`. The `wit-sync`
-CI job checks the mirror is byte-identical to the murmur commit pinned in
-`.github/workflows/ci.yml`.
+The artifact-facing WIT lives as a file mirror under `wit/guest/`,
+`wit/hook/` and `wit/process-driver/`, vendored from
+`murmur/crates/capsule-runtime/wit/`. The `wit-sync` CI job checks the mirror is
+byte-identical to the murmur commit pinned in `.github/workflows/ci.yml`.
+
+| Subtree | Declares | Used by |
+|---|---|---|
+| `wit/guest/` | `murmur:tool` and the interfaces a guest may import | hooks' tool side, wasm tools, http drivers |
+| `wit/hook/` | `murmur:hook` | hooks |
+| `wit/process-driver/` | `murmur:driver` | process drivers |
 
 **The mirror and the pin must always move together.** To update after a WIT
 change in murmur: check out murmur beside this repo (`../murmur`), copy its
-`wit/{guest,hook}` over this repo's `wit/`, run `./scripts/check-wit-sync.sh`
-until it exits `0`, then set the `ref:` in `ci.yml`'s `wit-sync` job to that
-same murmur commit — both changes in one commit.
+`wit/{guest,hook,process-driver}` over this repo's `wit/`, run
+`./scripts/check-wit-sync.sh` until it exits `0`, then set the `ref:` in
+`ci.yml`'s `wit-sync` job to that same murmur commit — both changes in one
+commit.
 
 ## Published hooks vs. the WIT contract
 
