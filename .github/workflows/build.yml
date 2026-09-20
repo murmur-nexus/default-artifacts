@@ -95,6 +95,7 @@ jobs:
           - { name: murmur-tool-corpus,         path: tools/murmur-tool-corpus           }
           - { name: murmur-tool-create,         path: tools/murmur-tool-create           }
           - { name: murmur-tool-editor,         path: tools/murmur-tool-editor           }
+          - { name: murmur-tool-tavily,         path: tools/murmur-tool-tavily           }
     steps:
       - uses: actions/checkout@v4
         with:

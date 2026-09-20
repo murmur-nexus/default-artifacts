@@ -40,10 +40,10 @@ WASM components (`runtime: hook`) that attach to lifecycle events. Each hook dec
 ## Tools
 
 Tool artifacts (`runtime: tool`) exposed to the agent as callable functions. `murmur-tool-corpus`,
-`murmur-tool-create`, `murmur-tool-editor`, `murmur-tool-report`, and `murmur-tool-request-input`
-are WASM components (`wasm32-wasip2`, exporting `murmur:tool/run`); the remaining five are native
-binaries whose C dependencies (SQLite, tree-sitter, TLS) do not cross-compile to wasm32-wasip2 (see
-[BUILD.md](./BUILD.md)).
+`murmur-tool-create`, `murmur-tool-editor`, `murmur-tool-report`, `murmur-tool-request-input`, and
+`murmur-tool-tavily` are WASM components (`wasm32-wasip2`, exporting `murmur:tool/run`); the
+remaining five are native binaries whose C dependencies (SQLite, tree-sitter, TLS) do not
+cross-compile to wasm32-wasip2 (see [BUILD.md](./BUILD.md)).
 
 | Artifact | Location | Implementation | Description |
 |---|---|---|---|
@@ -52,6 +52,7 @@ binaries whose C dependencies (SQLite, tree-sitter, TLS) do not cross-compile to
 | `murmur-tool-editor` | `tools/murmur-tool-editor/` | WASM | File read/write/patch operations (`read_file`, `write_file`, `replace_in_file`, `find_in_files`); the writing operations take their target as `dest_path`, declared `format: murmur-destination` so a `capabilities.filesystem.read_only` grant is enforced against the declaration rather than guessed from property names. Every path input is workdir-relative: an absolute `path`, `dest_path` or `dir` is refused with `error_kind: absolute_path` before any filesystem call |
 | `murmur-tool-report` | `tools/murmur-tool-report/` | WASM | The capsule states its own conclusion (`report`, `progress`) into `state/report.json`; requires a `capabilities.state` grant, and takes an optional `config:` block closing the deliverable-kind and note-stage vocabularies |
 | `murmur-tool-request-input` | `tools/murmur-tool-request-input/` | WASM | HITL pause gate — suspends the agent loop and waits for human input via `message/send` |
+| `murmur-tool-tavily` | `tools/murmur-tool-tavily/` | WASM | Web search through Tavily, returning a bounded plain-text result; the Tavily key is bound on the entry as `gateway.api_key` and attached by the runtime, never held by the tool, and every cost- and size-bearing lever is in the entry's `config:` block |
 | `murmur-tool-git` | `tools/murmur-tool-git/` | native | Git operations (clone, checkout, status, diff, commit, push, worktree, and more) |
 | `murmur-tool-code-graph` | `tools/murmur-tool-code-graph/` | native | Indexes a Rust and/or Python repo into a SQLite symbol/edge graph; structured queries over stable symbol identities |
 | `murmur-tool-code-coverage` | `tools/murmur-tool-code-coverage/` | native | Spectrum-based fault localization (Ochiai / Tarantula) over per-test LCOV reports |

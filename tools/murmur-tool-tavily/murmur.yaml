@@ -1,0 +1,60 @@
+name: murmur-tool-tavily
+version: 0.1.0
+runtime: tool
+implementation: wasm
+description: |
+  Search the web with Tavily and return a bounded, fenced text result — the Tavily key is bound by the operator and attached by the runtime, never held by the tool.
+
+  Input is {"query": "...", "max_results"?: n}, or a bare JSON string taken as the query.
+  The query is at most 400 characters. max_results can only lower the result count within
+  the operator's ceiling; every other search lever belongs to the operator.
+
+  Output is plain text: a header line naming the query, the result count, the depth and
+  the credits Tavily charged; then the answer, when the operator enabled one; then
+  numbered results, each with its title, URL and snippet. The text is at most the
+  operator's max_output_bytes. When anything is cut, the result is marked truncated and
+  the full Tavily response is written to tavily-results/<request_id>.json in the workdir,
+  named by data_path. The runtime fences the text as untrusted content; the tool passes
+  it through unaltered.
+
+  The operator binds the key on this tool's entry, never in config:
+
+      artifacts:
+        - name: murmur-tool-tavily
+          runtime: tool
+          gateway:
+            endpoint: https://api.tavily.com
+            api_key: ${TAVILY_API_KEY}
+          capabilities:
+            network:
+              allow: []
+
+  and stores it with `mur config set -g credentials.TAVILY_API_KEY <key>`. The call is
+  brokered but not metered by murmur. The optional config: block (config_version: 1) sets
+  search_depth, max_results {default, max}, include_answer, topic, time_range,
+  include_domains, exclude_domains, chunks_per_source and max_output_bytes; a
+  credential-shaped key in it is refused.
+
+  A failure returns {ok: false, error_kind, message, ...} where error_kind is one of
+  invalid_input, config_invalid, gateway_missing, upstream_unauthorized, rate_limited,
+  quota_exceeded, upstream_rejected, upstream_error, transport_error, response_invalid.
+
+inference_auth:
+  header: Authorization
+  value: "Bearer {key}"
+
+input_schema:
+  type: object
+  murmur-destinations: []
+  properties:
+    query:
+      type: string
+      description: "What to search the web for. Plain words, as you would type into a search engine; at most 400 characters."
+    max_results:
+      type: integer
+      description: "Optional. How many results you want. Clamped to the operator's ceiling; defaults to the operator's default."
+  required: [query]
+  additionalProperties: false
+
+requires_files:
+  - murmur_tool_tavily.wasm

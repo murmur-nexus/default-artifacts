@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-18T22:18:15Z",
+  "updated_at": "2026-09-19T02:19:40Z",
   "artifacts": [
     {
       "name": "murmur-driver-anthropic",
@@ -253,6 +253,17 @@
       "tags": [
         "tool",
         "report"
+      ],
+      "platforms": []
+    },
+    {
+      "name": "murmur-tool-tavily",
+      "version": "0.1.0",
+      "runtime": "tool",
+      "description": "Search the web with Tavily and return a bounded, fenced text result \u2014 the Tavily key is bound by the operator and attached by the runtime, never held by the tool.",
+      "tags": [
+        "tool",
+        "tavily"
       ],
       "platforms": []
     },

@@ -121,7 +121,7 @@ validate_one() {
       expected_export="murmur:hook/lifecycle"
       expected_version="$hook_version"
       ;;
-    murmur-driver-*|murmur-tool-request-input|murmur-tool-create|murmur-tool-editor|murmur-tool-corpus|murmur-tool-report)
+    murmur-driver-*|murmur-tool-request-input|murmur-tool-create|murmur-tool-editor|murmur-tool-corpus|murmur-tool-report|murmur-tool-tavily)
       category="tool"
       expected_export="murmur:tool/run"
       expected_version="$tool_version"

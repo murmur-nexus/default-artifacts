@@ -17,7 +17,7 @@ This repository contains the default Murmur artifacts: inference drivers, hooks,
 |---|---|---|
 | `drivers/` | WASM (`wasm32-wasip2`) | `.wasm` + `murmur.yaml` → `.mur.zip` |
 | `hooks/` | WASM (`wasm32-wasip2`) | `.wasm` + `murmur.yaml` → `.mur.zip` |
-| `tools/murmur-tool-request-input/`, `murmur-tool-create/`, `murmur-tool-editor/`, `murmur-tool-corpus/`, `murmur-tool-report/` | WASM (`wasm32-wasip2`) | `.wasm` + `murmur.yaml` → `.mur.zip` |
+| `tools/murmur-tool-request-input/`, `murmur-tool-create/`, `murmur-tool-editor/`, `murmur-tool-corpus/`, `murmur-tool-report/`, `murmur-tool-tavily/` | WASM (`wasm32-wasip2`) | `.wasm` + `murmur.yaml` → `.mur.zip` |
 | `tools/murmur-tool-git/`, `murmur-tool-registry-search/`, `murmur-tool-code-graph/`, `murmur-tool-test-report/`, `murmur-tool-code-coverage/` | Native binary | `bin/<name>` + `murmur.yaml` → `.mur.zip` |
 | `skills/` | Docs only | `skill.md` + `murmur.yaml` → `.mur.zip` |
 
@@ -27,6 +27,9 @@ needs raw sockets and a native TLS stack; `murmur-tool-code-graph`,
 `murmur-tool-test-report`, and `murmur-tool-code-coverage` link C sources (bundled
 SQLite, tree-sitter) that don't cross-compile. They are excluded from the workspace
 wasm build and built by `build.yml`'s `build-native` matrix instead.
+`murmur-tool-tavily` calls a third-party API and is WASM on purpose: its only egress is
+the runtime's credential gateway, which serves WASM stores alone — murmur refuses
+`gateway:` on a native tool with `E-CAP-017`.
 
 Nothing lists them by name to make that happen. `scripts/classify-crates.sh` reads
 each crate's own manifest and classifies every `[workspace] members` entry:
@@ -445,6 +448,16 @@ MUR_BIN=/path/to/mur cargo test -p murmur-tool-corpus --test mur_run_state -- --
 
 A run that finds no `mur` fails rather than skipping. The `corpus-state` workflow
 runs it against a `mur` built from murmur's default branch.
+
+`tools/murmur-tool-tavily/tests/mur_run_gateway.rs` is `#[ignore]`d for the same
+reason: it launches `mur` with the Tavily key stored under a scratch `HOME` and a
+fake Tavily on loopback, to prove the runtime attaches the key to the tool's one
+request and that it appears nowhere in the session. It needs a `mur` that has the
+per-entry credential gateway:
+
+```bash
+MUR_BIN=/path/to/mur cargo test -p murmur-tool-tavily --test mur_run_gateway -- --ignored
+```
 
 `tools/murmur-tool-create/tests/mur_manifest_shape.rs` is `#[ignore]`d for the same
 reason: it builds and publishes an unedited scaffold through a real `mur` to prove
