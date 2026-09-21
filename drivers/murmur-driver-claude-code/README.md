@@ -56,15 +56,6 @@ artifacts:
     version: "0.1.0"
 ```
 
-> **`transport: process` needs a runtime that accepts it.** The runtime half of process transport
-> ships in Murmur, on its own release train, and `murmur-cli 0.3.0` does **not** have it: it
-> rejects the manifest above with
-> `error[E-MAN-003]: invalid inference config for 'inference.driver.artifact': is not valid with
-> transport: process`. This driver is publishable and testable ahead of that — its own tests run
-> on the host — but a capsule cannot run a turn through it until the `mur` in use accepts a
-> process-transport manifest. If you see `E-MAN-003` on the manifest above, the driver is fine
-> and the runtime is too old.
-
 The harness starts from an **empty** environment and sees exactly the variables
 `capabilities.env.allow` declares. That is what keeps the subscription the thing being spent: an
 API key sitting in the operator's shell reaches `claude` only if the operator writes it down
