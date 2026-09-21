@@ -189,7 +189,7 @@ same events. The only thing carried from one call to the next is the bridge's to
 | `assistant` | at most one `thinking`, then at most one `text`, then one `tool-call` per `tool_use` block |
 | `user` `tool_result` block | `tool-result` |
 | `user` any other block, such as the `[Request interrupted by user]` marker | none |
-| `result` | `turn-end` or `turn-failed` |
+| `result` | `turn-end` or `turn-failed`, and the turn's token counts |
 | a blank or whitespace-only line | none |
 | anything else | exactly one `note` |
 
@@ -228,6 +228,49 @@ one that did.
 line does say — `subtype`, `terminal_reason: <value>` and `api_error_status: <value>`, joined
 with `", "`. An interrupted turn writes no `result`, so it reads
 `error_during_execution, terminal_reason: aborted_streaming`.
+
+### The tokens a turn spent
+
+The `result` line that ends a turn also carries a `usage` block, and the driver reads five
+counts out of it. That block is the only place Claude's spelling of a count appears; the
+runtime is handed the interface's generic names.
+
+| Count | Claude's field on the `result` line |
+|---|---|
+| input | `usage.input_tokens` |
+| output | `usage.output_tokens` |
+| cache read | `usage.cache_read_input_tokens` |
+| cache creation | `usage.cache_creation_input_tokens` |
+| thinking | `usage.output_tokens_details.thinking_tokens` |
+
+**Absent is not zero.** Each count is read as a non-negative integer; a value that is absent,
+`null`, a string, a float or negative reads as *absent*, never as zero. A harness that does not
+report a count and a turn that spent none of it are different facts, and a ceiling weighed
+against a number nobody measured is a ceiling against nothing. The converse holds too: a zero
+Claude did write is a measurement and is reported as zero, not dropped. A line that names none
+of the five — no `usage` key, `"usage": null`, `"usage": {}`, or a `usage` whose counts are all
+unreadable — reports nothing at all, one representation for "this line said nothing about
+tokens".
+
+**One reading per `result` line, and none from any other line.** `claude` also writes a `usage`
+block on its `assistant` lines and on its `message_delta` stream events, and neither is read.
+Both count one *message* rather than the turn: in the `03-bridge-tool-call` recording the two
+`message_delta` lines each report the same five output tokens, so summing them reports the
+turn's output a second time, and adding them to the `result` line's total of `10` reports `20`.
+The `result` line's block is the only per-turn statement the harness makes, so it is the only
+one this driver reads. That single reading is at once the turn's cumulative total and the
+turn's whole delta.
+
+These are **the harness's own reported numbers** for a subscription turn — what `claude` says it
+spent — rather than anything Murmur metered. Murmur sees no request on this path; the harness
+authenticates and bills itself. `total_cost_usd`, `costUSD` and `contextWindow` are deliberately
+not read: a dollar figure a harness produced against its own price table is a different claim
+from a token count and has no equivalent on the http path. Neither are `server_tool_use`,
+`service_tier`, `cache_creation`, `inference_geo`, `iterations` or `speed`.
+
+`murmur:driver/process@0.1.0` has nowhere to put a token count — its `event` variant carries no
+usage record — so these counts do not yet reach the runtime. They are read and tested here, and
+are carried on the terminal event once the interface does.
 
 ### The other events
 

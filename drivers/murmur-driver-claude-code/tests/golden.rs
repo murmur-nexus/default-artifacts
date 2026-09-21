@@ -7,8 +7,9 @@
 //! reading is covered by a unit test instead.
 
 use murmur_driver_claude_code::{
-    describe, parse_line, parse_lines, tool_name_prefix, Event, FailureKind, ParseContext,
-    RetryInfo, SessionInfo, ToolCallInfo, ToolResultInfo, TurnFailure,
+    describe, parse_line, parse_line_usage, parse_lines, parse_lines_usage, tool_name_prefix,
+    Event, FailureKind, ParseContext, RetryInfo, SessionInfo, TokenUsage, ToolCallInfo,
+    ToolResultInfo, TurnFailure,
 };
 
 /// The MCP server name the recordings were made with. `launch` builds the harness's tool prefix
@@ -468,4 +469,185 @@ fn a_recorded_tool_name_keeps_a_prefix_this_driver_did_not_add() {
         ))),
         harness_name
     );
+}
+
+// ── the tokens each recording reports ────────────────────────────────────────
+
+/// The token counts a recording reports, having first shown that the partition into batches
+/// does not change them either: the reading of a batch is the readings of its lines.
+fn usage_of(name: &str, split: usize) -> Vec<TokenUsage> {
+    let lines = recorded_lines(name);
+
+    let whole = parse_lines_usage(&lines);
+
+    let one_at_a_time: Vec<TokenUsage> = lines
+        .iter()
+        .filter_map(|line| parse_line_usage(line))
+        .collect();
+    assert_eq!(
+        one_at_a_time, whole,
+        "{name}: one line per batch must report the same counts as one batch"
+    );
+
+    let (head, tail) = lines.split_at(split);
+    let mut split_in_two = parse_lines_usage(head);
+    split_in_two.extend(parse_lines_usage(tail));
+    assert_eq!(
+        split_in_two, whole,
+        "{name}: a batch boundary inside a message must report the same counts as one batch"
+    );
+
+    whole
+}
+
+/// A reading in which the harness wrote all five counts, which is what all ten recordings do.
+fn usage(
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_creation: u64,
+    thinking: u64,
+) -> TokenUsage {
+    TokenUsage {
+        input_tokens: Some(input),
+        output_tokens: Some(output),
+        cache_read_tokens: Some(cache_read),
+        cache_creation_tokens: Some(cache_creation),
+        thinking_tokens: Some(thinking),
+    }
+}
+
+#[test]
+fn golden_usage_01_text_new_session() {
+    assert_eq!(
+        usage_of("01-text-new-session", 5),
+        vec![usage(1, 5, 0, 0, 0)]
+    );
+}
+
+#[test]
+fn golden_usage_03_bridge_tool_call_reports_the_turn_once() {
+    // Two assistant messages, each reporting one input and no output of its own; two
+    // `message_delta` lines, each reporting a running five output tokens for its message. The
+    // turn spent 2 and 10, and the `result` line is the only line that says so. Summing the
+    // deltas would report 10 a second time; adding them to the result would report 20.
+    let lines = recorded_lines("03-bridge-tool-call");
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains(r#""type":"message_delta""#))
+            .count(),
+        2,
+        "the recording really does carry two running output counts"
+    );
+
+    assert_eq!(
+        usage_of("03-bridge-tool-call", 14),
+        vec![usage(2, 10, 0, 0, 0)]
+    );
+}
+
+#[test]
+fn golden_usage_08_interrupt_reports_each_of_its_two_turns() {
+    // The canceled turn spent nothing and said so; the turn that followed it in the same
+    // process reported its own totals.
+    assert_eq!(
+        usage_of("08-interrupt-control-request", 9),
+        vec![usage(0, 0, 0, 0, 0), usage(1, 5, 0, 0, 0)]
+    );
+}
+
+#[test]
+fn every_recording_reports_one_reading_per_result_line() {
+    for (name, split) in RECORDINGS {
+        let result_lines = recorded_lines(name)
+            .iter()
+            .filter(|line| is_result_line(line))
+            .count();
+        let readings = usage_of(name, split);
+        assert_eq!(
+            readings.len(),
+            result_lines,
+            "{name}: {result_lines} result lines must give {result_lines} readings, not {}",
+            readings.len()
+        );
+    }
+}
+
+#[test]
+fn every_recording_reports_exactly_the_counts_it_recorded() {
+    // Read off the fixture bytes with jq and written down here, so a change to a recording or
+    // to the reader has to be argued with rather than absorbed.
+    let expected: [(&str, Vec<TokenUsage>); 10] = [
+        ("01-text-new-session", vec![usage(1, 5, 0, 0, 0)]),
+        ("02-resume-same-session", vec![usage(1, 5, 0, 0, 0)]),
+        ("03-bridge-tool-call", vec![usage(2, 10, 0, 0, 0)]),
+        ("04-thinking", vec![usage(1, 5, 0, 0, 0)]),
+        ("05-auth-401", vec![usage(0, 0, 0, 0, 0)]),
+        ("06-quota-429", vec![usage(0, 0, 0, 0, 0)]),
+        ("07-quota-429-after-retries", vec![usage(0, 0, 0, 0, 0)]),
+        (
+            "08-interrupt-control-request",
+            vec![usage(0, 0, 0, 0, 0), usage(1, 5, 0, 0, 0)],
+        ),
+        ("09-interrupt-sigint", vec![usage(0, 0, 0, 0, 0)]),
+        ("10-resume-after-sigint", vec![usage(1, 5, 0, 0, 0)]),
+    ];
+
+    for (name, counts) in expected {
+        let split = RECORDINGS
+            .iter()
+            .find(|(recording, _)| *recording == name)
+            .expect("a named recording is in the table")
+            .1;
+        assert_eq!(usage_of(name, split), counts, "{name}");
+    }
+}
+
+#[test]
+fn a_failing_recording_keeps_its_verdict_and_reports_only_what_it_recorded() {
+    // The counts are read off the same line as the verdict, and neither decides the other: a
+    // turn nobody could authenticate still reports the zeros its harness wrote.
+    for (name, split, kind) in [
+        ("05-auth-401", 3, FailureKind::Auth),
+        ("06-quota-429", 3, FailureKind::Quota),
+        ("07-quota-429-after-retries", 5, FailureKind::Quota),
+    ] {
+        let events = events_of(name, split);
+        assert!(
+            matches!(events.last(), Some(Event::TurnFailed(failure)) if failure.kind == kind),
+            "{name}: ended on {:?}",
+            events.last()
+        );
+        assert_eq!(usage_of(name, split), vec![usage(0, 0, 0, 0, 0)], "{name}");
+    }
+
+    // The two retries still precede the quota failure they were retrying towards.
+    let retries: Vec<Event> = events_of("07-quota-429-after-retries", 5)
+        .into_iter()
+        .filter(|event| matches!(event, Event::Retry(_)))
+        .collect();
+    let retry = |attempt| {
+        Event::Retry(RetryInfo {
+            attempt,
+            reason: "rate_limit (429)".to_string(),
+        })
+    };
+    assert_eq!(retries, vec![retry(1), retry(2)]);
+}
+
+#[test]
+fn no_line_but_a_result_line_reports_a_count() {
+    // Across all ten recordings, every reading is a result line's and every result line gives
+    // one — measured line by line rather than in aggregate.
+    for (name, _) in RECORDINGS {
+        for line in recorded_lines(name) {
+            let reported = parse_line_usage(&line).is_some();
+            assert_eq!(
+                reported,
+                is_result_line(&line),
+                "{name}: {line} reported {reported}"
+            );
+        }
+    }
 }
