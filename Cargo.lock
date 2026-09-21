@@ -1333,7 +1333,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-driver-anthropic"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "murmur-driver-env",
  "serde",
@@ -1344,7 +1344,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-driver-claude-code"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "serde_json",
  "wit-bindgen 0.59.0",
@@ -1352,7 +1352,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-driver-deepseek"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "murmur-driver-env",
  "serde",
@@ -1363,11 +1363,11 @@ dependencies = [
 
 [[package]]
 name = "murmur-driver-env"
-version = "0.18.0"
+version = "0.20.0"
 
 [[package]]
 name = "murmur-driver-moonshotai"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "murmur-driver-env",
  "serde",
@@ -1378,7 +1378,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-driver-openai"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "murmur-driver-env",
  "serde",
@@ -1389,7 +1389,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-hook-compact"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "murmur-hook-transcript",
  "serde_json",
@@ -1398,7 +1398,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-hook-debug"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "serde_json",
  "wit-bindgen 0.59.0",
@@ -1406,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-hook-diff-summary"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1416,7 +1416,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-hook-eval"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "serde_json",
  "wit-bindgen 0.59.0",
@@ -1424,7 +1424,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-hook-grafana"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "serde_json",
  "wit-bindgen 0.59.0",
@@ -1432,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-hook-memory"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "murmur-hook-transcript",
  "serde_json",
@@ -1441,7 +1441,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-hook-regression-verifier"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "murmur-test-parse",
  "serde_json",
@@ -1450,32 +1450,32 @@ dependencies = [
 
 [[package]]
 name = "murmur-hook-shell-desc"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "wit-bindgen 0.59.0",
 ]
 
 [[package]]
 name = "murmur-hook-transcript"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "murmur-test-parse"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "murmur-time"
-version = "0.18.0"
+version = "0.20.0"
 
 [[package]]
 name = "murmur-tool-code-coverage"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "rusqlite",
  "serde",
@@ -1485,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-tool-code-graph"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "rusqlite",
  "serde",
@@ -1498,7 +1498,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-tool-corpus"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "murmur-time",
  "serde",
@@ -1511,7 +1511,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-tool-create"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -1522,7 +1522,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-tool-editor"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "regex",
  "serde_json",
@@ -1534,7 +1534,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-tool-git"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "rusqlite",
  "serde",
@@ -1543,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-tool-git-validate"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "clap",
  "serde_json",
@@ -1552,7 +1552,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-tool-registry-search"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1561,7 +1561,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-tool-report"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "murmur-time",
  "serde",
@@ -1573,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-tool-request-input"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "serde_json",
  "wit-bindgen 0.59.0",
@@ -1581,7 +1581,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-tool-tavily"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -1594,7 +1594,7 @@ dependencies = [
 
 [[package]]
 name = "murmur-tool-test-report"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "murmur-test-parse",
  "rusqlite",

@@ -1,5 +1,5 @@
 name: murmur-driver-moonshotai
-version: 0.3.0
+version: 0.4.0
 runtime: driver
 description: "Moonshot AI inference driver — kimi-k3 on the Chat Completions surface, with reasoning_effort and response_format config keys"
 requires_files:

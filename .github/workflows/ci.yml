@@ -117,6 +117,24 @@ jobs:
       - name: Validate built components
         run: bash scripts/validate-component.sh
 
+  # Hold every artifact to the rule that a change to what it ships moves its
+  # version in artifacts.toml. A `.mur.zip` is served by name and version alone
+  # and `mur install` pins its sha256 in the consumer's murmur.lock, so
+  # re-publishing different bytes at a version someone already resolved does not
+  # reach them — it fails their next resolve on the pin. There is no way to
+  # correct that after the tag is pushed, which is why this runs on every PR.
+  #
+  # Needs the full history: the check compares HEAD against the last v* tag.
+  version-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check no artifact changed its payload at an unchanged version
+        run: ./scripts/check-version-drift.sh
+
   # Verify the artifact-facing WIT trees (wit/guest, wit/hook, wit/process-driver) stay
   # byte-identical to murmur/crates/capsule-runtime/wit. murmur is pinned to a literal SHA so an
   # unrelated murmur merge can't turn this repo's CI red without a deliberate bump here.

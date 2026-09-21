@@ -12,7 +12,7 @@
 # Only publishable artifacts (those with a murmur.yaml) are listed here.
 # Internal-only crates (e.g. murmur-tool-git-validate) must not appear.
 
-workspace_version = "0.19.0"
+workspace_version = "0.20.0"
 
 # The platforms a release publishes a native payload for — one platform-tagged
 # .mur.zip per native tool per entry. This is the single home for that fact:
@@ -34,7 +34,7 @@ native_platforms = ["darwin-aarch64", "linux-x86_64"]
 [[artifact]]
 name = "murmur-driver-anthropic"
 path = "drivers/murmur-driver-anthropic"
-version = "0.6.0"
+version = "0.7.0"
 
 [[artifact]]
 name = "murmur-driver-claude-code"
@@ -44,17 +44,17 @@ version = "0.1.0"
 [[artifact]]
 name = "murmur-driver-deepseek"
 path = "drivers/murmur-driver-deepseek"
-version = "0.4.0"
+version = "0.5.0"
 
 [[artifact]]
 name = "murmur-driver-moonshotai"
 path = "drivers/murmur-driver-moonshotai"
-version = "0.3.0"
+version = "0.4.0"
 
 [[artifact]]
 name = "murmur-driver-openai"
 path = "drivers/murmur-driver-openai"
-version = "0.5.0"
+version = "0.6.0"
 
 [[artifact]]
 name = "murmur-hook-compact"

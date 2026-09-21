@@ -10,7 +10,7 @@
 #
 # Usage: ./scripts/apply-versions.sh
 #
-# No external dependencies required beyond bash, grep, sed, and awk.
+# Needs bash, grep, sed, awk, python3 and cargo on PATH.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -248,6 +248,33 @@ with open(tmpdata_path) as f:
 print(json.dumps({"schema_version": "1", "updated_at": timestamp, "artifacts": artifacts}, indent=2))
 PYEOF
 echo "Generated: artifacts-index.json  updated_at=$TIMESTAMP"
+
+# ---------------------------------------------------------------------------
+# Re-resolve Cargo.lock
+#
+# Cargo.lock records every workspace member's version, so the [workspace.package]
+# edit above leaves it stale. Nothing else in this repo notices: CI runs
+# `cargo test --workspace` without `--locked`, which rewrites the lock in place
+# and passes. The staleness only surfaces as a dirty working tree the next time
+# a developer builds, after the release commit has already gone out without it.
+#
+# `--workspace --offline` re-resolves the path members alone: no registry
+# package moves, so the diff is exactly the version lines this script just
+# changed. The retry without `--offline` covers a cold registry cache.
+# ---------------------------------------------------------------------------
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "error: cargo not found on PATH — Cargo.lock cannot be re-resolved" >&2
+    echo "       install the toolchain pinned by rust-toolchain.toml and re-run" >&2
+    exit 1
+fi
+
+if cargo update --manifest-path "$CARGO_TOML" --workspace --offline --quiet 2>/dev/null \
+    || cargo update --manifest-path "$CARGO_TOML" --workspace --quiet; then
+    echo "Updated: Cargo.lock  workspace members re-resolved"
+else
+    echo "error: cargo update --workspace failed; Cargo.lock is stale" >&2
+    exit 1
+fi
 
 echo ""
 echo "Done. All version surfaces updated from artifacts.toml."

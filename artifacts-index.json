@@ -1,10 +1,10 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-21T00:48:47Z",
+  "updated_at": "2026-09-21T14:26:36Z",
   "artifacts": [
     {
       "name": "murmur-driver-anthropic",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "runtime": "driver",
       "description": "Anthropic Messages API inference driver for Murmur agent capsules.",
       "tags": [
@@ -29,7 +29,7 @@
     },
     {
       "name": "murmur-driver-deepseek",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "runtime": "driver",
       "description": "DeepSeek inference driver \u2014 deepseek-v4-flash and deepseek-v4-pro with thinking mode",
       "tags": [
@@ -41,7 +41,7 @@
     },
     {
       "name": "murmur-driver-moonshotai",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "runtime": "driver",
       "description": "Moonshot AI inference driver \u2014 kimi-k3 on the Chat Completions surface, with reasoning_effort and response_format config keys",
       "tags": [
@@ -53,7 +53,7 @@
     },
     {
       "name": "murmur-driver-openai",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "runtime": "driver",
       "description": "OpenAI inference driver for Murmur agent capsules \u2014 Chat Completions, with Responses API for gpt-5 and later models.",
       "tags": [

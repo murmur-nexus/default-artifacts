@@ -38,6 +38,29 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          # Full history and tags: check-version-drift.sh below compares this
+          # tag against the release before it.
+          fetch-depth: 0
+
+      # apply-versions.sh re-resolves Cargo.lock, so it needs the pinned
+      # toolchain rather than whatever cargo the runner image ships. Keep in
+      # sync with rust-toolchain.toml's `channel`, as ci.yml does.
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.95.0"
+
+      # The last gate before assets are published. A version that ships bytes
+      # differing from the ones already published under it cannot be corrected
+      # afterwards: consumers pin the payload's sha256 in murmur.lock, and a
+      # store that already holds <name>/<version> never re-downloads it.
+      # ci.yml runs this on every PR; here it guards the tag itself.
+      #
+      # Runs before the step below, which rewrites Cargo.lock and
+      # artifacts-index.json: the check compares the working tree whenever one
+      # differs from HEAD, and on a dirty tree at tag time that would resolve
+      # the base to the tag being built and compare it against itself.
+      - name: Check no artifact changed its payload at an unchanged version
+        run: ./scripts/check-version-drift.sh
 
       - name: Apply versions and check for drift
         run: |

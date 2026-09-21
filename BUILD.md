@@ -351,8 +351,60 @@ This updates `[workspace.package] version` in the root `Cargo.toml`, the
 each native tool's `package.sh`, and regenerates `artifacts-index.json` —
 including each entry's derived `platforms` (see
 [Platform coverage](#platform-coverage)).
+It also re-resolves `Cargo.lock`, which records every workspace member's
+version and so goes stale the moment `[workspace.package] version` moves.
+Nothing else catches that: CI runs `cargo test --workspace` without `--locked`,
+which rewrites the lock in place and passes, so the staleness surfaces only as a
+dirty working tree the next time someone builds — after the release commit has
+already gone out without it.
+
 CI rejects any push where these surfaces are out of sync with `artifacts.toml` —
 never bump a version by hand in an individual file.
+
+### A version is a promise about bytes
+
+A `.mur.zip` is served by name and version alone. `mur install` writes the
+payload's sha256 into the consumer's `murmur.lock`, and a store that already
+holds `<name>/<version>` never re-downloads it. So re-publishing different bytes
+at a version someone has already resolved does not upgrade them — it breaks
+them, with
+
+```
+error[E-REG-005]: murmur.lock conflict for 'murmur-driver-openai': 'murmur-driver-openai' is pinned at sha256 <old>, but <new> was resolved
+```
+
+and no version to move to. There is no way to correct that after the tag is
+pushed. The only fix is to have bumped before it.
+
+`scripts/check-version-drift.sh` (run by CI on every PR) holds every artifact to
+that rule, comparing HEAD against the last `v*` tag:
+
+```bash
+./scripts/check-version-drift.sh                  # what CI runs
+./scripts/check-version-drift.sh --base v0.18.0   # against a specific release
+./scripts/check-version-drift.sh --audit          # every tag, every version
+```
+
+It reports which class of input moved, so a failure says what to do:
+
+| Class | Inputs | Why it changes the bytes |
+|---|---|---|
+| `own tree` | the artifact's `murmur.yaml`, `src/`, `package.sh`, `skill.md` | packaged or compiled directly |
+| `path deps` | each `libs/*` it links, transitively | compiled into the component |
+| `wit mirror` | the `wit/` subtree its bindgen `path:` names | a rebuild exports a different interface version |
+| `workspace` | `[workspace.package]`, the `[workspace.dependencies]` entries it declares, its resolved third-party versions in `Cargo.lock`, `rust-toolchain.toml` | different dependency or compiler, different code |
+
+Each class is read from the repository rather than listed anywhere: path
+dependencies come from the crate's own `Cargo.toml`, the WIT subtree from the
+`path:` in its bindgen macro, the third-party set from walking `Cargo.lock` out
+from that crate. `README.md`, `tests/` and `benches/` are excluded because none
+of them reach the zip, and the workspace crates' own version strings are
+stripped out of `Cargo.toml` and `Cargo.lock` before hashing — a built component
+does not embed them, so a `workspace_version` bump alone is not a byte change.
+
+`--audit` answers the question after the fact: it walks every `v*` tag and
+prints each artifact version that shipped twice with different payloads, naming
+the release where it changed.
 
 ## Releasing a new version
 
