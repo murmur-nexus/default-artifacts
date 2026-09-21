@@ -51,7 +51,7 @@ driver.
 
 | Artifact | Location | Description |
 |---|---|---|
-| `murmur-driver-claude-code` | `drivers/murmur-driver-claude-code/` | Drives the `claude` CLI (Claude Code): the argv for a turn, the task as one JSON line on stdin, the MCP config pointing the harness at the capsule's tool bridge, and the interrupt control request. Reads the harness's stdout back into events — streamed text and thinking, tool calls and results, retries, a turn that ended or failed, and the token counts Claude Code reports for it, with a failure read from `is_error` and `api_error_status` rather than `subtype` |
+| `murmur-driver-claude-code` | `drivers/murmur-driver-claude-code/` | Drives the `claude` CLI (Claude Code): the argv for a turn, the task as one JSON line on stdin, the MCP config pointing the harness at the capsule's tool bridge, and the interrupt control request. Reads the harness's stdout back into events — streamed text and thinking, tool calls and results, retries, and a turn that ended or failed, with a failure read from `is_error` and `api_error_status` rather than `subtype`. Reads the token counts Claude Code reports for a turn, which reach the runtime once `murmur:driver/process` carries a usage record |
 
 ## Tools
 

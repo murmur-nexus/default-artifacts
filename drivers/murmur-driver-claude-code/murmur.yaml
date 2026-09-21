@@ -23,14 +23,16 @@ description: |
           allow: [HOME, PATH]
 
   It also reads the harness's stdout back into the runtime's events: streamed text and thinking,
-  tool calls and their results, retries, a turn that ended or failed, and the input, output,
-  cache-read, cache-creation and thinking token counts Claude Code reports for that turn. A
-  failing turn is read from `is_error` and `api_error_status`, never from `subtype` alone —
-  Claude Code reports an authentication or quota failure as `subtype: success`.
+  tool calls and their results, retries, and a turn that ended or failed. A failing turn is read
+  from `is_error` and `api_error_status`, never from `subtype` alone — Claude Code reports an
+  authentication or quota failure as `subtype: success`.
 
-  The token counts are the harness's own reported numbers for a subscription turn rather than
-  anything Murmur metered, and are read only off the `result` line that ends a turn: the
-  running count Claude Code prints on `message_delta` counts one message, not the turn. A count
-  the harness did not report stays absent rather than being reported as zero.
+  The driver also reads the input, output, cache-read, cache-creation and thinking token counts
+  Claude Code reports for a turn. These are the harness's own reported numbers for a
+  subscription turn rather than anything Murmur metered, and are read only off the `result` line
+  that ends a turn: the running count Claude Code prints on `message_delta` counts one message,
+  not the turn. A count the harness did not report stays absent rather than being reported as
+  zero. `murmur:driver/process@0.1.0` carries no usage record, so these counts do not reach the
+  runtime at this interface version and a trace records zero tokens for a process turn.
 requires_files:
   - murmur_driver_claude_code.wasm

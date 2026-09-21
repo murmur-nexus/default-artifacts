@@ -189,7 +189,7 @@ same events. The only thing carried from one call to the next is the bridge's to
 | `assistant` | at most one `thinking`, then at most one `text`, then one `tool-call` per `tool_use` block |
 | `user` `tool_result` block | `tool-result` |
 | `user` any other block, such as the `[Request interrupted by user]` marker | none |
-| `result` | `turn-end` or `turn-failed`, and the turn's token counts |
+| `result` | `turn-end` or `turn-failed`; its token counts are read separately, see [The tokens a turn spent](#the-tokens-a-turn-spent) |
 | a blank or whitespace-only line | none |
 | anything else | exactly one `note` |
 
