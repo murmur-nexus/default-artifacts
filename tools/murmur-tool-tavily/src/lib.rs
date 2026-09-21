@@ -2,7 +2,7 @@
 //! exporting `murmur:tool/run` (world `tool`) and importing no `murmur:*` interface.
 //!
 //! The tool never holds the Tavily key. Its bundled `murmur.yaml` declares only how Tavily
-//! takes a key (the `inference_auth:` scheme); the operator binds the key and the upstream
+//! takes a key (the `upstream_auth:` scheme); the operator binds the key and the upstream
 //! on this tool's entry as `gateway:`; and the runtime, the only party holding both, attaches
 //! the header to the one request the tool sends to the address in
 //! [`GATEWAY_ENDPOINT_ENV`]. Every cost- and size-bearing lever is the operator's, in the
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn source_neither_reads_a_credential_nor_builds_an_auth_header() {
-        // The runtime attaches the header declared under `inference_auth:`, so a tool-side
+        // The runtime attaches the header declared under `upstream_auth:`, so a tool-side
         // credential read or header would put the key back in the guest.
         for (name, source) in non_test_sources() {
             for needle in [
@@ -356,7 +356,7 @@ mod tests {
         // The runtime builds the auth header from these two fields, so a dropped quote pair
         // (`value: Bearer {key}` is not the same scalar) or a renamed key leaves the gateway
         // with no scheme to apply and the launch refused.
-        const BLOCK: &str = "inference_auth:\n  header: Authorization\n  value: \"Bearer {key}\"\n";
+        const BLOCK: &str = "upstream_auth:\n  header: Authorization\n  value: \"Bearer {key}\"\n";
         assert!(
             include_str!("../murmur.yaml").contains(BLOCK),
             "tools/murmur-tool-tavily/murmur.yaml must contain verbatim:\n{BLOCK}"

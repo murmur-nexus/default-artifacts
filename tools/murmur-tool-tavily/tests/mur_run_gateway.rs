@@ -148,7 +148,7 @@ struct Artifact {
 }
 
 /// Pack a crate's own `murmur.yaml` and component with `zip -j`, as `build.yml` releases them,
-/// so the launch reads the real `inference_auth:` block and `input_schema`.
+/// so the launch reads the real `upstream_auth:` block and `input_schema`.
 fn pack(out_dir: &Path, crate_dir: &str) -> Artifact {
     build_components();
     let crate_path = workspace_root().join(crate_dir);

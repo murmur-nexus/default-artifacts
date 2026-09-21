@@ -28,6 +28,6 @@ requires_files:
   - murmur_driver_anthropic.wasm
 
 # How this provider expects the inference credential to be presented; the runtime substitutes {key}.
-inference_auth:
+upstream_auth:
   header: x-api-key
   value: "{key}"

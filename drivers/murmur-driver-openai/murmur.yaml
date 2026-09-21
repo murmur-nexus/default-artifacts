@@ -6,6 +6,6 @@ requires_files:
   - murmur_driver_openai.wasm
 
 # How this provider expects the inference credential to be presented; the runtime substitutes {key}.
-inference_auth:
+upstream_auth:
   header: Authorization
   value: "Bearer {key}"

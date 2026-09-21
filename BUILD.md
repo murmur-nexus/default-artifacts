@@ -276,12 +276,12 @@ properties, `W-SEC-018` no longer says so.
 ### Declaring a driver's authentication scheme
 
 Every **http** driver declares how its provider expects the inference credential
-to be presented, as a top-level `inference_auth:` block in the driver's own
+to be presented, as a top-level `upstream_auth:` block in the driver's own
 `murmur.yaml`. A process driver declares none: the harness holds its own
 credentials, and the driver never sees one.
 
 ```yaml
-inference_auth:
+upstream_auth:
   header: x-api-key
   value: "{key}"
 ```
@@ -322,7 +322,7 @@ Three things to know before adding one:
   if its non-test source mentions the key variable or either auth header.
 
 This is a contributor-facing key, not a capsule-facing one: a capsule author
-never edits an installed artifact's manifest, and `inference_auth:` set in a
+never edits an installed artifact's manifest, and `upstream_auth:` set in a
 capsule's own `murmur.yaml` means nothing.
 
 > **Note — the crates under `libs/`.** They are *not* artifacts and must never

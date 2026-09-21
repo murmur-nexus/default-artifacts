@@ -39,7 +39,7 @@ description: |
   invalid_input, config_invalid, gateway_missing, upstream_unauthorized, rate_limited,
   quota_exceeded, upstream_rejected, upstream_error, transport_error, response_invalid.
 
-inference_auth:
+upstream_auth:
   header: Authorization
   value: "Bearer {key}"
 

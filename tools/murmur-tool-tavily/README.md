@@ -49,7 +49,7 @@ The tool never holds, reads or builds the key. Its bundled `murmur.yaml` declare
 Tavily takes a key:
 
 ```yaml
-inference_auth:
+upstream_auth:
   header: Authorization
   value: "Bearer {key}"
 ```

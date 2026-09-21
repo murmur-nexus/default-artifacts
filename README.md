@@ -43,7 +43,7 @@ WASM components (`runtime: driver`) for `transport: process`, where the capsule 
 harness CLI — a coding agent with its own loop — instead of calling a model. They export
 `murmur:driver/process` (`world process-driver`) and import nothing of Murmur's: the runtime
 grants a process driver nothing at all. A process driver holds no credential and declares no
-`inference_auth:` block, because the harness authenticates itself. That is the point of the
+`upstream_auth:` block, because the harness authenticates itself. That is the point of the
 transport: a turn spends a subscription rather than an API key.
 
 The exported interface, not the artifact name, is what tells a process driver from an inference
