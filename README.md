@@ -6,7 +6,7 @@ Default Murmur artifacts shipped with the runtime.
 
 ## Inference drivers
 
-WASM components (`runtime: driver`). Export `murmur:tool/run` (`world driver`) and translate between the Murmur canonical inference format and each provider's native API.
+WASM components (`runtime: driver`). Export `murmur:tool/run` (`world driver`) and translate between the Murmur canonical inference format and each provider's native API. These are the drivers a `transport: http` capsule uses; a process driver is also `runtime: driver` but exports a different interface — see [Process drivers](#process-drivers).
 
 | Artifact | Location | Description |
 |---|---|---|
@@ -36,6 +36,22 @@ WASM components (`runtime: hook`) that attach to lifecycle events. Each hook dec
 | `murmur-hook-shell-desc` | `hooks/murmur-hook-shell-desc/` | `on-stage` | blocking | write-manifests | Returns enriched tool manifests for common shell binaries at staging time |
 | `murmur-hook-eval` | `hooks/murmur-hook-eval/` | *(all events)* | async | none | Scores sessions against configured scorers and writes `eval.jsonl` |
 | `murmur-hook-grafana` | `hooks/murmur-hook-grafana/` | *(all events)* | async | none | Exports OTel spans to a Grafana Tempo OTLP/HTTP endpoint |
+
+## Process drivers
+
+WASM components (`runtime: driver`) for `transport: process`, where the capsule drives a
+harness CLI — a coding agent with its own loop — instead of calling a model. They export
+`murmur:driver/process` (`world process-driver`) and import nothing of Murmur's: the runtime
+grants a process driver nothing at all. A process driver holds no credential and declares no
+`upstream_auth:` block, because the harness authenticates itself. That is the point of the
+transport: a turn spends a subscription rather than an API key.
+
+The exported interface, not the artifact name, is what tells a process driver from an inference
+driver.
+
+| Artifact | Location | Description |
+|---|---|---|
+| `murmur-driver-claude-code` | `drivers/murmur-driver-claude-code/` | Drives the `claude` CLI (Claude Code): the argv for a turn, the task as one JSON line on stdin, the MCP config pointing the harness at the capsule's tool bridge, and the interrupt control request. At `0.1.0` it plans turns but does not yet read the harness's output back into events |
 
 ## Tools
 
@@ -73,11 +89,12 @@ system prompt.
 
 ## WIT
 
-The `wit/` directory is vendored from `murmur/crates/capsule-runtime/wit/` and synced manually whenever the interfaces change. The mirror is deliberately partial: it carries only the artifact-facing subtrees (`guest/`, `hook/`) and omits murmur's host-side world, the dead `runtime/` tree, and murmur's docs-reference top-level copies, none of which any artifact in this repo consumes. The relevant worlds:
+The `wit/` directory is vendored from `murmur/crates/capsule-runtime/wit/` and synced manually whenever the interfaces change. The mirror is deliberately partial: it carries only the artifact-facing subtrees (`guest/`, `hook/`, `process-driver/`) and omits murmur's host-side world, the dead `runtime/` tree, and murmur's docs-reference top-level copies, none of which any artifact in this repo consumes. The relevant worlds:
 
 - `wit/hook/` — `world hook` — implemented by all hook artifacts
 - `wit/guest/` — `world driver { ... export murmur:tool/run; }` — implemented by inference drivers
 - `wit/guest/` — `world tool { ... export murmur:tool/run; }` — implemented by tool artifacts
+- `wit/process-driver/` — `world process-driver { export process; }` — implemented by process drivers
 
 `world hook` in full, from [wit/hook/worlds.wit](./wit/hook/worlds.wit):
 

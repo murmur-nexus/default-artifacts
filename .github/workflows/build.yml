@@ -79,6 +79,7 @@ jobs:
       matrix:
         artifact:
           - { name: murmur-driver-anthropic,    path: drivers/murmur-driver-anthropic    }
+          - { name: murmur-driver-claude-code,  path: drivers/murmur-driver-claude-code  }
           - { name: murmur-driver-deepseek,     path: drivers/murmur-driver-deepseek     }
           - { name: murmur-driver-moonshotai,   path: drivers/murmur-driver-moonshotai   }
           - { name: murmur-driver-openai,       path: drivers/murmur-driver-openai       }

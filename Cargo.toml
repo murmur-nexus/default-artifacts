@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "drivers/murmur-driver-anthropic",
+  "drivers/murmur-driver-claude-code",
   "drivers/murmur-driver-deepseek",
   "drivers/murmur-driver-moonshotai",
   "drivers/murmur-driver-openai",

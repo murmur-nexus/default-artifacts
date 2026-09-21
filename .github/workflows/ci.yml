@@ -117,8 +117,8 @@ jobs:
       - name: Validate built components
         run: bash scripts/validate-component.sh
 
-  # Verify the artifact-facing WIT trees (wit/guest, wit/hook) stay byte-identical
-  # to murmur/crates/capsule-runtime/wit. murmur is pinned to a literal SHA so an
+  # Verify the artifact-facing WIT trees (wit/guest, wit/hook, wit/process-driver) stay
+  # byte-identical to murmur/crates/capsule-runtime/wit. murmur is pinned to a literal SHA so an
   # unrelated murmur merge can't turn this repo's CI red without a deliberate bump here.
   #
   # Both repos are checked out into sibling subdirectories of $GITHUB_WORKSPACE
@@ -143,11 +143,11 @@ jobs:
           # murmur merge cannot turn this repo's CI red without a deliberate bump.
           #
           # To re-pin after a WIT change: check out the new murmur beside this
-          # repo, copy its wit/{guest,hook} over this repo's wit/, run
-          # ./scripts/check-wit-sync.sh until it exits 0, then set `ref:` to that
-          # same commit. The mirror and the pin must always move together —
+          # repo, copy its wit/{guest,hook,process-driver} over this repo's wit/,
+          # run ./scripts/check-wit-sync.sh until it exits 0, then set `ref:` to
+          # that same commit. The mirror and the pin must always move together —
           # moving one without the other is what turns this job red.
-          ref: 92b5014e661e078a854578cfef55a62d9ff11689
+          ref: 7b1bdf42411874345d6b0dc0b0dfebe462624e6f
           path: murmur
 
       - name: Check artifact-facing WIT files are in sync with murmur

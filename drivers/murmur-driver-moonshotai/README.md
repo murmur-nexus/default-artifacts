@@ -10,7 +10,7 @@ round trip and preserved reasoning across turns.
 
 The driver reads no provider key and sends no authentication header. Murmur's
 runtime authenticates each call with the header declared under
-`inference_auth:` in [murmur.yaml](./murmur.yaml), the full manifest; the
+`upstream_auth:` in [murmur.yaml](./murmur.yaml), the full manifest; the
 capsule author still supplies the key as `inference.api_key`.
 
 The endpoint arrives in the `MURMUR_INFERENCE_ENDPOINT` environment variable,

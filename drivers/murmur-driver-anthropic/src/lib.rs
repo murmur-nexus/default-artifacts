@@ -2272,11 +2272,11 @@ mod tests {
     }
 
     #[test]
-    fn manifest_declares_the_inference_auth_scheme_the_gateway_will_read() {
+    fn manifest_declares_the_upstream_auth_scheme_the_gateway_will_read() {
         // The runtime builds the auth header from these two fields, so a dropped quote pair
         // (`value: {key}` is a YAML flow mapping, not a string) or a renamed key leaves the
         // gateway with no scheme to apply and every request unauthenticated.
-        const BLOCK: &str = "inference_auth:\n  header: x-api-key\n  value: \"{key}\"\n";
+        const BLOCK: &str = "upstream_auth:\n  header: x-api-key\n  value: \"{key}\"\n";
         assert!(
             include_str!("../murmur.yaml").contains(BLOCK),
             "drivers/murmur-driver-anthropic/murmur.yaml must contain verbatim:\n{BLOCK}"
@@ -2285,7 +2285,7 @@ mod tests {
 
     #[test]
     fn the_driver_neither_reads_a_credential_nor_builds_an_auth_header() {
-        // The runtime attaches the header declared under `inference_auth:`, so a driver-side
+        // The runtime attaches the header declared under `upstream_auth:`, so a driver-side
         // credential read would put the key back in the guest.
         let source = include_str!("lib.rs");
         let non_test = source[..source.find("\nmod tests {").expect("mod tests must exist")]
