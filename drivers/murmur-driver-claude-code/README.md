@@ -169,17 +169,110 @@ on the host through `/proc/<pid>/cmdline`. The runtime already creates a private
 for driver files, so the token goes there. `{files_dir}` is the token the runtime replaces with
 that directory's path.
 
-## What is not here at 0.1.0
+## Reading what the harness prints
 
-`parse` and `classify_exit` are stubs. The driver plans a turn; it does not yet turn the
-harness's output back into events, so a run produces no streaming text, no tool feed and no
-failure reason.
+`parse` takes a batch of complete stdout lines and returns the events they carry. Every line
+`claude` prints is self-contained — a `tool_result` carries its own `tool_use_id` — so the
+parser holds nothing across lines, and the same lines split into different batches produce the
+same events. The only thing carried from one call to the next is the bridge's tool prefix, which
+`launch` records so `parse` can strip it off again.
 
-- `parse` returns no events. The interface allows a call to return none, so this is a legal
-  answer rather than a claim about what the harness said.
-- `classify_exit` keeps the one rule every driver must keep — a run the runtime interrupted,
-  with no terminal event seen, is `canceled` whatever the exit code says — and answers every
-  other input with a failure naming the parser that does not exist yet.
+| Line | Events |
+|---|---|
+| `system` `init` | `session-started` |
+| `system` `api_retry` | `retry` |
+| `system` anything else (`status`, `thinking_tokens`, …) | none |
+| `control_response` | none |
+| `stream_event` whose `event.delta.type` is `text_delta` | `text-delta` |
+| `stream_event` whose `event.delta.type` is `thinking_delta` | `thinking-delta` |
+| `stream_event` anything else (message and block framing, `input_json_delta`, `signature_delta`) | none |
+| `assistant` | at most one `thinking`, then at most one `text`, then one `tool-call` per `tool_use` block |
+| `user` `tool_result` block | `tool-result` |
+| `user` any other block, such as the `[Request interrupted by user]` marker | none |
+| `result` | `turn-end` or `turn-failed` |
+| a blank or whitespace-only line | none |
+| anything else | exactly one `note` |
+
+An `assistant` message emits **one** `text` event, its text blocks joined, which is what makes
+the interface's rule — a `text` replaces the `text-delta`s streamed for that message rather than
+being appended to them — well defined. A message with no text of its own, such as a
+thinking-only one, emits no `text` event at all.
+
+A line the driver cannot read — not JSON, not a JSON object, or an object whose `type` is absent
+or unrecognised — becomes exactly one `note` reading `unreadable stdout line: <line>`, truncated
+at 512 characters with `…` appended. `parse` never returns an error and never panics, whatever
+it is handed.
+
+### `is_error` decides a `result` line, never `subtype`
+
+```
+is_error == false                        -> turn-end
+is_error == true, or absent              -> turn-failed, kind decided in this order:
+    api_error_status 401 or 403          -> auth
+    api_error_status 429                 -> quota
+    terminal_reason "aborted_streaming"  -> canceled
+    subtype "error_max_turns"            -> max-turns
+    anything else                        -> harness-error
+```
+
+`claude` 2.1.278 reports an authentication failure and a quota failure as `subtype: "success"`
+**alongside** `is_error: true` — both are in the recordings under `tests/fixtures/`. A reader
+that trusts `subtype` therefore hands a 401 to the runtime as the model's answer. This driver
+reads `is_error` and `api_error_status`, and `subtype` is consulted last and only for
+`error_max_turns`, the one failure it is the sole witness to. A `result` line with no readable
+`is_error` is a failure, not a success: a turn nobody can confirm succeeded is not reported as
+one that did.
+
+`turn-end` carries the line's `result` text, or `""` when it wrote none. A `turn-failed` carries
+`result` when it is a non-empty string, and otherwise composes the failure from the fields the
+line does say — `subtype`, `terminal_reason: <value>` and `api_error_status: <value>`, joined
+with `", "`. An interrupted turn writes no `result`, so it reads
+`error_during_execution, terminal_reason: aborted_streaming`.
+
+### The other events
+
+- **`session-started`** takes its id from `session_id` and its model from `model`. `auth` is
+  `subscription` only when the harness reports `apiKeySource: "none"`; every other value reads
+  as `api-key`, **absent included**. The runtime warns on anything that is not `subscription`,
+  so the ambiguous case fails towards being warned about rather than towards a quiet
+  subscription claim. Every recording in `tests/fixtures/` authenticated with an API key, so
+  every one reads `api-key`; the subscription reading is covered by a unit test.
+- **`retry`** takes `attempt` from the line and reads its reason as `<error> (<error_status>)`,
+  falling back to whichever of the two the line carries, and to `unknown` with neither.
+- **`tool-call`** strips the prefix `launch` added, and **only** that prefix. A generic
+  `mcp__<anything>__` strip would also rename the tools of an MCP server this driver never
+  registered; with no bridge recorded, a tool name passes through untouched.
+- **`tool-result`** pairs by `tool_use_id`. Its output is the block's `content` when that is a
+  string, and otherwise its text blocks joined with newlines, with any non-text block keeping
+  its JSON rather than being dropped.
+
+### `classify-exit`
+
+The runtime calls it only for a run whose output ended without a terminal event, and it only
+ever answers `turn-failed`:
+
+| Condition | Result |
+|---|---|
+| `interrupted` and no terminal event | `canceled`, `claude was interrupted before it reported a result` |
+| exit code `0` and no terminal event | `harness-error`, `claude exited without a result` |
+| anything else | `harness-error`, `claude exited with code <n>` / `claude was killed by signal <n>` / `claude exited without a status`, with a non-empty stderr tail appended after `": "` |
+
+The interrupt is checked before the exit code is read at all, which is the rule the interface
+holds every driver to: `claude` exits `0` on a turn stopped by SIGINT, so the code cannot tell a
+canceled turn from a finished one.
+
+## The recordings this is tested against
+
+`tests/fixtures/` holds ten recordings of real `claude` 2.1.278 output, byte-identical copies of
+the roadmap's, each with its stdout, its stderr and its exit code. `tests/golden.rs` asserts the
+**complete** event list for every one, and asserts across all ten that no recording produces a
+`note`, that every one ends with a terminal event — so the runtime never reaches `classify-exit`
+for any of them, including the two that exit `1` — and that no recording whose `result` line
+says `is_error: true` ends the turn successfully.
+
+Each recording is parsed three ways: all lines in one batch, one line per batch, and a two-batch
+split whose boundary falls between a message's deltas and the `assistant` line carrying its full
+text. All three must produce the same events.
 
 ## Building it
 
@@ -193,5 +286,6 @@ cargo build -p murmur-driver-claude-code --target wasm32-wasip2 --release
 The crate is three layers, the shape every artifact in this repo uses: the pure logic at the
 crate root, a `#[cfg(target_arch = "wasm32")] mod wasm_driver` that converts WIT records to the
 crate-root mirrors and back and decides nothing, and `#[cfg(test)] mod tests` at the crate root
-so the tests run on the host. Code behind the wasm gate does not exist for the host target, so
-logic written there would report a green `cargo test` having executed none of its lines.
+so the tests run on the host, with the recordings and their golden event lists under `tests/`.
+Code behind the wasm gate does not exist for the host target, so logic written there would
+report a green `cargo test` having executed none of its lines.

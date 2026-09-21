@@ -22,6 +22,9 @@ description: |
         env:
           allow: [HOME, PATH]
 
-  At 0.1.0 the driver plans turns but does not yet read the harness's output back into events.
+  It also reads the harness's stdout back into the runtime's events: streamed text and thinking,
+  tool calls and their results, retries, and a turn that ended or failed. A failing turn is read
+  from `is_error` and `api_error_status`, never from `subtype` alone — Claude Code reports an
+  authentication or quota failure as `subtype: success`.
 requires_files:
   - murmur_driver_claude_code.wasm
