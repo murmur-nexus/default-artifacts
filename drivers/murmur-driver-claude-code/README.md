@@ -56,6 +56,15 @@ artifacts:
     version: "0.1.0"
 ```
 
+> **`transport: process` needs a runtime that accepts it.** The runtime half of process transport
+> ships in Murmur, on its own release train, and `murmur-cli 0.3.0` does **not** have it: it
+> rejects the manifest above with
+> `error[E-MAN-003]: invalid inference config for 'inference.driver.artifact': is not valid with
+> transport: process`. This driver is publishable and testable ahead of that — its own tests run
+> on the host — but a capsule cannot run a turn through it until the `mur` in use accepts a
+> process-transport manifest. If you see `E-MAN-003` on the manifest above, the driver is fine
+> and the runtime is too old.
+
 The harness starts from an **empty** environment and sees exactly the variables
 `capabilities.env.allow` declares. That is what keeps the subscription the thing being spent: an
 API key sitting in the operator's shell reaches `claude` only if the operator writes it down
@@ -286,5 +295,6 @@ cargo build -p murmur-driver-claude-code --target wasm32-wasip2 --release
 The crate is three layers, the shape every artifact in this repo uses: the pure logic at the
 crate root, a `#[cfg(target_arch = "wasm32")] mod wasm_driver` that converts WIT records to the
 crate-root mirrors and back and decides nothing, and `#[cfg(test)] mod tests` at the crate root
-so the tests run on the host, with the recordings and their golden event lists under `tests/`. Code behind the wasm gate does not exist for the host target, so
-logic written there would report a green `cargo test` having executed none of its lines.
+so the tests run on the host, with the recordings and their golden event lists under `tests/`.
+Code behind the wasm gate does not exist for the host target, so logic written there would
+report a green `cargo test` having executed none of its lines.
