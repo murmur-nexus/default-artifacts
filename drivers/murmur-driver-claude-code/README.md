@@ -5,7 +5,7 @@ Murmur how to drive the `claude` CLI for one turn: the argument list, the JSON l
 goes out on, the MCP config that points the harness at the capsule's tool bridge, and the
 control request that interrupts a turn.
 
-It is the first artifact in this repo that exports `murmur:driver/process@0.1.0` rather than
+It is the first artifact in this repo that exports `murmur:driver/process@0.2.0` rather than
 `murmur:tool/run`. That export is how the runtime tells a process driver from an HTTP driver —
 both are `runtime: driver` artifacts, and the name decides nothing.
 
@@ -22,18 +22,29 @@ rather than an API key.
 
 ## Which murmur this needs
 
-`transport: process` with an `inference.driver` is newer than any published murmur release.
-A murmur that does not have it refuses the manifest below before the driver is ever loaded:
+This artifact exports `murmur:driver/process@0.2.0`, and **the host accepts exactly one version
+of that interface and carries no fallback for an earlier one.** So it needs a murmur whose
+process-driver runner is at `@0.2.0`; one still at `@0.1.0` refuses it at load, naming both
+versions and telling you to rebuild:
 
 ```
-error[E-MAN-003]: murmur.yaml: invalid inference config for 'inference.driver.artifact':
-is not valid with transport: process
+error[E-RUN-029]: the transport: process driver does not export the process driver interface
+  murmur-driver-claude-code@0.2.0 exports murmur:driver/process@0.2.0
+  this runtime expects murmur:driver/process@0.1.0
 ```
 
-`mur --version` does not distinguish the two — the version string was not bumped when the
-process-driver runner landed. If you see that error, your murmur predates the runner and no
-setting in this artifact will change it; build `mur` from a murmur that has it, or wait for the
-release that carries it.
+The refusal is deliberate and runs the other way too: `murmur-driver-claude-code@0.1.0` no
+longer loads against a murmur at `@0.2.0`. Install `0.2.0` — a rebuild is the intended cost of
+the bump.
+
+`mur --version` does not distinguish the two: it reports `murmur-cli 0.3.0` both before and
+after the interface moved, because the CLI version string was not bumped with it. If you see
+`E-RUN-029`, no setting in this artifact will change it; build `mur` from a murmur that carries
+the `@0.2.0` runner, or wait for the release that does.
+
+`transport: process` with an `inference.driver` is also newer than any published murmur release.
+A murmur without the runner at all refuses the manifest before the driver is loaded, with
+`E-MAN-003` naming `inference.driver.artifact`.
 
 ## The manifest an operator writes
 
@@ -53,7 +64,7 @@ capabilities:
 artifacts:
   - name: murmur-driver-claude-code
     runtime: driver
-    version: "0.1.0"
+    version: "0.2.0"
 ```
 
 The harness starts from an **empty** environment and sees exactly the variables
@@ -189,7 +200,7 @@ same events. The only thing carried from one call to the next is the bridge's to
 | `assistant` | at most one `thinking`, then at most one `text`, then one `tool-call` per `tool_use` block |
 | `user` `tool_result` block | `tool-result` |
 | `user` any other block, such as the `[Request interrupted by user]` marker | none |
-| `result` | `turn-end` or `turn-failed` |
+| `result` | one `usage`, then `turn-end` or `turn-failed` — see [The tokens a turn spent](#the-tokens-a-turn-spent) |
 | a blank or whitespace-only line | none |
 | anything else | exactly one `note` |
 
@@ -228,6 +239,69 @@ one that did.
 line does say — `subtype`, `terminal_reason: <value>` and `api_error_status: <value>`, joined
 with `", "`. An interrupted turn writes no `result`, so it reads
 `error_during_execution, terminal_reason: aborted_streaming`.
+
+### The tokens a turn spent
+
+The `result` line that ends a turn also carries a `usage` block, and the driver reads five
+counts out of it. That block is the only place Claude's spelling of a count appears; the
+runtime is handed the interface's generic names.
+
+| Count | Claude's field on the `result` line |
+|---|---|
+| input | `usage.input_tokens` |
+| output | `usage.output_tokens` |
+| cache read | `usage.cache_read_input_tokens` |
+| cache creation | `usage.cache_creation_input_tokens` |
+| thinking | `usage.output_tokens_details.thinking_tokens` |
+
+**Absent is not zero.** Each count is read as a non-negative integer; a value that is absent,
+`null`, a string, a float or negative reads as *absent*, never as zero. A harness that does not
+report a count and a turn that spent none of it are different facts, and a ceiling weighed
+against a number nobody measured is a ceiling against nothing. The converse holds too: a zero
+Claude did write is a measurement and is reported as zero, not dropped. A line that names none
+of the five — no `usage` key, `"usage": null`, `"usage": {}`, or a `usage` whose counts are all
+unreadable — reports nothing at all, one representation for "this line said nothing about
+tokens".
+
+**One reading per `result` line, and none from any other line.** `claude` also writes a `usage`
+block on its `assistant` lines and on its `message_delta` stream events, and neither is read.
+Both count one *message* rather than the turn: in the `03-bridge-tool-call` recording the two
+`message_delta` lines each report the same five output tokens, so summing them reports the
+turn's output a second time, and adding them to the `result` line's total of `10` reports `20`.
+The `result` line's block is the only per-turn statement the harness makes, so it is the only
+one this driver reads.
+
+These are **the harness's own reported numbers** for a subscription turn — what `claude` says it
+spent — rather than anything Murmur metered. Murmur sees no request on this path; the harness
+authenticates and bills itself. `total_cost_usd`, `costUSD` and `contextWindow` are deliberately
+not read: a dollar figure a harness produced against its own price table is a different claim
+from a token count and has no equivalent on the http path. Neither are `server_tool_use`,
+`service_tier`, `cache_creation`, `inference_geo`, `iterations` or `speed`.
+
+#### What goes out is the run's total, not the turn's
+
+`murmur:driver/process@0.2.0` takes every member of `usage` as **cumulative for the harness
+run**, and the runtime attributes to each turn only the growth of a member over what it has
+already attributed. `claude` reports the opposite — each `result` line carries that turn's own
+spend and nothing earlier — so the driver adds each turn onto the totals it has already
+reported and sends the sum.
+
+| Turn's `result` line says | Driver reports | Runtime attributes to that turn |
+|---|---|---|
+| `input 2, output 10` | `input 2, output 10` | `input 2, output 10` |
+| `input 1, output 5` | `input 3, output 15` | `input 1, output 5` |
+
+Reporting the second turn's `1`/`5` verbatim would have the runtime attribute **nothing** to
+it, because `1` is not growth over the `2` already counted. A member no turn has reported stays
+absent; a member one turn omits keeps the total an earlier turn set, because silence is the
+harness declining to repeat itself rather than retracting what it said.
+
+The totals belong to one process. A new `launch` starts them over, since the next process's
+first turn is the run's first turn again.
+
+The `usage` event is emitted **immediately before** the `turn-end` or `turn-failed` of the same
+`result` line: the runtime attributes a reading to the turn open when it arrives, and both
+terminal events close that turn.
 
 ### The other events
 

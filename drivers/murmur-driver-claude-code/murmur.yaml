@@ -1,5 +1,5 @@
 name: murmur-driver-claude-code
-version: 0.1.0
+version: 0.2.0
 runtime: driver
 description: |
   Process driver for Claude Code. It tells a `transport: process` capsule how to drive the
@@ -26,5 +26,13 @@ description: |
   tool calls and their results, retries, and a turn that ended or failed. A failing turn is read
   from `is_error` and `api_error_status`, never from `subtype` alone — Claude Code reports an
   authentication or quota failure as `subtype: success`.
+
+  The driver also reports the input, output, cache-read, cache-creation and thinking token
+  counts Claude Code prints for a turn. These are the harness's own reported numbers for a
+  subscription turn rather than anything Murmur metered, and are read only off the `result` line
+  that ends a turn: the running count Claude Code prints on `message_delta` counts one message,
+  not the turn. A count the harness did not report stays absent rather than being reported as
+  zero. The counts go out as totals for the harness run, which is what the interface asks for,
+  so a second turn is reported as the sum of itself and every turn before it.
 requires_files:
   - murmur_driver_claude_code.wasm

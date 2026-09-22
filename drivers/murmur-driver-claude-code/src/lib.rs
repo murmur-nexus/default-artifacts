@@ -38,6 +38,10 @@ const REQUIRED_ENV: &[&str] = &["HOME", "PATH"];
 /// `parse` emits `text-delta` events: `--include-partial-messages` makes the harness stream them.
 const STREAMS_TEXT: bool = true;
 
+/// `claude` writes a `usage` block on every `result` line, so a turn's counts are always
+/// reported and `inference.max_session_tokens` can be weighed against them.
+const REPORTS_USAGE: bool = true;
+
 // ── Launch constants ──────────────────────────────────────────────────────────
 
 /// The name of the MCP config file the driver asks the runtime to write, and points
@@ -76,6 +80,7 @@ pub struct Description {
     pub interrupt: InterruptMethod,
     pub required_env: Vec<String>,
     pub streams_text: bool,
+    pub reports_usage: bool,
 }
 
 /// The endpoint through which the harness calls the capsule's tools.
@@ -191,9 +196,93 @@ pub enum Event {
     ToolCall(ToolCallInfo),
     ToolResult(ToolResultInfo),
     Retry(RetryInfo),
+    /// What the harness has spent on this run so far, cumulative. Emitted immediately before
+    /// the terminal event of the `result` line it was read from, so the runtime attributes it
+    /// to the turn that is still open.
+    Usage(TokenUsage),
     TurnEnd(String),
     TurnFailed(TurnFailure),
     Note(String),
+}
+
+/// Token counts, in the interface's generic names rather than Claude's: only [`token_usage`]
+/// knows that `cache_read` is spelled `cache_read_input_tokens` on the wire.
+///
+/// Every count is optional and absent is not zero. A harness that reports a count and a turn
+/// that spent none of it are different facts, and a ceiling weighed against a number the
+/// harness never sent is a ceiling against nothing. A zero the harness did write is a
+/// measurement, and is carried as one.
+///
+/// Read off a `result` line this is one turn's own spend, which is what [`token_usage`]
+/// returns. Reported on the wire it is the whole run's, which is what [`RunningUsage`] turns
+/// the first into — the interface requires the second, and the two are the same number only
+/// for a run's first turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub cache_creation: Option<u64>,
+    pub thinking: Option<u64>,
+}
+
+/// What the harness has spent since the process started, built up from the per-turn counts
+/// Claude prints.
+///
+/// The interface takes every member as **cumulative for the harness run**, and the runtime
+/// attributes to each turn only the growth of a member over what it has already attributed. A
+/// `claude` process reports the opposite: each `result` line carries that turn's own spend and
+/// nothing earlier. Reporting those verbatim would mean a turn is counted only when it spends
+/// more than the largest turn before it — a 2/10 turn followed by a 1/5 turn would record
+/// 2/10 and then nothing, because 1 does not exceed the 2 already attributed. So the driver
+/// adds each turn onto the totals it has already reported and sends the sum.
+///
+/// One of these belongs to one process. `launch` starts a new one, because the next process's
+/// first turn is the run's first turn again.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunningUsage {
+    input: Option<u64>,
+    output: Option<u64>,
+    cache_read: Option<u64>,
+    cache_creation: Option<u64>,
+    thinking: Option<u64>,
+}
+
+impl RunningUsage {
+    /// A process that has reported nothing yet.
+    pub const fn new() -> Self {
+        Self {
+            input: None,
+            output: None,
+            cache_read: None,
+            cache_creation: None,
+            thinking: None,
+        }
+    }
+
+    /// Add one turn's counts and return the run totals to report for it.
+    ///
+    /// A member the turn did not report leaves its total standing rather than resetting it, and
+    /// is itself left absent until some turn reports it: absent means *this harness does not
+    /// report this count*, and one turn's silence does not retract what an earlier turn said.
+    /// A member that has been reported is sent on every later reading, even unchanged, which
+    /// the runtime attributes as no growth.
+    pub fn add_turn(&mut self, turn: &TokenUsage) -> TokenUsage {
+        fn add(total: &mut Option<u64>, spent: Option<u64>) -> Option<u64> {
+            if let Some(spent) = spent {
+                *total = Some(total.unwrap_or(0).saturating_add(spent));
+            }
+            *total
+        }
+
+        TokenUsage {
+            input: add(&mut self.input, turn.input),
+            output: add(&mut self.output, turn.output),
+            cache_read: add(&mut self.cache_read, turn.cache_read),
+            cache_creation: add(&mut self.cache_creation, turn.cache_creation),
+            thinking: add(&mut self.thinking, turn.thinking),
+        }
+    }
 }
 
 /// How the harness exited, for a run whose output ended without a terminal event.
@@ -218,6 +307,7 @@ pub fn describe() -> Description {
         interrupt: InterruptMethod::StdinMessage,
         required_env: REQUIRED_ENV.iter().map(|s| s.to_string()).collect(),
         streams_text: STREAMS_TEXT,
+        reports_usage: REPORTS_USAGE,
     }
 }
 
@@ -426,6 +516,13 @@ const ERROR_MAX_TURNS: &str = "error_max_turns";
 /// What a `turn-failed` says when the `result` line describes the failure in no field at all.
 const UNDESCRIBED_FAILURE: &str = "the harness reported a failure with no message";
 
+/// The `type` of the line that ends a turn. It is the only line whose token counts are read:
+/// see [`token_usage`].
+const RESULT_LINE: &str = "result";
+
+/// The key the `result` line's token counts hang off.
+const USAGE_KEY: &str = "usage";
+
 /// What `launch` learned that `parse` needs.
 ///
 /// The interface keeps one driver instance for a whole run, which is what lets a batch of lines
@@ -475,12 +572,17 @@ pub fn strip_tool_prefix<'a>(name: &'a str, context: &ParseContext) -> &'a str {
 /// Reads a batch of complete stdout lines into events.
 ///
 /// Every line `claude` prints is self-contained — a `tool_result` carries its own `tool_use_id`
-/// — so this holds no state across lines and the events of a batch are the events of its lines
-/// in order. The same lines split into different batches therefore produce the same events.
-pub fn parse_lines(lines: &[String], context: &ParseContext) -> Vec<Event> {
+/// — so the events of a batch are the events of its lines in order, and the same lines split
+/// into different batches produce the same events. The one thing carried across lines is
+/// `spent`, which the interface requires: see [`RunningUsage`].
+pub fn parse_lines(
+    lines: &[String],
+    context: &ParseContext,
+    spent: &mut RunningUsage,
+) -> Vec<Event> {
     lines
         .iter()
-        .flat_map(|line| parse_line(line, context))
+        .flat_map(|line| parse_line(line, context, spent))
         .collect()
 }
 
@@ -488,14 +590,11 @@ pub fn parse_lines(lines: &[String], context: &ParseContext) -> Vec<Event> {
 ///
 /// Never fails and never panics: a line that is not a JSON object of a shape this driver knows
 /// becomes a single `note` for the trace, which is all the interface offers for saying so.
-pub fn parse_line(line: &str, context: &ParseContext) -> Vec<Event> {
+pub fn parse_line(line: &str, context: &ParseContext, spent: &mut RunningUsage) -> Vec<Event> {
     if line.trim().is_empty() {
         return Vec::new();
     }
-    let Some(value) = serde_json::from_str::<Value>(line)
-        .ok()
-        .filter(Value::is_object)
-    else {
+    let Some(value) = line_object(line) else {
         return vec![note_for(line)];
     };
 
@@ -504,12 +603,81 @@ pub fn parse_line(line: &str, context: &ParseContext) -> Vec<Event> {
         Some("stream_event") => stream_events(&value),
         Some("assistant") => assistant_events(&value, context),
         Some("user") => user_events(&value),
-        Some("result") => vec![result_event(&value)],
+        // The counts go out before the terminal event, because the runtime attributes them to
+        // the turn still open and both terminal events close it.
+        Some(RESULT_LINE) => token_usage(&value)
+            .map(|turn| Event::Usage(spent.add_turn(&turn)))
+            .into_iter()
+            .chain([result_event(&value)])
+            .collect(),
         // A control response answers the driver's own interrupt request; the `result` line that
         // follows is what says the turn ended.
         Some("control_response") => Vec::new(),
         _ => vec![note_for(line)],
     }
+}
+
+/// A line as the JSON object it is, or `None` for anything else — a blank line, text that is
+/// not JSON, or JSON that is not an object.
+fn line_object(line: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(line)
+        .ok()
+        .filter(Value::is_object)
+}
+
+// ── the tokens a turn spent ──────────────────────────────────────────────────
+//
+// Only the `result` line that ends a turn reports a count. `claude` also writes a `usage` block
+// on its `assistant` lines and on the `message_delta` stream events, but both count one message
+// rather than the turn: the two `message_delta` lines of a turn that called a tool each report
+// the same five output tokens, so summing them reports a turn total twice over. The `result`
+// line's block is the only per-turn statement the harness makes, and `parse_line`'s dispatch on
+// the line's `type` is what holds the rule.
+
+/// The token counts a `result` line reported, or `None` when it reported none at all.
+///
+/// The one place in this repo where Claude's spelling of a count appears; the runtime is handed
+/// the interface's generic names. Each count is read as a non-negative integer, so a value that
+/// is absent, `null`, a string, a float or negative reads as absent rather than as zero — the
+/// driver reports what the harness said, and never invents a measurement it did not make.
+///
+/// `total_cost_usd`, `costUSD` and `contextWindow` are deliberately not read: a dollar figure a
+/// harness produced against its own price table is a different claim from a token count, and
+/// has no equivalent on the http path. Neither are `server_tool_use`, `service_tier`,
+/// `cache_creation`, `inference_geo`, `iterations` or `speed`.
+pub fn token_usage(value: &Value) -> Option<TokenUsage> {
+    let usage = value.get(USAGE_KEY)?;
+    let usage = TokenUsage {
+        input: count_at(usage, "input_tokens"),
+        output: count_at(usage, "output_tokens"),
+        cache_read: count_at(usage, "cache_read_input_tokens"),
+        cache_creation: count_at(usage, "cache_creation_input_tokens"),
+        thinking: usage
+            .get("output_tokens_details")
+            .and_then(|details| count_at(details, "thinking_tokens")),
+    };
+    reported(usage)
+}
+
+/// The non-negative integer at `key`, or `None` for every other way a count can fail to be one.
+fn count_at(value: &Value, key: &str) -> Option<u64> {
+    value.get(key).and_then(Value::as_u64)
+}
+
+/// A reading the harness actually made, or `None` when it named none of the five counts. One
+/// representation for "the line said nothing about tokens", whether it wrote no `usage` at all
+/// or a `usage` this driver could read nothing out of.
+fn reported(usage: TokenUsage) -> Option<TokenUsage> {
+    [
+        usage.input,
+        usage.output,
+        usage.cache_read,
+        usage.cache_creation,
+        usage.thinking,
+    ]
+    .iter()
+    .any(Option::is_some)
+    .then_some(usage)
 }
 
 /// A `note` repeating a line the driver could not read, truncated at `NOTE_LINE_LIMIT`.
@@ -813,12 +981,18 @@ mod wasm_driver {
         /// last `launch` stored is the one whose output `parse` is reading.
         static PARSE_CONTEXT: RefCell<super::ParseContext> =
             const { RefCell::new(super::ParseContext::none()) };
+
+        /// What the harness has spent since this process started. The interface reports run
+        /// totals, `claude` prints per-turn ones, and this is what adds the second into the
+        /// first across the turns of one run.
+        static SPENT: RefCell<super::RunningUsage> =
+            const { RefCell::new(super::RunningUsage::new()) };
     }
 
     use exports::murmur::driver::process::{
         Bridge, Description, DriverFile, Event, ExitStatus, FailureKind, Guest, InterruptMethod,
         LaunchPlan, LaunchRequest, RetryInfo, Session, SessionInfo, SessionMode, ToolCallInfo,
-        ToolResultInfo, TurnFailure,
+        ToolResultInfo, TurnFailure, Usage,
     };
 
     pub struct ClaudeCodeDriver;
@@ -832,12 +1006,18 @@ mod wasm_driver {
             let request = to_request(request);
             let context = super::parse_context_for(request.bridge.as_ref());
             PARSE_CONTEXT.with(|stored| *stored.borrow_mut() = context);
+            // A new process has spent nothing: its first turn is the run's first turn again.
+            SPENT.with(|spent| *spent.borrow_mut() = super::RunningUsage::new());
             super::launch(request).map(from_plan)
         }
 
         fn parse(lines: Vec<String>) -> Vec<Event> {
             PARSE_CONTEXT
-                .with(|context| super::parse_lines(&lines, &context.borrow()))
+                .with(|context| {
+                    SPENT.with(|spent| {
+                        super::parse_lines(&lines, &context.borrow(), &mut spent.borrow_mut())
+                    })
+                })
                 .into_iter()
                 .map(from_event)
                 .collect()
@@ -861,6 +1041,7 @@ mod wasm_driver {
             },
             required_env: description.required_env,
             streams_text: description.streams_text,
+            reports_usage: description.reports_usage,
         }
     }
 
@@ -947,6 +1128,13 @@ mod wasm_driver {
             super::Event::Retry(retry) => Event::Retry(RetryInfo {
                 attempt: retry.attempt,
                 reason: retry.reason,
+            }),
+            super::Event::Usage(usage) => Event::Usage(Usage {
+                input: usage.input,
+                output: usage.output,
+                cache_read: usage.cache_read,
+                cache_creation: usage.cache_creation,
+                thinking: usage.thinking,
             }),
             super::Event::TurnEnd(result) => Event::TurnEnd(result),
             super::Event::TurnFailed(failure) => Event::TurnFailed(TurnFailure {
@@ -1324,7 +1512,7 @@ mod tests {
     }
 
     fn events(line: &str) -> Vec<Event> {
-        parse_line(line, &bridged_context())
+        parse_line(line, &bridged_context(), &mut RunningUsage::new())
     }
 
     #[test]
@@ -1503,10 +1691,13 @@ mod tests {
         let line = format!(
             r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"t1","name":"{name}","input":{{}}}}]}}}}"#
         );
-        let called = |context: &ParseContext| match parse_line(&line, context).remove(0) {
-            Event::ToolCall(call) => call.name,
-            other => panic!("a tool_use block is a tool-call, not {other:?}"),
-        };
+        let called =
+            |context: &ParseContext| match parse_line(&line, context, &mut RunningUsage::new())
+                .remove(0)
+            {
+                Event::ToolCall(call) => call.name,
+                other => panic!("a tool_use block is a tool-call, not {other:?}"),
+            };
 
         assert_eq!(called(&bridged_context()), "echo_tool");
         // A run launched with no bridge, and a run whose bridge the runtime named something
@@ -1559,9 +1750,11 @@ mod tests {
 
     // ── Scenario 10 — a result line is read by is_error first ─────────────────
 
+    /// The failure a `result` line carries. It is the line's last event, because a line that
+    /// also reported counts emits those first, while the turn is still open.
     fn failure(line: &str) -> TurnFailure {
-        match events(line).remove(0) {
-            Event::TurnFailed(failure) => failure,
+        match events(line).pop() {
+            Some(Event::TurnFailed(failure)) => failure,
             other => panic!("a failing result is a turn-failed, not {other:?}"),
         }
     }
@@ -1667,10 +1860,11 @@ mod tests {
         .collect();
 
         let context = bridged_context();
-        let batched = parse_lines(&lines, &context);
+        let batched = parse_lines(&lines, &context, &mut RunningUsage::new());
+        let mut spent = RunningUsage::new();
         let one_at_a_time: Vec<Event> = lines
             .iter()
-            .flat_map(|line| parse_line(line, &context))
+            .flat_map(|line| parse_line(line, &context, &mut spent))
             .collect();
         assert_eq!(batched, one_at_a_time);
         assert_eq!(batched.len(), 2);
@@ -1793,5 +1987,372 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── Scenario 13 — the tokens a turn spent ─────────────────────────────────
+
+    /// A `result` line carrying `usage`, spelled the way `claude` 2.1.278 spells it.
+    fn result_with_usage(usage: &str) -> String {
+        format!(
+            r#"{{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{usage}}}"#
+        )
+    }
+
+    /// The `usage` block of every recording's `result` line, with the counts substituted in.
+    fn recorded_usage(
+        input: &str,
+        cache_creation: &str,
+        cache_read: &str,
+        output: &str,
+        thinking: &str,
+    ) -> String {
+        format!(
+            r#"{{"input_tokens":{input},"cache_creation_input_tokens":{cache_creation},"cache_read_input_tokens":{cache_read},"output_tokens":{output},"output_tokens_details":{{"thinking_tokens":{thinking}}},"server_tool_use":{{"web_search_requests":0,"web_fetch_requests":0}},"service_tier":"standard","cache_creation":{{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0}},"inference_geo":"","iterations":[],"speed":"standard"}}"#
+        )
+    }
+
+    /// The counts one line reports, read as the first turn of a fresh run, where the run
+    /// total and the turn's own spend are the same number.
+    fn usage_of(line: &str) -> Option<TokenUsage> {
+        usage_in(&parse_line(
+            line,
+            &bridged_context(),
+            &mut RunningUsage::new(),
+        ))
+        .next()
+    }
+
+    /// Every usage reading in a batch of events, in order.
+    fn usage_in(events: &[Event]) -> impl Iterator<Item = TokenUsage> + '_ {
+        events.iter().filter_map(|event| match event {
+            Event::Usage(usage) => Some(usage.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_result_line_reports_every_count_the_harness_wrote() {
+        assert_eq!(
+            usage_of(&result_with_usage(&recorded_usage(
+                "11", "22", "33", "44", "55"
+            ))),
+            Some(TokenUsage {
+                input: Some(11),
+                output: Some(44),
+                cache_read: Some(33),
+                cache_creation: Some(22),
+                thinking: Some(55),
+            })
+        );
+    }
+
+    #[test]
+    fn a_zero_the_harness_wrote_is_reported_as_zero() {
+        // The distinction the interface exists for, from the other side: a turn that spent
+        // none of a thing said so, and saying so is not the same as saying nothing.
+        assert_eq!(
+            usage_of(&result_with_usage(&recorded_usage("0", "0", "0", "0", "0"))),
+            Some(TokenUsage {
+                input: Some(0),
+                output: Some(0),
+                cache_read: Some(0),
+                cache_creation: Some(0),
+                thinking: Some(0),
+            })
+        );
+    }
+
+    #[test]
+    fn a_result_line_that_said_nothing_about_tokens_reports_nothing() {
+        for line in [
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"done"}"#.to_string(),
+            result_with_usage("null"),
+            result_with_usage("{}"),
+            result_with_usage(r#"{"service_tier":"standard","inference_geo":"","iterations":[]}"#),
+            // An object whose five counts are all unreadable is the same "nothing".
+            result_with_usage(
+                r#"{"input_tokens":"1","output_tokens":-2,"cache_read_input_tokens":1.5,"cache_creation_input_tokens":null,"output_tokens_details":{"thinking_tokens":"0"}}"#,
+            ),
+            result_with_usage(r#"{"output_tokens_details":null}"#),
+            result_with_usage(r#"[1,2,3]"#),
+        ] {
+            assert_eq!(usage_of(&line), None, "{line} reports no count");
+        }
+    }
+
+    #[test]
+    fn a_count_that_is_not_a_non_negative_integer_reads_as_absent() {
+        // Absent rather than zero, one count at a time: the readable four survive a fifth the
+        // driver cannot read, and the unreadable one does not become a measurement of none.
+        let usage = usage_of(&result_with_usage(
+            r#"{"input_tokens":"7","output_tokens":5,"cache_read_input_tokens":-1,"cache_creation_input_tokens":2.5,"output_tokens_details":{"thinking_tokens":3}}"#
+        ))
+        .expect("the readable counts are still reported");
+        assert_eq!(
+            usage,
+            TokenUsage {
+                input: None,
+                output: Some(5),
+                cache_read: None,
+                cache_creation: None,
+                thinking: Some(3),
+            }
+        );
+    }
+
+    #[test]
+    fn a_usage_carrying_some_of_the_five_leaves_the_rest_absent() {
+        assert_eq!(
+            usage_of(&result_with_usage(
+                r#"{"input_tokens":4,"output_tokens":9}"#
+            )),
+            Some(TokenUsage {
+                input: Some(4),
+                output: Some(9),
+                cache_read: None,
+                cache_creation: None,
+                thinking: None,
+            })
+        );
+    }
+
+    #[test]
+    fn the_dollar_figures_on_a_result_line_are_not_read() {
+        // A cost the harness computed against its own price table is a different claim from a
+        // token count, so a line that carries only cost carries no reading at all.
+        assert_eq!(
+            usage_of(
+                r#"{"type":"result","is_error":false,"result":"done","total_cost_usd":0.42,"costUSD":0.42,"contextWindow":200000}"#
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn only_the_result_line_reports_the_tokens_a_turn_spent() {
+        // `claude` writes a `usage` block on its `assistant` lines and on the `message_delta`
+        // stream events too, each counting one message rather than the turn. Reading them
+        // would count the same output tokens against the turn a second time.
+        for line in [
+            r#"{"type":"assistant","message":{"type":"message","content":[],"usage":{"input_tokens":1,"output_tokens":5}},"session_id":"s1"}"#,
+            r#"{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}},"session_id":"s1"}"#,
+            r#"{"type":"system","subtype":"thinking_tokens","session_id":"s1"}"#,
+            r#"{"type":"user","message":{"content":[]},"session_id":"s1"}"#,
+            r#"{"type":"control_response","response":{"subtype":"success"}}"#,
+            // Not where the harness puts it, but the rule is the line's `type`, not the shape
+            // of what hangs off it.
+            r#"{"type":"assistant","usage":{"input_tokens":1,"output_tokens":5}}"#,
+            r#"{"type":"stream_event","usage":{"output_tokens":5}}"#,
+        ] {
+            assert_eq!(usage_of(line), None, "{line} reports no turn total");
+        }
+    }
+
+    #[test]
+    fn a_failed_turn_reports_the_counts_its_line_carries_and_invents_none() {
+        // The verdict and the counts are read off the same line and neither decides the other.
+        let line = format!(
+            r#"{{"type":"result","subtype":"success","is_error":true,"api_error_status":401,"result":"Invalid API key","usage":{}}}"#,
+            recorded_usage("0", "0", "0", "0", "0")
+        );
+        assert_eq!(failure(&line).kind, FailureKind::Auth);
+        assert_eq!(
+            usage_of(&line),
+            Some(TokenUsage {
+                input: Some(0),
+                output: Some(0),
+                cache_read: Some(0),
+                cache_creation: Some(0),
+                thinking: Some(0),
+            })
+        );
+    }
+
+    #[test]
+    fn reading_tokens_never_panics_on_a_line_that_is_not_one() {
+        let long = format!(r#"{{"type":"result","result":"{}"}}"#, "x".repeat(4000));
+        for line in [
+            "",
+            "   ",
+            "not json at all",
+            "[1,2,3]",
+            r#""just a string""#,
+            "null",
+            r#"{"no":"type"}"#,
+            r#"{"type":"unknown_to_this_driver","usage":{"input_tokens":1}}"#,
+            r#"{"type":42,"usage":{"input_tokens":1}}"#,
+            &long,
+            r#"{"type":"result","result":"héllo — 🌍","usage":{"input_tokens":1}}"#,
+        ] {
+            let _ = usage_of(line);
+        }
+        // The multi-byte line is a real reading, not merely a survived one.
+        assert_eq!(
+            usage_of(r#"{"type":"result","result":"héllo — 🌍","usage":{"input_tokens":1}}"#)
+                .and_then(|usage| usage.input),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_batch_reports_one_reading_per_result_line_and_none_from_any_other() {
+        let lines: Vec<String> = [
+            r#"{"type":"system","subtype":"init","session_id":"s1","apiKeySource":"none"}"#.to_string(),
+            r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":5}}}"#.to_string(),
+            String::new(),
+            r#"{"type":"assistant","message":{"content":[],"usage":{"input_tokens":1,"output_tokens":5}}}"#.to_string(),
+            result_with_usage(r#"{"input_tokens":2,"output_tokens":10}"#),
+        ]
+        .to_vec();
+
+        let events = parse_lines(&lines, &bridged_context(), &mut RunningUsage::new());
+        let readings: Vec<TokenUsage> = usage_in(&events).collect();
+        assert_eq!(readings.len(), 1, "one result line, one reading");
+        assert_eq!(readings[0].input, Some(2));
+        assert_eq!(readings[0].output, Some(10));
+    }
+
+    #[test]
+    fn token_usage_reads_the_block_off_a_line_the_parser_already_read() {
+        // The value-level reader and the line-level one are the same reading.
+        let line = result_with_usage(&recorded_usage("1", "0", "0", "5", "0"));
+        let value: Value = serde_json::from_str(&line).expect("a result line is JSON");
+        assert_eq!(token_usage(&value), usage_of(&line));
+        assert_eq!(token_usage(&value).and_then(|u| u.output), Some(5));
+    }
+
+    // ── Scenario 14 — what reaches the wire is the run's total ────────────────
+
+    /// The run totals reported across a batch of `result` lines, each carrying `usage`.
+    fn totals_across(turns: &[&str]) -> Vec<TokenUsage> {
+        let lines: Vec<String> = turns.iter().map(|u| result_with_usage(u)).collect();
+        let events = parse_lines(&lines, &bridged_context(), &mut RunningUsage::new());
+        usage_in(&events).collect()
+    }
+
+    #[test]
+    fn a_later_turn_reports_the_run_total_rather_than_its_own_spend() {
+        // The interface takes every member as cumulative for the harness run, so a second turn
+        // is reported as the sum. Reporting 1/5 verbatim after 2/10 would have the runtime
+        // attribute nothing to it: it counts only a member's growth over what it already has.
+        assert_eq!(
+            totals_across(&[
+                r#"{"input_tokens":2,"output_tokens":10}"#,
+                r#"{"input_tokens":1,"output_tokens":5}"#,
+            ]),
+            vec![
+                TokenUsage {
+                    input: Some(2),
+                    output: Some(10),
+                    cache_read: None,
+                    cache_creation: None,
+                    thinking: None,
+                },
+                TokenUsage {
+                    input: Some(3),
+                    output: Some(15),
+                    cache_read: None,
+                    cache_creation: None,
+                    thinking: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_turn_that_spent_nothing_leaves_the_total_where_it_was() {
+        // A run total that repeats is the harness saying this turn added nothing, which the
+        // runtime attributes as no growth. It is not the same as reporting nothing at all.
+        assert_eq!(
+            totals_across(&[
+                r#"{"input_tokens":4,"output_tokens":9}"#,
+                r#"{"input_tokens":0,"output_tokens":0}"#,
+            ])[1],
+            TokenUsage {
+                input: Some(4),
+                output: Some(9),
+                cache_read: None,
+                cache_creation: None,
+                thinking: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_member_one_turn_did_not_report_keeps_the_total_an_earlier_turn_set() {
+        // Silence is the harness declining to repeat itself, not retracting what it said, so
+        // the total stands and is reported again rather than dropping back to absent.
+        let totals = totals_across(&[
+            r#"{"input_tokens":3,"output_tokens":7,"cache_read_input_tokens":11}"#,
+            r#"{"input_tokens":2}"#,
+        ]);
+        assert_eq!(
+            totals[1],
+            TokenUsage {
+                input: Some(5),
+                output: Some(7),
+                cache_read: Some(11),
+                cache_creation: None,
+                thinking: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_count_no_turn_has_reported_stays_absent_in_the_total() {
+        // Absent is not zero all the way to the wire: a member no turn named is never invented.
+        let totals = totals_across(&[r#"{"input_tokens":1}"#, r#"{"input_tokens":1}"#]);
+        assert_eq!(totals[1].input, Some(2));
+        for absent in [
+            totals[1].output,
+            totals[1].cache_read,
+            totals[1].cache_creation,
+            totals[1].thinking,
+        ] {
+            assert_eq!(absent, None);
+        }
+    }
+
+    #[test]
+    fn a_fresh_run_starts_over_rather_than_carrying_the_last_one_forward() {
+        // `launch` starts a new one per process, because the next process's first turn is the
+        // run's first turn again.
+        let turn = r#"{"input_tokens":2,"output_tokens":10}"#;
+        assert_eq!(totals_across(&[turn]), totals_across(&[turn]));
+    }
+
+    #[test]
+    fn the_counts_go_out_before_the_terminal_event_that_closes_the_turn() {
+        // The runtime attributes a reading to the turn open when it arrives, and both terminal
+        // events close the turn — so a reading emitted after one would land on the next turn.
+        let line = result_with_usage(r#"{"input_tokens":1,"output_tokens":5}"#);
+        let events = parse_line(&line, &bridged_context(), &mut RunningUsage::new());
+        assert!(
+            matches!(events.as_slice(), [Event::Usage(_), Event::TurnEnd(_)]),
+            "a result line reports then ends the turn, not {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_line_reporting_no_counts_emits_no_usage_event_at_all() {
+        // One representation for "this line said nothing about tokens": no event, rather than
+        // an event carrying five absences.
+        let events = parse_line(
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"done"}"#,
+            &bridged_context(),
+            &mut RunningUsage::new(),
+        );
+        assert!(
+            matches!(events.as_slice(), [Event::TurnEnd(_)]),
+            "no usage event, not {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_run_total_saturates_rather_than_wrapping_past_u64() {
+        // Absurd, but it must not panic in a component the runtime cannot catch an abort from.
+        let huge = format!(r#"{{"input_tokens":{}}}"#, u64::MAX);
+        let totals = totals_across(&[&huge, r#"{"input_tokens":5}"#]);
+        assert_eq!(totals[1].input, Some(u64::MAX));
     }
 }

@@ -39,7 +39,7 @@ version = "0.7.0"
 [[artifact]]
 name = "murmur-driver-claude-code"
 path = "drivers/murmur-driver-claude-code"
-version = "0.1.0"
+version = "0.2.0"
 
 [[artifact]]
 name = "murmur-driver-deepseek"
