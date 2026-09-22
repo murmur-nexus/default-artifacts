@@ -79,6 +79,11 @@ echo "→ [4/5] install into $CAPSULE_DIR"
 # .mur.zip, and `mur install` already wrote that exact value to a .sha256 sidecar
 # next to the artifact — read it back so the lock always matches mur's own
 # integrity check. If no lock exists, leave it: `mur run` generates a correct one.
+#
+# Which key the hash goes under is the artifact's payload shape, not a choice:
+# lock_version 2 pins a wasm component under sha256.any and a native binary under
+# sha256.platforms.<tag>, and refuses an entry carrying both. A native .mur.zip is
+# named "<name>-<version>-<platform>.mur.zip", which is where the tag comes from.
 echo "→ [5/5] update lock $NAME@$VERSION"
 SIDECAR=$(ls "$CAPSULE_DIR/.murmur/artifacts/$NAME/$VERSION/"*.sha256 2>/dev/null | head -1 || true)
 if [ ! -f "$LOCK" ]; then
@@ -87,19 +92,38 @@ elif [ -z "$SIDECAR" ]; then
   echo "    warning: no .sha256 sidecar under .murmur/artifacts/$NAME/$VERSION/ — left lock unchanged" >&2
 else
   SHA=$(tr -d '[:space:]' < "$SIDECAR")
-  python3 - "$LOCK" "$NAME" "$VERSION" "$SHA" <<'PY'
+  if [ "$IMPL" = "native" ]; then
+    PLATFORM="$(basename "$ZIP")"; PLATFORM="${PLATFORM#"$NAME-$VERSION-"}"; PLATFORM="${PLATFORM%.mur.zip}"
+    # package.sh hardcodes its own VERSION; if it disagrees with murmur.yaml the
+    # prefix strip above is a no-op and the whole filename would become the key.
+    [[ "$PLATFORM" =~ ^[a-z]+-[a-z0-9_]+$ ]] || {
+      echo "error: could not parse a platform tag from $(basename "$ZIP") (package.sh VERSION vs murmur.yaml $VERSION?)" >&2; exit 1; }
+  else
+    PLATFORM=""
+  fi
+  python3 - "$LOCK" "$NAME" "$VERSION" "$SHA" "$PLATFORM" <<'PY'
 import sys, yaml
-lock_path, name, version, sha = sys.argv[1:5]
+lock_path, name, version, sha, platform = sys.argv[1:6]
 doc = yaml.safe_load(open(lock_path)) or {}
 arts = doc.setdefault("artifacts", [])
 entry = next((a for a in arts if a.get("name") == name), None)
 if entry is None:
     entry = {"name": name}
     arts.append(entry)
+# Same rule as LockedArtifact::pin: other platforms' hashes for this version stay,
+# since the lock is shared across machines. Otherwise replace whole — an entry
+# holding both sha256.any and sha256.platforms is refused, and whatever is there
+# names the previous version.
+old = entry.get("sha256") or {}
+key = f"platforms.{platform}" if platform else "any"
+if platform and entry.get("resolved_version") == version and "platforms" in old and "any" not in old:
+    old["platforms"][platform] = sha
+    entry["sha256"] = old
+else:
+    entry["sha256"] = {"platforms": {platform: sha}} if platform else {"any": sha}
 entry["resolved_version"] = version
-entry.setdefault("sha256", {})["wasm"] = sha
 yaml.safe_dump(doc, open(lock_path, "w"), sort_keys=False)
-print(f"    lock updated: {name}@{version} sha256.wasm={sha[:12]}…")
+print(f"    lock updated: {name}@{version} sha256.{key}={sha[:12]}…")
 PY
 fi
 
