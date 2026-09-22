@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-21T14:26:36Z",
+  "updated_at": "2026-09-22T15:26:23Z",
   "artifacts": [
     {
       "name": "murmur-driver-anthropic",
@@ -16,7 +16,7 @@
     },
     {
       "name": "murmur-driver-claude-code",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "runtime": "driver",
       "description": "Process driver for Claude Code.",
       "tags": [

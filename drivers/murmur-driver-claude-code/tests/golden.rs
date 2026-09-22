@@ -7,9 +7,8 @@
 //! reading is covered by a unit test instead.
 
 use murmur_driver_claude_code::{
-    describe, parse_line, parse_line_usage, parse_lines, parse_lines_usage, tool_name_prefix,
-    Event, FailureKind, ParseContext, RetryInfo, SessionInfo, TokenUsage, ToolCallInfo,
-    ToolResultInfo, TurnFailure,
+    describe, parse_line, parse_lines, tool_name_prefix, Event, FailureKind, ParseContext,
+    RetryInfo, RunningUsage, SessionInfo, TokenUsage, ToolCallInfo, ToolResultInfo, TurnFailure,
 };
 
 /// The MCP server name the recordings were made with. `launch` builds the harness's tool prefix
@@ -61,11 +60,12 @@ fn events_of(name: &str, split: usize) -> Vec<Event> {
     let context = recorded_context();
     assert_split_is_mid_message(name, &lines, split);
 
-    let whole = parse_lines(&lines, &context);
+    let whole = parse_lines(&lines, &context, &mut RunningUsage::new());
 
+    let mut one_by_one = RunningUsage::new();
     let one_at_a_time: Vec<Event> = lines
         .iter()
-        .flat_map(|line| parse_line(line, &context))
+        .flat_map(|line| parse_line(line, &context, &mut one_by_one))
         .collect();
     assert_eq!(
         one_at_a_time, whole,
@@ -73,8 +73,9 @@ fn events_of(name: &str, split: usize) -> Vec<Event> {
     );
 
     let (head, tail) = lines.split_at(split);
-    let mut split_in_two = parse_lines(head, &context);
-    split_in_two.extend(parse_lines(tail, &context));
+    let mut across = RunningUsage::new();
+    let mut split_in_two = parse_lines(head, &context, &mut across);
+    split_in_two.extend(parse_lines(tail, &context, &mut across));
     assert_eq!(
         split_in_two, whole,
         "{name}: a batch boundary inside a message must produce the same events as one batch"
@@ -169,6 +170,7 @@ fn golden_01_text_new_session() {
             session("aaaaaaaa-1111-4222-8333-444444444444"),
             delta(RESUMED_REPLY),
             text(RESUMED_REPLY),
+            spent(1, 5, 0, 0, 0),
             end(RESUMED_REPLY),
         ]
     );
@@ -182,6 +184,7 @@ fn golden_02_resume_same_session() {
             session("aaaaaaaa-1111-4222-8333-444444444444"),
             delta(RESUMED_REPLY),
             text(RESUMED_REPLY),
+            spent(1, 5, 0, 0, 0),
             end(RESUMED_REPLY),
         ]
     );
@@ -207,6 +210,7 @@ fn golden_03_bridge_tool_call() {
             }),
             delta(FRESH_REPLY),
             text(FRESH_REPLY),
+            spent(2, 10, 0, 0, 0),
             end(FRESH_REPLY),
         ]
     );
@@ -223,6 +227,7 @@ fn golden_04_thinking() {
             delta("Answer after thinking. "),
             delta(FRESH_REPLY),
             text(&format!("Answer after thinking. {FRESH_REPLY}")),
+            spent(1, 5, 0, 0, 0),
             end(&format!("Answer after thinking. {FRESH_REPLY}")),
         ]
     );
@@ -237,6 +242,7 @@ fn golden_05_auth_401() {
             session("237dbd29-7562-4247-8522-b1c8e7668544"),
             // The `<synthetic>` message `claude` writes for an API error is read like any other.
             text(message),
+            spent(0, 0, 0, 0, 0),
             failed(FailureKind::Auth, message),
         ]
     );
@@ -249,6 +255,7 @@ fn golden_06_quota_429() {
         vec![
             session("4577d02b-aa7a-4cec-9b8a-25e13414fd7a"),
             text(QUOTA_MESSAGE),
+            spent(0, 0, 0, 0, 0),
             failed(FailureKind::Quota, QUOTA_MESSAGE),
         ]
     );
@@ -269,6 +276,7 @@ fn golden_07_quota_429_after_retries() {
             retry(1),
             retry(2),
             text(QUOTA_MESSAGE),
+            spent(0, 0, 0, 0, 0),
             failed(FailureKind::Quota, QUOTA_MESSAGE),
         ]
     );
@@ -287,10 +295,12 @@ fn golden_08_interrupt_control_request() {
             delta("tick2 "),
             delta("tick3 "),
             text("tick0 tick1 tick2 tick3 "),
+            spent(0, 0, 0, 0, 0),
             failed(FailureKind::Canceled, ABORTED_MESSAGE),
             session("bbbbbbbb-1111-4222-8333-444444444444"),
             delta(FRESH_REPLY),
             text(FRESH_REPLY),
+            spent(1, 5, 0, 0, 0),
             end(FRESH_REPLY),
         ]
     );
@@ -308,6 +318,7 @@ fn golden_09_interrupt_sigint() {
             delta("tick3 "),
             delta("tick4 "),
             text("tick0 tick1 tick2 tick3 tick4 "),
+            spent(0, 0, 0, 0, 0),
             failed(FailureKind::Canceled, ABORTED_MESSAGE),
         ]
     );
@@ -321,6 +332,7 @@ fn golden_10_resume_after_sigint() {
             session("cccccccc-1111-4222-8333-444444444444"),
             delta(FRESH_REPLY),
             text(FRESH_REPLY),
+            spent(1, 5, 0, 0, 0),
             end(FRESH_REPLY),
         ]
     );
@@ -452,7 +464,7 @@ fn a_recorded_tool_name_keeps_a_prefix_this_driver_did_not_add() {
     let lines = recorded_lines("03-bridge-tool-call");
 
     let called = |context: &ParseContext| {
-        parse_lines(&lines, context)
+        parse_lines(&lines, context, &mut RunningUsage::new())
             .into_iter()
             .find_map(|event| match event {
                 Event::ToolCall(call) => Some(call.name),
@@ -476,28 +488,23 @@ fn a_recorded_tool_name_keeps_a_prefix_this_driver_did_not_add() {
 /// The token counts a recording reports, having first shown that the partition into batches
 /// does not change them either: the reading of a batch is the readings of its lines.
 fn usage_of(name: &str, split: usize) -> Vec<TokenUsage> {
-    let lines = recorded_lines(name);
+    usage_in(&events_of(name, split))
+}
 
-    let whole = parse_lines_usage(&lines);
-
-    let one_at_a_time: Vec<TokenUsage> = lines
+/// Every usage reading among a recording's events, in the order they were emitted.
+fn usage_in(events: &[Event]) -> Vec<TokenUsage> {
+    events
         .iter()
-        .filter_map(|line| parse_line_usage(line))
-        .collect();
-    assert_eq!(
-        one_at_a_time, whole,
-        "{name}: one line per batch must report the same counts as one batch"
-    );
+        .filter_map(|event| match event {
+            Event::Usage(usage) => Some(usage.clone()),
+            _ => None,
+        })
+        .collect()
+}
 
-    let (head, tail) = lines.split_at(split);
-    let mut split_in_two = parse_lines_usage(head);
-    split_in_two.extend(parse_lines_usage(tail));
-    assert_eq!(
-        split_in_two, whole,
-        "{name}: a batch boundary inside a message must report the same counts as one batch"
-    );
-
-    whole
+/// The usage event a `result` line emits, carrying the run totals through that turn.
+fn spent(input: u64, output: u64, cache_read: u64, cache_creation: u64, thinking: u64) -> Event {
+    Event::Usage(usage(input, output, cache_read, cache_creation, thinking))
 }
 
 /// A reading in which the harness wrote all five counts, which is what all ten recordings do.
@@ -509,11 +516,11 @@ fn usage(
     thinking: u64,
 ) -> TokenUsage {
     TokenUsage {
-        input_tokens: Some(input),
-        output_tokens: Some(output),
-        cache_read_tokens: Some(cache_read),
-        cache_creation_tokens: Some(cache_creation),
-        thinking_tokens: Some(thinking),
+        input: Some(input),
+        output: Some(output),
+        cache_read: Some(cache_read),
+        cache_creation: Some(cache_creation),
+        thinking: Some(thinking),
     }
 }
 
@@ -642,7 +649,8 @@ fn no_line_but_a_result_line_reports_a_count() {
     // one — measured line by line rather than in aggregate.
     for (name, _) in RECORDINGS {
         for line in recorded_lines(name) {
-            let reported = parse_line_usage(&line).is_some();
+            let events = parse_line(&line, &recorded_context(), &mut RunningUsage::new());
+            let reported = !usage_in(&events).is_empty();
             assert_eq!(
                 reported,
                 is_result_line(&line),
