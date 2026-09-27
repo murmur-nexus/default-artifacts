@@ -139,12 +139,25 @@ survives, the response carries no `usage` key at all.
 Any other value is refused with
 `driver: unsupported Anthropic stop_reason '<value>'`.
 
-A response with no stop reason — a body that is not a Messages API response, or
-a stream that ended before any `message_delta` carried one — is refused with
-`driver: Anthropic response has no stop_reason` or
-`driver: Anthropic stream ended with no stop_reason` respectively, and the task
-fails. `stop_reason: "end_turn"` with empty `content` is a successful empty
-turn.
+A response that never says why the turn stopped is refused rather than read as
+`end_turn`:
+
+| Response | Refused with |
+|---|---|
+| JSON body whose `stop_reason` is absent, `null` or not a string — for example a chat-completions body | `driver: Anthropic response has no stop_reason` |
+| SSE stream that ends before any `message_delta` carries a non-empty `stop_reason` — a dropped connection, an empty body, or a stream that ends on an `event: error` | `driver: Anthropic stream ended with no stop_reason` |
+
+A refusal is returned as `{"stop_reason":"error","error":"<message>"}`, the same
+shape as every other driver error, so the task ends failed. The message never
+includes any part of the response body. Text already streamed through
+`murmur:text/chunks` before the stream ended has been shown and is not
+withdrawn; it is just not recorded as a finished reply.
+
+Not refused:
+
+- `stop_reason: "end_turn"` with empty `content` — a successful empty turn.
+- A stream whose `message_delta` carried a stop reason but that ended before
+  `message_stop` — the reply is already complete at that point.
 
 ## Prompt cache key
 

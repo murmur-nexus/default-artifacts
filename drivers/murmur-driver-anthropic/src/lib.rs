@@ -1423,7 +1423,10 @@ mod tests {
             "content": [{"type": "text", "text": "partial"}]
         });
 
-        assert_eq!(translate_anthropic_response_to_murmur(&body).unwrap_err(), NO_STOP_REASON);
+        assert_eq!(
+            translate_anthropic_response_to_murmur(&body).unwrap_err(),
+            NO_STOP_REASON
+        );
     }
 
     #[test]
@@ -1454,8 +1457,12 @@ mod tests {
         );
 
         let mut emitted: Vec<String> = Vec::new();
-        let err = parse_anthropic_sse_body(body, &mut |chunk| emitted.push(chunk.to_string()), &mut |_| {})
-            .unwrap_err();
+        let err = parse_anthropic_sse_body(
+            body,
+            &mut |chunk| emitted.push(chunk.to_string()),
+            &mut |_| {},
+        )
+        .unwrap_err();
 
         assert_eq!(err, STREAM_NO_STOP_REASON);
         assert_eq!(emitted, vec!["Hello", " world"]);
