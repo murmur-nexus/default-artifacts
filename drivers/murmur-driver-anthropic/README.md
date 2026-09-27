@@ -127,6 +127,38 @@ Each member is independently optional. A count the provider did not report is
 omitted rather than sent as `0`; a reported `0` is kept as `0`. When no member
 survives, the response carries no `usage` key at all.
 
+## Stop reasons
+
+| Anthropic `stop_reason` | murmur `stop_reason` |
+|---|---|
+| `end_turn` | `end_turn` |
+| `stop_sequence` | `end_turn` |
+| `tool_use` | `tool_call` |
+| `max_tokens` | `max_tokens` |
+
+Any other value is refused with
+`driver: unsupported Anthropic stop_reason '<value>'`.
+
+A response that never says why the turn stopped is refused rather than read as
+`end_turn`:
+
+| Response | Refused with |
+|---|---|
+| JSON body whose `stop_reason` is absent, `null` or not a string — for example a chat-completions body | `driver: Anthropic response has no stop_reason` |
+| SSE stream that ends before any `message_delta` carries a non-empty `stop_reason` — a dropped connection, an empty body, or a stream that ends on an `event: error` | `driver: Anthropic stream ended with no stop_reason` |
+
+A refusal is returned as `{"stop_reason":"error","error":"<message>"}`, the same
+shape as every other driver error, so the task ends failed. The message never
+includes any part of the response body. Text already streamed through
+`murmur:text/chunks` before the stream ended has been shown and is not
+withdrawn; it is just not recorded as a finished reply.
+
+Not refused:
+
+- `stop_reason: "end_turn"` with empty `content` — a successful empty turn.
+- A stream whose `message_delta` carried a stop reason but that ended before
+  `message_stop` — the reply is already complete at that point.
+
 ## Prompt cache key
 
 Murmur puts a `prompt_cache_key` on every driver request. This driver drops it:

@@ -34,7 +34,7 @@ native_platforms = ["darwin-aarch64", "linux-x86_64"]
 [[artifact]]
 name = "murmur-driver-anthropic"
 path = "drivers/murmur-driver-anthropic"
-version = "0.7.0"
+version = "0.8.0"
 
 [[artifact]]
 name = "murmur-driver-claude-code"
