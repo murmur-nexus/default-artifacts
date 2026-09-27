@@ -127,6 +127,25 @@ Each member is independently optional. A count the provider did not report is
 omitted rather than sent as `0`; a reported `0` is kept as `0`. When no member
 survives, the response carries no `usage` key at all.
 
+## Stop reasons
+
+| Anthropic `stop_reason` | murmur `stop_reason` |
+|---|---|
+| `end_turn` | `end_turn` |
+| `stop_sequence` | `end_turn` |
+| `tool_use` | `tool_call` |
+| `max_tokens` | `max_tokens` |
+
+Any other value is refused with
+`driver: unsupported Anthropic stop_reason '<value>'`.
+
+A response with no stop reason — a body that is not a Messages API response, or
+a stream that ended before any `message_delta` carried one — is refused with
+`driver: Anthropic response has no stop_reason` or
+`driver: Anthropic stream ended with no stop_reason` respectively, and the task
+fails. `stop_reason: "end_turn"` with empty `content` is a successful empty
+turn.
+
 ## Prompt cache key
 
 Murmur puts a `prompt_cache_key` on every driver request. This driver drops it:

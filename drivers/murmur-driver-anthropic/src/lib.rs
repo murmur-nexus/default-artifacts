@@ -573,23 +573,24 @@ fn stamp_streaming_flags(body: &mut Value) {
     }
 }
 
+fn map_anthropic_stop_reason(anthropic_stop: &str) -> Result<&'static str, String> {
+    match anthropic_stop {
+        "end_turn" | "stop_sequence" => Ok("end_turn"),
+        "tool_use" => Ok("tool_call"),
+        "max_tokens" => Ok("max_tokens"),
+        other => Err(format!(
+            "driver: unsupported Anthropic stop_reason '{other}'"
+        )),
+    }
+}
+
 fn translate_anthropic_response_to_murmur(response: &Value) -> Result<Value, String> {
+    // Absent, `null` or non-string: not a finished Messages API response.
     let anthropic_stop = response
         .get("stop_reason")
         .and_then(Value::as_str)
-        .unwrap_or("end_turn");
-
-    let stop_reason = match anthropic_stop {
-        "end_turn" => "end_turn",
-        "tool_use" => "tool_call",
-        "max_tokens" => "max_tokens",
-        "stop_sequence" => "end_turn",
-        other => {
-            return Err(format!(
-                "driver: unsupported Anthropic stop_reason '{other}'"
-            ));
-        }
-    };
+        .ok_or_else(|| "driver: Anthropic response has no stop_reason".to_string())?;
+    let stop_reason = map_anthropic_stop_reason(anthropic_stop)?;
 
     let content_blocks = response
         .get("content")
@@ -828,18 +829,12 @@ fn parse_anthropic_sse_body<F: FnMut(&str), G: FnMut(&str)>(
 }
 
 fn assemble_anthropic_streaming_response(state: AnthropicSseState) -> Result<Value, String> {
-    let anthropic_stop = state.stop_reason.as_deref().unwrap_or("end_turn");
-    let stop_reason = match anthropic_stop {
-        "end_turn" => "end_turn",
-        "tool_use" => "tool_call",
-        "max_tokens" => "max_tokens",
-        "stop_sequence" => "end_turn",
-        other => {
-            return Err(format!(
-                "driver: unsupported Anthropic stop_reason '{other}'"
-            ));
-        }
-    };
+    // No `message_delta` carried a stop reason, so the stream ended before the turn did.
+    let anthropic_stop = state
+        .stop_reason
+        .as_deref()
+        .ok_or_else(|| "driver: Anthropic stream ended with no stop_reason".to_string())?;
+    let stop_reason = map_anthropic_stop_reason(anthropic_stop)?;
 
     let usage = state.usage;
     let mut content = Vec::new();
@@ -1404,6 +1399,113 @@ mod tests {
 
         let translated = translate_anthropic_response_to_murmur(&anthropic).unwrap();
         assert_eq!(translated["stop_reason"], "end_turn");
+    }
+
+    const NO_STOP_REASON: &str = "driver: Anthropic response has no stop_reason";
+    const STREAM_NO_STOP_REASON: &str = "driver: Anthropic stream ended with no stop_reason";
+
+    #[test]
+    fn chat_completions_body_is_refused_without_echoing_it() {
+        let body = json!({"id":"x","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"hi"}}]});
+
+        let err = translate_anthropic_response_to_murmur(&body).unwrap_err();
+        assert_eq!(err, NO_STOP_REASON);
+        assert!(!err.contains("chat.completion"));
+        assert!(!err.contains("choices"));
+    }
+
+    #[test]
+    fn null_stop_reason_is_refused() {
+        let body = json!({
+            "type": "message",
+            "role": "assistant",
+            "stop_reason": null,
+            "content": [{"type": "text", "text": "partial"}]
+        });
+
+        assert_eq!(translate_anthropic_response_to_murmur(&body).unwrap_err(), NO_STOP_REASON);
+    }
+
+    #[test]
+    fn end_turn_with_empty_content_is_a_successful_empty_turn() {
+        let body = json!({"stop_reason": "end_turn", "content": []});
+
+        let translated = translate_anthropic_response_to_murmur(&body).unwrap();
+        assert_eq!(translated["stop_reason"], "end_turn");
+        assert_eq!(translated["content"], json!([]));
+        assert!(translated.get("usage").is_none());
+    }
+
+    #[test]
+    fn stream_cut_off_before_message_delta_is_refused() {
+        let body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-4-6\",\"stop_reason\":null,\"stop_sequence\":null}}\n",
+            "\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\n",
+            "\n",
+        );
+
+        let mut emitted: Vec<String> = Vec::new();
+        let err = parse_anthropic_sse_body(body, &mut |chunk| emitted.push(chunk.to_string()), &mut |_| {})
+            .unwrap_err();
+
+        assert_eq!(err, STREAM_NO_STOP_REASON);
+        assert_eq!(emitted, vec!["Hello", " world"]);
+    }
+
+    #[test]
+    fn empty_stream_is_refused() {
+        let err = parse_anthropic_sse_body("", &mut |_| {}, &mut |_| {}).unwrap_err();
+        assert_eq!(err, STREAM_NO_STOP_REASON);
+    }
+
+    #[test]
+    fn stream_whose_only_message_delta_carries_null_stop_reason_is_refused() {
+        let body = concat!(
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n",
+            "\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":null,\"stop_sequence\":null},\"usage\":{\"output_tokens\":1}}\n",
+            "\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n",
+            "\n",
+        );
+
+        let err = parse_anthropic_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap_err();
+        assert_eq!(err, STREAM_NO_STOP_REASON);
+    }
+
+    #[test]
+    fn stream_with_stop_reason_but_no_message_stop_is_accepted() {
+        let body = concat!(
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello world\"}}\n",
+            "\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":2}}\n",
+            "\n",
+        );
+
+        let result = parse_anthropic_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap();
+        assert_eq!(result["stop_reason"], "end_turn");
+        assert_eq!(result["content"][0]["type"], "text");
+        assert_eq!(result["content"][0]["text"], "Hello world");
     }
 
     #[test]
