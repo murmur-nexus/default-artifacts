@@ -573,6 +573,35 @@ fn stamp_streaming_flags(body: &mut Value) {
     }
 }
 
+/// A Messages API `stop_reason: "refusal"`, on either path. It carries no `driver: ` prefix: the
+/// provider declined the turn, and the driver read that correctly.
+const REFUSED: &str = "Anthropic response refused";
+const NO_STOP_REASON: &str = "driver: Anthropic response has no stop_reason";
+const STREAM_NO_STOP_REASON: &str = "driver: Anthropic stream ended with no stop_reason";
+/// A body that holds lines but not one SSE `event:` line, such as a Chat Completions stream.
+const NOT_AN_EVENT_STREAM: &str = "driver: response is not an Anthropic event stream";
+
+fn malformed_response(detail: std::fmt::Arguments<'_>) -> String {
+    format!("driver: malformed Anthropic response: {detail}")
+}
+
+fn malformed_stream(detail: std::fmt::Arguments<'_>) -> String {
+    format!("driver: malformed Anthropic stream: {detail}")
+}
+
+/// `Anthropic error: <type>: <message>` for a Messages API error object, delivered in a 2xx body
+/// or an SSE `error` event. A part that is absent or not a string reads `unknown`: the text is
+/// diagnostic only, since the call has already failed.
+fn provider_error_message(error: Option<&Value>) -> String {
+    let part = |key: &str| {
+        error
+            .and_then(|error| error.get(key))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+    };
+    format!("Anthropic error: {}: {}", part("type"), part("message"))
+}
+
 fn map_anthropic_stop_reason(anthropic_stop: &str) -> Result<&'static str, String> {
     match anthropic_stop {
         "end_turn" | "stop_sequence" => Ok("end_turn"),
@@ -584,39 +613,35 @@ fn map_anthropic_stop_reason(anthropic_stop: &str) -> Result<&'static str, Strin
     }
 }
 
+/// Translate a buffered Messages API body. Provider errors and refusals come back as
+/// `Ok(error_payload(..))`; a body the driver cannot read as a finished turn is an `Err`.
 fn translate_anthropic_response_to_murmur(response: &Value) -> Result<Value, String> {
+    if response.get("type").and_then(Value::as_str) == Some("error") {
+        return Ok(error_payload(&provider_error_message(response.get("error"))));
+    }
+
     // Absent, `null` or non-string: not a finished Messages API response.
     let anthropic_stop = response
         .get("stop_reason")
         .and_then(Value::as_str)
-        .ok_or_else(|| "driver: Anthropic response has no stop_reason".to_string())?;
+        .ok_or_else(|| NO_STOP_REASON.to_string())?;
+    if anthropic_stop == "refusal" {
+        return Ok(error_payload(REFUSED));
+    }
     let stop_reason = map_anthropic_stop_reason(anthropic_stop)?;
 
-    let content_blocks = response
+    // `content: []` is an empty turn; no array at all cannot be told apart from a lost reply.
+    let blocks = response
         .get("content")
         .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+        .ok_or_else(|| malformed_response(format_args!("no content array")))?;
 
-    let content = content_blocks
-        .iter()
-        .filter_map(|block| match block.get("type").and_then(Value::as_str) {
-            Some("text") => Some(json!({
-                "type": "text",
-                "text": block
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-            })),
-            Some("tool_use") => Some(json!({
-                "type": "tool_call",
-                "id": block.get("id").and_then(Value::as_str).unwrap_or_default(),
-                "name": block.get("name").and_then(Value::as_str).unwrap_or_default(),
-                "input": block.get("input").cloned().unwrap_or_else(default_object),
-            })),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    let mut content = Vec::with_capacity(blocks.len());
+    for (index, block) in blocks.iter().enumerate() {
+        if let Some(block) = translate_anthropic_content_block(index, block)? {
+            content.push(block);
+        }
+    }
 
     let usage = response
         .get("usage")
@@ -626,12 +651,83 @@ fn translate_anthropic_response_to_murmur(response: &Value) -> Result<Value, Str
     Ok(murmur_response(stop_reason, content, usage))
 }
 
+/// One buffered content block as murmur content, or `None` for a block murmur has no shape for.
+fn translate_anthropic_content_block(index: usize, block: &Value) -> Result<Option<Value>, String> {
+    let field = |key: &str| block.get(key).and_then(Value::as_str);
+    let block_type = field("type")
+        .ok_or_else(|| malformed_response(format_args!("content block {index} has no type")))?;
+
+    match block_type {
+        "text" => {
+            let text = field("text")
+                .ok_or_else(|| malformed_response(format_args!("text block {index} has no text")))?;
+            Ok(Some(json!({"type": "text", "text": text})))
+        }
+        "tool_use" => {
+            let id = field("id")
+                .ok_or_else(|| malformed_response(format_args!("tool_use block {index} has no id")))?;
+            let name = field("name").ok_or_else(|| {
+                malformed_response(format_args!("tool_use block {index} has no name"))
+            })?;
+            let input = block.get("input").filter(|input| input.is_object()).ok_or_else(|| {
+                malformed_response(format_args!(
+                    "tool_use block {index} input is not a JSON object"
+                ))
+            })?;
+            Ok(Some(json!({
+                "type": "tool_call",
+                "id": id,
+                "name": name,
+                "input": input,
+            })))
+        }
+        "thinking" => {
+            let text = field("thinking").ok_or_else(|| {
+                malformed_response(format_args!("thinking block {index} has no thinking"))
+            })?;
+            // Unsigned is representable: the request translation replays only signed blocks.
+            let signature = field("signature").unwrap_or_default();
+            Ok(Some(json!({
+                "type": "thinking",
+                "text": text,
+                "signature": signature,
+            })))
+        }
+        // `redacted_thinking` has no murmur content block. Other types are server-tool blocks
+        // the driver never requests, or types added to the Messages API since; none carries
+        // anything murmur could forward.
+        _ => Ok(None),
+    }
+}
+
 // ── SSE streaming types and parsing ──────────────────────────────────────────
 
 enum AnthropicBlock {
     Text { text: String },
     Thinking { text: String, signature: String },
     ToolUse { id: String, name: String, input: String },
+    /// A block type murmur has no content block for (see `translate_anthropic_content_block`).
+    /// Its deltas are dropped.
+    Ignored,
+}
+
+impl AnthropicBlock {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Text { .. } => "text",
+            Self::Thinking { .. } => "thinking",
+            Self::ToolUse { .. } => "tool_use",
+            Self::Ignored => "ignored",
+        }
+    }
+}
+
+/// Why a stream stopped being read before its turn finished.
+enum StreamFailure {
+    /// An `event: error`; its `Anthropic error: ` message ends the turn as a provider error.
+    Provider(String),
+    /// A `driver: ` message: the stream cannot be read as a Messages API turn.
+    Malformed(String),
 }
 
 struct AnthropicSseState {
@@ -641,6 +737,12 @@ struct AnthropicSseState {
     current_event: String,
     current_data: String,
     done: bool,
+    /// The first failure; once set, `done` is too and no later line is dispatched.
+    failure: Option<StreamFailure>,
+    /// An SSE `event:` line was read, so the body is in the Messages API's shape.
+    saw_event_line: bool,
+    /// A non-blank line other than an SSE comment was read.
+    saw_content_line: bool,
 }
 
 impl AnthropicSseState {
@@ -652,19 +754,30 @@ impl AnthropicSseState {
             current_event: String::new(),
             current_data: String::new(),
             done: false,
+            failure: None,
+            saw_event_line: false,
+            saw_content_line: false,
         }
     }
 }
 
 /// Process one SSE line, updating state and calling `emit` for text deltas.
-/// Returns `true` when the stream is done (`message_stop` dispatched).
+/// Returns `true` when reading should stop: `message_stop` was dispatched, or a failure was
+/// recorded.
 fn process_anthropic_sse_line(
     line: &str,
     state: &mut AnthropicSseState,
     emit: &mut impl FnMut(&str),
     emit_thinking: &mut impl FnMut(&str),
 ) -> bool {
+    if state.done {
+        return true;
+    }
+    if !line.trim().is_empty() && !line.starts_with(':') {
+        state.saw_content_line = true;
+    }
     if let Some(event) = line.strip_prefix("event: ") {
+        state.saw_event_line = true;
         state.current_event = event.to_string();
     } else if let Some(data) = line.strip_prefix("data: ") {
         state.current_data = data.to_string();
@@ -673,7 +786,11 @@ fn process_anthropic_sse_line(
     } else if line.is_empty() && !state.current_event.is_empty() {
         let event = std::mem::take(&mut state.current_event);
         let data = std::mem::take(&mut state.current_data);
-        dispatch_anthropic_sse_event(&event, &data, state, emit, emit_thinking);
+        if let Err(failure) = dispatch_anthropic_sse_event(&event, &data, state, emit, emit_thinking)
+        {
+            state.failure = Some(failure);
+            state.done = true;
+        }
     }
     state.done
 }
@@ -684,108 +801,131 @@ fn dispatch_anthropic_sse_event(
     state: &mut AnthropicSseState,
     emit: &mut impl FnMut(&str),
     emit_thinking: &mut impl FnMut(&str),
-) {
-    let Ok(val) = serde_json::from_str::<Value>(data) else {
-        return;
+) -> Result<(), StreamFailure> {
+    let malformed = |detail: std::fmt::Arguments<'_>| StreamFailure::Malformed(malformed_stream(detail));
+    // Only the events whose data the driver reads are parsed, so only they can fail to parse.
+    let parse = || {
+        serde_json::from_str::<Value>(data)
+            .map_err(|_| malformed(format_args!("{event} data is not JSON")))
+    };
+    let block_index = |val: &Value| {
+        val.get("index")
+            .and_then(Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok())
+            .ok_or_else(|| malformed(format_args!("{event} has no index")))
     };
 
     match event {
+        "error" => {
+            // A provider error even when its data does not parse.
+            let val = serde_json::from_str::<Value>(data).ok();
+            let error = val.as_ref().and_then(|val| val.get("error"));
+            return Err(StreamFailure::Provider(provider_error_message(error)));
+        }
         "content_block_start" => {
-            let index = val.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let val = parse()?;
+            let index = block_index(&val)?;
             let block_type = val
                 .pointer("/content_block/type")
                 .and_then(Value::as_str)
-                .unwrap_or("text");
+                .ok_or_else(|| malformed(format_args!("content block {index} has no type")))?;
 
-            while state.blocks.len() <= index {
-                state.blocks.push(None);
-            }
-
-            state.blocks[index] = Some(match block_type {
-                "tool_use" => {
-                    let id = val
-                        .pointer("/content_block/id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    let name = val
-                        .pointer("/content_block/name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    AnthropicBlock::ToolUse { id, name, input: String::new() }
-                }
+            let block = match block_type {
+                "text" => AnthropicBlock::Text { text: String::new() },
                 "thinking" => AnthropicBlock::Thinking {
                     text: String::new(),
                     signature: String::new(),
                 },
-                _ => AnthropicBlock::Text { text: String::new() },
-            });
+                "tool_use" => {
+                    let field = |key: &str| {
+                        val.pointer(&format!("/content_block/{key}"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .ok_or_else(|| {
+                                malformed(format_args!("tool_use block {index} has no {key}"))
+                            })
+                    };
+                    AnthropicBlock::ToolUse {
+                        id: field("id")?,
+                        name: field("name")?,
+                        input: String::new(),
+                    }
+                }
+                _ => AnthropicBlock::Ignored,
+            };
+
+            while state.blocks.len() <= index {
+                state.blocks.push(None);
+            }
+            state.blocks[index] = Some(block);
         }
         "content_block_delta" => {
-            let index = val.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let val = parse()?;
+            let index = block_index(&val)?;
             let delta_type = val
                 .pointer("/delta/type")
                 .and_then(Value::as_str)
-                .unwrap_or("");
+                .ok_or_else(|| {
+                    malformed(format_args!(
+                        "content_block_delta for block {index} has no delta type"
+                    ))
+                })?;
+            let Some(Some(block)) = state.blocks.get_mut(index) else {
+                return Err(malformed(format_args!(
+                    "{delta_type} for block {index}, which never started"
+                )));
+            };
+            if matches!(block, AnthropicBlock::Ignored) {
+                return Ok(());
+            }
+            let field = match delta_type {
+                "text_delta" => "text",
+                "input_json_delta" => "partial_json",
+                "thinking_delta" => "thinking",
+                "signature_delta" => "signature",
+                // e.g. `citations_delta`: nothing in it that murmur content represents.
+                _ => return Ok(()),
+            };
+            let kind = block.kind();
+            // A present empty string is a real delta: tool input opens with `partial_json: ""`.
+            let payload = || {
+                val.pointer(&format!("/delta/{field}"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        malformed(format_args!("{delta_type} for block {index} has no {field}"))
+                    })
+            };
 
-            if index < state.blocks.len() {
-                match delta_type {
-                    "text_delta" => {
-                        let text = val
-                            .pointer("/delta/text")
-                            .and_then(Value::as_str)
-                            .unwrap_or("");
-                        if !text.is_empty() {
-                            emit(text);
-                            if let Some(Some(AnthropicBlock::Text { text: acc })) =
-                                state.blocks.get_mut(index)
-                            {
-                                acc.push_str(text);
-                            }
-                        }
+            match (delta_type, block) {
+                ("text_delta", AnthropicBlock::Text { text }) => {
+                    let delta = payload()?;
+                    if !delta.is_empty() {
+                        emit(delta);
+                        text.push_str(delta);
                     }
-                    "input_json_delta" => {
-                        let partial = val
-                            .pointer("/delta/partial_json")
-                            .and_then(Value::as_str)
-                            .unwrap_or("");
-                        if let Some(Some(AnthropicBlock::ToolUse { input, .. })) =
-                            state.blocks.get_mut(index)
-                        {
-                            input.push_str(partial);
-                        }
+                }
+                ("input_json_delta", AnthropicBlock::ToolUse { input, .. }) => {
+                    input.push_str(payload()?);
+                }
+                ("thinking_delta", AnthropicBlock::Thinking { text, .. }) => {
+                    let delta = payload()?;
+                    if !delta.is_empty() {
+                        emit_thinking(delta);
+                        text.push_str(delta);
                     }
-                    "thinking_delta" => {
-                        let thought = val
-                            .pointer("/delta/thinking")
-                            .and_then(Value::as_str)
-                            .unwrap_or("");
-                        if !thought.is_empty() {
-                            emit_thinking(thought);
-                            if let Some(Some(AnthropicBlock::Thinking { text, .. })) =
-                                state.blocks.get_mut(index)
-                            {
-                                text.push_str(thought);
-                            }
-                        }
-                    }
-                    "signature_delta" => {
-                        let sig = val
-                            .pointer("/delta/signature")
-                            .and_then(Value::as_str)
-                            .unwrap_or("");
-                        if let Some(Some(AnthropicBlock::Thinking { signature, .. })) =
-                            state.blocks.get_mut(index)
-                        {
-                            signature.push_str(sig);
-                        }
-                    }
-                    _ => {}
+                }
+                ("signature_delta", AnthropicBlock::Thinking { signature, .. }) => {
+                    signature.push_str(payload()?);
+                }
+                _ => {
+                    return Err(malformed(format_args!(
+                        "{delta_type} sent to {kind} block {index}"
+                    )));
                 }
             }
         }
         "message_start" => {
+            let val = parse()?;
             // Carries the request-side counts plus a placeholder `output_tokens` that a later
             // `message_delta` supersedes.
             if let Some(usage) = val.pointer("/message/usage") {
@@ -793,6 +933,7 @@ fn dispatch_anthropic_sse_event(
             }
         }
         "message_delta" => {
+            let val = parse()?;
             if let Some(reason) = val.pointer("/delta/stop_reason").and_then(Value::as_str) {
                 if !reason.is_empty() {
                     state.stop_reason = Some(reason.to_string());
@@ -806,8 +947,11 @@ fn dispatch_anthropic_sse_event(
         "message_stop" => {
             state.done = true;
         }
-        _ => {} // content_block_stop, ping — no-op
+        // content_block_stop and ping carry nothing the driver reads, and the Messages API may
+        // add event types a client is expected to tolerate.
+        _ => {}
     }
+    Ok(())
 }
 
 /// Parse a complete SSE body string (used in tests).
@@ -828,36 +972,49 @@ fn parse_anthropic_sse_body<F: FnMut(&str), G: FnMut(&str)>(
     assemble_anthropic_streaming_response(state)
 }
 
+/// Build the turn a stream carried. A provider error or refusal comes back as
+/// `Ok(error_payload(..))`; a stream the driver cannot read as a finished turn is an `Err`.
 fn assemble_anthropic_streaming_response(state: AnthropicSseState) -> Result<Value, String> {
+    match state.failure {
+        Some(StreamFailure::Provider(message)) => return Ok(error_payload(&message)),
+        Some(StreamFailure::Malformed(message)) => return Err(message),
+        None => {}
+    }
+    if state.saw_content_line && !state.saw_event_line {
+        return Err(NOT_AN_EVENT_STREAM.to_string());
+    }
     // No `message_delta` carried a stop reason, so the stream ended before the turn did.
     let anthropic_stop = state
         .stop_reason
         .as_deref()
-        .ok_or_else(|| "driver: Anthropic stream ended with no stop_reason".to_string())?;
+        .ok_or_else(|| STREAM_NO_STOP_REASON.to_string())?;
+    if anthropic_stop == "refusal" {
+        return Ok(error_payload(REFUSED));
+    }
     let stop_reason = map_anthropic_stop_reason(anthropic_stop)?;
+    let stopped_at_cap = anthropic_stop == "max_tokens";
 
     let usage = state.usage;
     let mut content = Vec::new();
-    for block in state.blocks.into_iter().flatten() {
+    for (index, block) in state.blocks.into_iter().enumerate() {
         match block {
-            AnthropicBlock::Text { text } if !text.is_empty() => {
+            Some(AnthropicBlock::Text { text }) if !text.is_empty() => {
                 content.push(json!({"type": "text", "text": text}));
             }
-            AnthropicBlock::Thinking { text, signature } if !text.is_empty() => {
+            Some(AnthropicBlock::Thinking { text, signature }) if !text.is_empty() => {
                 content.push(json!({
                     "type": "thinking",
                     "text": text,
                     "signature": signature,
                 }));
             }
-            AnthropicBlock::ToolUse { id, name, input } => {
-                let input_val: Value =
-                    serde_json::from_str(&input).unwrap_or_else(|_| json!({}));
+            Some(AnthropicBlock::ToolUse { id, name, input }) => {
+                let input = parse_streamed_tool_input(index, &name, &input, stopped_at_cap)?;
                 content.push(json!({
                     "type": "tool_call",
                     "id": id,
                     "name": name,
-                    "input": input_val,
+                    "input": input,
                 }));
             }
             _ => {}
@@ -867,7 +1024,38 @@ fn assemble_anthropic_streaming_response(state: AnthropicSseState) -> Result<Val
     Ok(murmur_response(stop_reason, content, usage))
 }
 
-#[allow(dead_code)] // reachable only from the wasm32-gated driver module
+/// The input of a streamed `tool_use` block, whose SSE index is `index`. Neither error echoes
+/// the partial input.
+fn parse_streamed_tool_input(
+    index: usize,
+    name: &str,
+    input: &str,
+    stopped_at_cap: bool,
+) -> Result<Value, String> {
+    // No `input_json_delta`, or only empty ones: how the Messages API streams a call with no
+    // arguments.
+    if input.is_empty() {
+        return Ok(json!({}));
+    }
+    let Ok(value) = serde_json::from_str::<Value>(input) else {
+        return Err(if stopped_at_cap {
+            format!(
+                "driver: Anthropic turn stopped at the inference.max_tokens output cap; tool call '{name}' was cut off mid-input and cannot be run — raise the cap and re-run"
+            )
+        } else {
+            malformed_stream(format_args!(
+                "tool_use block {index} ('{name}') input is not valid JSON"
+            ))
+        });
+    };
+    if !value.is_object() {
+        return Err(malformed_stream(format_args!(
+            "tool_use block {index} ('{name}') input is not a JSON object"
+        )));
+    }
+    Ok(value)
+}
+
 fn error_payload(message: &str) -> Value {
     json!({
         "stop_reason": "error",
@@ -1513,6 +1701,630 @@ mod tests {
         assert_eq!(result["stop_reason"], "end_turn");
         assert_eq!(result["content"][0]["type"], "text");
         assert_eq!(result["content"][0]["text"], "Hello world");
+    }
+
+    // ── Malformed, provider-error and refused responses ──────────────────────
+
+    const REFUSED: &str = "Anthropic response refused";
+    const NOT_AN_EVENT_STREAM: &str = "driver: response is not an Anthropic event stream";
+
+    /// Build an SSE body from `(event, data)` pairs, each closed by the blank line that
+    /// dispatches it.
+    fn sse(events: &[(&str, &str)]) -> String {
+        events
+            .iter()
+            .map(|(event, data)| format!("event: {event}\ndata: {data}\n\n"))
+            .collect()
+    }
+
+    const TEXT_START_0: &str =
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+    const TOOL_START_0: &str = r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"bash","input":{}}}"#;
+    const THINKING_START_0: &str = r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#;
+    const END_TURN: &str =
+        r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}"#;
+    const TOOL_USE_STOP: &str =
+        r#"{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null}}"#;
+    const MAX_TOKENS_STOP: &str =
+        r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null}}"#;
+    const MESSAGE_STOP: &str = r#"{"type":"message_stop"}"#;
+
+    fn text_delta(index: u64, text: &str) -> String {
+        json!({"type": "content_block_delta", "index": index, "delta": {"type": "text_delta", "text": text}})
+            .to_string()
+    }
+
+    fn input_delta(index: u64, partial: &str) -> String {
+        json!({"type": "content_block_delta", "index": index, "delta": {"type": "input_json_delta", "partial_json": partial}})
+            .to_string()
+    }
+
+    fn parse_stream(body: &str) -> Result<Value, String> {
+        parse_anthropic_sse_body(body, &mut |_| {}, &mut |_| {})
+    }
+
+    fn buffered_block_err(block: Value) -> String {
+        let body = json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "fine"}, block]
+        });
+        translate_anthropic_response_to_murmur(&body).unwrap_err()
+    }
+
+    #[test]
+    fn content_absent_null_or_not_an_array_is_malformed() {
+        for content in [None, Some(Value::Null), Some(json!("hi")), Some(json!({"type": "text"}))] {
+            let mut body = json!({"stop_reason": "end_turn"});
+            if let Some(content) = content.clone() {
+                body["content"] = content;
+            }
+            assert_eq!(
+                translate_anthropic_response_to_murmur(&body).unwrap_err(),
+                "driver: malformed Anthropic response: no content array",
+                "content = {content:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn buffered_block_with_no_type_is_malformed() {
+        for block in [json!({"text": "x"}), json!({"type": null, "text": "x"}), json!({"type": 3})] {
+            assert_eq!(
+                buffered_block_err(block),
+                "driver: malformed Anthropic response: content block 1 has no type"
+            );
+        }
+    }
+
+    #[test]
+    fn buffered_text_block_with_no_text_is_malformed() {
+        for block in [json!({"type": "text"}), json!({"type": "text", "text": 7})] {
+            assert_eq!(
+                buffered_block_err(block),
+                "driver: malformed Anthropic response: text block 1 has no text"
+            );
+        }
+    }
+
+    #[test]
+    fn buffered_tool_use_with_no_id_is_malformed() {
+        let err = buffered_block_err(
+            json!({"type": "tool_use", "name": "bash", "input": {"cmd": "wipe-disk"}}),
+        );
+        assert_eq!(err, "driver: malformed Anthropic response: tool_use block 1 has no id");
+        assert!(!err.contains("wipe-disk"));
+    }
+
+    #[test]
+    fn buffered_tool_use_with_no_name_is_malformed() {
+        assert_eq!(
+            buffered_block_err(json!({"type": "tool_use", "id": "toolu_01", "name": null, "input": {}})),
+            "driver: malformed Anthropic response: tool_use block 1 has no name"
+        );
+    }
+
+    #[test]
+    fn buffered_tool_use_input_that_is_not_an_object_is_malformed() {
+        for input in [None, Some(Value::Null), Some(json!("{\"cmd\":\"ls\"}")), Some(json!([1]))] {
+            let mut block = json!({"type": "tool_use", "id": "toolu_01", "name": "bash"});
+            if let Some(input) = input.clone() {
+                block["input"] = input;
+            }
+            assert_eq!(
+                buffered_block_err(block),
+                "driver: malformed Anthropic response: tool_use block 1 input is not a JSON object",
+                "input = {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn buffered_argument_less_tool_call_keeps_its_empty_input() {
+        let body = json!({
+            "stop_reason": "tool_use",
+            "content": [{"type": "tool_use", "id": "toolu_01", "name": "now", "input": {}}]
+        });
+        let translated = translate_anthropic_response_to_murmur(&body).unwrap();
+        assert_eq!(
+            translated["content"],
+            json!([{"type": "tool_call", "id": "toolu_01", "name": "now", "input": {}}])
+        );
+    }
+
+    #[test]
+    fn buffered_thinking_block_with_no_thinking_is_malformed() {
+        assert_eq!(
+            buffered_block_err(json!({"type": "thinking", "signature": "sig"})),
+            "driver: malformed Anthropic response: thinking block 1 has no thinking"
+        );
+    }
+
+    #[test]
+    fn buffered_thinking_block_is_kept_like_the_stream_keeps_it() {
+        let body = json!({
+            "stop_reason": "end_turn",
+            "content": [
+                {"type": "thinking", "thinking": "signed thought", "signature": "sig-abc"},
+                {"type": "thinking", "thinking": "unsigned thought"},
+                {"type": "text", "text": "answer"}
+            ]
+        });
+        let translated = translate_anthropic_response_to_murmur(&body).unwrap();
+        assert_eq!(
+            translated["content"],
+            json!([
+                {"type": "thinking", "text": "signed thought", "signature": "sig-abc"},
+                {"type": "thinking", "text": "unsigned thought", "signature": ""},
+                {"type": "text", "text": "answer"}
+            ])
+        );
+    }
+
+    #[test]
+    fn buffered_unknown_and_redacted_thinking_blocks_are_dropped() {
+        let body = json!({
+            "stop_reason": "end_turn",
+            "content": [
+                {"type": "redacted_thinking", "data": "opaque"},
+                {"type": "server_tool_use", "id": "srvtoolu_01", "name": "web_search", "input": {}},
+                {"type": "text", "text": "answer"}
+            ]
+        });
+        let translated = translate_anthropic_response_to_murmur(&body).unwrap();
+        assert_eq!(translated["stop_reason"], "end_turn");
+        assert_eq!(translated["content"], json!([{"type": "text", "text": "answer"}]));
+    }
+
+    #[test]
+    fn buffered_error_body_is_a_provider_error() {
+        let body = json!({
+            "type": "error",
+            "error": {"type": "overloaded_error", "message": "Overloaded"}
+        });
+        let payload = translate_anthropic_response_to_murmur(&body).unwrap();
+        assert_eq!(
+            payload,
+            json!({"stop_reason": "error", "error": "Anthropic error: overloaded_error: Overloaded"})
+        );
+    }
+
+    #[test]
+    fn buffered_error_body_with_unreadable_detail_falls_back_to_unknown() {
+        for (body, expected) in [
+            (json!({"type": "error"}), "Anthropic error: unknown: unknown"),
+            (json!({"type": "error", "error": {"type": 5}}), "Anthropic error: unknown: unknown"),
+            (
+                json!({"type": "error", "error": {"message": "slow down"}}),
+                "Anthropic error: unknown: slow down",
+            ),
+        ] {
+            let payload = translate_anthropic_response_to_murmur(&body).unwrap();
+            assert_eq!(payload["stop_reason"], "error");
+            assert_eq!(payload["error"], expected);
+        }
+    }
+
+    #[test]
+    fn buffered_refusal_is_a_refusal() {
+        let body = json!({"stop_reason": "refusal", "content": [{"type": "text", "text": "no"}]});
+        assert_eq!(
+            translate_anthropic_response_to_murmur(&body).unwrap(),
+            json!({"stop_reason": "error", "error": REFUSED})
+        );
+    }
+
+    #[test]
+    fn buffered_unmapped_stop_reasons_stay_unsupported() {
+        for reason in ["", "pause_turn", "model_context_window_exceeded"] {
+            let body = json!({"stop_reason": reason, "content": []});
+            assert_eq!(
+                translate_anthropic_response_to_murmur(&body).unwrap_err(),
+                format!("driver: unsupported Anthropic stop_reason '{reason}'")
+            );
+        }
+    }
+
+    #[test]
+    fn stream_error_event_mid_text_is_a_provider_error() {
+        let body = sse(&[
+            ("content_block_start", TEXT_START_0),
+            ("content_block_delta", &text_delta(0, "Hello")),
+            (
+                "error",
+                r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+            ),
+            ("content_block_delta", &text_delta(0, " after")),
+            ("message_delta", END_TURN),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+
+        let mut emitted: Vec<String> = Vec::new();
+        let payload =
+            parse_anthropic_sse_body(&body, &mut |c| emitted.push(c.to_string()), &mut |_| {})
+                .unwrap();
+
+        assert_eq!(
+            payload,
+            json!({"stop_reason": "error", "error": "Anthropic error: overloaded_error: Overloaded"})
+        );
+        assert_eq!(emitted, vec!["Hello"]);
+    }
+
+    #[test]
+    fn stream_error_event_with_unparseable_data_is_still_a_provider_error() {
+        let body = sse(&[("content_block_start", TEXT_START_0), ("error", "overloaded!")]);
+        assert_eq!(
+            parse_stream(&body).unwrap(),
+            json!({"stop_reason": "error", "error": "Anthropic error: unknown: unknown"})
+        );
+    }
+
+    #[test]
+    fn stream_refusal_is_a_refusal() {
+        let body = sse(&[
+            ("content_block_start", TEXT_START_0),
+            ("content_block_delta", &text_delta(0, "I can")),
+            ("message_delta", r#"{"type":"message_delta","delta":{"stop_reason":"refusal"}}"#),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+        assert_eq!(parse_stream(&body).unwrap(), json!({"stop_reason": "error", "error": REFUSED}));
+    }
+
+    #[test]
+    fn stream_event_whose_data_is_not_json_is_malformed() {
+        for event in ["message_start", "content_block_start", "content_block_delta", "message_delta"]
+        {
+            let body = sse(&[(event, "{not json"), ("message_delta", END_TURN)]);
+            assert_eq!(
+                parse_stream(&body).unwrap_err(),
+                format!("driver: malformed Anthropic stream: {event} data is not JSON")
+            );
+        }
+    }
+
+    #[test]
+    fn stream_events_whose_data_is_not_read_are_not_checked() {
+        let body = sse(&[
+            ("ping", "not json"),
+            ("content_block_start", TEXT_START_0),
+            ("content_block_delta", &text_delta(0, "hi")),
+            ("content_block_stop", "not json"),
+            ("some_future_event", "not json either"),
+            ("message_delta", END_TURN),
+            ("message_stop", "not json"),
+        ]);
+        let result = parse_stream(&body).unwrap();
+        assert_eq!(result["content"], json!([{"type": "text", "text": "hi"}]));
+    }
+
+    #[test]
+    fn stream_event_with_no_index_is_malformed() {
+        let start = sse(&[(
+            "content_block_start",
+            r#"{"type":"content_block_start","content_block":{"type":"text","text":""}}"#,
+        )]);
+        assert_eq!(
+            parse_stream(&start).unwrap_err(),
+            "driver: malformed Anthropic stream: content_block_start has no index"
+        );
+
+        let delta = sse(&[
+            ("content_block_start", TEXT_START_0),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":"1","delta":{"type":"text_delta","text":"x"}}"#,
+            ),
+        ]);
+        assert_eq!(
+            parse_stream(&delta).unwrap_err(),
+            "driver: malformed Anthropic stream: content_block_delta has no index"
+        );
+    }
+
+    #[test]
+    fn stream_block_with_no_type_is_malformed() {
+        let body = sse(&[(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":2,"content_block":{"text":""}}"#,
+        )]);
+        assert_eq!(
+            parse_stream(&body).unwrap_err(),
+            "driver: malformed Anthropic stream: content block 2 has no type"
+        );
+    }
+
+    #[test]
+    fn stream_tool_use_with_no_id_or_name_is_malformed() {
+        let no_id = sse(&[(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","name":"bash","input":{}}}"#,
+        )]);
+        assert_eq!(
+            parse_stream(&no_id).unwrap_err(),
+            "driver: malformed Anthropic stream: tool_use block 1 has no id"
+        );
+
+        let no_name = sse(&[(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01","input":{}}}"#,
+        )]);
+        assert_eq!(
+            parse_stream(&no_name).unwrap_err(),
+            "driver: malformed Anthropic stream: tool_use block 1 has no name"
+        );
+    }
+
+    #[test]
+    fn stream_delta_with_no_delta_type_is_malformed() {
+        let body = sse(&[
+            ("content_block_start", TEXT_START_0),
+            ("content_block_delta", r#"{"type":"content_block_delta","index":0,"delta":{"text":"x"}}"#),
+        ]);
+        assert_eq!(
+            parse_stream(&body).unwrap_err(),
+            "driver: malformed Anthropic stream: content_block_delta for block 0 has no delta type"
+        );
+    }
+
+    #[test]
+    fn stream_delta_for_a_block_that_never_started_is_malformed() {
+        let body = sse(&[
+            ("content_block_start", TEXT_START_0),
+            ("content_block_delta", &text_delta(3, "lost")),
+            ("message_delta", END_TURN),
+        ]);
+        let mut emitted: Vec<String> = Vec::new();
+        let err =
+            parse_anthropic_sse_body(&body, &mut |c| emitted.push(c.to_string()), &mut |_| {})
+                .unwrap_err();
+        assert_eq!(
+            err,
+            "driver: malformed Anthropic stream: text_delta for block 3, which never started"
+        );
+        assert!(emitted.is_empty());
+
+        // An index inside the block list whose own start never arrived is the same failure.
+        let gap = sse(&[
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            ),
+            ("content_block_delta", &input_delta(0, "{}")),
+        ]);
+        assert_eq!(
+            parse_stream(&gap).unwrap_err(),
+            "driver: malformed Anthropic stream: input_json_delta for block 0, which never started"
+        );
+    }
+
+    #[test]
+    fn stream_delta_sent_to_a_block_of_another_kind_is_malformed() {
+        let text_to_tool = sse(&[
+            ("content_block_start", TOOL_START_0),
+            ("content_block_delta", &text_delta(0, "x")),
+        ]);
+        assert_eq!(
+            parse_stream(&text_to_tool).unwrap_err(),
+            "driver: malformed Anthropic stream: text_delta sent to tool_use block 0"
+        );
+
+        let input_to_text = sse(&[
+            ("content_block_start", TEXT_START_0),
+            ("content_block_delta", &input_delta(0, "{}")),
+        ]);
+        assert_eq!(
+            parse_stream(&input_to_text).unwrap_err(),
+            "driver: malformed Anthropic stream: input_json_delta sent to text block 0"
+        );
+
+        let signature_to_text = sse(&[
+            ("content_block_start", TEXT_START_0),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"s"}}"#,
+            ),
+        ]);
+        assert_eq!(
+            parse_stream(&signature_to_text).unwrap_err(),
+            "driver: malformed Anthropic stream: signature_delta sent to text block 0"
+        );
+
+        let thinking_to_tool = sse(&[
+            ("content_block_start", TOOL_START_0),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"t"}}"#,
+            ),
+        ]);
+        assert_eq!(
+            parse_stream(&thinking_to_tool).unwrap_err(),
+            "driver: malformed Anthropic stream: thinking_delta sent to tool_use block 0"
+        );
+
+        let text_to_thinking = sse(&[
+            ("content_block_start", THINKING_START_0),
+            ("content_block_delta", &text_delta(0, "x")),
+        ]);
+        assert_eq!(
+            parse_stream(&text_to_thinking).unwrap_err(),
+            "driver: malformed Anthropic stream: text_delta sent to thinking block 0"
+        );
+    }
+
+    #[test]
+    fn stream_delta_with_no_payload_is_malformed() {
+        for (start, delta_type, field) in [
+            (TEXT_START_0, "text_delta", "text"),
+            (TOOL_START_0, "input_json_delta", "partial_json"),
+            (THINKING_START_0, "thinking_delta", "thinking"),
+            (THINKING_START_0, "signature_delta", "signature"),
+        ] {
+            for payload in [None, Some(Value::Null), Some(json!(4))] {
+                let mut delta = json!({"type": delta_type});
+                if let Some(payload) = payload.clone() {
+                    delta[field] = payload;
+                }
+                let event = json!({"type": "content_block_delta", "index": 0, "delta": delta});
+                let body = sse(&[
+                    ("content_block_start", start),
+                    ("content_block_delta", &event.to_string()),
+                    ("message_delta", END_TURN),
+                ]);
+                assert_eq!(
+                    parse_stream(&body).unwrap_err(),
+                    format!(
+                        "driver: malformed Anthropic stream: {delta_type} for block 0 has no {field}"
+                    ),
+                    "payload = {payload:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stream_tool_input_cut_off_at_the_output_cap_names_the_cap() {
+        let body = sse(&[
+            ("content_block_start", TOOL_START_0),
+            ("content_block_delta", &input_delta(0, "{\"cmd\":\"wipe-disk")),
+            ("message_delta", MAX_TOKENS_STOP),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+        let err = parse_stream(&body).unwrap_err();
+        assert_eq!(
+            err,
+            "driver: Anthropic turn stopped at the inference.max_tokens output cap; tool call 'bash' was cut off mid-input and cannot be run — raise the cap and re-run"
+        );
+        assert!(!err.contains("wipe-disk"));
+    }
+
+    #[test]
+    fn stream_tool_input_that_is_not_json_is_malformed() {
+        let body = sse(&[
+            ("content_block_start", TOOL_START_0),
+            ("content_block_delta", &input_delta(0, "{\"cmd\":\"wipe-disk")),
+            ("message_delta", TOOL_USE_STOP),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+        let err = parse_stream(&body).unwrap_err();
+        assert_eq!(
+            err,
+            "driver: malformed Anthropic stream: tool_use block 0 ('bash') input is not valid JSON"
+        );
+        assert!(!err.contains("wipe-disk"));
+    }
+
+    #[test]
+    fn stream_tool_input_that_is_not_an_object_is_malformed() {
+        let body = sse(&[
+            ("content_block_start", TEXT_START_0),
+            ("content_block_delta", &text_delta(0, "Calling.")),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_02","name":"calc","input":{}}}"#,
+            ),
+            ("content_block_delta", &input_delta(1, "[1, 2]")),
+            ("message_delta", TOOL_USE_STOP),
+        ]);
+        assert_eq!(
+            parse_stream(&body).unwrap_err(),
+            "driver: malformed Anthropic stream: tool_use block 1 ('calc') input is not a JSON object"
+        );
+    }
+
+    #[test]
+    fn stream_argument_less_tool_call_gets_an_empty_object() {
+        let no_delta = sse(&[
+            ("content_block_start", TOOL_START_0),
+            ("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
+            ("message_delta", TOOL_USE_STOP),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+        let empty_delta = sse(&[
+            ("content_block_start", TOOL_START_0),
+            ("content_block_delta", &input_delta(0, "")),
+            ("message_delta", TOOL_USE_STOP),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+        for body in [no_delta, empty_delta] {
+            let result = parse_stream(&body).unwrap();
+            assert_eq!(result["stop_reason"], "tool_call");
+            assert_eq!(
+                result["content"],
+                json!([{"type": "tool_call", "id": "toolu_01", "name": "bash", "input": {}}])
+            );
+        }
+    }
+
+    #[test]
+    fn stream_tolerates_unknown_events_deltas_and_block_types() {
+        let body = sse(&[
+            ("content_block_start", TEXT_START_0),
+            ("content_block_delta", &text_delta(0, "See ")),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"type":"char_location","cited_text":"x"}}}"#,
+            ),
+            ("content_block_delta", &text_delta(0, "source.")),
+            ("some_future_event", r#"{"type":"some_future_event"}"#),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"redacted_thinking","data":"opaque"}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"hidden"}}"#,
+            ),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":2,"content_block":{"type":"thinking","thinking":""}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":2,"delta":{"type":"thinking_delta","thinking":"unsigned"}}"#,
+            ),
+            ("message_delta", END_TURN),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+
+        let mut emitted: Vec<String> = Vec::new();
+        let result =
+            parse_anthropic_sse_body(&body, &mut |c| emitted.push(c.to_string()), &mut |_| {})
+                .unwrap();
+
+        assert_eq!(emitted, vec!["See ", "source."]);
+        assert_eq!(result["stop_reason"], "end_turn");
+        assert_eq!(
+            result["content"],
+            json!([
+                {"type": "text", "text": "See source."},
+                {"type": "thinking", "text": "unsigned", "signature": ""}
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_stream_is_not_an_anthropic_event_stream() {
+        let body = concat!(
+            "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n",
+            "\n",
+            "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n",
+            "\n",
+            "data: [DONE]\n",
+            "\n",
+        );
+        let mut emitted: Vec<String> = Vec::new();
+        let err =
+            parse_anthropic_sse_body(body, &mut |c| emitted.push(c.to_string()), &mut |_| {})
+                .unwrap_err();
+        assert_eq!(err, NOT_AN_EVENT_STREAM);
+        assert!(emitted.is_empty());
+    }
+
+    #[test]
+    fn blank_or_comment_only_stream_keeps_the_no_stop_reason_message() {
+        for body in ["\n\n", "   \n\t\n", ": keep-alive\n\n: keep-alive\n"] {
+            assert_eq!(parse_stream(body).unwrap_err(), STREAM_NO_STOP_REASON, "body = {body:?}");
+        }
     }
 
     #[test]

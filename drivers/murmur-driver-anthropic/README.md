@@ -135,29 +135,69 @@ survives, the response carries no `usage` key at all.
 | `stop_sequence` | `end_turn` |
 | `tool_use` | `tool_call` |
 | `max_tokens` | `max_tokens` |
+| `refusal` | `error`, with `Anthropic response refused` |
 
-Any other value is refused with
+Any other value, `pause_turn` and `""` included, is refused with
 `driver: unsupported Anthropic stop_reason '<value>'`.
 
-A response that never says why the turn stopped is refused rather than read as
-`end_turn`:
+### Failed turns
+
+A turn the driver cannot report as finished is returned as
+`{"stop_reason":"error","error":"<message>"}`, so the task ends failed with
+cause `driver_error`. The message says which of three kinds of failure it was:
+
+| Kind | `error` message | Example |
+|---|---|---|
+| Translation failure: the response cannot be read as a finished Messages API turn | starts with `driver: ` | `driver: malformed Anthropic stream: tool_use block 1 has no id` |
+| Provider error | starts with `HTTP <status>: `, or with `Anthropic error: <type>: <message>` for an error object in a 2xx JSON body or an SSE `event: error` | `Anthropic error: overloaded_error: Overloaded` |
+| Refusal | exactly `Anthropic response refused` | `stop_reason: "refusal"` |
+
+In `Anthropic error: <type>: <message>`, a part the error object does not carry
+as a string reads `unknown`. Reading a stream stops at its `event: error`, so no
+later text is shown.
+
+The translation failures:
 
 | Response | Refused with |
 |---|---|
-| JSON body whose `stop_reason` is absent, `null` or not a string — for example a chat-completions body | `driver: Anthropic response has no stop_reason` |
-| SSE stream that ends before any `message_delta` carries a non-empty `stop_reason` — a dropped connection, an empty body, or a stream that ends on an `event: error` | `driver: Anthropic stream ended with no stop_reason` |
+| JSON body whose `stop_reason` is absent, `null` or not a string, such as a chat-completions body | `driver: Anthropic response has no stop_reason` |
+| Body that holds lines but no SSE `event:` line, such as a chat-completions stream | `driver: response is not an Anthropic event stream` |
+| SSE stream that ends before any `message_delta` carries a non-empty `stop_reason`: a dropped connection, or an empty body | `driver: Anthropic stream ended with no stop_reason` |
+| JSON body missing a field that changes what the turn means | `driver: malformed Anthropic response: <what is missing>` |
+| SSE event missing a field that changes what the turn means | `driver: malformed Anthropic stream: <what is missing>` |
+| Streamed tool input that does not parse, on a turn stopped by `max_tokens` | `driver: Anthropic turn stopped at the inference.max_tokens output cap; tool call '<name>' was cut off mid-input and cannot be run — raise the cap and re-run` |
 
-A refusal is returned as `{"stop_reason":"error","error":"<message>"}`, the same
-shape as every other driver error, so the task ends failed. The message never
-includes any part of the response body. Text already streamed through
-`murmur:text/chunks` before the stream ended has been shown and is not
-withdrawn; it is just not recorded as a finished reply.
+A JSON body must carry a `content` array. Each block must carry a string `type`;
+a `text` block its `text`; a `tool_use` block its `id`, `name` and an object
+`input`; a `thinking` block its `thinking`.
 
-Not refused:
+In a stream, the driver reads the data of `message_start`,
+`content_block_start`, `content_block_delta` and `message_delta`, and that data
+must be JSON. A block event must carry an integer `index`; a block start its
+block `type`, and a `tool_use` start its `id` and `name`; a delta its `type`,
+for a block that started, of the matching kind, with a string payload. Streamed
+tool input must parse to a JSON object.
 
-- `stop_reason: "end_turn"` with empty `content` — a successful empty turn.
+No message includes any part of the response body or of a tool call's input.
+Text already streamed through `murmur:text/chunks` before a failure has been
+shown and is not withdrawn; it is just not recorded as a finished reply.
+
+### Not refused
+
+- `content: []` with `stop_reason: "end_turn"`: a successful empty turn.
+- A tool call with no arguments: `input: {}`, or a streamed `tool_use` block
+  with no `input_json_delta` or only empty ones.
+- A `thinking` block with no `signature`. It is kept with `signature: ""`, and
+  never replayed on the next request.
+- A `redacted_thinking` block, and any block type the driver does not know:
+  dropped.
+- An SSE event name or delta type the driver does not know, such as
+  `citations_delta`: ignored.
+- `ping`, `content_block_stop` and `message_stop` data that is not JSON: never
+  read.
+- Absent or malformed `usage`: the turn reports no usage.
 - A stream whose `message_delta` carried a stop reason but that ended before
-  `message_stop` — the reply is already complete at that point.
+  `message_stop`: the reply is already complete at that point.
 
 ## Prompt cache key
 

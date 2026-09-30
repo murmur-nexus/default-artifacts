@@ -930,10 +930,12 @@ fn translate_openai_response_to_murmur(response: &Value) -> Result<Value, String
         .and_then(|choices| choices.first())
         .ok_or_else(|| "driver: OpenAI response missing choices[0]".to_string())?;
 
+    // Absent, `null`, non-string or empty: the turn did not finish.
     let finish_reason = choice
         .get("finish_reason")
         .and_then(Value::as_str)
-        .unwrap_or("stop");
+        .filter(|reason| !reason.is_empty())
+        .ok_or_else(|| "driver: OpenAI response has no finish_reason".to_string())?;
 
     let stop_reason = match finish_reason {
         "stop" => "end_turn",
@@ -1095,7 +1097,7 @@ fn translate_responses_to_murmur(response: &Value) -> Result<Value, String> {
     let status = response
         .get("status")
         .and_then(Value::as_str)
-        .unwrap_or("completed");
+        .ok_or_else(|| "driver: OpenAI Responses response has no status".to_string())?;
     let output = response
         .get("output")
         .and_then(Value::as_array)
@@ -1474,14 +1476,18 @@ fn assemble_openai_streaming_response(
     stop_reason: Option<String>,
     usage: UsageTokens,
 ) -> Result<Value, String> {
-    let stop_reason_str = match stop_reason.as_deref() {
-        Some("stop") | None => "end_turn",
-        Some("tool_calls") => "tool_call",
-        Some("length") => "max_tokens",
-        Some("content_filter") => {
+    // No chunk carried a finish_reason, so the stream ended before the turn did.
+    let finish_reason = stop_reason
+        .as_deref()
+        .ok_or_else(|| "driver: OpenAI stream ended with no finish_reason".to_string())?;
+    let stop_reason_str = match finish_reason {
+        "stop" => "end_turn",
+        "tool_calls" => "tool_call",
+        "length" => "max_tokens",
+        "content_filter" => {
             return Ok(error_payload("OpenAI response blocked by content_filter"));
         }
-        Some(other) => {
+        other => {
             return Err(format!("driver: unsupported OpenAI finish_reason '{other}'"));
         }
     };
@@ -1664,9 +1670,13 @@ fn assemble_responses_streaming_response(
         return Ok(error_payload(&format!("OpenAI Responses error: {msg}")));
     }
 
+    // `status` is set only by a `response.completed`, `.incomplete` or `.failed` event.
+    let status = status.as_deref().ok_or_else(|| {
+        "driver: OpenAI Responses stream ended with no terminal event".to_string()
+    })?;
     let has_function_call = !tool_states.is_empty();
     let stop_reason = responses_stop_reason(
-        status.as_deref().unwrap_or("completed"),
+        status,
         has_function_call,
         incomplete_reason.as_deref(),
     )?;
@@ -3885,6 +3895,89 @@ mod tests {
         let translated = translate_responses_to_murmur(&response).unwrap();
         assert!(translated.get("content").is_none());
         assert!(translated.get("usage").is_none());
+    }
+
+    // ── A missing stop signal is refused ──────────────────────────────────────
+
+    const NO_FINISH_REASON: &str = "driver: OpenAI response has no finish_reason";
+    const STREAM_NO_FINISH_REASON: &str = "driver: OpenAI stream ended with no finish_reason";
+
+    #[test]
+    fn chat_response_with_no_finish_reason_is_refused() {
+        for finish_reason in [None, Some(Value::Null), Some(json!("")), Some(json!(1))] {
+            let mut choice = json!({"message": {"role": "assistant", "content": "partial"}});
+            if let Some(finish_reason) = finish_reason.clone() {
+                choice["finish_reason"] = finish_reason;
+            }
+            let response = json!({"choices": [choice]});
+            assert_eq!(
+                translate_openai_response_to_murmur(&response).unwrap_err(),
+                NO_FINISH_REASON,
+                "finish_reason = {finish_reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_stream_that_ends_with_no_finish_reason_is_refused() {
+        let cut_off = concat!(
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"He\"},\"finish_reason\":null}]}\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"llo\"},\"finish_reason\":null}]}\n",
+        );
+        let blank_reason = concat!(
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"\"}]}\n",
+            "data: [DONE]\n",
+        );
+        for body in [cut_off, blank_reason, ""] {
+            let mut emitted: Vec<String> = Vec::new();
+            let err =
+                parse_openai_sse_body(body, &mut |c| emitted.push(c.to_string()), &mut |_| {})
+                    .unwrap_err();
+            assert_eq!(err, STREAM_NO_FINISH_REASON, "body = {body:?}");
+        }
+    }
+
+    #[test]
+    fn responses_response_with_no_status_is_refused() {
+        for status in [None, Some(Value::Null), Some(json!(3))] {
+            let mut response = json!({
+                "output": [
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Hi"}]}
+                ]
+            });
+            if let Some(status) = status.clone() {
+                response["status"] = status;
+            }
+            assert_eq!(
+                translate_responses_to_murmur(&response).unwrap_err(),
+                "driver: OpenAI Responses response has no status",
+                "status = {status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn responses_top_level_error_is_still_read_before_the_status() {
+        let response = json!({"error": {"message": "boom"}});
+        let payload = translate_responses_to_murmur(&response).unwrap();
+        assert_eq!(payload["stop_reason"], "error");
+        assert_eq!(payload["error"], "OpenAI Responses error: boom");
+    }
+
+    #[test]
+    fn responses_stream_with_no_terminal_event_is_refused() {
+        let body = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"He\"}\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"llo\"}\n",
+        );
+        for body in [body, ""] {
+            assert_eq!(
+                parse_responses_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap_err(),
+                "driver: OpenAI Responses stream ended with no terminal event",
+                "body = {body:?}"
+            );
+        }
     }
 
     #[test]

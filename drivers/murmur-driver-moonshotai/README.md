@@ -181,10 +181,23 @@ reasoning-tag scanner anywhere in this crate.
 
 | Moonshot `finish_reason` | Murmur `stop_reason` |
 |---|---|
-| `stop`, or no reason at all | `end_turn` |
+| `stop` | `end_turn` |
 | `tool_calls` | `tool_call` |
 | `length` | `max_tokens` |
 | anything else | an error naming the unmapped reason |
+
+A turn that never says why it stopped is refused rather than read as
+`end_turn`. A `finish_reason` that is absent, `null`, not a string or empty
+counts as none:
+
+| Response | Refused with |
+|---|---|
+| JSON body whose first choice has no `finish_reason` | `driver: Moonshot response has no finish_reason` |
+| SSE stream in which no chunk carries a `finish_reason`, such as a connection dropped before the final chunk | `driver: Moonshot stream ended with no finish_reason` |
+
+The refusal is returned as `{"stop_reason":"error","error":"<message>"}`, so the
+task ends failed. Text already streamed before the stream ended is not
+withdrawn; it is just not recorded as a finished reply.
 
 ## Token usage
 

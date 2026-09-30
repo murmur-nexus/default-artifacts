@@ -181,3 +181,23 @@ JSON: …` — so a genuine provider fault is not mistaken for a cap.
 The Chat Completions surface maps `finish_reason: "length"` to the same
 `max_tokens` stop reason, and hard-errors on unparseable tool-call arguments
 with `driver: failed to parse OpenAI tool call arguments JSON: …`.
+
+## A missing stop signal is refused
+
+A turn that never says why it stopped is refused rather than read as finished.
+On Chat Completions, a `finish_reason` that is absent, `null`, not a string or
+empty counts as none. On Responses, a stream is finished only by a
+`response.completed`, `response.incomplete` or `response.failed` event.
+
+| Surface and path | Refused with |
+|---|---|
+| Chat Completions, JSON body whose first choice has no `finish_reason` | `driver: OpenAI response has no finish_reason` |
+| Chat Completions, SSE stream in which no chunk carries a `finish_reason` | `driver: OpenAI stream ended with no finish_reason` |
+| Responses, JSON body whose `status` is absent, `null` or not a string | `driver: OpenAI Responses response has no status` |
+| Responses, SSE stream that ends with no terminal event | `driver: OpenAI Responses stream ended with no terminal event` |
+
+A Responses `error` object is still reported first, as `OpenAI Responses error:
+<message>`. The refusal is returned as `{"stop_reason":"error","error":"<message>"}`,
+so the task ends failed. A connection dropped before the final chunk is the
+common cause; text already streamed is not withdrawn, it is just not recorded as
+a finished reply.

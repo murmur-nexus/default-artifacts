@@ -424,21 +424,13 @@ fn translate_deepseek_response_to_murmur(response: &Value) -> Result<Value, Stri
         .and_then(|choices| choices.first())
         .ok_or_else(|| "driver: DeepSeek response missing choices[0]".to_string())?;
 
+    // Absent, `null`, non-string or empty: the turn did not finish.
     let finish_reason = choice
         .get("finish_reason")
         .and_then(Value::as_str)
-        .unwrap_or("stop");
-
-    let stop_reason = match finish_reason {
-        "stop" => "end_turn",
-        "tool_calls" => "tool_call",
-        "length" => "max_tokens",
-        other => {
-            return Err(format!(
-                "driver: unsupported DeepSeek finish_reason '{other}'"
-            ));
-        }
-    };
+        .filter(|reason| !reason.is_empty())
+        .ok_or_else(|| "driver: DeepSeek response has no finish_reason".to_string())?;
+    let stop_reason = map_finish_reason(finish_reason)?;
 
     let message = choice.get("message").unwrap_or(&Value::Null);
 
@@ -514,13 +506,14 @@ struct ToolCallState {
     arguments: String,
 }
 
-/// Map a DeepSeek `finish_reason` to a murmur `stop_reason`. `None` → "end_turn".
-fn map_finish_reason(finish_reason: Option<&str>) -> Result<&'static str, String> {
+/// Map a DeepSeek `finish_reason` to a murmur `stop_reason`. Each caller refuses a missing reason
+/// with its own path's message; an unmapped one is an error naming it.
+fn map_finish_reason(finish_reason: &str) -> Result<&'static str, String> {
     match finish_reason {
-        Some("stop") | None => Ok("end_turn"),
-        Some("tool_calls") => Ok("tool_call"),
-        Some("length") => Ok("max_tokens"),
-        Some(other) => Err(format!("driver: unsupported DeepSeek finish_reason '{other}'")),
+        "stop" => Ok("end_turn"),
+        "tool_calls" => Ok("tool_call"),
+        "length" => Ok("max_tokens"),
+        other => Err(format!("driver: unsupported DeepSeek finish_reason '{other}'")),
     }
 }
 
@@ -619,7 +612,11 @@ fn assemble_deepseek_streaming_response(
     stop_reason: Option<String>,
     usage: UsageTokens,
 ) -> Result<Value, String> {
-    let stop_reason_str = map_finish_reason(stop_reason.as_deref())?;
+    // No chunk carried a finish_reason, so the stream ended before the turn did.
+    let finish_reason = stop_reason
+        .as_deref()
+        .ok_or_else(|| "driver: DeepSeek stream ended with no finish_reason".to_string())?;
+    let stop_reason_str = map_finish_reason(finish_reason)?;
 
     let mut tool_content = Vec::new();
     for state in tool_states {
@@ -1605,6 +1602,44 @@ mod tests {
         stamp_streaming_flags(&mut body);
         assert_eq!(body["stream"], json!(true));
         assert_eq!(body["stream_options"], json!({"include_usage": true}));
+    }
+
+    // ── A missing stop signal is refused ──────────────────────────────────────
+
+    #[test]
+    fn response_with_no_finish_reason_is_refused() {
+        for finish_reason in [None, Some(Value::Null), Some(json!("")), Some(json!(1))] {
+            let mut choice = json!({"message": {"role": "assistant", "content": "partial"}});
+            if let Some(finish_reason) = finish_reason.clone() {
+                choice["finish_reason"] = finish_reason;
+            }
+            let response = json!({"choices": [choice]});
+            assert_eq!(
+                translate_deepseek_response_to_murmur(&response).unwrap_err(),
+                "driver: DeepSeek response has no finish_reason",
+                "finish_reason = {finish_reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_that_ends_with_no_finish_reason_is_refused() {
+        let cut_off = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Let me \"},\"finish_reason\":null}]}\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"The answer \"},\"finish_reason\":null}]}\n",
+        );
+        let blank_reason = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"\"}]}\n",
+            "data: [DONE]\n",
+        );
+        for body in [cut_off, blank_reason, ""] {
+            assert_eq!(
+                parse_deepseek_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap_err(),
+                "driver: DeepSeek stream ended with no finish_reason",
+                "body = {body:?}"
+            );
+        }
     }
 
     #[test]
