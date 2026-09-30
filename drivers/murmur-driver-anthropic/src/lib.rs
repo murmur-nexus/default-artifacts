@@ -761,6 +761,29 @@ impl AnthropicSseState {
     }
 }
 
+/// Process one SSE line as read off the wire, without its `\n`, the way
+/// `process_anthropic_sse_line` does. A line that is not UTF-8 is a malformed stream rather than
+/// decoded lossily: a replaced byte inside tool input would still parse, and the tool would run
+/// with arguments the model never sent.
+fn process_anthropic_sse_bytes(
+    line: &[u8],
+    state: &mut AnthropicSseState,
+    emit: &mut impl FnMut(&str),
+    emit_thinking: &mut impl FnMut(&str),
+) -> bool {
+    if state.done {
+        return true;
+    }
+    let Ok(line) = std::str::from_utf8(line) else {
+        state.failure = Some(StreamFailure::Malformed(malformed_stream(format_args!(
+            "a line is not UTF-8"
+        ))));
+        state.done = true;
+        return true;
+    };
+    process_anthropic_sse_line(line.trim_end_matches('\r'), state, emit, emit_thinking)
+}
+
 /// Process one SSE line, updating state and calling `emit` for text deltas.
 /// Returns `true` when reading should stop: `message_stop` was dispatched, or a failure was
 /// recorded.
@@ -1067,7 +1090,7 @@ fn error_payload(message: &str) -> Value {
 mod wasm_driver {
     use super::{
         assemble_anthropic_streaming_response, classify_model, error_payload, parse_beta_features,
-        parse_prompt_cache_config, parse_thinking_config, process_anthropic_sse_line,
+        parse_prompt_cache_config, parse_thinking_config, process_anthropic_sse_bytes,
         stamp_streaming_flags,
         translate_anthropic_response_to_murmur, translate_murmur_request_to_anthropic,
         AnthropicSseState, MurmurRequest, ThinkingConfig,
@@ -1229,10 +1252,8 @@ mod wasm_driver {
             // Process bytes already read.
             for &b in &first {
                 if b == b'\n' {
-                    let line = String::from_utf8_lossy(&line_buf);
-                    let line = line.trim_end_matches('\r');
-                    done = process_anthropic_sse_line(
-                        line,
+                    done = process_anthropic_sse_bytes(
+                        &line_buf,
                         &mut state,
                         &mut |chunk| murmur::text::chunks::emit_chunk(chunk),
                         &mut |chunk| murmur::text::chunks::emit_thinking_chunk(chunk),
@@ -1255,10 +1276,8 @@ mod wasm_driver {
                     }
                     for &b in &chunk {
                         if b == b'\n' {
-                            let line = String::from_utf8_lossy(&line_buf);
-                            let line = line.trim_end_matches('\r');
-                            done = process_anthropic_sse_line(
-                                line,
+                            done = process_anthropic_sse_bytes(
+                                &line_buf,
                                 &mut state,
                                 &mut |chunk| murmur::text::chunks::emit_chunk(chunk),
                                 &mut |chunk| murmur::text::chunks::emit_thinking_chunk(chunk),
@@ -2318,6 +2337,66 @@ mod tests {
                 .unwrap_err();
         assert_eq!(err, NOT_AN_EVENT_STREAM);
         assert!(emitted.is_empty());
+    }
+
+    #[test]
+    fn stream_line_that_is_not_utf8_is_malformed() {
+        use super::{
+            assemble_anthropic_streaming_response, process_anthropic_sse_bytes, AnthropicSseState,
+        };
+
+        let read = |lines: &[&[u8]]| {
+            let mut state = AnthropicSseState::new();
+            let mut emitted: Vec<String> = Vec::new();
+            for line in lines {
+                if process_anthropic_sse_bytes(
+                    line,
+                    &mut state,
+                    &mut |c| emitted.push(c.to_string()),
+                    &mut |_| {},
+                ) {
+                    break;
+                }
+            }
+            (assemble_anthropic_streaming_response(state), emitted)
+        };
+        let start = format!("data: {TOOL_START_0}");
+        let stop = format!("data: {TOOL_USE_STOP}");
+
+        // Tool input whose string value carries a byte that is not UTF-8. Decoded lossily it
+        // would parse, and the tool would run on a replacement character.
+        let (result, _) = read(&[
+            b"event: content_block_start",
+            start.as_bytes(),
+            b"",
+            b"event: content_block_delta",
+            b"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"cmd\\\":\\\"rm \xff\\\"}\"}}",
+            b"",
+            b"event: message_delta",
+            stop.as_bytes(),
+            b"",
+        ]);
+        assert_eq!(
+            result.unwrap_err(),
+            "driver: malformed Anthropic stream: a line is not UTF-8"
+        );
+
+        // The same stream in valid UTF-8, with CRLF line endings, still reads.
+        let (result, _) = read(&[
+            b"event: content_block_start\r",
+            format!("{start}\r").as_bytes(),
+            b"\r",
+            b"event: content_block_delta\r",
+            format!("data: {}\r", input_delta(0, "{\"cmd\":\"ls\"}")).as_bytes(),
+            b"\r",
+            b"event: message_delta\r",
+            format!("{stop}\r").as_bytes(),
+            b"\r",
+        ]);
+        assert_eq!(
+            result.unwrap()["content"],
+            json!([{"type": "tool_call", "id": "toolu_01", "name": "bash", "input": {"cmd": "ls"}}])
+        );
     }
 
     #[test]

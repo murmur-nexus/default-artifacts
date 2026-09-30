@@ -137,8 +137,10 @@ survives, the response carries no `usage` key at all.
 | `max_tokens` | `max_tokens` |
 | `refusal` | `error`, with `Anthropic response refused` |
 
-Any other value, `pause_turn` and `""` included, is refused with
-`driver: unsupported Anthropic stop_reason '<value>'`.
+Any other value, `pause_turn` included, is refused with
+`driver: unsupported Anthropic stop_reason '<value>'`. So is `""` in a JSON
+body; in a stream an empty `stop_reason` is not recorded, so the stream ends
+with no stop reason (see below).
 
 ### Failed turns
 
@@ -156,6 +158,10 @@ In `Anthropic error: <type>: <message>`, a part the error object does not carry
 as a string reads `unknown`. Reading a stream stops at its `event: error`, so no
 later text is shown.
 
+A failed task status and a `task_failed` trace line with cause `driver_error`
+need a murmur runtime released after v0.4.0. On v0.4.0 and earlier the runtime
+records the error but still reports the task as `ok` and exits 0.
+
 The translation failures:
 
 | Response | Refused with |
@@ -171,7 +177,8 @@ A JSON body must carry a `content` array. Each block must carry a string `type`;
 a `text` block its `text`; a `tool_use` block its `id`, `name` and an object
 `input`; a `thinking` block its `thinking`.
 
-In a stream, the driver reads the data of `message_start`,
+Every line of a stream must be UTF-8, as a JSON body must be. In a stream, the
+driver reads the data of `message_start`,
 `content_block_start`, `content_block_delta` and `message_delta`, and that data
 must be JSON. A block event must carry an integer `index`; a block start its
 block `type`, and a `tool_use` start its `id` and `name`; a delta its `type`,
@@ -188,7 +195,8 @@ shown and is not withdrawn; it is just not recorded as a finished reply.
 - A tool call with no arguments: `input: {}`, or a streamed `tool_use` block
   with no `input_json_delta` or only empty ones.
 - A `thinking` block with no `signature`. It is kept with `signature: ""`, and
-  never replayed on the next request.
+  never replayed on the next request. `thinking` blocks are kept on the JSON
+  fallback as well as on the SSE path.
 - A `redacted_thinking` block, and any block type the driver does not know:
   dropped.
 - An SSE event name or delta type the driver does not know, such as

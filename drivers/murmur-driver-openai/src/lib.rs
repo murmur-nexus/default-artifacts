@@ -3930,10 +3930,7 @@ mod tests {
             "data: [DONE]\n",
         );
         for body in [cut_off, blank_reason, ""] {
-            let mut emitted: Vec<String> = Vec::new();
-            let err =
-                parse_openai_sse_body(body, &mut |c| emitted.push(c.to_string()), &mut |_| {})
-                    .unwrap_err();
+            let err = parse_openai_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap_err();
             assert_eq!(err, STREAM_NO_FINISH_REASON, "body = {body:?}");
         }
     }

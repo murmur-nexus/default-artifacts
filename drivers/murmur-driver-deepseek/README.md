@@ -42,6 +42,10 @@ The refusal is returned as `{"stop_reason":"error","error":"<message>"}`, so the
 task ends failed. Text already streamed before the stream ended is not
 withdrawn; it is just not recorded as a finished reply.
 
+A failed task status and a `task_failed` trace line with cause `driver_error`
+need a murmur runtime released after v0.4.0. On v0.4.0 and earlier the runtime
+records the error but still reports the task as `ok` and exits 0.
+
 ## Token usage
 
 Every translated response carries an optional top-level `usage` object, on both
