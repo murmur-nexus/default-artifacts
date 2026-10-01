@@ -736,13 +736,20 @@ fn retry_reason(value: &Value) -> String {
 }
 
 /// Reads a `stream_event` line. Only the two content deltas carry anything the runtime streams;
-/// the message and block framing around them is the harness's own bookkeeping.
+/// the message and block framing around them is the harness's own bookkeeping. A delta whose
+/// text is empty emits nothing; any other text, whitespace included, streams byte for byte.
 fn stream_events(value: &Value) -> Vec<Event> {
     let delta = &value["event"]["delta"];
-    match delta.get("type").and_then(Value::as_str) {
-        Some("text_delta") => vec![Event::TextDelta(text_at(delta, "text"))],
-        Some("thinking_delta") => vec![Event::ThinkingDelta(text_at(delta, "thinking"))],
-        _ => Vec::new(),
+    let kind = delta.get("type").and_then(Value::as_str);
+    let (text, event): (&str, fn(String) -> Event) = match kind {
+        Some("text_delta") => (str_at(delta, "text"), Event::TextDelta),
+        Some("thinking_delta") => (str_at(delta, "thinking"), Event::ThinkingDelta),
+        _ => return Vec::new(),
+    };
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![event(text.to_string())]
     }
 }
 
@@ -1634,6 +1641,70 @@ mod tests {
         assert_eq!(
             events(
                 r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{}"}}}"#
+            ),
+            Vec::new()
+        );
+    }
+
+    fn delta(delta: &str) -> String {
+        format!(
+            r#"{{"type":"stream_event","event":{{"type":"content_block_delta","delta":{delta}}}}}"#
+        )
+    }
+
+    #[test]
+    fn an_empty_thinking_delta_streams_nothing() {
+        assert_eq!(
+            events(&delta(r#"{"type":"thinking_delta","thinking":""}"#)),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn an_empty_text_delta_streams_nothing() {
+        assert_eq!(
+            events(&delta(r#"{"type":"text_delta","text":""}"#)),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn a_delta_without_readable_text_streams_nothing() {
+        for unreadable in [
+            r#"{"type":"thinking_delta"}"#,
+            r#"{"type":"thinking_delta","thinking":null}"#,
+            r#"{"type":"text_delta"}"#,
+            r#"{"type":"text_delta","text":7}"#,
+        ] {
+            assert_eq!(events(&delta(unreadable)), Vec::new(), "{unreadable}");
+        }
+    }
+
+    #[test]
+    fn a_whitespace_only_delta_streams_unchanged() {
+        assert_eq!(
+            events(&delta(r#"{"type":"thinking_delta","thinking":" "}"#)),
+            vec![Event::ThinkingDelta(" ".to_string())]
+        );
+        assert_eq!(
+            events(&delta(r#"{"type":"thinking_delta","thinking":"\n"}"#)),
+            vec![Event::ThinkingDelta("\n".to_string())]
+        );
+        assert_eq!(
+            events(&delta(r#"{"type":"text_delta","text":" "}"#)),
+            vec![Event::TextDelta(" ".to_string())]
+        );
+        assert_eq!(
+            events(&delta(r#"{"type":"text_delta","text":"\n\n"}"#)),
+            vec![Event::TextDelta("\n\n".to_string())]
+        );
+    }
+
+    #[test]
+    fn an_empty_thinking_block_emits_nothing() {
+        assert_eq!(
+            events(
+                r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"","signature":"c2ln"}]}}"#
             ),
             Vec::new()
         );

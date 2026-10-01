@@ -29,13 +29,13 @@ versions and telling you to rebuild:
 
 ```
 error[E-RUN-029]: the transport: process driver does not export the process driver interface
-  murmur-driver-claude-code@0.2.0 exports murmur:driver/process@0.2.0
+  murmur-driver-claude-code@0.2.1 exports murmur:driver/process@0.2.0
   this runtime expects murmur:driver/process@0.1.0
 ```
 
 The refusal is deliberate and runs the other way too: `murmur-driver-claude-code@0.1.0` no
-longer loads against a murmur at `@0.2.0`. Install `0.2.0` — a rebuild is the intended cost of
-the bump.
+longer loads against a murmur at `@0.2.0`. Install `0.2.0` or later — a rebuild is the intended
+cost of the bump.
 
 `mur --version` does not distinguish the two: it reports `murmur-cli 0.3.0` both before and
 after the interface moved, because the CLI version string was not bumped with it. If you see
@@ -64,7 +64,7 @@ capabilities:
 artifacts:
   - name: murmur-driver-claude-code
     runtime: driver
-    version: "0.2.0"
+    version: "0.2.1"
 ```
 
 The harness starts from an **empty** environment and sees exactly the variables
@@ -194,8 +194,8 @@ same events. The only thing carried from one call to the next is the bridge's to
 | `system` `api_retry` | `retry` |
 | `system` anything else (`status`, `thinking_tokens`, …) | none |
 | `control_response` | none |
-| `stream_event` whose `event.delta.type` is `text_delta` | `text-delta` |
-| `stream_event` whose `event.delta.type` is `thinking_delta` | `thinking-delta` |
+| `stream_event` whose `event.delta.type` is `text_delta` | `text-delta` when its `text` is non-empty; none when it is empty |
+| `stream_event` whose `event.delta.type` is `thinking_delta` | `thinking-delta` when its `thinking` is non-empty; none when it is empty |
 | `stream_event` anything else (message and block framing, `input_json_delta`, `signature_delta`) | none |
 | `assistant` | at most one `thinking`, then at most one `text`, then one `tool-call` per `tool_use` block |
 | `user` `tool_result` block | `tool-result` |
