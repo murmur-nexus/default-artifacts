@@ -1,5 +1,5 @@
 name: murmur-driver-claude-code
-version: 0.2.1
+version: 0.3.0
 runtime: driver
 description: |
   Process driver for Claude Code. It tells a `transport: process` capsule how to drive the
