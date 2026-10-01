@@ -20,6 +20,32 @@ MURMUR_INFERENCE_ENDPOINT`, and one that arrives empty or whitespace-only with
 `driver: MURMUR_INFERENCE_ENDPOINT is set but empty`. Neither reaches the
 network. A usable value is trimmed and used exactly as given.
 
+## Stop reasons
+
+| DeepSeek `finish_reason` | Murmur `stop_reason` |
+|---|---|
+| `stop` | `end_turn` |
+| `tool_calls` | `tool_call` |
+| `length` | `max_tokens` |
+| anything else | an error naming the unmapped reason |
+
+A turn that never says why it stopped is refused rather than read as
+`end_turn`. A `finish_reason` that is absent, `null`, not a string or empty
+counts as none:
+
+| Response | Refused with |
+|---|---|
+| JSON body whose first choice has no `finish_reason` | `driver: DeepSeek response has no finish_reason` |
+| SSE stream in which no chunk carries a `finish_reason`, such as a connection dropped before the final chunk | `driver: DeepSeek stream ended with no finish_reason` |
+
+The refusal is returned as `{"stop_reason":"error","error":"<message>"}`, so the
+task ends failed. Text already streamed before the stream ended is not
+withdrawn; it is just not recorded as a finished reply.
+
+A failed task status and a `task_failed` trace line with cause `driver_error`
+need a murmur runtime released after v0.4.0. On v0.4.0 and earlier the runtime
+records the error but still reports the task as `ok` and exits 0.
+
 ## Token usage
 
 Every translated response carries an optional top-level `usage` object, on both

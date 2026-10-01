@@ -621,14 +621,14 @@ fn stamp_streaming_flags(body: &mut Value) {
 
 // ── Stop-reason mapping ───────────────────────────────────────────────────────
 
-/// Map a Moonshot `finish_reason` to a murmur `stop_reason`. A missing reason is `end_turn`; an
-/// unmapped one is an error naming it rather than a guess.
-fn map_finish_reason(finish_reason: Option<&str>) -> Result<&'static str, String> {
+/// Map a Moonshot `finish_reason` to a murmur `stop_reason`. Each caller refuses a missing reason
+/// with its own path's message; an unmapped one is an error naming it rather than a guess.
+fn map_finish_reason(finish_reason: &str) -> Result<&'static str, String> {
     match finish_reason {
-        Some("stop") | None => Ok("end_turn"),
-        Some("tool_calls") => Ok("tool_call"),
-        Some("length") => Ok("max_tokens"),
-        Some(other) => Err(format!(
+        "stop" => Ok("end_turn"),
+        "tool_calls" => Ok("tool_call"),
+        "length" => Ok("max_tokens"),
+        other => Err(format!(
             "driver: unsupported Moonshot finish_reason '{other}'"
         )),
     }
@@ -645,12 +645,13 @@ fn translate_moonshot_response_to_murmur(response: &Value) -> Result<Value, Stri
         .and_then(|choices| choices.first())
         .ok_or_else(|| "driver: Moonshot response missing choices[0]".to_string())?;
 
-    let stop_reason = map_finish_reason(
-        choice
-            .get("finish_reason")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty()),
-    )?;
+    // Absent, `null`, non-string or empty: the turn did not finish.
+    let finish_reason = choice
+        .get("finish_reason")
+        .and_then(Value::as_str)
+        .filter(|reason| !reason.is_empty())
+        .ok_or_else(|| "driver: Moonshot response has no finish_reason".to_string())?;
+    let stop_reason = map_finish_reason(finish_reason)?;
 
     let message = choice.get("message").unwrap_or(&Value::Null);
 
@@ -825,7 +826,11 @@ fn assemble_moonshot_streaming_response(
     stop_reason: Option<String>,
     usage: UsageTokens,
 ) -> Result<Value, String> {
-    let stop_reason_str = map_finish_reason(stop_reason.as_deref())?;
+    // No chunk carried a finish_reason, so the stream ended before the turn did.
+    let finish_reason = stop_reason
+        .as_deref()
+        .ok_or_else(|| "driver: Moonshot stream ended with no finish_reason".to_string())?;
+    let stop_reason_str = map_finish_reason(finish_reason)?;
 
     let mut tool_content = Vec::new();
     for state in tool_states {
@@ -1560,11 +1565,11 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_finish_reason_ends_the_turn() {
+    fn a_missing_finish_reason_is_refused() {
         let stream = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\ndata: [DONE]\n";
-        let response =
-            parse_moonshot_sse_body(stream, &mut |_: &str| {}, &mut |_: &str| {}).unwrap();
-        assert_eq!(response["stop_reason"], json!("end_turn"));
+        let err =
+            parse_moonshot_sse_body(stream, &mut |_: &str| {}, &mut |_: &str| {}).unwrap_err();
+        assert_eq!(err, "driver: Moonshot stream ended with no finish_reason");
     }
 
     #[test]
@@ -2085,6 +2090,44 @@ mod tests {
                 {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}}
             ])
         );
+    }
+
+    // ── A missing stop signal is refused ──────────────────────────────────────
+
+    #[test]
+    fn response_with_no_finish_reason_is_refused() {
+        for finish_reason in [None, Some(Value::Null), Some(json!("")), Some(json!(1))] {
+            let mut choice = json!({"message": {"role": "assistant", "content": "partial"}});
+            if let Some(finish_reason) = finish_reason.clone() {
+                choice["finish_reason"] = finish_reason;
+            }
+            let response = json!({"choices": [choice]});
+            assert_eq!(
+                translate_moonshot_response_to_murmur(&response).unwrap_err(),
+                "driver: Moonshot response has no finish_reason",
+                "finish_reason = {finish_reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_that_ends_with_no_finish_reason_is_refused() {
+        let cut_off = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Let me \"},\"finish_reason\":null}]}\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"The answer \"},\"finish_reason\":null}]}\n",
+        );
+        let blank_reason = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"\"}]}\n",
+            "data: [DONE]\n",
+        );
+        for body in [cut_off, blank_reason, ""] {
+            assert_eq!(
+                parse_moonshot_sse_body(body, &mut |_: &str| {}, &mut |_: &str| {}).unwrap_err(),
+                "driver: Moonshot stream ended with no finish_reason",
+                "body = {body:?}"
+            );
+        }
     }
 
     #[test]
