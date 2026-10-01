@@ -29,13 +29,13 @@ versions and telling you to rebuild:
 
 ```
 error[E-RUN-029]: the transport: process driver does not export the process driver interface
-  murmur-driver-claude-code@0.2.0 exports murmur:driver/process@0.2.0
+  murmur-driver-claude-code@0.2.1 exports murmur:driver/process@0.2.0
   this runtime expects murmur:driver/process@0.1.0
 ```
 
 The refusal is deliberate and runs the other way too: `murmur-driver-claude-code@0.1.0` no
-longer loads against a murmur at `@0.2.0`. Install `0.2.0` — a rebuild is the intended cost of
-the bump.
+longer loads against a murmur at `@0.2.0`. Install `0.2.0` or later — a rebuild is the intended
+cost of the bump.
 
 `mur --version` does not distinguish the two: it reports `murmur-cli 0.3.0` both before and
 after the interface moved, because the CLI version string was not bumped with it. If you see
