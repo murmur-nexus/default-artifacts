@@ -6,6 +6,10 @@
 //! test in this crate still passes, while the runtime silently falls back to judging the tool's
 //! calls by key name and `W-SEC-018` returns.
 //!
+//! The `operation` enum is the manifest's other copy of something the code decides: the names
+//! the tool dispatches. Its test holds the enum to the names the tool lists when it rejects an
+//! `operation`, which a unit test in `src/lib.rs` holds to the dispatch table.
+//!
 //! These read the manifest out of the checkout, the same way `mur publish` does.
 
 use std::{fs, path::PathBuf};
@@ -85,5 +89,39 @@ fn exactly_one_property_is_annotated() {
         annotations, 1,
         "this tool declares one write destination; a second annotation would widen what the \
          runtime refuses without a scenario asking for it"
+    );
+}
+
+#[test]
+fn the_operation_enum_lists_the_operations_the_tool_dispatches() {
+    let manifest = manifest();
+    let body = property_body(&manifest, "operation")
+        .expect("input_schema must declare an `operation` property");
+    let enum_at = body
+        .iter()
+        .position(|line| line == "enum:")
+        .unwrap_or_else(|| panic!("`operation` must declare an `enum:`. Got: {body:?}"));
+    let declared: Vec<&str> = body[enum_at + 1..]
+        .iter()
+        .map_while(|line| line.strip_prefix("- "))
+        .collect();
+    assert!(
+        !declared.is_empty(),
+        "`operation`'s enum lists no items. Got: {body:?}"
+    );
+
+    let out = murmur_tool_editor::logic::run(r#"{"data":{}}"#);
+    let message = out["message"]
+        .as_str()
+        .expect("a rejection carries a message");
+    let (_, listed) = message
+        .split_once("expected one of ")
+        .unwrap_or_else(|| panic!("no operation list in {message:?}"));
+    let dispatched: Vec<&str> = listed.split(", ").collect();
+
+    assert_eq!(
+        declared, dispatched,
+        "murmur.yaml's `operation` enum and OPERATIONS in src/lib.rs must change together, in \
+         the same order.\n  murmur.yaml enum: {declared:?}\n  OPERATIONS:       {dispatched:?}"
     );
 }

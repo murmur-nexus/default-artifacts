@@ -98,7 +98,10 @@ pub mod logic {
         };
         match OPERATIONS.iter().find(|(known, _, _)| known == name) {
             Some((_, handler, effect)) => with_state_effect(handler(&op), effect),
-            None => fail_msg(format!("unknown operation {name:?}: {}", expected_operations())),
+            None => fail_msg(format!(
+                "unknown operation {name:?}: {}",
+                expected_operations()
+            )),
         }
     }
 
@@ -686,7 +689,10 @@ pub mod logic {
             assert_eq!(out["summary"], MISSING_OPERATION);
             assert!(out.get("error_kind").is_none(), "got {out:?}");
             assert!(out["metadata"].is_null(), "got {out:?}");
-            assert!(!path.exists(), "a rejected operation must not reach the filesystem");
+            assert!(
+                !path.exists(),
+                "a rejected operation must not reach the filesystem"
+            );
             let _ = fs::remove_dir_all(&dir);
         }
 
@@ -748,28 +754,47 @@ pub mod logic {
             for input in inputs {
                 let out = run(&input);
                 let message = out["message"].as_str().unwrap();
-                assert!(!message.ends_with(':') && !message.ends_with(": "), "{input}: {message}");
+                assert!(
+                    !message.ends_with(':') && !message.ends_with(": "),
+                    "{input}: {message}"
+                );
                 assert!(message.ends_with("find_in_files"), "{input}: {message}");
             }
-            assert!(!dest.exists(), "a rejected operation must not reach the filesystem");
+            assert!(
+                !dest.exists(),
+                "a rejected operation must not reach the filesystem"
+            );
             let _ = fs::remove_dir_all(&dir);
         }
 
         #[test]
         fn every_listed_operation_reaches_its_handler() {
             // With no other fields, each handler refuses on its own first required input —
-            // proof the name passed both the missing and the unknown check.
+            // proof the name passed both the missing and the unknown check and reached the
+            // handler it is paired with.
+            let first_required = [
+                ("read_file", "path"),
+                ("write_file", "dest_path"),
+                ("replace_in_file", "dest_path"),
+                ("find_in_files", "pattern"),
+            ];
             for (name, _, _) in OPERATIONS {
+                let (_, field) = first_required
+                    .iter()
+                    .find(|(op, _)| *op == name)
+                    .unwrap_or_else(|| panic!("no expected first required field for {name}"));
                 let out = run(&json!({ "data": { "operation": name } }).to_string());
                 assert_eq!(out["ok"], false, "{name}");
-                let message = out["message"].as_str().unwrap();
-                assert!(
-                    message.starts_with("missing required field: "),
-                    "{name} did not reach its handler: {message}"
+                assert_eq!(
+                    out["message"],
+                    format!("missing required field: {field}"),
+                    "{name} did not reach its own handler"
                 );
             }
         }
 
+        // One half of the drift check: the message lists OPERATIONS, in order. The other half,
+        // in tests/manifest_declares_destination.rs, holds the manifest's enum to the message.
         #[test]
         fn the_rejection_message_lists_exactly_the_operations_table() {
             let out = run(r#"{"data":{}}"#);
@@ -780,53 +805,6 @@ pub mod logic {
             let listed: Vec<&str> = listed.split(", ").collect();
             let table: Vec<&str> = OPERATIONS.iter().map(|(name, _, _)| *name).collect();
             assert_eq!(listed, table);
-        }
-
-        /// The `- <name>` items of the `enum:` under `input_schema.properties.operation` in
-        /// `murmur.yaml`. Panics when the property or its `enum:` is absent, so a manifest
-        /// that loses either cannot read as an empty list.
-        fn manifest_operation_enum(manifest: &str) -> Vec<String> {
-            let mut lines = manifest
-                .lines()
-                .skip_while(|line| !line.starts_with("input_schema:"));
-            let header = lines
-                .by_ref()
-                .find(|line| line.trim_end() == "    operation:")
-                .expect("murmur.yaml input_schema declares no `operation` property");
-            let indent = header.len() - header.trim_start().len();
-            let body: Vec<&str> = lines
-                .take_while(|line| {
-                    line.trim().is_empty() || line.len() - line.trim_start().len() > indent
-                })
-                .filter(|line| !line.trim().is_empty())
-                .collect();
-
-            let enum_at = body
-                .iter()
-                .position(|line| line.trim() == "enum:")
-                .expect("murmur.yaml `operation` property declares no `enum:`");
-            let items: Vec<String> = body[enum_at + 1..]
-                .iter()
-                .map_while(|line| line.trim().strip_prefix("- "))
-                .map(str::to_string)
-                .collect();
-            assert!(!items.is_empty(), "murmur.yaml `operation` enum lists no items");
-            items
-        }
-
-        #[test]
-        fn manifest_operation_enum_matches_the_operations_table() {
-            let manifest = manifest_operation_enum(include_str!("../murmur.yaml"));
-            let table: Vec<String> = OPERATIONS
-                .iter()
-                .map(|(name, _, _)| name.to_string())
-                .collect();
-            assert_eq!(
-                manifest, table,
-                "murmur.yaml's `operation` enum and OPERATIONS in src/lib.rs must change \
-                 together, in the same order.\n  murmur.yaml enum: {manifest:?}\n  OPERATIONS:       \
-                 {table:?}"
-            );
         }
 
         #[test]
