@@ -9,6 +9,8 @@
 //! import. It is pure translation both ways — a `LaunchRequest` into the `LaunchPlan` that
 //! spawns the harness, and the lines the harness prints into the events the runtime acts on.
 
+use std::collections::BTreeMap;
+
 use serde_json::{json, Value};
 
 // ── What this driver drives ───────────────────────────────────────────────────
@@ -152,6 +154,21 @@ pub struct ToolCallInfo {
     pub input: String,
 }
 
+/// A tool call the model has begun writing, before its input is complete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallStart {
+    pub id: String,
+    pub name: String,
+}
+
+/// How much of a started call's input the model has written so far: a running total for the
+/// call, never the size of one delta.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallProgress {
+    pub id: String,
+    pub input_bytes: u64,
+}
+
 /// The result of a tool call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolResultInfo {
@@ -203,6 +220,12 @@ pub enum Event {
     TurnEnd(String),
     TurnFailed(TurnFailure),
     Note(String),
+    /// A tool call the model has begun writing, under the id and name its `ToolCall` will
+    /// carry. Read off the block start, so it arrives before any of the call's input.
+    ToolCallStarted(ToolCallStart),
+    /// How many bytes of a started call's input the model has written so far. It carries the
+    /// size and nothing else: no byte of the input itself leaves the parser this way.
+    ToolCallProgress(ToolCallProgress),
 }
 
 /// Token counts, in the interface's generic names rather than Claude's: only [`token_usage`]
@@ -281,6 +304,92 @@ impl RunningUsage {
             cache_read: add(&mut self.cache_read, turn.cache_read),
             cache_creation: add(&mut self.cache_creation, turn.cache_creation),
             thinking: add(&mut self.thinking, turn.thinking),
+        }
+    }
+}
+
+/// The tool calls the message being streamed has opened, by content-block index.
+///
+/// An `input_json_delta` names its block by `index` alone, and only the `content_block_start`
+/// before it says which call that index is. So the start is remembered here until the message
+/// ends, together with how many bytes of the call's input have streamed since. A new message
+/// reuses indices from `0`, which is why `message_start` forgets every one of them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct OpenToolCalls {
+    calls: BTreeMap<u64, OpenToolCall>,
+}
+
+/// One call a `tool_use` block start opened: its id, and the bytes of input streamed for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenToolCall {
+    id: String,
+    input_bytes: u64,
+}
+
+impl OpenToolCalls {
+    /// A message that has opened no tool call yet.
+    const fn new() -> Self {
+        Self {
+            calls: BTreeMap::new(),
+        }
+    }
+
+    /// Forget every call, because the message that opened them is over.
+    fn forget_all(&mut self) {
+        self.calls.clear();
+    }
+
+    /// Forget whatever call `index` held, because a new block is starting there.
+    fn forget(&mut self, index: u64) {
+        self.calls.remove(&index);
+    }
+
+    /// Remember that the block at `index` is the call `id`, with nothing of its input written.
+    fn open(&mut self, index: u64, id: &str) {
+        self.calls.insert(
+            index,
+            OpenToolCall {
+                id: id.to_string(),
+                input_bytes: 0,
+            },
+        );
+    }
+
+    /// Add one fragment of input to the call at `index` and report the call's new total, or
+    /// `None` when no call is open there or the fragment is empty. Only the fragment's length
+    /// is read, so the report can carry nothing of the input.
+    fn grow(&mut self, index: u64, fragment: &str) -> Option<ToolCallProgress> {
+        if fragment.is_empty() {
+            return None;
+        }
+        let call = self.calls.get_mut(&index)?;
+        call.input_bytes = call.input_bytes.saturating_add(fragment.len() as u64);
+        Some(ToolCallProgress {
+            id: call.id.clone(),
+            input_bytes: call.input_bytes,
+        })
+    }
+}
+
+/// Everything `parse` carries from one call to the next for one harness process.
+///
+/// The interface keeps one driver instance for a whole run and hands it lines in batches of
+/// any size. Carrying this between batches is what makes the events of a run independent of
+/// where the batches fall. `launch` starts a new one, because a new process is a new stream.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParseState {
+    /// What the run has spent so far: see [`RunningUsage`].
+    spent: RunningUsage,
+    /// The tool calls the message being streamed has opened: see [`OpenToolCalls`].
+    calls: OpenToolCalls,
+}
+
+impl ParseState {
+    /// A process that has printed nothing yet.
+    pub const fn new() -> Self {
+        Self {
+            spent: RunningUsage::new(),
+            calls: OpenToolCalls::new(),
         }
     }
 }
@@ -526,8 +635,8 @@ const USAGE_KEY: &str = "usage";
 /// What `launch` learned that `parse` needs.
 ///
 /// The interface keeps one driver instance for a whole run, which is what lets a batch of lines
-/// be read against the bridge that same run was launched with. It is the only thing carried
-/// from one call to the next; every line is otherwise read entirely on its own.
+/// be read against the bridge that same run was launched with. It is fixed for the run; what the
+/// lines themselves build up as they are read is [`ParseState`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseContext {
     /// The prefix `launch` told the harness to address the capsule's tools by, stripped off a
@@ -571,18 +680,14 @@ pub fn strip_tool_prefix<'a>(name: &'a str, context: &ParseContext) -> &'a str {
 
 /// Reads a batch of complete stdout lines into events.
 ///
-/// Every line `claude` prints is self-contained — a `tool_result` carries its own `tool_use_id`
-/// — so the events of a batch are the events of its lines in order, and the same lines split
-/// into different batches produce the same events. The one thing carried across lines is
-/// `spent`, which the interface requires: see [`RunningUsage`].
-pub fn parse_lines(
-    lines: &[String],
-    context: &ParseContext,
-    spent: &mut RunningUsage,
-) -> Vec<Event> {
+/// The events of a batch are the events of its lines in order. What one line leaves behind for
+/// a later one — the run's spend, and the tool calls the current message has opened — lives in
+/// `state`, which the caller carries from one batch to the next, so the same lines split into
+/// different batches produce the same events.
+pub fn parse_lines(lines: &[String], context: &ParseContext, state: &mut ParseState) -> Vec<Event> {
     lines
         .iter()
-        .flat_map(|line| parse_line(line, context, spent))
+        .flat_map(|line| parse_line(line, context, state))
         .collect()
 }
 
@@ -590,7 +695,7 @@ pub fn parse_lines(
 ///
 /// Never fails and never panics: a line that is not a JSON object of a shape this driver knows
 /// becomes a single `note` for the trace, which is all the interface offers for saying so.
-pub fn parse_line(line: &str, context: &ParseContext, spent: &mut RunningUsage) -> Vec<Event> {
+pub fn parse_line(line: &str, context: &ParseContext, state: &mut ParseState) -> Vec<Event> {
     if line.trim().is_empty() {
         return Vec::new();
     }
@@ -600,13 +705,13 @@ pub fn parse_line(line: &str, context: &ParseContext, spent: &mut RunningUsage) 
 
     match value.get("type").and_then(Value::as_str) {
         Some("system") => system_events(&value),
-        Some("stream_event") => stream_events(&value),
+        Some("stream_event") => stream_events(&value, context, &mut state.calls),
         Some("assistant") => assistant_events(&value, context),
         Some("user") => user_events(&value),
         // The counts go out before the terminal event, because the runtime attributes them to
         // the turn still open and both terminal events close it.
         Some(RESULT_LINE) => token_usage(&value)
-            .map(|turn| Event::Usage(spent.add_turn(&turn)))
+            .map(|turn| Event::Usage(state.spent.add_turn(&turn)))
             .into_iter()
             .chain([result_event(&value)])
             .collect(),
@@ -735,15 +840,77 @@ fn retry_reason(value: &Value) -> String {
     }
 }
 
-/// Reads a `stream_event` line. Only the two content deltas carry anything the runtime streams;
-/// the message and block framing around them is the harness's own bookkeeping. A delta whose
-/// text is empty emits nothing; any other text, whitespace included, streams byte for byte.
-fn stream_events(value: &Value) -> Vec<Event> {
-    let delta = &value["event"]["delta"];
+/// Reads a `stream_event` line.
+///
+/// The two content deltas stream their text: a delta whose text is empty emits nothing, and any
+/// other text, whitespace included, streams byte for byte. A `tool_use` block start reports the
+/// call it opens, and each `input_json_delta` for it reports how many bytes of input the call
+/// has so far — the size only, never a byte of the input. The rest of the message and block
+/// framing is the harness's own bookkeeping, except that `message_start` ends the previous
+/// message's tool calls.
+fn stream_events(value: &Value, context: &ParseContext, calls: &mut OpenToolCalls) -> Vec<Event> {
+    let event = &value["event"];
+    let mut events = Vec::new();
+    match event.get("type").and_then(Value::as_str) {
+        Some("message_start") => calls.forget_all(),
+        Some("content_block_start") => events.extend(block_started(event, context, calls)),
+        _ => {}
+    }
+    events.extend(content_delta(event, calls));
+    events
+}
+
+/// Reads a `content_block_start`, which reports a call when the block is a `tool_use`.
+///
+/// Whatever the block, a call an earlier block opened at the same index is over. A `tool_use`
+/// block with no id is reported as nothing and remembered as nothing: a call the runtime cannot
+/// match to its `tool-call` is not one it can show. The block's `input` is never read.
+fn block_started(
+    event: &Value,
+    context: &ParseContext,
+    calls: &mut OpenToolCalls,
+) -> Option<Event> {
+    let index = event.get("index").and_then(Value::as_u64);
+    if let Some(index) = index {
+        calls.forget(index);
+    }
+
+    let block = &event["content_block"];
+    if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+        return None;
+    }
+    let id = str_at(block, "id");
+    if id.is_empty() {
+        return None;
+    }
+    if let Some(index) = index {
+        calls.open(index, id);
+    }
+    Some(Event::ToolCallStarted(ToolCallStart {
+        id: id.to_string(),
+        name: tool_name(block, context),
+    }))
+}
+
+/// Reads the `delta` of a `content_block_delta`, keyed on the delta's own `type`.
+fn content_delta(event: &Value, calls: &mut OpenToolCalls) -> Vec<Event> {
+    let delta = &event["delta"];
     let kind = delta.get("type").and_then(Value::as_str);
     let (text, event): (&str, fn(String) -> Event) = match kind {
         Some("text_delta") => (str_at(delta, "text"), Event::TextDelta),
         Some("thinking_delta") => (str_at(delta, "thinking"), Event::ThinkingDelta),
+        // The delta names its block by `index` alone. A delta at an index no `tool_use` start
+        // in this message opened, or whose `partial_json` is empty or not a string, reports
+        // nothing.
+        Some("input_json_delta") => {
+            return event
+                .get("index")
+                .and_then(Value::as_u64)
+                .and_then(|index| calls.grow(index, str_at(delta, "partial_json")))
+                .map(Event::ToolCallProgress)
+                .into_iter()
+                .collect();
+        }
         _ => return Vec::new(),
     };
     if text.is_empty() {
@@ -775,7 +942,7 @@ fn assistant_events(value: &Value, context: &ParseContext) -> Vec<Event> {
             Some("thinking") => thinking.push_str(str_at(block, "thinking")),
             Some("tool_use") => calls.push(Event::ToolCall(ToolCallInfo {
                 id: text_at(block, "id"),
-                name: strip_tool_prefix(str_at(block, "name"), context).to_string(),
+                name: tool_name(block, context),
                 input: match block.get("input") {
                     Some(input) if !input.is_null() => input.to_string(),
                     _ => EMPTY_TOOL_INPUT.to_string(),
@@ -893,6 +1060,12 @@ fn failure_message(value: &Value) -> String {
     described.join(", ")
 }
 
+/// The bare artifact name a `tool_use` block calls. The block start and the complete block are
+/// both read through this, so `tool-call-started` and `tool-call` name a call identically.
+fn tool_name(block: &Value, context: &ParseContext) -> String {
+    strip_tool_prefix(str_at(block, "name"), context).to_string()
+}
+
 /// The content blocks of a line's `message`, empty when it carries none.
 fn content_blocks(value: &Value) -> &[Value] {
     value["message"]["content"]
@@ -989,17 +1162,18 @@ mod wasm_driver {
         static PARSE_CONTEXT: RefCell<super::ParseContext> =
             const { RefCell::new(super::ParseContext::none()) };
 
-        /// What the harness has spent since this process started. The interface reports run
-        /// totals, `claude` prints per-turn ones, and this is what adds the second into the
-        /// first across the turns of one run.
-        static SPENT: RefCell<super::RunningUsage> =
-            const { RefCell::new(super::RunningUsage::new()) };
+        /// What the lines of this process have built up so far: the spend the interface
+        /// reports as run totals, and the tool calls of the message being streamed. Carried
+        /// from one `parse` to the next, which is what keeps the events of a run independent
+        /// of how its lines are batched.
+        static STATE: RefCell<super::ParseState> =
+            const { RefCell::new(super::ParseState::new()) };
     }
 
     use exports::murmur::driver::process::{
         Bridge, Description, DriverFile, Event, ExitStatus, FailureKind, Guest, InterruptMethod,
         LaunchPlan, LaunchRequest, RetryInfo, Session, SessionInfo, SessionMode, ToolCallInfo,
-        ToolResultInfo, TurnFailure, Usage,
+        ToolCallProgress, ToolCallStart, ToolResultInfo, TurnFailure, Usage,
     };
 
     pub struct ClaudeCodeDriver;
@@ -1013,16 +1187,17 @@ mod wasm_driver {
             let request = to_request(request);
             let context = super::parse_context_for(request.bridge.as_ref());
             PARSE_CONTEXT.with(|stored| *stored.borrow_mut() = context);
-            // A new process has spent nothing: its first turn is the run's first turn again.
-            SPENT.with(|spent| *spent.borrow_mut() = super::RunningUsage::new());
+            // A new process has spent nothing and opened no tool call: its first turn is the
+            // run's first turn again, and its stream starts over.
+            STATE.with(|state| *state.borrow_mut() = super::ParseState::new());
             super::launch(request).map(from_plan)
         }
 
         fn parse(lines: Vec<String>) -> Vec<Event> {
             PARSE_CONTEXT
                 .with(|context| {
-                    SPENT.with(|spent| {
-                        super::parse_lines(&lines, &context.borrow(), &mut spent.borrow_mut())
+                    STATE.with(|state| {
+                        super::parse_lines(&lines, &context.borrow(), &mut state.borrow_mut())
                     })
                 })
                 .into_iter()
@@ -1156,6 +1331,14 @@ mod wasm_driver {
                 message: failure.message,
             }),
             super::Event::Note(note) => Event::Note(note),
+            super::Event::ToolCallStarted(start) => Event::ToolCallStarted(ToolCallStart {
+                id: start.id,
+                name: start.name,
+            }),
+            super::Event::ToolCallProgress(progress) => Event::ToolCallProgress(ToolCallProgress {
+                id: progress.id,
+                input_bytes: progress.input_bytes,
+            }),
         }
     }
 
@@ -1519,7 +1702,7 @@ mod tests {
     }
 
     fn events(line: &str) -> Vec<Event> {
-        parse_line(line, &bridged_context(), &mut RunningUsage::new())
+        parse_line(line, &bridged_context(), &mut ParseState::new())
     }
 
     #[test]
@@ -1616,7 +1799,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_two_content_deltas_stream() {
+    fn only_the_two_content_deltas_stream_text() {
         assert_eq!(
             events(
                 r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi "}}}"#
@@ -1763,7 +1946,7 @@ mod tests {
             r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"t1","name":"{name}","input":{{}}}}]}}}}"#
         );
         let called =
-            |context: &ParseContext| match parse_line(&line, context, &mut RunningUsage::new())
+            |context: &ParseContext| match parse_line(&line, context, &mut ParseState::new())
                 .remove(0)
             {
                 Event::ToolCall(call) => call.name,
@@ -1931,11 +2114,11 @@ mod tests {
         .collect();
 
         let context = bridged_context();
-        let batched = parse_lines(&lines, &context, &mut RunningUsage::new());
-        let mut spent = RunningUsage::new();
+        let batched = parse_lines(&lines, &context, &mut ParseState::new());
+        let mut state = ParseState::new();
         let one_at_a_time: Vec<Event> = lines
             .iter()
-            .flat_map(|line| parse_line(line, &context, &mut spent))
+            .flat_map(|line| parse_line(line, &context, &mut state))
             .collect();
         assert_eq!(batched, one_at_a_time);
         assert_eq!(batched.len(), 2);
@@ -2088,7 +2271,7 @@ mod tests {
         usage_in(&parse_line(
             line,
             &bridged_context(),
-            &mut RunningUsage::new(),
+            &mut ParseState::new(),
         ))
         .next()
     }
@@ -2276,7 +2459,7 @@ mod tests {
         ]
         .to_vec();
 
-        let events = parse_lines(&lines, &bridged_context(), &mut RunningUsage::new());
+        let events = parse_lines(&lines, &bridged_context(), &mut ParseState::new());
         let readings: Vec<TokenUsage> = usage_in(&events).collect();
         assert_eq!(readings.len(), 1, "one result line, one reading");
         assert_eq!(readings[0].input, Some(2));
@@ -2297,7 +2480,7 @@ mod tests {
     /// The run totals reported across a batch of `result` lines, each carrying `usage`.
     fn totals_across(turns: &[&str]) -> Vec<TokenUsage> {
         let lines: Vec<String> = turns.iter().map(|u| result_with_usage(u)).collect();
-        let events = parse_lines(&lines, &bridged_context(), &mut RunningUsage::new());
+        let events = parse_lines(&lines, &bridged_context(), &mut ParseState::new());
         usage_in(&events).collect()
     }
 
@@ -2397,7 +2580,7 @@ mod tests {
         // The runtime attributes a reading to the turn open when it arrives, and both terminal
         // events close the turn — so a reading emitted after one would land on the next turn.
         let line = result_with_usage(r#"{"input_tokens":1,"output_tokens":5}"#);
-        let events = parse_line(&line, &bridged_context(), &mut RunningUsage::new());
+        let events = parse_line(&line, &bridged_context(), &mut ParseState::new());
         assert!(
             matches!(events.as_slice(), [Event::Usage(_), Event::TurnEnd(_)]),
             "a result line reports then ends the turn, not {events:?}"
@@ -2411,7 +2594,7 @@ mod tests {
         let events = parse_line(
             r#"{"type":"result","subtype":"success","is_error":false,"result":"done"}"#,
             &bridged_context(),
-            &mut RunningUsage::new(),
+            &mut ParseState::new(),
         );
         assert!(
             matches!(events.as_slice(), [Event::TurnEnd(_)]),
@@ -2425,5 +2608,425 @@ mod tests {
         let huge = format!(r#"{{"input_tokens":{}}}"#, u64::MAX);
         let totals = totals_across(&[&huge, r#"{"input_tokens":5}"#]);
         assert_eq!(totals[1].input, Some(u64::MAX));
+    }
+
+    // ── Scenario 15 — a tool call being written ───────────────────────────────
+
+    /// A `content_block_start` at `index` (any JSON, so an unreadable one can be written)
+    /// opening `block`.
+    fn block_start(index: Value, block: Value) -> String {
+        json!({
+            "type": "stream_event",
+            "event": { "type": "content_block_start", "index": index, "content_block": block },
+        })
+        .to_string()
+    }
+
+    /// The block start `claude` prints for a bridged `echo_tool` call `id` at `index`.
+    fn tool_use_start(index: u64, id: &str) -> String {
+        block_start(
+            json!(index),
+            json!({ "type": "tool_use", "id": id, "name": "mcp__claude_bridge__echo_tool", "input": {} }),
+        )
+    }
+
+    /// An `input_json_delta` naming its block by `index` and carrying `partial_json`, either of
+    /// which may be any JSON at all.
+    fn input_delta(index: Value, partial_json: Value) -> String {
+        json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": index,
+                "delta": { "type": "input_json_delta", "partial_json": partial_json },
+            },
+        })
+        .to_string()
+    }
+
+    /// The `input_json_delta` `claude` prints for a fragment of a call's input.
+    fn fragment(index: u64, partial_json: &str) -> String {
+        input_delta(json!(index), json!(partial_json))
+    }
+
+    fn message_start() -> String {
+        r#"{"type":"stream_event","event":{"type":"message_start","message":{"content":[]}}}"#
+            .to_string()
+    }
+
+    /// The events of `lines`, read one after another in one state, as one process prints them.
+    fn read_in_order(lines: &[String]) -> Vec<Event> {
+        parse_lines(lines, &bridged_context(), &mut ParseState::new())
+    }
+
+    fn started(id: &str, name: &str) -> Event {
+        Event::ToolCallStarted(ToolCallStart {
+            id: id.to_string(),
+            name: name.to_string(),
+        })
+    }
+
+    fn progress(id: &str, input_bytes: u64) -> Event {
+        Event::ToolCallProgress(ToolCallProgress {
+            id: id.to_string(),
+            input_bytes,
+        })
+    }
+
+    #[test]
+    fn a_tool_use_block_start_reports_the_call_by_its_bare_name() {
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"mcp__claude_bridge__echo_tool","input":{}}}}"#;
+        assert_eq!(events(line), vec![started("toolu_1", "echo_tool")]);
+
+        // Only the prefix this driver added comes off, exactly as it does for `tool-call`.
+        let started_under =
+            |context: &ParseContext| parse_line(line, context, &mut ParseState::new());
+        let harness_name = "mcp__claude_bridge__echo_tool";
+        assert_eq!(
+            started_under(&ParseContext::none()),
+            vec![started("toolu_1", harness_name)]
+        );
+        assert_eq!(
+            started_under(&ParseContext::with_prefix(&tool_name_prefix(
+                "other_server"
+            ))),
+            vec![started("toolu_1", harness_name)]
+        );
+    }
+
+    #[test]
+    fn a_started_call_and_its_complete_call_carry_the_same_name() {
+        let complete = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"mcp__claude_bridge__echo_tool","input":{}}]}}"#;
+        for context in [
+            bridged_context(),
+            ParseContext::none(),
+            ParseContext::with_prefix(&tool_name_prefix("other_server")),
+        ] {
+            let events = parse_lines(
+                &[tool_use_start(0, "toolu_1"), complete.to_string()],
+                &context,
+                &mut ParseState::new(),
+            );
+            let [Event::ToolCallStarted(start), Event::ToolCall(call)] = events.as_slice() else {
+                panic!("a start and then the call, not {events:?}");
+            };
+            assert_eq!((&start.id, &start.name), (&call.id, &call.name));
+        }
+    }
+
+    #[test]
+    fn the_input_size_is_a_running_utf8_byte_total_for_the_call() {
+        let events = read_in_order(&[
+            tool_use_start(0, "toolu_1"),
+            fragment(0, r#"{"path": "a.txt", "#),
+            fragment(0, ""),
+            fragment(0, r#""content": "héllo"}"#),
+        ]);
+        // 18 bytes, then 20 more: `é` is two bytes, so the second fragment is 19 characters
+        // but 20 bytes. The empty fragment reports nothing and adds nothing.
+        assert_eq!(
+            events,
+            vec![
+                started("toolu_1", "echo_tool"),
+                progress("toolu_1", 18),
+                progress("toolu_1", 38),
+            ]
+        );
+        for event in &events {
+            let shown = format!("{event:?}");
+            assert!(
+                !shown.contains("a.txt") && !shown.contains("héllo"),
+                "{shown} carries part of the input"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fragment_that_is_empty_or_not_a_string_leaves_the_total_unchanged() {
+        let absent = json!({
+            "type": "stream_event",
+            "event": { "type": "content_block_delta", "index": 0, "delta": { "type": "input_json_delta" } },
+        })
+        .to_string();
+        let events = read_in_order(&[
+            tool_use_start(0, "toolu_1"),
+            fragment(0, "{}"),
+            fragment(0, ""),
+            absent,
+            input_delta(json!(0), json!(null)),
+            input_delta(json!(0), json!(7)),
+            input_delta(json!(0), json!({ "text": "hi" })),
+            input_delta(json!(0), json!(["{}"])),
+            fragment(0, "x"),
+        ]);
+        assert_eq!(
+            events,
+            vec![
+                started("toolu_1", "echo_tool"),
+                progress("toolu_1", 2),
+                progress("toolu_1", 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_delta_whose_index_no_tool_use_block_opened_reports_nothing() {
+        for orphan in [
+            fragment(0, "{}"),
+            json!({
+                "type": "stream_event",
+                "event": { "type": "content_block_delta", "delta": { "type": "input_json_delta", "partial_json": "{}" } },
+            })
+            .to_string(),
+            input_delta(json!("0"), json!("{}")),
+        ] {
+            // Not a note either: a delta for a block this driver is not tracking is ordinary.
+            assert_eq!(events(&orphan), Vec::new(), "{orphan}");
+        }
+
+        // An index that is a string, negative or fractional is never read as an open one.
+        let events = read_in_order(&[
+            tool_use_start(0, "toolu_1"),
+            input_delta(json!("0"), json!("{}")),
+            input_delta(json!(-0.0), json!("{}")),
+            input_delta(json!(0.5), json!("{}")),
+            fragment(1, "{}"),
+        ]);
+        assert_eq!(events, vec![started("toolu_1", "echo_tool")]);
+    }
+
+    #[test]
+    fn message_start_forgets_the_previous_messages_tool_calls() {
+        let events = read_in_order(&[
+            message_start(),
+            tool_use_start(0, "toolu_A"),
+            fragment(0, "{\"a\": 1}"),
+            message_start(),
+            // The second message reuses index 0, which no block of its own has opened yet.
+            fragment(0, "{\"stale\": true}"),
+            tool_use_start(0, "toolu_B"),
+            fragment(0, "{}"),
+        ]);
+        assert_eq!(
+            events,
+            vec![
+                started("toolu_A", "echo_tool"),
+                progress("toolu_A", 8),
+                started("toolu_B", "echo_tool"),
+                progress("toolu_B", 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn two_calls_in_one_message_keep_separate_totals() {
+        let events = read_in_order(&[
+            message_start(),
+            block_start(json!(0), json!({ "type": "text", "text": "" })),
+            tool_use_start(1, "toolu_1"),
+            tool_use_start(2, "toolu_2"),
+            fragment(1, "{\"a\""),
+            fragment(2, "{\"bb\": 2}"),
+            fragment(1, ": 1}"),
+        ]);
+        assert_eq!(
+            events,
+            vec![
+                started("toolu_1", "echo_tool"),
+                started("toolu_2", "echo_tool"),
+                progress("toolu_1", 4),
+                progress("toolu_2", 9),
+                progress("toolu_1", 8),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_block_of_another_type_at_an_open_index_ends_that_call() {
+        let events = read_in_order(&[
+            tool_use_start(1, "toolu_1"),
+            fragment(1, "{}"),
+            block_start(json!(1), json!({ "type": "text", "text": "" })),
+            fragment(1, "{}"),
+        ]);
+        assert_eq!(
+            events,
+            vec![started("toolu_1", "echo_tool"), progress("toolu_1", 2)]
+        );
+    }
+
+    #[test]
+    fn a_tool_use_block_start_without_an_id_reports_nothing() {
+        for id in [json!(""), json!(null), json!(7)] {
+            let start = block_start(
+                json!(0),
+                json!({ "type": "tool_use", "id": id, "name": "mcp__claude_bridge__echo_tool" }),
+            );
+            assert_eq!(
+                read_in_order(&[start, fragment(0, "{}")]),
+                Vec::new(),
+                "{id}"
+            );
+        }
+        let absent = block_start(
+            json!(0),
+            json!({ "type": "tool_use", "name": "mcp__claude_bridge__echo_tool" }),
+        );
+        assert_eq!(read_in_order(&[absent, fragment(0, "{}")]), Vec::new());
+
+        // Nor does an id-less start at an open index leave the earlier call standing there.
+        let events = read_in_order(&[
+            tool_use_start(0, "toolu_1"),
+            block_start(json!(0), json!({ "type": "tool_use", "id": "" })),
+            fragment(0, "{}"),
+        ]);
+        assert_eq!(events, vec![started("toolu_1", "echo_tool")]);
+    }
+
+    #[test]
+    fn a_start_whose_index_cannot_be_read_still_reports_the_call() {
+        // The call is real and named, so it is reported; with no index to find it by, none of
+        // its deltas can be tied to it, so nothing more is.
+        let events = read_in_order(&[
+            block_start(
+                json!("0"),
+                json!({ "type": "tool_use", "id": "toolu_1", "name": "x" }),
+            ),
+            input_delta(json!("0"), json!("{}")),
+            fragment(0, "{}"),
+        ]);
+        assert_eq!(events, vec![started("toolu_1", "x")]);
+    }
+
+    /// The lines of [`message_start_forgets_the_previous_messages_tool_calls`] and
+    /// [`two_calls_in_one_message_keep_separate_totals`], one after the other.
+    fn tool_call_lines() -> Vec<String> {
+        vec![
+            message_start(),
+            tool_use_start(0, "toolu_A"),
+            fragment(0, "{\"a\": 1}"),
+            message_start(),
+            fragment(0, "{\"stale\": true}"),
+            tool_use_start(0, "toolu_B"),
+            fragment(0, "{}"),
+            message_start(),
+            block_start(json!(0), json!({ "type": "text", "text": "" })),
+            tool_use_start(1, "toolu_1"),
+            tool_use_start(2, "toolu_2"),
+            fragment(1, "{\"a\""),
+            fragment(2, "{\"bb\": 2}"),
+            fragment(1, ": 1}"),
+            block_start(json!(1), json!({ "type": "text", "text": "" })),
+            fragment(1, "{}"),
+        ]
+    }
+
+    #[test]
+    fn the_events_of_a_tool_call_do_not_depend_on_how_its_lines_are_batched() {
+        let lines = tool_call_lines();
+        let context = bridged_context();
+        let whole = parse_lines(&lines, &context, &mut ParseState::new());
+        assert_eq!(
+            whole.len(),
+            9,
+            "the sequence must exercise starts and progress"
+        );
+
+        let mut state = ParseState::new();
+        let one_at_a_time: Vec<Event> = lines
+            .iter()
+            .flat_map(|line| parse_lines(std::slice::from_ref(line), &context, &mut state))
+            .collect();
+        assert_eq!(one_at_a_time, whole, "one line per batch");
+
+        for split in 0..=lines.len() {
+            let (head, tail) = lines.split_at(split);
+            let mut state = ParseState::new();
+            let mut split_in_two = parse_lines(head, &context, &mut state);
+            split_in_two.extend(parse_lines(tail, &context, &mut state));
+            assert_eq!(split_in_two, whole, "split at line {split}");
+        }
+    }
+
+    #[test]
+    fn no_event_but_a_tool_call_carries_any_of_the_input() {
+        // The marker is in every place the harness writes input: the block start's `input`,
+        // every fragment, and the complete `tool_use` block. Only `tool-call` may repeat it.
+        const MARKER: &str = "QXZJ-WKVR";
+        let lines = [
+            message_start(),
+            block_start(
+                json!(0),
+                json!({ "type": "tool_use", "id": "toolu_1", "name": "echo_tool", "input": { "text": MARKER } }),
+            ),
+            fragment(0, &format!("{{\"text\": \"{MARKER}")),
+            fragment(0, "\"}"),
+            json!({
+                "type": "assistant",
+                "message": { "content": [{ "type": "tool_use", "id": "toolu_1", "name": "echo_tool", "input": { "text": MARKER } }] },
+            })
+            .to_string(),
+        ];
+        let events = read_in_order(&lines);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, Event::ToolCallProgress(_))));
+        for event in &events {
+            if !matches!(event, Event::ToolCall(_)) {
+                assert!(
+                    !format!("{event:?}").contains(MARKER),
+                    "{event:?} carries the input"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_tool_call_line_of_any_shape_never_panics() {
+        let lines: Vec<String> = [
+            block_start(json!(u64::MAX), json!({ "type": "tool_use", "id": "t", "name": "n" })),
+            input_delta(json!(u64::MAX), json!("{}")),
+            block_start(json!(-1), json!({ "type": "tool_use", "id": "t", "name": "n" })),
+            input_delta(json!(-1), json!("{}")),
+            block_start(json!(1e300), json!({ "type": "tool_use", "id": "t" })),
+            block_start(json!(0), json!("tool_use")),
+            block_start(json!(0), json!(["tool_use"])),
+            block_start(json!(0), json!(null)),
+            block_start(json!(0), json!({ "type": "tool_use", "id": ["t"], "name": 7 })),
+            input_delta(json!(0), json!(null)),
+            input_delta(json!(null), json!(null)),
+            r#"{"type":"stream_event","event":"content_block_start"}"#.to_string(),
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":"input_json_delta"}}"#.to_string(),
+            r#"{"type":"stream_event","event":{"type":"message_start"}}"#.to_string(),
+            r#"{"type":"stream_event"}"#.to_string(),
+        ]
+        .to_vec();
+        let events = read_in_order(&lines);
+
+        // The start at `u64::MAX` is a readable index like any other, and its delta reports.
+        assert_eq!(events[..2], [started("t", "n"), progress("t", 2)]);
+        for event in &events {
+            if let Event::ToolCallProgress(progress) = event {
+                assert!(
+                    !progress.id.is_empty() && progress.input_bytes > 0,
+                    "{event:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_input_total_saturates_rather_than_wrapping_past_u64() {
+        let mut calls = OpenToolCalls::new();
+        calls.open(0, "toolu_1");
+        calls.calls.get_mut(&0).expect("just opened").input_bytes = u64::MAX - 1;
+        assert_eq!(
+            calls.grow(0, "{}").map(|progress| progress.input_bytes),
+            Some(u64::MAX)
+        );
+        assert_eq!(
+            calls.grow(0, "{}").map(|progress| progress.input_bytes),
+            Some(u64::MAX)
+        );
     }
 }
