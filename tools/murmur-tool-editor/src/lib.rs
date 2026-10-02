@@ -90,20 +90,42 @@ pub mod logic {
             _ => return fail_msg("data must be a JSON string or object"),
         };
 
-        let operation = op.get("operation").and_then(|v| v.as_str()).unwrap_or("");
-
-        // Declare each operation's effect on the resource it addressed via the runtime's
-        // reserved `state_effect` metadata key (see the host's wit/tool.wit). This is what
-        // lets `mur trace` redundant-call detection reason about these operations without
-        // hardcoding any of their names. Only successful calls declare an effect — a failed
-        // read did not read, and a failed write did not mutate, so those stay undeclared.
-        match operation {
-            "read_file" => with_state_effect(op_read_file(&op), "read"),
-            "write_file" => with_state_effect(op_write_file(&op), "mutate"),
-            "replace_in_file" => with_state_effect(op_replace_in_file(&op), "mutate"),
-            "find_in_files" => with_state_effect(op_find_in_files(&op), "read"),
-            other => fail_msg(format!("unknown operation: {other}")),
+        // An absent, non-string or empty `operation` is "missing", the same as every other
+        // required string input in this tool.
+        let name = match op.get("operation") {
+            Some(Value::String(name)) if !name.is_empty() => name,
+            _ => return fail_msg(format!("missing \"operation\": {}", expected_operations())),
+        };
+        match OPERATIONS.iter().find(|(known, _, _)| known == name) {
+            Some((_, handler, effect)) => with_state_effect(handler(&op), effect),
+            None => fail_msg(format!("unknown operation {name:?}: {}", expected_operations())),
         }
+    }
+
+    /// An operation's entry point: the `data` object in, the old-protocol result out.
+    type Handler = fn(&Value) -> Value;
+
+    /// Every operation this tool dispatches: its name, its handler, and the `state_effect` a
+    /// successful call declares. The names are listed, in this order, in every error that
+    /// rejects an `operation`, and must equal the `operation` enum in `murmur.yaml`.
+    ///
+    /// The effect goes out via the runtime's reserved `state_effect` metadata key (see the
+    /// host's wit/tool.wit). This is what lets `mur trace` redundant-call detection reason
+    /// about these operations without hardcoding any of their names. Only successful calls
+    /// declare an effect — a failed read did not read, and a failed write did not mutate, so
+    /// those stay undeclared.
+    const OPERATIONS: [(&str, Handler, &str); 4] = [
+        ("read_file", op_read_file, "read"),
+        ("write_file", op_write_file, "mutate"),
+        ("replace_in_file", op_replace_in_file, "mutate"),
+        ("find_in_files", op_find_in_files, "read"),
+    ];
+
+    /// `expected one of ` followed by the [`OPERATIONS`] names, comma-separated — the tail of
+    /// every message that rejects an `operation`.
+    fn expected_operations() -> String {
+        let names: Vec<&str> = OPERATIONS.iter().map(|(name, _, _)| *name).collect();
+        format!("expected one of {}", names.join(", "))
     }
 
     /// Attach the reserved `state_effect` metadata key to a successful result. Failures are
@@ -639,7 +661,172 @@ pub mod logic {
             let input = r#"{"data":{"operation":"bogus_op_xyz"}}"#;
             let out = run(input);
             assert_eq!(out["ok"], false);
-            assert!(out["message"].as_str().unwrap().contains("unknown operation"));
+            assert_eq!(
+                out["message"],
+                "unknown operation \"bogus_op_xyz\": expected one of read_file, write_file, \
+                 replace_in_file, find_in_files"
+            );
+        }
+
+        const MISSING_OPERATION: &str = "missing \"operation\": expected one of read_file, \
+                                         write_file, replace_in_file, find_in_files";
+
+        #[test]
+        fn run_names_a_missing_operation_and_writes_nothing() {
+            // Write-shaped input with every field but `operation`.
+            let dir = scratch("missing_operation");
+            let path = dir.join("out.txt");
+            let envelope = json!({
+                "data": { "dest_path": path.to_str().unwrap(), "content": "x" },
+            });
+            let out = run(&envelope.to_string());
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["status"], "error");
+            assert_eq!(out["message"], MISSING_OPERATION);
+            assert_eq!(out["summary"], MISSING_OPERATION);
+            assert!(out.get("error_kind").is_none(), "got {out:?}");
+            assert!(out["metadata"].is_null(), "got {out:?}");
+            assert!(!path.exists(), "a rejected operation must not reach the filesystem");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn run_treats_a_non_string_or_empty_operation_as_missing() {
+            for operation in [
+                json!(null),
+                json!(42),
+                json!(true),
+                json!(["write_file"]),
+                json!({}),
+                json!(""),
+            ] {
+                let envelope = json!({ "data": { "operation": operation } });
+                let out = run(&envelope.to_string());
+                assert_eq!(out["ok"], false, "operation {operation}");
+                assert_eq!(out["status"], "error", "operation {operation}");
+                assert_eq!(out["message"], MISSING_OPERATION, "operation {operation}");
+                assert!(out["metadata"].is_null(), "operation {operation}");
+            }
+        }
+
+        #[test]
+        fn run_escapes_an_unknown_operation_name() {
+            let out = run(&json!({ "data": { "operation": "write\"file" } }).to_string());
+            let message = out["message"].as_str().unwrap();
+            assert!(
+                message.starts_with(r#"unknown operation "write\"file": expected one of "#),
+                "got {message}"
+            );
+
+            let out = run(&json!({ "data": { "operation": "write\nfile" } }).to_string());
+            let message = out["message"].as_str().unwrap();
+            assert!(!message.contains('\n'), "got {message:?}");
+            assert!(
+                message.starts_with(r#"unknown operation "write\nfile": "#),
+                "got {message:?}"
+            );
+        }
+
+        #[test]
+        fn a_rejected_operation_never_ends_in_a_dangling_colon() {
+            let dir = scratch("dangling_colon");
+            let dest = dir.join("out.txt");
+            let inputs = [
+                json!({ "data": { "dest_path": dest.to_str().unwrap(), "content": "x" } })
+                    .to_string(),
+                json!({ "data": { "operation": null } }).to_string(),
+                json!({ "data": { "operation": 42 } }).to_string(),
+                json!({ "data": { "operation": true } }).to_string(),
+                json!({ "data": { "operation": ["write_file"] } }).to_string(),
+                json!({ "data": { "operation": {} } }).to_string(),
+                json!({ "data": { "operation": "" } }).to_string(),
+                json!({ "data": { "operation": "bogus_op_xyz" } }).to_string(),
+                json!({ "data": r#"{"operation":"bogus_double_enc"}"# }).to_string(),
+                json!({ "data": { "operation": "write\"file" } }).to_string(),
+                json!({ "data": { "operation": "write\nfile" } }).to_string(),
+            ];
+            for input in inputs {
+                let out = run(&input);
+                let message = out["message"].as_str().unwrap();
+                assert!(!message.ends_with(':') && !message.ends_with(": "), "{input}: {message}");
+                assert!(message.ends_with("find_in_files"), "{input}: {message}");
+            }
+            assert!(!dest.exists(), "a rejected operation must not reach the filesystem");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn every_listed_operation_reaches_its_handler() {
+            // With no other fields, each handler refuses on its own first required input —
+            // proof the name passed both the missing and the unknown check.
+            for (name, _, _) in OPERATIONS {
+                let out = run(&json!({ "data": { "operation": name } }).to_string());
+                assert_eq!(out["ok"], false, "{name}");
+                let message = out["message"].as_str().unwrap();
+                assert!(
+                    message.starts_with("missing required field: "),
+                    "{name} did not reach its handler: {message}"
+                );
+            }
+        }
+
+        #[test]
+        fn the_rejection_message_lists_exactly_the_operations_table() {
+            let out = run(r#"{"data":{}}"#);
+            let message = out["message"].as_str().unwrap();
+            let (_, listed) = message
+                .split_once("expected one of ")
+                .unwrap_or_else(|| panic!("no list in {message}"));
+            let listed: Vec<&str> = listed.split(", ").collect();
+            let table: Vec<&str> = OPERATIONS.iter().map(|(name, _, _)| *name).collect();
+            assert_eq!(listed, table);
+        }
+
+        /// The `- <name>` items of the `enum:` under `input_schema.properties.operation` in
+        /// `murmur.yaml`. Panics when the property or its `enum:` is absent, so a manifest
+        /// that loses either cannot read as an empty list.
+        fn manifest_operation_enum(manifest: &str) -> Vec<String> {
+            let mut lines = manifest
+                .lines()
+                .skip_while(|line| !line.starts_with("input_schema:"));
+            let header = lines
+                .by_ref()
+                .find(|line| line.trim_end() == "    operation:")
+                .expect("murmur.yaml input_schema declares no `operation` property");
+            let indent = header.len() - header.trim_start().len();
+            let body: Vec<&str> = lines
+                .take_while(|line| {
+                    line.trim().is_empty() || line.len() - line.trim_start().len() > indent
+                })
+                .filter(|line| !line.trim().is_empty())
+                .collect();
+
+            let enum_at = body
+                .iter()
+                .position(|line| line.trim() == "enum:")
+                .expect("murmur.yaml `operation` property declares no `enum:`");
+            let items: Vec<String> = body[enum_at + 1..]
+                .iter()
+                .map_while(|line| line.trim().strip_prefix("- "))
+                .map(str::to_string)
+                .collect();
+            assert!(!items.is_empty(), "murmur.yaml `operation` enum lists no items");
+            items
+        }
+
+        #[test]
+        fn manifest_operation_enum_matches_the_operations_table() {
+            let manifest = manifest_operation_enum(include_str!("../murmur.yaml"));
+            let table: Vec<String> = OPERATIONS
+                .iter()
+                .map(|(name, _, _)| name.to_string())
+                .collect();
+            assert_eq!(
+                manifest, table,
+                "murmur.yaml's `operation` enum and OPERATIONS in src/lib.rs must change \
+                 together, in the same order.\n  murmur.yaml enum: {manifest:?}\n  OPERATIONS:       \
+                 {table:?}"
+            );
         }
 
         #[test]
@@ -749,7 +936,11 @@ pub mod logic {
             );
             let out = run(&envelope);
             assert_eq!(out["ok"], false);
-            assert!(out["message"].as_str().unwrap().contains("unknown operation"));
+            assert_eq!(
+                out["message"],
+                "unknown operation \"bogus_double_enc\": expected one of read_file, write_file, \
+                 replace_in_file, find_in_files"
+            );
         }
 
         // ── Scoped search tests ─────────────────────────────────────────────────

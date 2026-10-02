@@ -1,5 +1,5 @@
 name: murmur-tool-editor
-version: 0.5.0
+version: 0.5.1
 runtime: tool
 implementation: wasm
 description: |
