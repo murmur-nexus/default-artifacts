@@ -315,7 +315,7 @@ impl RunningUsage {
 /// ends, together with how many bytes of the call's input have streamed since. A new message
 /// reuses indices from `0`, which is why `message_start` forgets every one of them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct OpenToolCalls {
+struct OpenToolCalls {
     calls: BTreeMap<u64, OpenToolCall>,
 }
 
@@ -328,7 +328,7 @@ struct OpenToolCall {
 
 impl OpenToolCalls {
     /// A message that has opened no tool call yet.
-    pub const fn new() -> Self {
+    const fn new() -> Self {
         Self {
             calls: BTreeMap::new(),
         }

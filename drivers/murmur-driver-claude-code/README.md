@@ -37,12 +37,21 @@ That is what `murmur-driver-claude-code@0.3.0` and every earlier release get fro
 `@0.3.0`: they no longer load. Install `0.4.0` or later — a rebuild is the intended cost of the
 bump. The refusal runs the other way too: a murmur still at `@0.2.0` refuses this release.
 
-`mur --version` does not distinguish the two: it reports `murmur-cli 0.5.0` both before and
-after the interface moved, because the CLI version string was not bumped with it. If you see
-`E-RUN-029`, no setting in this artifact will change it; build `mur` from a murmur that carries
-the `@0.3.0` runner, or wait for the release that does.
+**No published murmur release carries the `@0.3.0` runner yet.** Pick the driver by the murmur
+you run:
 
-`transport: process` with an `inference.driver` is also newer than any published murmur release.
+| murmur | Its process-driver interface | Driver release to pin |
+|---|---|---|
+| `v0.3.0` and earlier | none | none: `transport: process` is not supported |
+| `v0.4.0`, `v0.5.0` | `murmur:driver/process@0.2.0` | `0.3.0` |
+| built from `main` at `e8bf7c2` or later | `murmur:driver/process@0.3.0` | `0.4.0` |
+
+`mur --version` does not tell the last two rows apart: a `mur` built from `e8bf7c2` reports
+`murmur-cli 0.5.0`, the same as the `v0.5.0` release, because the CLI version string was not
+bumped with the interface. If you see `E-RUN-029`, no setting in this artifact will change it.
+Either pin the driver release from the table, or build `mur` from a murmur that carries the
+`@0.3.0` runner, or wait for the first release after `v0.5.0`.
+
 A murmur without the runner at all refuses the manifest before the driver is loaded, with
 `E-MAN-003` naming `inference.driver.artifact`.
 
@@ -187,9 +196,8 @@ are carried from one `parse` call to the next: the bridge's tool prefix, which `
 so `parse` can strip it off again, and the open tool calls of the message being streamed, which
 tie an `input_json_delta` to the call its block started. The run's token totals are carried the
 same way. `launch` starts the open calls and the totals afresh, because a new process is a new
-stream. Because what one
-line leaves for a later one is carried rather than dropped at a batch boundary, the same lines
-split into different batches still produce the same events.
+stream. Because what one line leaves for a later one is carried rather than dropped at a batch
+boundary, the same lines split into different batches still produce the same events.
 
 | Line | Events |
 |---|---|

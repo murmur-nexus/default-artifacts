@@ -614,7 +614,7 @@ fn the_recorded_input_size_is_the_bytes_the_harness_streamed_for_the_call() {
     // 14, not the 13 of the `tool-call`'s `{"text":"hi"}`: the harness streamed
     // `{"text": "hi"}`, with a space after the colon, and the size counts the bytes it streamed.
     // The `tool-call`'s input is the complete block's `input` re-serialized compactly.
-    let last_progress = events
+    let totals: Vec<u64> = events
         .iter()
         .filter_map(|event| match event {
             Event::ToolCallProgress(progress) if progress.id == "toolu_1" => {
@@ -622,7 +622,13 @@ fn the_recorded_input_size_is_the_bytes_the_harness_streamed_for_the_call() {
             }
             _ => None,
         })
-        .next_back()
+        .collect();
+    assert!(
+        totals.windows(2).all(|pair| pair[0] <= pair[1]),
+        "the totals for toolu_1 never decrease: {totals:?}"
+    );
+    let last_progress = *totals
+        .last()
         .expect("the recording streams toolu_1's input");
     assert_eq!(streamed.len() as u64, last_progress);
     assert_eq!(last_progress, 14);
