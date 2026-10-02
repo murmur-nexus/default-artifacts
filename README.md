@@ -23,6 +23,22 @@ All four also take the endpoint they talk to from the host, in
 of them: an endpoint that is absent, empty or whitespace-only is refused before
 any request is built, never replaced with a provider default.
 
+All four stream text and thinking, and report each tool call while the model is still writing
+it, through `murmur:stream/events@0.1.0`: the call's start, with the id and name of the
+`tool_call` the driver will return, then a rising UTF-8 byte count of its arguments, never the
+arguments themselves. On `transport: http` these become `tool-call-started` and
+`tool-call-progress` frames ahead of the call's `artifact`. That interface is served by the first
+murmur release after v0.5.0, which refuses the releases built before it with `E-RUN-029`:
+
+| Artifact | First release on `murmur:stream/events` |
+|---|---|
+| `murmur-driver-anthropic` | 0.10.0 |
+| `murmur-driver-deepseek` | 0.8.0 |
+| `murmur-driver-moonshotai` | 0.7.0 |
+| `murmur-driver-openai` | 0.9.0 |
+
+See each driver's "Tool-call progress" section for the provider event each report is taken from.
+
 ## Hooks
 
 WASM components (`runtime: hook`) that attach to lifecycle events. Each hook declares its `binding`, `execution_mode`, and `commit_policy` in its own `murmur.yaml`; where a field is omitted the runtime defaults apply (all events, async, no commit).

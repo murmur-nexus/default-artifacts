@@ -2035,9 +2035,12 @@ mod tests {
     #[test]
     fn wasm_driver_reports_tool_calls_on_murmur_stream_events_only() {
         let source = include_str!("lib.rs");
-        let wasm = &source[source
+        // Ends at `mod tests` so the needles below cannot match themselves.
+        let start = source
             .find("\nmod wasm_driver {")
-            .expect("mod wasm_driver must exist")..];
+            .expect("mod wasm_driver must exist");
+        let end = source.find("\nmod tests {").expect("mod tests must exist");
+        let wasm = &source[start..end];
         for call in [
             "murmur::stream::events::tool_call_started(",
             "murmur::stream::events::tool_call_input_bytes(",
