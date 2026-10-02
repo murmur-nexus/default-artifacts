@@ -39,7 +39,8 @@
 #         murmur:runtime/tokens, murmur:task-io/read, murmur:conversation/read } plus the
 #         type-only murmur:hook/lifecycle instance those pull in.
 #   TOOL: export set == { murmur:tool/run@<tool-wit-version> };       murmur:* imports subset of
-#         { murmur:text/chunks, murmur:task/task }.
+#         { murmur:stream/events, murmur:task/task } (`murmur:%stream/events` as
+#         `wasm-tools component wit` prints it; the `%` escape is stripped first).
 #   PROCESS-DRIVER: export set == { murmur:driver/process@<process-driver-wit-version> }; zero
 #         murmur:* imports. The runtime instantiates a process driver on an empty WASI context
 #         with no murmur host import at all, so any murmur:* import is a component that cannot
@@ -173,11 +174,13 @@ validate_one() {
 
   # Interface ids with the trailing `;` stripped. Exports keep their @version
   # suffix — that is what the version assertion below compares. Imports have it
-  # stripped, since import versions are intentionally not gated. awk (not sed) for
-  # portability: BSD sed treats `\+` as a literal `+`, so a sed-based extraction
-  # silently matches nothing on macOS.
-  imports="$(printf '%s\n' "$world" | awk '$1=="import"{sub(/;$/,"",$2); sub(/@.*/,"",$2); print $2}')"
-  exports_versioned="$(printf '%s\n' "$world" | awk '$1=="export"{sub(/;$/,"",$2); print $2}')"
+  # stripped, since import versions are intentionally not gated. A `%` after `:` or
+  # `/` is WIT keyword escaping (`murmur:%stream/events` is the interface
+  # `murmur:stream/events`), so it is dropped before any name is compared. awk (not
+  # sed) for portability: BSD sed treats `\+` as a literal `+`, so a sed-based
+  # extraction silently matches nothing on macOS.
+  imports="$(printf '%s\n' "$world" | awk '$1=="import"{sub(/;$/,"",$2); sub(/@.*/,"",$2); gsub(/:%/,":",$2); gsub(/\/%/,"/",$2); print $2}')"
+  exports_versioned="$(printf '%s\n' "$world" | awk '$1=="export"{sub(/;$/,"",$2); gsub(/:%/,":",$2); gsub(/\/%/,"/",$2); print $2}')"
   exports="$(printf '%s\n' "$exports_versioned" | awk '{sub(/@.*/,""); print}')"
 
   murmur_imports="$(printf '%s\n' "$imports" | grep '^murmur:' || true)"
@@ -241,13 +244,13 @@ validate_one() {
       esac
     done <<< "$murmur_imports"
   else
-    # Tools/drivers may import only murmur:text/chunks and/or murmur:task/task.
+    # Tools/drivers may import only murmur:stream/events and/or murmur:task/task.
     while IFS= read -r i; do
       [ -n "$i" ] || continue
       case "$i" in
-        murmur:text/chunks|murmur:task/task) ;;
+        murmur:stream/events|murmur:task/task) ;;
         *)
-          echo "FAIL: $base (tool): unexpected import '$i' — tool/driver components may import only murmur:text/chunks and/or murmur:task/task" >&2
+          echo "FAIL: $base (tool): unexpected import '$i' — tool/driver components may import only murmur:stream/events and/or murmur:task/task" >&2
           fail=1
           ;;
       esac

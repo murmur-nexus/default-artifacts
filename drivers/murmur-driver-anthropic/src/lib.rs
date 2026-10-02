@@ -1255,8 +1255,8 @@ mod wasm_driver {
                     done = process_anthropic_sse_bytes(
                         &line_buf,
                         &mut state,
-                        &mut |chunk| murmur::text::chunks::emit_chunk(chunk),
-                        &mut |chunk| murmur::text::chunks::emit_thinking_chunk(chunk),
+                        &mut |chunk| murmur::stream::events::emit_chunk(chunk),
+                        &mut |chunk| murmur::stream::events::emit_thinking_chunk(chunk),
                     );
                     line_buf.clear();
                     if done {
@@ -1279,8 +1279,8 @@ mod wasm_driver {
                             done = process_anthropic_sse_bytes(
                                 &line_buf,
                                 &mut state,
-                                &mut |chunk| murmur::text::chunks::emit_chunk(chunk),
-                                &mut |chunk| murmur::text::chunks::emit_thinking_chunk(chunk),
+                                &mut |chunk| murmur::stream::events::emit_chunk(chunk),
+                                &mut |chunk| murmur::stream::events::emit_thinking_chunk(chunk),
                             );
                             line_buf.clear();
                             if done {

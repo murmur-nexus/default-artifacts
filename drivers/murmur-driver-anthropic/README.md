@@ -186,7 +186,7 @@ for a block that started, of the matching kind, with a string payload. Streamed
 tool input must parse to a JSON object.
 
 No message includes any part of the response body or of a tool call's input.
-Text already streamed through `murmur:text/chunks` before a failure has been
+Text already streamed through `murmur:stream/events` before a failure has been
 shown and is not withdrawn; it is just not recorded as a finished reply.
 
 ### Not refused

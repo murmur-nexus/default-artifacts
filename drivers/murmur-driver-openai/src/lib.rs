@@ -1928,8 +1928,8 @@ mod wasm_driver {
                 let line = String::from_utf8_lossy(&line_buf);
                 let line = line.trim_end_matches('\r');
                 {
-                    let mut emit_t = |t: &str| { murmur::text::chunks::emit_chunk(t); text_acc.push_str(t); };
-                    let mut emit_think = |t: &str| { murmur::text::chunks::emit_thinking_chunk(t); thinking_acc.push_str(t); };
+                    let mut emit_t = |t: &str| { murmur::stream::events::emit_chunk(t); text_acc.push_str(t); };
+                    let mut emit_think = |t: &str| { murmur::stream::events::emit_thinking_chunk(t); thinking_acc.push_str(t); };
                     done = process_openai_sse_line(
                         line,
                         &mut tool_states,
@@ -1961,8 +1961,8 @@ mod wasm_driver {
                         let line = String::from_utf8_lossy(&line_buf);
                         let line = line.trim_end_matches('\r');
                         {
-                            let mut emit_t = |t: &str| { murmur::text::chunks::emit_chunk(t); text_acc.push_str(t); };
-                            let mut emit_think = |t: &str| { murmur::text::chunks::emit_thinking_chunk(t); thinking_acc.push_str(t); };
+                            let mut emit_t = |t: &str| { murmur::stream::events::emit_chunk(t); text_acc.push_str(t); };
+                            let mut emit_think = |t: &str| { murmur::stream::events::emit_thinking_chunk(t); thinking_acc.push_str(t); };
                             done = process_openai_sse_line(
                                 line,
                                 &mut tool_states,
@@ -1987,8 +1987,8 @@ mod wasm_driver {
         drop(stream);
         let _ = wasip2::http::types::IncomingBody::finish(incoming_body);
         {
-            let mut emit_t = |t: &str| { murmur::text::chunks::emit_chunk(t); text_acc.push_str(t); };
-            let mut emit_think = |t: &str| { murmur::text::chunks::emit_thinking_chunk(t); thinking_acc.push_str(t); };
+            let mut emit_t = |t: &str| { murmur::stream::events::emit_chunk(t); text_acc.push_str(t); };
+            let mut emit_think = |t: &str| { murmur::stream::events::emit_thinking_chunk(t); thinking_acc.push_str(t); };
             thinking.flush(&mut emit_t, &mut emit_think);
         }
         assemble_openai_streaming_response(&text_acc, &thinking_acc, tool_states, stop_reason, usage)
@@ -2019,8 +2019,8 @@ mod wasm_driver {
                 let line = String::from_utf8_lossy(&line_buf);
                 let line = line.trim_end_matches('\r');
                 {
-                    let mut emit_t = |t: &str| { murmur::text::chunks::emit_chunk(t); text_acc.push_str(t); };
-                    let mut emit_think = |t: &str| { murmur::text::chunks::emit_thinking_chunk(t); thinking_acc.push_str(t); };
+                    let mut emit_t = |t: &str| { murmur::stream::events::emit_chunk(t); text_acc.push_str(t); };
+                    let mut emit_think = |t: &str| { murmur::stream::events::emit_thinking_chunk(t); thinking_acc.push_str(t); };
                     done = process_responses_sse_line(
                         line,
                         &mut tool_states,
@@ -2055,8 +2055,8 @@ mod wasm_driver {
                         let line = String::from_utf8_lossy(&line_buf);
                         let line = line.trim_end_matches('\r');
                         {
-                            let mut emit_t = |t: &str| { murmur::text::chunks::emit_chunk(t); text_acc.push_str(t); };
-                            let mut emit_think = |t: &str| { murmur::text::chunks::emit_thinking_chunk(t); thinking_acc.push_str(t); };
+                            let mut emit_t = |t: &str| { murmur::stream::events::emit_chunk(t); text_acc.push_str(t); };
+                            let mut emit_think = |t: &str| { murmur::stream::events::emit_thinking_chunk(t); thinking_acc.push_str(t); };
                             done = process_responses_sse_line(
                                 line,
                                 &mut tool_states,

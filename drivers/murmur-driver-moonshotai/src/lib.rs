@@ -1073,11 +1073,11 @@ mod wasm_driver {
                                reasoning_acc: &mut String|
              -> bool {
                 let mut et = |t: &str| {
-                    murmur::text::chunks::emit_chunk(t);
+                    murmur::stream::events::emit_chunk(t);
                     text_acc.push_str(t);
                 };
                 let mut eth = |t: &str| {
-                    murmur::text::chunks::emit_thinking_chunk(t);
+                    murmur::stream::events::emit_thinking_chunk(t);
                     reasoning_acc.push_str(t);
                 };
                 process_moonshot_sse_line(line, tool_states, stop_reason, usage, &mut et, &mut eth)
@@ -1600,11 +1600,11 @@ mod tests {
         let module = wasm_module_source();
 
         let text_sites: Vec<usize> = module
-            .match_indices("murmur::text::chunks::emit_chunk(")
+            .match_indices("murmur::stream::events::emit_chunk(")
             .map(|(index, _)| index)
             .collect();
         let thinking_sites: Vec<usize> = module
-            .match_indices("murmur::text::chunks::emit_thinking_chunk(")
+            .match_indices("murmur::stream::events::emit_thinking_chunk(")
             .map(|(index, _)| index)
             .collect();
 
