@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-10-02T14:29:45Z",
+  "updated_at": "2026-10-02T15:51:46Z",
   "artifacts": [
     {
       "name": "murmur-driver-anthropic",
@@ -156,7 +156,7 @@
     },
     {
       "name": "murmur-tool-corpus",
-      "version": "0.2.1",
+      "version": "0.3.0",
       "runtime": "tool",
       "description": "Append-only record store for Murmur capsules.",
       "tags": [
@@ -167,7 +167,7 @@
     },
     {
       "name": "murmur-tool-create",
-      "version": "0.4.1",
+      "version": "0.5.0",
       "runtime": "tool",
       "description": "Scaffolds a new tool artifact directory with murmur.yaml, stub implementation, and README.md.",
       "tags": [
@@ -178,7 +178,7 @@
     },
     {
       "name": "murmur-tool-editor",
-      "version": "0.5.2",
+      "version": "0.6.0",
       "runtime": "tool",
       "description": "Structured file editing interface for Murmur capsules.",
       "tags": [
@@ -248,7 +248,7 @@
     },
     {
       "name": "murmur-tool-request-input",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "runtime": "tool",
       "description": "Pauses the agent loop and requests external input via A2A.",
       "tags": [
@@ -260,7 +260,7 @@
     },
     {
       "name": "murmur-tool-report",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "runtime": "tool",
       "description": "State this capsule's own conclusion where a consumer can find it.",
       "tags": [
@@ -271,7 +271,7 @@
     },
     {
       "name": "murmur-tool-tavily",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "runtime": "tool",
       "description": "Search the web with Tavily and return a bounded, fenced text result \u2014 the Tavily key is bound by the operator and attached by the runtime, never held by the tool.",
       "tags": [

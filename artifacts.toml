@@ -99,17 +99,17 @@ version = "0.6.0"
 [[artifact]]
 name = "murmur-tool-corpus"
 path = "tools/murmur-tool-corpus"
-version = "0.2.1"
+version = "0.3.0"
 
 [[artifact]]
 name = "murmur-tool-create"
 path = "tools/murmur-tool-create"
-version = "0.4.1"
+version = "0.5.0"
 
 [[artifact]]
 name = "murmur-tool-editor"
 path = "tools/murmur-tool-editor"
-version = "0.5.2"
+version = "0.6.0"
 
 [[artifact]]
 name = "murmur-tool-code-coverage"
@@ -134,17 +134,17 @@ version = "0.1.0"
 [[artifact]]
 name = "murmur-tool-request-input"
 path = "tools/murmur-tool-request-input"
-version = "0.1.1"
+version = "0.2.0"
 
 [[artifact]]
 name = "murmur-tool-report"
 path = "tools/murmur-tool-report"
-version = "0.1.1"
+version = "0.2.0"
 
 [[artifact]]
 name = "murmur-tool-tavily"
 path = "tools/murmur-tool-tavily"
-version = "0.1.1"
+version = "0.2.0"
 
 [[artifact]]
 name = "murmur-tool-registry-search"
