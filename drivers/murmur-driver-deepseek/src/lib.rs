@@ -500,10 +500,52 @@ fn translate_deepseek_response_to_murmur(response: &Value) -> Result<Value, Stri
 
 // ── SSE streaming ──────────────────────────────────────────────────────────────
 
+#[derive(Default)]
 struct ToolCallState {
     id: String,
     name: String,
     arguments: String,
+    /// `Started` has been signalled for this call.
+    started: bool,
+    /// The last `InputBytes` total signalled for this call.
+    reported_bytes: u64,
+}
+
+impl ToolCallState {
+    /// Signal what this call's state newly supports, after a delta has been merged into it:
+    /// its start, once both its id and name are known, then its argument text's byte length
+    /// whenever that has grown past the last total. A call whose id has not arrived yet is not
+    /// reported; once it arrives, the start and the total so far go out together.
+    fn signal_due(&mut self, signal: &mut impl FnMut(ToolCallSignal<'_>)) {
+        if !self.started {
+            if self.id.is_empty() || self.name.is_empty() {
+                return;
+            }
+            signal(ToolCallSignal::Started {
+                id: &self.id,
+                name: &self.name,
+            });
+            self.started = true;
+        }
+        let bytes = self.arguments.len() as u64;
+        if bytes > self.reported_bytes {
+            signal(ToolCallSignal::InputBytes {
+                id: &self.id,
+                bytes,
+            });
+            self.reported_bytes = bytes;
+        }
+    }
+}
+
+/// A tool-call fact read from the provider stream. Carries no part of the call's input.
+///
+/// The id and name are the `id` and `name` the returned `tool_call` block carries. `InputBytes`
+/// is the running UTF-8 byte length of the call's argument text, so it only rises and ends at
+/// the length of the text parsed into the returned `input`.
+enum ToolCallSignal<'a> {
+    Started { id: &'a str, name: &'a str },
+    InputBytes { id: &'a str, bytes: u64 },
 }
 
 /// Map a DeepSeek `finish_reason` to a murmur `stop_reason`. Each caller refuses a missing reason
@@ -528,6 +570,7 @@ fn process_deepseek_sse_line(
     usage: &mut UsageTokens,
     emit_text: &mut impl FnMut(&str),
     emit_thinking: &mut impl FnMut(&str),
+    signal: &mut impl FnMut(ToolCallSignal<'_>),
 ) -> bool {
     if line == "data: [DONE]" {
         return true;
@@ -578,11 +621,7 @@ fn process_deepseek_sse_line(
         for tc in tc_arr {
             let idx = tc.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
             while tool_states.len() <= idx {
-                tool_states.push(ToolCallState {
-                    id: String::new(),
-                    name: String::new(),
-                    arguments: String::new(),
-                });
+                tool_states.push(ToolCallState::default());
             }
             if let Some(id) = tc.get("id").and_then(Value::as_str) {
                 if tool_states[idx].id.is_empty() {
@@ -599,6 +638,7 @@ fn process_deepseek_sse_line(
                     tool_states[idx].arguments.push_str(args);
                 }
             }
+            tool_states[idx].signal_due(signal);
         }
     }
 
@@ -660,11 +700,47 @@ fn parse_deepseek_sse_body<F: FnMut(&str), G: FnMut(&str)>(
     emit_text: &mut F,
     emit_thinking: &mut G,
 ) -> Result<Value, String> {
+    parse_deepseek_sse_body_with_signals(body, emit_text, emit_thinking).0
+}
+
+/// A tool-call signal as the tests collect it.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RecordedSignal {
+    Started { id: String, name: String },
+    InputBytes { id: String, bytes: u64 },
+}
+
+#[cfg(test)]
+impl From<ToolCallSignal<'_>> for RecordedSignal {
+    fn from(signal: ToolCallSignal<'_>) -> Self {
+        match signal {
+            ToolCallSignal::Started { id, name } => Self::Started {
+                id: id.to_string(),
+                name: name.to_string(),
+            },
+            ToolCallSignal::InputBytes { id, bytes } => Self::InputBytes {
+                id: id.to_string(),
+                bytes,
+            },
+        }
+    }
+}
+
+/// Parse a complete SSE body string, also returning every tool-call signal in the order it was
+/// sent (used in tests).
+#[cfg(test)]
+fn parse_deepseek_sse_body_with_signals<F: FnMut(&str), G: FnMut(&str)>(
+    body: &str,
+    emit_text: &mut F,
+    emit_thinking: &mut G,
+) -> (Result<Value, String>, Vec<RecordedSignal>) {
     let mut text_acc = String::new();
     let mut reasoning_acc = String::new();
     let mut tool_states: Vec<ToolCallState> = Vec::new();
     let mut stop_reason: Option<String> = None;
     let mut usage = UsageTokens::default();
+    let mut signals = Vec::new();
 
     for line in body.lines() {
         let line = line.trim_end_matches('\r');
@@ -684,6 +760,7 @@ fn parse_deepseek_sse_body<F: FnMut(&str), G: FnMut(&str)>(
                 &mut usage,
                 &mut et,
                 &mut eth,
+                &mut |s| signals.push(RecordedSignal::from(s)),
             )
         };
         if done {
@@ -691,7 +768,14 @@ fn parse_deepseek_sse_body<F: FnMut(&str), G: FnMut(&str)>(
         }
     }
 
-    assemble_deepseek_streaming_response(&text_acc, &reasoning_acc, tool_states, stop_reason, usage)
+    let result = assemble_deepseek_streaming_response(
+        &text_acc,
+        &reasoning_acc,
+        tool_states,
+        stop_reason,
+        usage,
+    );
+    (result, signals)
 }
 
 #[allow(dead_code)]
@@ -710,7 +794,7 @@ mod wasm_driver {
         assemble_deepseek_streaming_response, error_payload, process_deepseek_sse_line,
         stamp_streaming_flags, translate_deepseek_response_to_murmur,
         translate_murmur_request_to_deepseek, validate_model, MurmurRequest, ThinkingConfig,
-        ToolCallState, UsageTokens,
+        ToolCallSignal, ToolCallState, UsageTokens,
     };
     use std::collections::HashMap;
     use serde_json::Value;
@@ -720,6 +804,19 @@ mod wasm_driver {
         world: "driver",
         generate_all,
     });
+
+    /// Hand a tool-call signal to the host, which writes it as a `tool-call-started` or
+    /// `tool-call-progress` frame.
+    fn signal_tool_call(signal: ToolCallSignal<'_>) {
+        match signal {
+            ToolCallSignal::Started { id, name } => {
+                murmur::stream::events::tool_call_started(id, name)
+            }
+            ToolCallSignal::InputBytes { id, bytes } => {
+                murmur::stream::events::tool_call_input_bytes(id, bytes)
+            }
+        }
+    }
 
     pub struct DeepSeekDriver;
 
@@ -870,7 +967,15 @@ mod wasm_driver {
                     murmur::stream::events::emit_thinking_chunk(t);
                     reasoning_acc.push_str(t);
                 };
-                process_deepseek_sse_line(line, tool_states, stop_reason, usage, &mut et, &mut eth)
+                process_deepseek_sse_line(
+                    line,
+                    tool_states,
+                    stop_reason,
+                    usage,
+                    &mut et,
+                    &mut eth,
+                    &mut signal_tool_call,
+                )
             };
 
             // Process bytes already read.
@@ -1701,6 +1806,246 @@ mod tests {
                 !non_test.contains(needle),
                 "murmur-driver-deepseek: non-test source must not contain {needle}"
             );
+        }
+    }
+
+    // ── Tool-call signals ─────────────────────────────────────────────────────
+
+    use super::{parse_deepseek_sse_body_with_signals, RecordedSignal};
+
+    fn started(id: &str, name: &str) -> RecordedSignal {
+        RecordedSignal::Started {
+            id: id.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    fn input_bytes(id: &str, bytes: u64) -> RecordedSignal {
+        RecordedSignal::InputBytes {
+            id: id.to_string(),
+            bytes,
+        }
+    }
+
+    /// `marker` sits only inside a call's arguments, so no signal may carry it.
+    fn assert_no_signal_carries(signals: &[RecordedSignal], marker: &str) {
+        for signal in signals {
+            assert!(
+                !format!("{signal:?}").contains(marker),
+                "a tool-call signal carries argument text: {signal:?}"
+            );
+        }
+    }
+
+    /// One streamed chunk whose `delta` is `delta`.
+    fn chunk(delta: Value) -> String {
+        let chunk = json!({"choices": [{"delta": delta, "finish_reason": null}]});
+        format!("data: {chunk}\n")
+    }
+
+    /// One streamed chunk carrying a `tool_calls` fragment for `index`.
+    fn tool_delta(
+        index: u64,
+        id: Option<&str>,
+        name: Option<&str>,
+        arguments: Option<&str>,
+    ) -> String {
+        let mut call = json!({"index": index, "function": {}});
+        if let Some(id) = id {
+            call["id"] = json!(id);
+            call["type"] = json!("function");
+        }
+        if let Some(name) = name {
+            call["function"]["name"] = json!(name);
+        }
+        if let Some(arguments) = arguments {
+            call["function"]["arguments"] = json!(arguments);
+        }
+        chunk(json!({"tool_calls": [call]}))
+    }
+
+    const TOOL_CALLS_FINISH: &str =
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\ndata: [DONE]\n";
+
+    fn parse_with_signals(body: &str) -> (Value, Vec<RecordedSignal>) {
+        let (result, signals) =
+            parse_deepseek_sse_body_with_signals(body, &mut |_| {}, &mut |_| {});
+        (result.unwrap(), signals)
+    }
+
+    #[test]
+    fn tool_call_signals_its_start_then_rising_input_byte_totals() {
+        let body = [
+            tool_delta(0, Some("call_1"), Some("bash"), Some("")),
+            tool_delta(0, None, None, Some(r#"{"cmd":"#)),
+            tool_delta(0, None, None, Some(r#""ZQXJ ü"}"#)),
+            TOOL_CALLS_FINISH.to_string(),
+        ]
+        .concat();
+
+        let (result, signals) = parse_with_signals(&body);
+
+        assert_eq!(
+            signals,
+            vec![
+                started("call_1", "bash"),
+                input_bytes("call_1", 7),
+                input_bytes("call_1", 17),
+            ]
+        );
+        assert_eq!(r#"{"cmd":"ZQXJ ü"}"#.len(), 17);
+        let call = &result["content"][0];
+        assert_eq!(call["id"], "call_1");
+        assert_eq!(call["name"], "bash");
+        assert_eq!(call["input"], json!({"cmd": "ZQXJ ü"}));
+        assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    #[test]
+    fn tool_calls_at_two_indexes_keep_separate_ids_and_totals() {
+        let body = [
+            tool_delta(0, Some("call_a"), Some("read"), Some("")),
+            tool_delta(1, Some("call_b"), Some("bash"), Some("")),
+            tool_delta(0, None, None, Some(r#"{"path":"#)),
+            tool_delta(1, None, None, Some(r#"{"cmd":"#)),
+            tool_delta(0, None, None, Some(r#""ZQXJ.md"}"#)),
+            tool_delta(1, None, None, Some(r#""ls ZQXJ"}"#)),
+            TOOL_CALLS_FINISH.to_string(),
+        ]
+        .concat();
+
+        let (result, signals) = parse_with_signals(&body);
+
+        assert_eq!(
+            signals,
+            vec![
+                started("call_a", "read"),
+                started("call_b", "bash"),
+                input_bytes("call_a", 8),
+                input_bytes("call_b", 7),
+                input_bytes("call_a", 18),
+                input_bytes("call_b", 17),
+            ]
+        );
+        assert_eq!(result["content"][0]["id"], "call_a");
+        assert_eq!(result["content"][0]["input"], json!({"path": "ZQXJ.md"}));
+        assert_eq!(result["content"][1]["id"], "call_b");
+        assert_eq!(result["content"][1]["input"], json!({"cmd": "ls ZQXJ"}));
+        assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    #[test]
+    fn tool_call_whose_id_arrives_late_is_reported_once_it_does() {
+        let head = [
+            tool_delta(0, None, Some("bash"), Some(r#"{"cmd":"#)),
+            tool_delta(0, None, None, Some(r#""ZQXJ"}"#)),
+        ]
+        .concat();
+        let (_, before_the_id) =
+            parse_deepseek_sse_body_with_signals(&head, &mut |_| {}, &mut |_| {});
+        assert_eq!(before_the_id, vec![]);
+
+        let body = [
+            head,
+            tool_delta(0, Some("call_late"), None, None),
+            TOOL_CALLS_FINISH.to_string(),
+        ]
+        .concat();
+
+        let (result, signals) = parse_with_signals(&body);
+
+        assert_eq!(
+            signals,
+            vec![started("call_late", "bash"), input_bytes("call_late", 14)]
+        );
+        assert_eq!(result["content"][0]["id"], "call_late");
+        assert_eq!(result["content"][0]["input"], json!({"cmd": "ZQXJ"}));
+        assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    #[test]
+    fn tool_call_that_never_gets_an_id_signals_nothing_and_is_returned_as_before() {
+        let body = [
+            tool_delta(0, None, Some("bash"), Some(r#"{"cmd":"#)),
+            tool_delta(0, None, None, Some(r#""ZQXJ"}"#)),
+            TOOL_CALLS_FINISH.to_string(),
+        ]
+        .concat();
+
+        let (result, signals) = parse_with_signals(&body);
+
+        assert_eq!(signals, vec![]);
+        assert_eq!(
+            result["content"],
+            json!([{"type": "tool_call", "id": "", "name": "bash", "input": {"cmd": "ZQXJ"}}])
+        );
+    }
+
+    #[test]
+    fn tool_call_with_no_arguments_signals_only_its_start() {
+        let body = [
+            tool_delta(0, Some("call_1"), Some("list"), Some("")),
+            TOOL_CALLS_FINISH.to_string(),
+        ]
+        .concat();
+
+        let (result, signals) = parse_with_signals(&body);
+
+        assert_eq!(signals, vec![started("call_1", "list")]);
+        assert_eq!(result["content"][0]["input"], json!({}));
+    }
+
+    #[test]
+    fn tool_call_signals_leave_reasoning_and_content_chunks_unchanged() {
+        let body = [
+            chunk(json!({"reasoning_content": "Check the "})),
+            chunk(json!({"reasoning_content": "tree."})),
+            chunk(json!({"content": "Listing."})),
+            tool_delta(0, Some("call_1"), Some("bash"), Some("")),
+            chunk(json!({"reasoning_content": " Then stop."})),
+            tool_delta(0, None, None, Some(r#"{"cmd":"ZQXJ"}"#)),
+            TOOL_CALLS_FINISH.to_string(),
+        ]
+        .concat();
+
+        let mut text: Vec<String> = Vec::new();
+        let mut thinking: Vec<String> = Vec::new();
+        let (result, signals) = parse_deepseek_sse_body_with_signals(
+            &body,
+            &mut |c| text.push(c.to_string()),
+            &mut |c| thinking.push(c.to_string()),
+        );
+
+        assert_eq!(text, vec!["Listing."]);
+        assert_eq!(thinking, vec!["Check the ", "tree.", " Then stop."]);
+        assert_eq!(
+            result.unwrap()["content"],
+            json!([
+                {"type": "thinking", "text": "Check the tree. Then stop."},
+                {"type": "tool_call", "id": "call_1", "name": "bash", "input": {"cmd": "ZQXJ"}}
+            ])
+        );
+        assert_eq!(
+            signals,
+            vec![started("call_1", "bash"), input_bytes("call_1", 14)]
+        );
+        assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    #[test]
+    fn wasm_driver_reports_tool_calls_on_murmur_stream_events_only() {
+        let source = include_str!("lib.rs");
+        let wasm = &source[source
+            .find("\nmod wasm_driver {")
+            .expect("mod wasm_driver must exist")..];
+        for call in [
+            "murmur::stream::events::tool_call_started(",
+            "murmur::stream::events::tool_call_input_bytes(",
+        ] {
+            assert!(wasm.contains(call), "mod wasm_driver must call {call}");
+        }
+        for retired in [concat!("murmur::", "text"), concat!("murmur:", "text")] {
+            assert!(!source.contains(retired), "lib.rs must not name {retired}");
         }
     }
 }

@@ -103,6 +103,39 @@ artifacts:
     config: { my_setting: value }
 ```
 
+## Tool-call progress
+
+While the model is still writing a tool call, the driver reports it to the host through
+`murmur:stream/events@0.1.0`:
+
+| Surface | `tool-call-started` sent on | `tool-call-input-bytes` sent on | Id |
+|---|---|---|---|
+| Responses | `response.output_item.added` with a `function_call` item | each `response.function_call_arguments.delta`; `.done` only when its arguments are longer than the deltas' total | the item's `call_id`, never its `fc_…` `id` |
+| Chat Completions | the first `delta.tool_calls[]` fragment by which the call's `id` and `function.name` have both arrived | each fragment that grows the call's `function.arguments` | `tool_calls[].id` |
+
+The id and name are the ones the returned `tool_call` block carries.
+
+The size is a running UTF-8 byte total of the call's argument text. It only rises, and its last
+value is the byte length of the text parsed into the returned `input`. No argument text is ever
+forwarded: the host learns a call's id, name and size, and the arguments reach it only in the
+returned tool call. On `transport: http`, the host writes these as `tool-call-started` and
+`tool-call-progress` frames ahead of the call's `artifact`.
+
+A Chat Completions call whose `id` the provider has not sent yet is not reported. Once it arrives,
+the start and the size so far go out together. A call that never gets an id, or a Responses call
+with an empty `call_id`, is not reported at all, and is returned as before.
+
+The driver imports `murmur:stream/events@0.1.0`, which murmur serves from the first release after
+v0.5.0; an older murmur cannot load it. A newer murmur refuses a release of this driver built
+before that interface (0.8.0 and earlier) at `mur run` with `E-RUN-029`.
+
+Pinned at 0.8.0, the driver is refused like this:
+
+```text
+error[E-RUN-029]: artifact 'murmur-driver-openai@0.8.0' imports murmur:text/chunks@0.1.0, which this host does not serve; a driver must import murmur:stream/events@0.1.0 in its place
+  hint: pin a release of murmur-driver-openai built against murmur:stream/events@0.1.0 in murmur.yaml and run `mur install`, or rebuild it against that interface
+```
+
 ## Token usage
 
 Every translated response carries an optional top-level `usage` object, on both

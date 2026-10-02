@@ -722,6 +722,17 @@ impl AnthropicBlock {
     }
 }
 
+/// A tool-call fact read from the provider stream. Carries no part of the call's input.
+///
+/// `Started` comes once per call, when its `tool_use` block opens with a non-empty id and name,
+/// which are the `id` and `name` the returned `tool_call` block carries. `InputBytes` is the
+/// running UTF-8 byte length of the call's `partial_json` text, reported after each non-empty
+/// delta, so it only rises and ends at the length of the text parsed into the returned `input`.
+enum ToolCallSignal<'a> {
+    Started { id: &'a str, name: &'a str },
+    InputBytes { id: &'a str, bytes: u64 },
+}
+
 /// Why a stream stopped being read before its turn finished.
 enum StreamFailure {
     /// An `event: error`; its `Anthropic error: ` message ends the turn as a provider error.
@@ -770,6 +781,7 @@ fn process_anthropic_sse_bytes(
     state: &mut AnthropicSseState,
     emit: &mut impl FnMut(&str),
     emit_thinking: &mut impl FnMut(&str),
+    signal: &mut impl FnMut(ToolCallSignal<'_>),
 ) -> bool {
     if state.done {
         return true;
@@ -781,10 +793,17 @@ fn process_anthropic_sse_bytes(
         state.done = true;
         return true;
     };
-    process_anthropic_sse_line(line.trim_end_matches('\r'), state, emit, emit_thinking)
+    process_anthropic_sse_line(
+        line.trim_end_matches('\r'),
+        state,
+        emit,
+        emit_thinking,
+        signal,
+    )
 }
 
-/// Process one SSE line, updating state and calling `emit` for text deltas.
+/// Process one SSE line, updating state, calling `emit` for text deltas and `signal` for
+/// tool-call starts and input sizes.
 /// Returns `true` when reading should stop: `message_stop` was dispatched, or a failure was
 /// recorded.
 fn process_anthropic_sse_line(
@@ -792,6 +811,7 @@ fn process_anthropic_sse_line(
     state: &mut AnthropicSseState,
     emit: &mut impl FnMut(&str),
     emit_thinking: &mut impl FnMut(&str),
+    signal: &mut impl FnMut(ToolCallSignal<'_>),
 ) -> bool {
     if state.done {
         return true;
@@ -809,7 +829,8 @@ fn process_anthropic_sse_line(
     } else if line.is_empty() && !state.current_event.is_empty() {
         let event = std::mem::take(&mut state.current_event);
         let data = std::mem::take(&mut state.current_data);
-        if let Err(failure) = dispatch_anthropic_sse_event(&event, &data, state, emit, emit_thinking)
+        if let Err(failure) =
+            dispatch_anthropic_sse_event(&event, &data, state, emit, emit_thinking, signal)
         {
             state.failure = Some(failure);
             state.done = true;
@@ -824,6 +845,7 @@ fn dispatch_anthropic_sse_event(
     state: &mut AnthropicSseState,
     emit: &mut impl FnMut(&str),
     emit_thinking: &mut impl FnMut(&str),
+    signal: &mut impl FnMut(ToolCallSignal<'_>),
 ) -> Result<(), StreamFailure> {
     let malformed = |detail: std::fmt::Arguments<'_>| StreamFailure::Malformed(malformed_stream(detail));
     // Only the events whose data the driver reads are parsed, so only they can fail to parse.
@@ -868,9 +890,17 @@ fn dispatch_anthropic_sse_event(
                                 malformed(format_args!("tool_use block {index} has no {key}"))
                             })
                     };
+                    let (id, name) = (field("id")?, field("name")?);
+                    // A call with no id or name could never be matched to the returned block.
+                    if !id.is_empty() && !name.is_empty() {
+                        signal(ToolCallSignal::Started {
+                            id: &id,
+                            name: &name,
+                        });
+                    }
                     AnthropicBlock::ToolUse {
-                        id: field("id")?,
-                        name: field("name")?,
+                        id,
+                        name,
                         input: String::new(),
                     }
                 }
@@ -927,8 +957,16 @@ fn dispatch_anthropic_sse_event(
                         text.push_str(delta);
                     }
                 }
-                ("input_json_delta", AnthropicBlock::ToolUse { input, .. }) => {
-                    input.push_str(payload()?);
+                ("input_json_delta", AnthropicBlock::ToolUse { id, name, input }) => {
+                    let delta = payload()?;
+                    input.push_str(delta);
+                    // Only a call that was started is sized, and only when its text grew.
+                    if !delta.is_empty() && !id.is_empty() && !name.is_empty() {
+                        signal(ToolCallSignal::InputBytes {
+                            id,
+                            bytes: input.len() as u64,
+                        });
+                    }
                 }
                 ("thinking_delta", AnthropicBlock::Thinking { text, .. }) => {
                     let delta = payload()?;
@@ -984,15 +1022,53 @@ fn parse_anthropic_sse_body<F: FnMut(&str), G: FnMut(&str)>(
     emit: &mut F,
     emit_thinking: &mut G,
 ) -> Result<Value, String> {
+    parse_anthropic_sse_body_with_signals(body, emit, emit_thinking).0
+}
+
+/// A tool-call signal as the tests collect it.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RecordedSignal {
+    Started { id: String, name: String },
+    InputBytes { id: String, bytes: u64 },
+}
+
+#[cfg(test)]
+impl From<ToolCallSignal<'_>> for RecordedSignal {
+    fn from(signal: ToolCallSignal<'_>) -> Self {
+        match signal {
+            ToolCallSignal::Started { id, name } => Self::Started {
+                id: id.to_string(),
+                name: name.to_string(),
+            },
+            ToolCallSignal::InputBytes { id, bytes } => Self::InputBytes {
+                id: id.to_string(),
+                bytes,
+            },
+        }
+    }
+}
+
+/// Parse a complete SSE body string, also returning every tool-call signal in the order it was
+/// sent (used in tests).
+#[cfg(test)]
+fn parse_anthropic_sse_body_with_signals<F: FnMut(&str), G: FnMut(&str)>(
+    body: &str,
+    emit: &mut F,
+    emit_thinking: &mut G,
+) -> (Result<Value, String>, Vec<RecordedSignal>) {
     let mut state = AnthropicSseState::new();
+    let mut signals = Vec::new();
     for line in body.lines() {
         let line = line.trim_end_matches('\r');
-        process_anthropic_sse_line(line, &mut state, emit, emit_thinking);
+        process_anthropic_sse_line(line, &mut state, emit, emit_thinking, &mut |s| {
+            signals.push(RecordedSignal::from(s))
+        });
         if state.done {
             break;
         }
     }
-    assemble_anthropic_streaming_response(state)
+    (assemble_anthropic_streaming_response(state), signals)
 }
 
 /// Build the turn a stream carried. A provider error or refusal comes back as
@@ -1093,7 +1169,7 @@ mod wasm_driver {
         parse_prompt_cache_config, parse_thinking_config, process_anthropic_sse_bytes,
         stamp_streaming_flags,
         translate_anthropic_response_to_murmur, translate_murmur_request_to_anthropic,
-        AnthropicSseState, MurmurRequest, ThinkingConfig,
+        AnthropicSseState, MurmurRequest, ThinkingConfig, ToolCallSignal,
     };
     use serde_json::Value;
 
@@ -1104,6 +1180,19 @@ mod wasm_driver {
     });
 
     const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+    /// Hand a tool-call signal to the host, which writes it as a `tool-call-started` or
+    /// `tool-call-progress` frame.
+    fn signal_tool_call(signal: ToolCallSignal<'_>) {
+        match signal {
+            ToolCallSignal::Started { id, name } => {
+                murmur::stream::events::tool_call_started(id, name)
+            }
+            ToolCallSignal::InputBytes { id, bytes } => {
+                murmur::stream::events::tool_call_input_bytes(id, bytes)
+            }
+        }
+    }
 
     pub struct AnthropicDriver;
 
@@ -1257,6 +1346,7 @@ mod wasm_driver {
                         &mut state,
                         &mut |chunk| murmur::stream::events::emit_chunk(chunk),
                         &mut |chunk| murmur::stream::events::emit_thinking_chunk(chunk),
+                        &mut signal_tool_call,
                     );
                     line_buf.clear();
                     if done {
@@ -1281,6 +1371,7 @@ mod wasm_driver {
                                 &mut state,
                                 &mut |chunk| murmur::stream::events::emit_chunk(chunk),
                                 &mut |chunk| murmur::stream::events::emit_thinking_chunk(chunk),
+                                &mut signal_tool_call,
                             );
                             line_buf.clear();
                             if done {
@@ -2354,6 +2445,7 @@ mod tests {
                     &mut state,
                     &mut |c| emitted.push(c.to_string()),
                     &mut |_| {},
+                    &mut |_| {},
                 ) {
                     break;
                 }
@@ -3300,6 +3392,245 @@ mod tests {
                 !non_test.contains(needle),
                 "murmur-driver-anthropic: non-test source must not contain {needle}"
             );
+        }
+    }
+
+    // ── Tool-call signals ─────────────────────────────────────────────────────
+
+    use super::{parse_anthropic_sse_body_with_signals, RecordedSignal};
+
+    fn started(id: &str, name: &str) -> RecordedSignal {
+        RecordedSignal::Started {
+            id: id.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    fn input_bytes(id: &str, bytes: u64) -> RecordedSignal {
+        RecordedSignal::InputBytes {
+            id: id.to_string(),
+            bytes,
+        }
+    }
+
+    fn parse_stream_with_signals(body: &str) -> (Value, Vec<RecordedSignal>) {
+        let (result, signals) =
+            parse_anthropic_sse_body_with_signals(body, &mut |_| {}, &mut |_| {});
+        (result.unwrap(), signals)
+    }
+
+    /// `marker` sits only inside a call's arguments, so no signal may carry it.
+    fn assert_no_signal_carries(signals: &[RecordedSignal], marker: &str) {
+        for signal in signals {
+            assert!(
+                !format!("{signal:?}").contains(marker),
+                "a tool-call signal carries argument text: {signal:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_call_signals_its_start_then_rising_input_byte_totals() {
+        let body = sse(&[
+            ("content_block_start", TOOL_START_0),
+            ("content_block_delta", &input_delta(0, "")),
+            ("content_block_delta", &input_delta(0, r#"{"cmd":"#)),
+            ("content_block_delta", &input_delta(0, r#""héllo"}"#)),
+            ("message_delta", TOOL_USE_STOP),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+
+        let (result, signals) = parse_stream_with_signals(&body);
+
+        assert_eq!(
+            signals,
+            vec![
+                started("toolu_01", "bash"),
+                input_bytes("toolu_01", 7),
+                input_bytes("toolu_01", 16),
+            ]
+        );
+        let call = &result["content"][0];
+        assert_eq!(call["type"], "tool_call");
+        assert_eq!(call["id"], "toolu_01");
+        assert_eq!(call["name"], "bash");
+        assert_eq!(call["input"], json!({"cmd": "héllo"}));
+        // The last total is the byte length of the text the input was parsed from.
+        assert_eq!(r#"{"cmd":"héllo"}"#.len(), 16);
+        assert_eq!(serde_json::to_string(&call["input"]).unwrap().len(), 16);
+        assert_no_signal_carries(&signals, "héllo");
+    }
+
+    #[test]
+    fn tool_call_signals_leave_text_and_thinking_chunks_unchanged() {
+        let body = sse(&[
+            ("content_block_start", THINKING_START_0),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Plan it."}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}"#,
+            ),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            ),
+            ("content_block_delta", &text_delta(1, "Running ")),
+            ("content_block_delta", &text_delta(1, "it.")),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_02","name":"bash","input":{}}}"#,
+            ),
+            ("content_block_delta", &input_delta(2, r#"{"cmd":"ZQXJ"}"#)),
+            ("message_delta", TOOL_USE_STOP),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+
+        let mut text: Vec<String> = Vec::new();
+        let mut thinking: Vec<String> = Vec::new();
+        let (result, signals) = parse_anthropic_sse_body_with_signals(
+            &body,
+            &mut |c| text.push(c.to_string()),
+            &mut |c| thinking.push(c.to_string()),
+        );
+
+        assert_eq!(text, vec!["Running ", "it."]);
+        assert_eq!(thinking, vec!["Plan it."]);
+        assert_eq!(
+            result.unwrap()["content"],
+            json!([
+                {"type": "thinking", "text": "Plan it.", "signature": "sig"},
+                {"type": "text", "text": "Running it."},
+                {"type": "tool_call", "id": "toolu_02", "name": "bash", "input": {"cmd": "ZQXJ"}}
+            ])
+        );
+        assert_eq!(
+            signals,
+            vec![started("toolu_02", "bash"), input_bytes("toolu_02", 14)]
+        );
+        assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    #[test]
+    fn tool_call_with_no_arguments_signals_only_its_start() {
+        let body = sse(&[
+            ("content_block_start", TOOL_START_0),
+            ("content_block_delta", &input_delta(0, "")),
+            ("message_delta", TOOL_USE_STOP),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+
+        let (result, signals) = parse_stream_with_signals(&body);
+
+        assert_eq!(signals, vec![started("toolu_01", "bash")]);
+        assert_eq!(result["content"][0]["input"], json!({}));
+    }
+
+    #[test]
+    fn tool_call_with_an_empty_id_signals_nothing_and_is_returned_as_before() {
+        let body = sse(&[
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"bash","input":{}}}"#,
+            ),
+            ("content_block_delta", &input_delta(0, r#"{"cmd":"ZQXJ"}"#)),
+            ("message_delta", TOOL_USE_STOP),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+
+        let (result, signals) = parse_stream_with_signals(&body);
+
+        assert_eq!(signals, vec![]);
+        assert_eq!(
+            result["content"],
+            json!([{"type": "tool_call", "id": "", "name": "bash", "input": {"cmd": "ZQXJ"}}])
+        );
+    }
+
+    #[test]
+    fn tool_calls_at_two_indexes_keep_separate_totals() {
+        let body = sse(&[
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_a","name":"read","input":{}}}"#,
+            ),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_b","name":"bash","input":{}}}"#,
+            ),
+            ("content_block_delta", &input_delta(1, r#"{"path":"#)),
+            ("content_block_delta", &input_delta(2, r#"{"cmd":"#)),
+            ("content_block_delta", &input_delta(1, r#""ZQXJ.md"}"#)),
+            ("content_block_delta", &input_delta(2, r#""ls ZQXJ"}"#)),
+            ("message_delta", TOOL_USE_STOP),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+
+        let (result, signals) = parse_stream_with_signals(&body);
+
+        assert_eq!(
+            signals,
+            vec![
+                started("toolu_a", "read"),
+                started("toolu_b", "bash"),
+                input_bytes("toolu_a", 8),
+                input_bytes("toolu_b", 7),
+                input_bytes("toolu_a", 18),
+                input_bytes("toolu_b", 17),
+            ]
+        );
+        assert_eq!(result["content"][0]["id"], "toolu_a");
+        assert_eq!(result["content"][0]["input"], json!({"path": "ZQXJ.md"}));
+        assert_eq!(result["content"][1]["id"], "toolu_b");
+        assert_eq!(result["content"][1]["input"], json!({"cmd": "ls ZQXJ"}));
+        assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    #[test]
+    fn ignored_server_tool_use_block_signals_nothing() {
+        let body = sse(&[
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_01","name":"web_search","input":{}}}"#,
+            ),
+            (
+                "content_block_delta",
+                &input_delta(0, r#"{"query":"ZQXJ"}"#),
+            ),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            ),
+            ("content_block_delta", &text_delta(1, "Found it.")),
+            ("message_delta", END_TURN),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+
+        let (result, signals) = parse_stream_with_signals(&body);
+
+        assert_eq!(signals, vec![]);
+        assert_eq!(
+            result["content"],
+            json!([{"type": "text", "text": "Found it."}])
+        );
+    }
+
+    #[test]
+    fn wasm_driver_reports_tool_calls_on_murmur_stream_events_only() {
+        let source = include_str!("lib.rs");
+        let wasm = &source[source
+            .find("\nmod wasm_driver {")
+            .expect("mod wasm_driver must exist")..];
+        for call in [
+            "murmur::stream::events::tool_call_started(",
+            "murmur::stream::events::tool_call_input_bytes(",
+        ] {
+            assert!(wasm.contains(call), "mod wasm_driver must call {call}");
+        }
+        for retired in [concat!("murmur::", "text"), concat!("murmur:", "text")] {
+            assert!(!source.contains(retired), "lib.rs must not name {retired}");
         }
     }
 }

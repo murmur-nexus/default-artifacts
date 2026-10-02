@@ -105,6 +105,30 @@ entry refreshes its timer at no cost.
 Prompt caching is generally available, so the driver adds no `anthropic-beta`
 header for it.
 
+## Tool-call progress
+
+While the model is still writing a tool call, the driver reports it to the host through
+`murmur:stream/events@0.1.0`:
+
+| Call | Sent on | Carries |
+|---|---|---|
+| `tool-call-started` | `content_block_start` opening a `tool_use` block | the block's `id` and `name`, which the returned `tool_call` carries too |
+| `tool-call-input-bytes` | each non-empty `input_json_delta` for that block | the call's argument bytes so far |
+
+The size is a running UTF-8 byte total of the call's argument text. It only rises, and its last
+value is the byte length of the text parsed into the returned `input`. No argument text is ever
+forwarded: the host learns a call's id, name and size, and the arguments reach it only in the
+returned tool call. On `transport: http`, the host writes these as `tool-call-started` and
+`tool-call-progress` frames ahead of the call's `artifact`.
+
+The Messages API sends a call's id in the event that opens its block, so a call is reported from
+its first byte. A `tool_use` block with an empty `id` or `name` is not reported, and is returned
+as before. Blocks the driver drops, such as `server_tool_use`, are not reported.
+
+The driver imports `murmur:stream/events@0.1.0`, which murmur serves from the first release after
+v0.5.0; an older murmur cannot load it. A newer murmur refuses a release of this driver built
+before that interface (0.9.0 and earlier) at `mur run` with `E-RUN-029`.
+
 ## Token usage
 
 Every translated response carries an optional top-level `usage` object, on both

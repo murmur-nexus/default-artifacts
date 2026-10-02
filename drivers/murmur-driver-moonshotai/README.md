@@ -164,7 +164,8 @@ Requests are always sent with `stream: true` and
 anything from `params`. SSE lines are parsed incrementally:
 `delta.reasoning_content` goes to `emit_thinking_chunk`, `delta.content` to
 `emit_chunk`, and `delta.tool_calls` is accumulated by `index` into id, name and
-argument fragments. `data: [DONE]` ends the stream.
+argument fragments, reporting each call's start and size to the host as it grows (see
+[Tool-call progress](#tool-call-progress)). `data: [DONE]` ends the stream.
 
 A non-streaming JSON fallback is selected by sniffing the first non-whitespace
 byte of the response body for `{` or `[`, which is where scripted test servers
@@ -176,6 +177,30 @@ tool-call round trip work and what the UI renders separately.
 
 Moonshot delivers reasoning on its own delta field, so there is no inline
 reasoning-tag scanner anywhere in this crate.
+
+## Tool-call progress
+
+While the model is still writing a tool call, the driver reports it to the host through
+`murmur:stream/events@0.1.0`:
+
+| Call | Sent on | Carries |
+|---|---|---|
+| `tool-call-started` | the first `delta.tool_calls[]` fragment by which the call's `id` and `function.name` have both arrived | `tool_calls[].id` and the function name, which the returned `tool_call` carries too |
+| `tool-call-input-bytes` | each fragment that grows the call's `function.arguments` | the call's argument bytes so far |
+
+The size is a running UTF-8 byte total of the call's argument text. It only rises, and its last
+value is the byte length of the text parsed into the returned `input`. No argument text is ever
+forwarded: the host learns a call's id, name and size, and the arguments reach it only in the
+returned tool call. On `transport: http`, the host writes these as `tool-call-started` and
+`tool-call-progress` frames ahead of the call's `artifact`.
+
+A call whose `id` the provider has not sent yet is not reported. Once it arrives, the start and the
+size so far go out together. A call that never gets an id is not reported at all, and is returned
+as before.
+
+The driver imports `murmur:stream/events@0.1.0`, which murmur serves from the first release after
+v0.5.0; an older murmur cannot load it. A newer murmur refuses a release of this driver built
+before that interface (0.6.0 and earlier) at `mur run` with `E-RUN-029`.
 
 ## Stop reasons
 
