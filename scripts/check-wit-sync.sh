@@ -84,6 +84,10 @@ compare_subtree() {
 # package — or a fully-qualified `ns:pkg/iface@version`. Files are matched on their declared
 # package and interface names rather than on the deps/ directory layout, so a dependency copied
 # under an unconventional directory name still resolves.
+#
+# A `%` before a name is WIT keyword escaping: `package murmur:%stream@0.1.0;` declares the
+# package `murmur:stream`. The reference is expected unescaped (check_interface_ref strips it),
+# and a declaration matches with or without the `%`.
 find_interface_file() {
     local root="$1" own_pkg="$2" ref="$3"
     local want_pkg want_iface pkg_re iface_re
@@ -100,14 +104,15 @@ find_interface_file() {
         want_iface="$ref"
     fi
 
-    pkg_re="^[[:space:]]*package[[:space:]]+${want_pkg//./\\.}"
+    pkg_re="${want_pkg//./\\.}"
+    pkg_re="^[[:space:]]*package[[:space:]]+%?${pkg_re//:/:%?}"
     if [[ "$want_pkg" == *@* ]]; then
         pkg_re="$pkg_re[[:space:]]*;"
     else
         # Reference carries no version, so accept the package at any version.
         pkg_re="$pkg_re(@[^;[:space:]]*)?[[:space:]]*;"
     fi
-    iface_re="^[[:space:]]*interface[[:space:]]+${want_iface}[[:space:]]*\{"
+    iface_re="^[[:space:]]*interface[[:space:]]+%?${want_iface}[[:space:]]*\{"
 
     [ -d "$root" ] || return 1
     while IFS= read -r f; do
@@ -129,6 +134,7 @@ check_subtree_closure() {
         local rel="${wf#"$da_root"/}"
         local pkg world="" depth=0 stripped line ref hint murmur_rel
         pkg="$(sed -nE 's/^[[:space:]]*package[[:space:]]+([^;]+);.*/\1/p' "$wf" | head -1)"
+        pkg="${pkg//%/}"
 
         while IFS= read -r line; do
             if [ -z "$world" ]; then
@@ -164,14 +170,20 @@ check_subtree_closure() {
 # Report a world's interface reference when no vendored file under the subtree defines it.
 check_interface_ref() {
     local subtree="$1" rel="$2" world="$3" pkg="$4" ref="$5"
-    local da_root="$DA_WIT/$subtree" hint murmur_rel
+    local da_root="$DA_WIT/$subtree" hint murmur_rel name
+
+    # Resolve on the unescaped name (`murmur:%stream/events` is `murmur:stream/events`); report
+    # the reference as the world writes it.
+    name="${ref//:%/:}"
+    name="${name//\/%//}"
+    [[ "$name" == %* ]] && name="${name#%}"
 
     # `import name: func(...)` and inline interface blocks are not interface references.
-    [[ "$ref" =~ ^[a-zA-Z0-9_-]+(:[a-zA-Z0-9_-]+)*(/[a-zA-Z0-9_-]+)?(@[0-9][^[:space:]]*)?$ ]] || return 0
+    [[ "$name" =~ ^[a-zA-Z0-9_-]+(:[a-zA-Z0-9_-]+)*(/[a-zA-Z0-9_-]+)?(@[0-9][^[:space:]]*)?$ ]] || return 0
 
-    find_interface_file "$da_root" "$pkg" "$ref" > /dev/null && return 0
+    find_interface_file "$da_root" "$pkg" "$name" > /dev/null && return 0
 
-    if murmur_rel="$(find_interface_file "$MURMUR_WIT/$subtree" "$pkg" "$ref")"; then
+    if murmur_rel="$(find_interface_file "$MURMUR_WIT/$subtree" "$pkg" "$name")"; then
         hint="copy $MURMUR_WIT/$subtree/$murmur_rel -> wit/$subtree/$murmur_rel"
     else
         hint="no file under $MURMUR_WIT/$subtree/ defines it either — check the reference"

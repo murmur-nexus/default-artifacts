@@ -106,7 +106,7 @@ jobs:
       # Every built .wasm must be a well-formed component whose world-level
       # imports/exports match its category (hooks export murmur:hook/lifecycle
       # with no murmur:* import; drivers/tools export murmur:tool/run and import
-      # only murmur:text/chunks and/or murmur:task/task), at the exact interface
+      # only murmur:stream/events and/or murmur:task/task), at the exact interface
       # version the vendored WIT declares — a component built against a stale WIT
       # is unloadable by the host. Native command components
       # (murmur-tool-{create,editor,git,...}) are skipped by name.
@@ -165,7 +165,7 @@ jobs:
           # run ./scripts/check-wit-sync.sh until it exits 0, then set `ref:` to
           # that same commit. The mirror and the pin must always move together —
           # moving one without the other is what turns this job red.
-          ref: e8bf7c2eed373764cc8dfa2c14febf9e51e8d1ca
+          ref: 251fbe600c34651f15602a2f4e1c6dda0502c708
           path: murmur
 
       - name: Check artifact-facing WIT files are in sync with murmur

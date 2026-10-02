@@ -1272,10 +1272,52 @@ impl ThinkingState {
     }
 }
 
+#[derive(Default)]
 struct ToolCallState {
     id: String,
     name: String,
     arguments: String,
+    /// `Started` has been signalled for this call.
+    started: bool,
+    /// The last `InputBytes` total signalled for this call.
+    reported_bytes: u64,
+}
+
+impl ToolCallState {
+    /// Signal what this call's state newly supports, after a delta has been merged into it:
+    /// its start, once both its id and name are known, then its argument text's byte length
+    /// whenever that has grown past the last total. A call whose id has not arrived yet is not
+    /// reported; once it arrives, the start and the total so far go out together.
+    fn signal_due(&mut self, signal: &mut impl FnMut(ToolCallSignal<'_>)) {
+        if !self.started {
+            if self.id.is_empty() || self.name.is_empty() {
+                return;
+            }
+            signal(ToolCallSignal::Started {
+                id: &self.id,
+                name: &self.name,
+            });
+            self.started = true;
+        }
+        let bytes = self.arguments.len() as u64;
+        if bytes > self.reported_bytes {
+            signal(ToolCallSignal::InputBytes {
+                id: &self.id,
+                bytes,
+            });
+            self.reported_bytes = bytes;
+        }
+    }
+}
+
+/// A tool-call fact read from the provider stream. Carries no part of the call's input.
+///
+/// The id and name are the `id` and `name` the returned `tool_call` block carries (`call_id` on
+/// the Responses surface). `InputBytes` is the running UTF-8 byte length of the call's argument
+/// text, so it only rises and ends at the length of the text parsed into the returned `input`.
+enum ToolCallSignal<'a> {
+    Started { id: &'a str, name: &'a str },
+    InputBytes { id: &'a str, bytes: u64 },
 }
 
 /// Process one complete SSE line. Returns `true` when the stream is done (`[DONE]`).
@@ -1292,6 +1334,7 @@ fn process_openai_sse_line(
     thinking: &mut ThinkingState,
     emit_text: &mut impl FnMut(&str),
     emit_thinking: &mut impl FnMut(&str),
+    signal: &mut impl FnMut(ToolCallSignal<'_>),
 ) -> bool {
     if line == "data: [DONE]" {
         return true;
@@ -1361,11 +1404,7 @@ fn process_openai_sse_line(
         for tc in tc_arr {
             let idx = tc.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
             while tool_states.len() <= idx {
-                tool_states.push(ToolCallState {
-                    id: String::new(),
-                    name: String::new(),
-                    arguments: String::new(),
-                });
+                tool_states.push(ToolCallState::default());
             }
             if let Some(id) = tc.get("id").and_then(Value::as_str) {
                 if tool_states[idx].id.is_empty() {
@@ -1382,6 +1421,7 @@ fn process_openai_sse_line(
                     tool_states[idx].arguments.push_str(args);
                 }
             }
+            tool_states[idx].signal_due(signal);
         }
     }
 
@@ -1395,29 +1435,95 @@ fn parse_openai_sse_body<F: FnMut(&str), G: FnMut(&str)>(
     emit_text: &mut F,
     emit_thinking: &mut G,
 ) -> Result<Value, String> {
+    parse_openai_sse_body_with_signals(body, emit_text, emit_thinking).0
+}
+
+/// A tool-call signal as the tests collect it.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RecordedSignal {
+    Started { id: String, name: String },
+    InputBytes { id: String, bytes: u64 },
+}
+
+#[cfg(test)]
+impl From<ToolCallSignal<'_>> for RecordedSignal {
+    fn from(signal: ToolCallSignal<'_>) -> Self {
+        match signal {
+            ToolCallSignal::Started { id, name } => Self::Started {
+                id: id.to_string(),
+                name: name.to_string(),
+            },
+            ToolCallSignal::InputBytes { id, bytes } => Self::InputBytes {
+                id: id.to_string(),
+                bytes,
+            },
+        }
+    }
+}
+
+/// Parse a complete SSE body string, also returning every tool-call signal in the order it was
+/// sent (used in tests).
+#[cfg(test)]
+fn parse_openai_sse_body_with_signals<F: FnMut(&str), G: FnMut(&str)>(
+    body: &str,
+    emit_text: &mut F,
+    emit_thinking: &mut G,
+) -> (Result<Value, String>, Vec<RecordedSignal>) {
     let mut text_acc = String::new();
     let mut thinking_acc = String::new();
     let mut tool_states: Vec<ToolCallState> = Vec::new();
     let mut stop_reason: Option<String> = None;
     let mut usage = UsageTokens::default();
     let mut thinking = ThinkingState::new();
+    let mut signals = Vec::new();
 
     for line in body.lines() {
         let line = line.trim_end_matches('\r');
         let done = {
-            let mut combined_text = |t: &str| { emit_text(t); text_acc.push_str(t); };
-            let mut combined_thinking = |t: &str| { emit_thinking(t); thinking_acc.push_str(t); };
-            process_openai_sse_line(line, &mut tool_states, &mut stop_reason, &mut usage, &mut thinking, &mut combined_text, &mut combined_thinking)
+            let mut combined_text = |t: &str| {
+                emit_text(t);
+                text_acc.push_str(t);
+            };
+            let mut combined_thinking = |t: &str| {
+                emit_thinking(t);
+                thinking_acc.push_str(t);
+            };
+            process_openai_sse_line(
+                line,
+                &mut tool_states,
+                &mut stop_reason,
+                &mut usage,
+                &mut thinking,
+                &mut combined_text,
+                &mut combined_thinking,
+                &mut |s| signals.push(RecordedSignal::from(s)),
+            )
         };
-        if done { break; }
+        if done {
+            break;
+        }
     }
     {
-        let mut combined_text = |t: &str| { emit_text(t); text_acc.push_str(t); };
-        let mut combined_thinking = |t: &str| { emit_thinking(t); thinking_acc.push_str(t); };
+        let mut combined_text = |t: &str| {
+            emit_text(t);
+            text_acc.push_str(t);
+        };
+        let mut combined_thinking = |t: &str| {
+            emit_thinking(t);
+            thinking_acc.push_str(t);
+        };
         thinking.flush(&mut combined_text, &mut combined_thinking);
     }
 
-    assemble_openai_streaming_response(&text_acc, &thinking_acc, tool_states, stop_reason, usage)
+    let result = assemble_openai_streaming_response(
+        &text_acc,
+        &thinking_acc,
+        tool_states,
+        stop_reason,
+        usage,
+    );
+    (result, signals)
 }
 
 /// Parse a complete Responses API SSE body string (used in tests).
@@ -1427,6 +1533,18 @@ fn parse_responses_sse_body<F: FnMut(&str), G: FnMut(&str)>(
     emit_text: &mut F,
     emit_thinking: &mut G,
 ) -> Result<Value, String> {
+    parse_responses_sse_body_with_signals(body, emit_text, emit_thinking).0
+}
+
+/// Parse a complete Responses API SSE body string, also returning every tool-call signal in the
+/// order it was sent (used in tests).
+#[cfg(test)]
+fn parse_responses_sse_body_with_signals<F: FnMut(&str), G: FnMut(&str)>(
+    body: &str,
+    emit_text: &mut F,
+    emit_thinking: &mut G,
+) -> (Result<Value, String>, Vec<RecordedSignal>) {
+    let mut signals = Vec::new();
     let mut text_acc = String::new();
     let mut thinking_acc = String::new();
     let mut tool_states: Vec<ToolCallState> = Vec::new();
@@ -1440,8 +1558,14 @@ fn parse_responses_sse_body<F: FnMut(&str), G: FnMut(&str)>(
     for line in body.lines() {
         let line = line.trim_end_matches('\r');
         let done = {
-            let mut combined_text = |t: &str| { emit_text(t); text_acc.push_str(t); };
-            let mut combined_thinking = |t: &str| { emit_thinking(t); thinking_acc.push_str(t); };
+            let mut combined_text = |t: &str| {
+                emit_text(t);
+                text_acc.push_str(t);
+            };
+            let mut combined_thinking = |t: &str| {
+                emit_thinking(t);
+                thinking_acc.push_str(t);
+            };
             process_responses_sse_line(
                 line,
                 &mut tool_states,
@@ -1453,12 +1577,15 @@ fn parse_responses_sse_body<F: FnMut(&str), G: FnMut(&str)>(
                 &mut usage,
                 &mut combined_text,
                 &mut combined_thinking,
+                &mut |s| signals.push(RecordedSignal::from(s)),
             )
         };
-        if done { break; }
+        if done {
+            break;
+        }
     }
 
-    assemble_responses_streaming_response(
+    let result = assemble_responses_streaming_response(
         &text_acc,
         &thinking_acc,
         tool_states,
@@ -1466,7 +1593,8 @@ fn parse_responses_sse_body<F: FnMut(&str), G: FnMut(&str)>(
         incomplete_reason,
         error_message,
         usage,
-    )
+    );
+    (result, signals)
 }
 
 fn assemble_openai_streaming_response(
@@ -1554,6 +1682,7 @@ fn process_responses_sse_line(
     usage: &mut UsageTokens,
     emit_text: &mut impl FnMut(&str),
     emit_thinking: &mut impl FnMut(&str),
+    signal: &mut impl FnMut(ToolCallSignal<'_>),
 ) -> bool {
     let Some(json_str) = line.strip_prefix("data: ") else {
         return false;
@@ -1597,9 +1726,10 @@ fn process_responses_sse_line(
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string(),
-                    arguments: String::new(),
+                    ..ToolCallState::default()
                 });
                 tool_index_by_output_index.insert(output_index, idx);
+                tool_states[idx].signal_due(signal);
             }
         }
         "response.function_call_arguments.delta" => {
@@ -1609,6 +1739,7 @@ fn process_responses_sse_line(
                 data.get("delta").and_then(Value::as_str),
             ) {
                 tool_states[idx].arguments.push_str(delta);
+                tool_states[idx].signal_due(signal);
             }
         }
         "response.function_call_arguments.done" => {
@@ -1617,7 +1748,9 @@ fn process_responses_sse_line(
                 tool_index_by_output_index.get(&output_index),
                 data.get("arguments").and_then(Value::as_str),
             ) {
+                // Authoritative; it reports only when longer than the deltas' total.
                 tool_states[idx].arguments = arguments.to_string();
+                tool_states[idx].signal_due(signal);
             }
         }
         "response.completed" | "response.incomplete" | "response.failed" => {
@@ -1721,7 +1854,8 @@ mod wasm_driver {
         build_provider_request, classify_api_surface, classify_model, error_payload,
         parse_driver_config, process_openai_sse_line, process_responses_sse_line, store_opt_in,
         translate_openai_response_to_murmur, translate_responses_to_murmur, ApiSurface,
-        MurmurRequest, ThinkingState, ToolCallState, UsageTokens, CONTINUATION_ID_KEY,
+        MurmurRequest, ThinkingState, ToolCallSignal, ToolCallState, UsageTokens,
+        CONTINUATION_ID_KEY,
     };
     use std::collections::HashMap;
     use serde_json::Value;
@@ -1731,6 +1865,19 @@ mod wasm_driver {
         world: "driver",
         generate_all,
     });
+
+    /// Hand a tool-call signal to the host, which writes it as a `tool-call-started` or
+    /// `tool-call-progress` frame.
+    fn signal_tool_call(signal: ToolCallSignal<'_>) {
+        match signal {
+            ToolCallSignal::Started { id, name } => {
+                murmur::stream::events::tool_call_started(id, name)
+            }
+            ToolCallSignal::InputBytes { id, bytes } => {
+                murmur::stream::events::tool_call_input_bytes(id, bytes)
+            }
+        }
+    }
 
     pub struct OpenAiDriver;
 
@@ -1928,8 +2075,8 @@ mod wasm_driver {
                 let line = String::from_utf8_lossy(&line_buf);
                 let line = line.trim_end_matches('\r');
                 {
-                    let mut emit_t = |t: &str| { murmur::text::chunks::emit_chunk(t); text_acc.push_str(t); };
-                    let mut emit_think = |t: &str| { murmur::text::chunks::emit_thinking_chunk(t); thinking_acc.push_str(t); };
+                    let mut emit_t = |t: &str| { murmur::stream::events::emit_chunk(t); text_acc.push_str(t); };
+                    let mut emit_think = |t: &str| { murmur::stream::events::emit_thinking_chunk(t); thinking_acc.push_str(t); };
                     done = process_openai_sse_line(
                         line,
                         &mut tool_states,
@@ -1938,6 +2085,7 @@ mod wasm_driver {
                         &mut thinking,
                         &mut emit_t,
                         &mut emit_think,
+                        &mut signal_tool_call,
                     );
                 }
                 line_buf.clear();
@@ -1961,8 +2109,8 @@ mod wasm_driver {
                         let line = String::from_utf8_lossy(&line_buf);
                         let line = line.trim_end_matches('\r');
                         {
-                            let mut emit_t = |t: &str| { murmur::text::chunks::emit_chunk(t); text_acc.push_str(t); };
-                            let mut emit_think = |t: &str| { murmur::text::chunks::emit_thinking_chunk(t); thinking_acc.push_str(t); };
+                            let mut emit_t = |t: &str| { murmur::stream::events::emit_chunk(t); text_acc.push_str(t); };
+                            let mut emit_think = |t: &str| { murmur::stream::events::emit_thinking_chunk(t); thinking_acc.push_str(t); };
                             done = process_openai_sse_line(
                                 line,
                                 &mut tool_states,
@@ -1971,6 +2119,7 @@ mod wasm_driver {
                                 &mut thinking,
                                 &mut emit_t,
                                 &mut emit_think,
+                                &mut signal_tool_call,
                             );
                         }
                         line_buf.clear();
@@ -1987,8 +2136,8 @@ mod wasm_driver {
         drop(stream);
         let _ = wasip2::http::types::IncomingBody::finish(incoming_body);
         {
-            let mut emit_t = |t: &str| { murmur::text::chunks::emit_chunk(t); text_acc.push_str(t); };
-            let mut emit_think = |t: &str| { murmur::text::chunks::emit_thinking_chunk(t); thinking_acc.push_str(t); };
+            let mut emit_t = |t: &str| { murmur::stream::events::emit_chunk(t); text_acc.push_str(t); };
+            let mut emit_think = |t: &str| { murmur::stream::events::emit_thinking_chunk(t); thinking_acc.push_str(t); };
             thinking.flush(&mut emit_t, &mut emit_think);
         }
         assemble_openai_streaming_response(&text_acc, &thinking_acc, tool_states, stop_reason, usage)
@@ -2019,8 +2168,8 @@ mod wasm_driver {
                 let line = String::from_utf8_lossy(&line_buf);
                 let line = line.trim_end_matches('\r');
                 {
-                    let mut emit_t = |t: &str| { murmur::text::chunks::emit_chunk(t); text_acc.push_str(t); };
-                    let mut emit_think = |t: &str| { murmur::text::chunks::emit_thinking_chunk(t); thinking_acc.push_str(t); };
+                    let mut emit_t = |t: &str| { murmur::stream::events::emit_chunk(t); text_acc.push_str(t); };
+                    let mut emit_think = |t: &str| { murmur::stream::events::emit_thinking_chunk(t); thinking_acc.push_str(t); };
                     done = process_responses_sse_line(
                         line,
                         &mut tool_states,
@@ -2032,6 +2181,7 @@ mod wasm_driver {
                         &mut usage,
                         &mut emit_t,
                         &mut emit_think,
+                        &mut signal_tool_call,
                     );
                 }
                 line_buf.clear();
@@ -2055,8 +2205,8 @@ mod wasm_driver {
                         let line = String::from_utf8_lossy(&line_buf);
                         let line = line.trim_end_matches('\r');
                         {
-                            let mut emit_t = |t: &str| { murmur::text::chunks::emit_chunk(t); text_acc.push_str(t); };
-                            let mut emit_think = |t: &str| { murmur::text::chunks::emit_thinking_chunk(t); thinking_acc.push_str(t); };
+                            let mut emit_t = |t: &str| { murmur::stream::events::emit_chunk(t); text_acc.push_str(t); };
+                            let mut emit_think = |t: &str| { murmur::stream::events::emit_thinking_chunk(t); thinking_acc.push_str(t); };
                             done = process_responses_sse_line(
                                 line,
                                 &mut tool_states,
@@ -2068,6 +2218,7 @@ mod wasm_driver {
                                 &mut usage,
                                 &mut emit_t,
                                 &mut emit_think,
+                                &mut signal_tool_call,
                             );
                         }
                         line_buf.clear();
@@ -3004,6 +3155,7 @@ mod tests {
             &mut error_message,
             &mut response_id,
             &mut usage,
+            &mut |_| {},
             &mut |_| {},
             &mut |_| {},
         );
@@ -4036,6 +4188,382 @@ mod tests {
                 !non_test.contains(needle),
                 "murmur-driver-openai: non-test source must not contain {needle}"
             );
+        }
+    }
+
+    // ── Tool-call signals ─────────────────────────────────────────────────────
+
+    use super::{
+        parse_openai_sse_body_with_signals, parse_responses_sse_body_with_signals, RecordedSignal,
+    };
+
+    fn started(id: &str, name: &str) -> RecordedSignal {
+        RecordedSignal::Started {
+            id: id.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    fn input_bytes(id: &str, bytes: u64) -> RecordedSignal {
+        RecordedSignal::InputBytes {
+            id: id.to_string(),
+            bytes,
+        }
+    }
+
+    /// `marker` sits only inside a call's arguments, so no signal may carry it.
+    fn assert_no_signal_carries(signals: &[RecordedSignal], marker: &str) {
+        for signal in signals {
+            assert!(
+                !format!("{signal:?}").contains(marker),
+                "a tool-call signal carries argument text: {signal:?}"
+            );
+        }
+    }
+
+    /// One Chat Completions chunk carrying a `tool_calls` fragment for `index`.
+    fn chat_tool_delta(
+        index: u64,
+        id: Option<&str>,
+        name: Option<&str>,
+        arguments: Option<&str>,
+    ) -> String {
+        let mut call = json!({"index": index, "function": {}});
+        if let Some(id) = id {
+            call["id"] = json!(id);
+            call["type"] = json!("function");
+        }
+        if let Some(name) = name {
+            call["function"]["name"] = json!(name);
+        }
+        if let Some(arguments) = arguments {
+            call["function"]["arguments"] = json!(arguments);
+        }
+        let chunk = json!({"choices": [{"delta": {"tool_calls": [call]}, "finish_reason": null}]});
+        format!("data: {chunk}\n")
+    }
+
+    const CHAT_TOOL_CALLS_FINISH: &str =
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\ndata: [DONE]\n";
+
+    fn parse_chat_with_signals(body: &str) -> (Value, Vec<RecordedSignal>) {
+        let (result, signals) = parse_openai_sse_body_with_signals(body, &mut |_| {}, &mut |_| {});
+        (result.unwrap(), signals)
+    }
+
+    fn responses_event(event: Value) -> String {
+        format!("data: {event}\n\n")
+    }
+
+    fn function_call_added(output_index: u64, call_id: &str, name: &str) -> String {
+        responses_event(json!({
+            "type": "response.output_item.added",
+            "output_index": output_index,
+            "item": {
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": call_id,
+                "name": name,
+                "arguments": "",
+            },
+        }))
+    }
+
+    fn function_call_arguments_delta(output_index: u64, delta: &str) -> String {
+        responses_event(json!({
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_1",
+            "output_index": output_index,
+            "delta": delta,
+        }))
+    }
+
+    fn function_call_arguments_done(output_index: u64, arguments: &str) -> String {
+        responses_event(json!({
+            "type": "response.function_call_arguments.done",
+            "item_id": "fc_1",
+            "output_index": output_index,
+            "arguments": arguments,
+        }))
+    }
+
+    const RESPONSES_COMPLETED: &str = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\"}}\n\n";
+
+    fn parse_responses_with_signals(body: &str) -> (Value, Vec<RecordedSignal>) {
+        let (result, signals) =
+            parse_responses_sse_body_with_signals(body, &mut |_| {}, &mut |_| {});
+        (result.unwrap(), signals)
+    }
+
+    #[test]
+    fn responses_tool_call_signals_its_call_id_then_one_total_per_delta() {
+        let body = [
+            function_call_added(1, "call_abc", "murmur-tool-editor"),
+            function_call_arguments_delta(1, r#"{"text":"ZQXJ"#),
+            function_call_arguments_delta(1, r#" é"}"#),
+            function_call_arguments_done(1, r#"{"text":"ZQXJ é"}"#),
+            RESPONSES_COMPLETED.to_string(),
+        ]
+        .concat();
+
+        let (result, signals) = parse_responses_with_signals(&body);
+
+        assert_eq!(
+            signals,
+            vec![
+                started("call_abc", "murmur-tool-editor"),
+                input_bytes("call_abc", 13),
+                input_bytes("call_abc", 18),
+            ]
+        );
+        assert_eq!(r#"{"text":"ZQXJ é"}"#.len(), 18);
+        assert_eq!(result["stop_reason"], "tool_call");
+        let call = &result["content"][0];
+        assert_eq!(call["id"], "call_abc");
+        assert_eq!(call["name"], "murmur-tool-editor");
+        assert_eq!(call["input"], json!({"text": "ZQXJ é"}));
+        for signal in &signals {
+            assert!(
+                !format!("{signal:?}").contains("fc_1"),
+                "{signal:?} names the item id"
+            );
+        }
+        assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    #[test]
+    fn responses_done_longer_than_the_deltas_adds_one_total() {
+        let body = [
+            function_call_added(1, "call_abc", "murmur-tool-editor"),
+            function_call_arguments_delta(1, r#"{"text":"ZQXJ"#),
+            function_call_arguments_done(1, r#"{"text":"ZQXJ é"}"#),
+            RESPONSES_COMPLETED.to_string(),
+        ]
+        .concat();
+
+        let (result, signals) = parse_responses_with_signals(&body);
+
+        assert_eq!(
+            signals,
+            vec![
+                started("call_abc", "murmur-tool-editor"),
+                input_bytes("call_abc", 13),
+                input_bytes("call_abc", 18),
+            ]
+        );
+        assert_eq!(result["content"][0]["input"], json!({"text": "ZQXJ é"}));
+        assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    #[test]
+    fn responses_tool_call_with_an_empty_call_id_signals_nothing() {
+        let body = [
+            function_call_added(1, "", "murmur-tool-editor"),
+            function_call_arguments_delta(1, r#"{"text":"ZQXJ"}"#),
+            function_call_arguments_done(1, r#"{"text":"ZQXJ"}"#),
+            RESPONSES_COMPLETED.to_string(),
+        ]
+        .concat();
+
+        let (result, signals) = parse_responses_with_signals(&body);
+
+        assert_eq!(signals, vec![]);
+        assert_eq!(
+            result["content"],
+            json!([{"type": "tool_call", "id": "", "name": "murmur-tool-editor", "input": {"text": "ZQXJ"}}])
+        );
+    }
+
+    #[test]
+    fn responses_tool_call_signals_leave_text_and_reasoning_chunks_unchanged() {
+        let body = [
+            responses_event(
+                json!({"type": "response.reasoning_summary_text.delta", "delta": "Write it."}),
+            ),
+            responses_event(json!({"type": "response.output_text.delta", "delta": "Writing "})),
+            function_call_added(1, "call_abc", "murmur-tool-editor"),
+            responses_event(json!({"type": "response.output_text.delta", "delta": "now."})),
+            function_call_arguments_delta(1, r#"{"text":"ZQXJ"}"#),
+            responses_event(
+                json!({"type": "response.reasoning_summary_text.delta", "delta": " Done."}),
+            ),
+            function_call_arguments_done(1, r#"{"text":"ZQXJ"}"#),
+            RESPONSES_COMPLETED.to_string(),
+        ]
+        .concat();
+
+        let mut text: Vec<String> = Vec::new();
+        let mut thinking: Vec<String> = Vec::new();
+        let (result, signals) = parse_responses_sse_body_with_signals(
+            &body,
+            &mut |c| text.push(c.to_string()),
+            &mut |c| thinking.push(c.to_string()),
+        );
+
+        assert_eq!(text, vec!["Writing ", "now."]);
+        assert_eq!(thinking, vec!["Write it.", " Done."]);
+        assert_eq!(
+            result.unwrap()["content"],
+            json!([
+                {"type": "thinking", "text": "Write it. Done."},
+                {"type": "tool_call", "id": "call_abc", "name": "murmur-tool-editor", "input": {"text": "ZQXJ"}}
+            ])
+        );
+        assert_eq!(
+            signals,
+            vec![
+                started("call_abc", "murmur-tool-editor"),
+                input_bytes("call_abc", 15),
+            ]
+        );
+        assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    #[test]
+    fn chat_tool_call_signals_its_start_then_rising_input_byte_totals() {
+        let body = [
+            chat_tool_delta(0, Some("call_1"), Some("bash"), Some("")),
+            chat_tool_delta(0, None, None, Some(r#"{"cmd":"#)),
+            chat_tool_delta(0, None, None, Some(r#""ZQXJ ü"}"#)),
+            CHAT_TOOL_CALLS_FINISH.to_string(),
+        ]
+        .concat();
+
+        let (result, signals) = parse_chat_with_signals(&body);
+
+        assert_eq!(
+            signals,
+            vec![
+                started("call_1", "bash"),
+                input_bytes("call_1", 7),
+                input_bytes("call_1", 17),
+            ]
+        );
+        assert_eq!(r#"{"cmd":"ZQXJ ü"}"#.len(), 17);
+        let call = &result["content"][0];
+        assert_eq!(call["id"], "call_1");
+        assert_eq!(call["name"], "bash");
+        assert_eq!(call["input"], json!({"cmd": "ZQXJ ü"}));
+        assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    #[test]
+    fn chat_tool_calls_at_two_indexes_keep_separate_ids_and_totals() {
+        let body = [
+            chat_tool_delta(0, Some("call_a"), Some("read"), Some("")),
+            chat_tool_delta(1, Some("call_b"), Some("bash"), Some("")),
+            chat_tool_delta(0, None, None, Some(r#"{"path":"#)),
+            chat_tool_delta(1, None, None, Some(r#"{"cmd":"#)),
+            chat_tool_delta(0, None, None, Some(r#""ZQXJ.md"}"#)),
+            chat_tool_delta(1, None, None, Some(r#""ls ZQXJ"}"#)),
+            CHAT_TOOL_CALLS_FINISH.to_string(),
+        ]
+        .concat();
+
+        let (result, signals) = parse_chat_with_signals(&body);
+
+        assert_eq!(
+            signals,
+            vec![
+                started("call_a", "read"),
+                started("call_b", "bash"),
+                input_bytes("call_a", 8),
+                input_bytes("call_b", 7),
+                input_bytes("call_a", 18),
+                input_bytes("call_b", 17),
+            ]
+        );
+        assert_eq!(result["content"][0]["id"], "call_a");
+        assert_eq!(result["content"][0]["input"], json!({"path": "ZQXJ.md"}));
+        assert_eq!(result["content"][1]["id"], "call_b");
+        assert_eq!(result["content"][1]["input"], json!({"cmd": "ls ZQXJ"}));
+        assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    #[test]
+    fn chat_tool_call_whose_id_arrives_late_is_reported_once_it_does() {
+        let head = [
+            chat_tool_delta(0, None, Some("bash"), Some(r#"{"cmd":"#)),
+            chat_tool_delta(0, None, None, Some(r#""ZQXJ"}"#)),
+        ]
+        .concat();
+        let (_, before_the_id) =
+            parse_openai_sse_body_with_signals(&head, &mut |_| {}, &mut |_| {});
+        assert_eq!(before_the_id, vec![]);
+
+        let body = [
+            head,
+            chat_tool_delta(0, Some("call_late"), None, None),
+            CHAT_TOOL_CALLS_FINISH.to_string(),
+        ]
+        .concat();
+
+        let (result, signals) = parse_chat_with_signals(&body);
+
+        assert_eq!(
+            signals,
+            vec![started("call_late", "bash"), input_bytes("call_late", 14)]
+        );
+        assert_eq!(result["content"][0]["id"], "call_late");
+        assert_eq!(result["content"][0]["input"], json!({"cmd": "ZQXJ"}));
+        assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    #[test]
+    fn chat_tool_call_that_never_gets_an_id_signals_nothing_and_is_returned_as_before() {
+        let body = [
+            chat_tool_delta(0, None, Some("bash"), Some(r#"{"cmd":"#)),
+            chat_tool_delta(0, None, None, Some(r#""ZQXJ"}"#)),
+            CHAT_TOOL_CALLS_FINISH.to_string(),
+        ]
+        .concat();
+
+        let (result, signals) = parse_chat_with_signals(&body);
+
+        assert_eq!(signals, vec![]);
+        assert_eq!(
+            result["content"],
+            json!([{"type": "tool_call", "id": "", "name": "bash", "input": {"cmd": "ZQXJ"}}])
+        );
+    }
+
+    #[test]
+    fn chat_tool_call_with_no_arguments_signals_its_start_and_the_empty_object() {
+        // OpenAI sends `{}` for a call with no arguments; empty argument text does not parse
+        // on this surface.
+        let body = [
+            chat_tool_delta(0, Some("call_1"), Some("list"), Some("")),
+            chat_tool_delta(0, None, None, Some("{}")),
+            CHAT_TOOL_CALLS_FINISH.to_string(),
+        ]
+        .concat();
+
+        let (result, signals) = parse_chat_with_signals(&body);
+
+        assert_eq!(
+            signals,
+            vec![started("call_1", "list"), input_bytes("call_1", 2)]
+        );
+        assert_eq!(result["content"][0]["input"], json!({}));
+    }
+
+    #[test]
+    fn wasm_driver_reports_tool_calls_on_murmur_stream_events_only() {
+        let source = include_str!("lib.rs");
+        // Ends at `mod tests` so the needles below cannot match themselves.
+        let start = source
+            .find("\nmod wasm_driver {")
+            .expect("mod wasm_driver must exist");
+        let end = source.find("\nmod tests {").expect("mod tests must exist");
+        let wasm = &source[start..end];
+        for call in [
+            "murmur::stream::events::tool_call_started(",
+            "murmur::stream::events::tool_call_input_bytes(",
+        ] {
+            assert!(wasm.contains(call), "mod wasm_driver must call {call}");
+        }
+        for retired in [concat!("murmur::", "text"), concat!("murmur:", "text")] {
+            assert!(!source.contains(retired), "lib.rs must not name {retired}");
         }
     }
 }
