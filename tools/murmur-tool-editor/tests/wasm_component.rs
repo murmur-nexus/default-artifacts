@@ -310,6 +310,46 @@ fn component_refuses_an_absolute_dest_path_and_leaves_the_workdir_untouched() {
     let _ = std::fs::remove_dir_all(&workdir);
 }
 
+// A call with every `write_file` field but `operation` — the shape a model sends when it leaves
+// the discriminator out. The message names the field and the values to send, and arrives in
+// `ToolResult.summary`, the field a host displays.
+#[test]
+fn component_names_a_missing_operation_and_leaves_the_workdir_untouched() {
+    let eng = engine();
+    let component = Component::from_file(&eng, component_path()).expect("load component");
+    let lnk = linker(&eng);
+    let workdir = unique_workdir("missing_operation");
+    let before = dir_entries(&workdir);
+
+    let (status, payload, summary, meta) = run_editor_reporting(
+        &eng,
+        &component,
+        &lnk,
+        &workdir,
+        r#"{"dest_path":"out.txt","content":"x"}"#,
+    );
+    assert!(matches!(status, Status::Error), "status: {status:?}");
+    assert!(payload.is_null(), "payload: {payload}");
+    assert_eq!(
+        summary.as_deref(),
+        Some(
+            "missing \"operation\": expected one of read_file, write_file, replace_in_file, \
+             find_in_files"
+        ),
+    );
+    assert!(
+        meta.is_empty(),
+        "a rejected operation declares no state_effect, got {meta:?}"
+    );
+    assert_eq!(
+        dir_entries(&workdir),
+        before,
+        "a rejected operation must leave the workdir exactly as it found it"
+    );
+
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
 #[test]
 fn component_refuses_an_absolute_read_path_even_when_the_file_exists() {
     let eng = engine();

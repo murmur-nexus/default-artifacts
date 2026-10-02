@@ -23,6 +23,26 @@ workdir (the component's CWD at dispatch time); an absolute value is
 The two writing operations name their target `dest_path`; the two reading
 operations take `path` and `dir`. The split is not cosmetic — see below.
 
+## A missing or unknown `operation`
+
+A call whose `operation` the tool cannot dispatch returns `ok: false` with one of
+two messages. Both list the operations it accepts, in the order above:
+
+| `operation` sent | Message |
+|---|---|
+| absent, `null`, any other non-string, or `""` | `missing "operation": expected one of read_file, write_file, replace_in_file, find_in_files` |
+| any other string not in the table | `unknown operation "X": expected one of read_file, write_file, replace_in_file, find_in_files` |
+
+The unrecognised value is quoted with quotes, backslashes and control characters
+escaped, so `"write\nfile"` appears as `"write\nfile"` and the message stays on
+one line. The message is also the result's `summary`, which is what a host shows
+for the call. Neither carries an `error_kind`. The call touches no file and
+declares no `state_effect`. A caller can tell the two apart by their prefixes,
+`missing "operation"` and `unknown operation "`.
+
+Before 0.5.1 both cases returned `unknown operation: <value>`, which for a call
+with no `operation` read `unknown operation: ` with nothing after the colon.
+
 ## Absolute paths are refused
 
 `path`, `dest_path` and `dir` are workdir-relative by contract, and a value
