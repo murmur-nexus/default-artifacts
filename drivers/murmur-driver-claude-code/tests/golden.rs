@@ -8,8 +8,10 @@
 
 use murmur_driver_claude_code::{
     describe, parse_line, parse_lines, tool_name_prefix, Event, FailureKind, ParseContext,
-    RetryInfo, RunningUsage, SessionInfo, TokenUsage, ToolCallInfo, ToolResultInfo, TurnFailure,
+    ParseState, RetryInfo, SessionInfo, TokenUsage, ToolCallInfo, ToolCallProgress, ToolCallStart,
+    ToolResultInfo, TurnFailure,
 };
+use serde_json::Value;
 
 /// The MCP server name the recordings were made with. `launch` builds the harness's tool prefix
 /// from the bridge the runtime names, and `parse` strips that same prefix back off.
@@ -34,6 +36,13 @@ const RECORDINGS: [(&str, usize); 10] = [
     ("10-resume-after-sigint", 5),
 ];
 
+/// The recordings that stream a tool call's input, with the line index a batch boundary falls
+/// on between a `tool_use` block start and its first `input_json_delta` — the case a parser
+/// that forgot which call a block index belongs to between batches would get wrong. Every other
+/// recording streams no `input_json_delta`, so it has no such boundary and skips this partition;
+/// `events_of` checks that it really does stream none.
+const TOOL_INPUT_SPLITS: [(&str, usize); 1] = [("03-bridge-tool-call", 4)];
+
 // ── reading a recording ──────────────────────────────────────────────────────
 
 /// The context a run bridged the way the recordings were reads its output against.
@@ -54,15 +63,20 @@ fn recorded_lines(name: &str) -> Vec<String> {
 }
 
 /// The events a recording produces, having first shown that the partition into batches does not
-/// change them: the parser holds nothing across lines, so a batch is exactly its lines.
+/// change them: what one line leaves for a later one is carried across batches in a
+/// [`ParseState`], so a run's events are its lines' events however the lines are batched.
+///
+/// Four partitions, each with its own fresh state: one batch, one line per batch, a boundary
+/// inside a message, and — for a recording in [`TOOL_INPUT_SPLITS`] — a boundary between a tool
+/// call's block start and its input.
 fn events_of(name: &str, split: usize) -> Vec<Event> {
     let lines = recorded_lines(name);
     let context = recorded_context();
     assert_split_is_mid_message(name, &lines, split);
 
-    let whole = parse_lines(&lines, &context, &mut RunningUsage::new());
+    let whole = parse_lines(&lines, &context, &mut ParseState::new());
 
-    let mut one_by_one = RunningUsage::new();
+    let mut one_by_one = ParseState::new();
     let one_at_a_time: Vec<Event> = lines
         .iter()
         .flat_map(|line| parse_line(line, &context, &mut one_by_one))
@@ -73,7 +87,7 @@ fn events_of(name: &str, split: usize) -> Vec<Event> {
     );
 
     let (head, tail) = lines.split_at(split);
-    let mut across = RunningUsage::new();
+    let mut across = ParseState::new();
     let mut split_in_two = parse_lines(head, &context, &mut across);
     split_in_two.extend(parse_lines(tail, &context, &mut across));
     assert_eq!(
@@ -81,7 +95,66 @@ fn events_of(name: &str, split: usize) -> Vec<Event> {
         "{name}: a batch boundary inside a message must produce the same events as one batch"
     );
 
+    match tool_input_split(name) {
+        Some(split) => {
+            assert_split_is_mid_tool_call(name, &lines, split);
+            let (head, tail) = lines.split_at(split);
+            let mut across = ParseState::new();
+            let mut split_in_two = parse_lines(head, &context, &mut across);
+            split_in_two.extend(parse_lines(tail, &context, &mut across));
+            assert_eq!(
+                split_in_two, whole,
+                "{name}: a batch boundary inside a tool call must produce the same events as one batch"
+            );
+        }
+        None => assert!(
+            !lines.iter().any(|line| is_input_json_delta(line)),
+            "{name} streams tool input, so it needs a split in TOOL_INPUT_SPLITS"
+        ),
+    }
+
     whole
+}
+
+/// The boundary between a tool call's block start and its input, for a recording that streams
+/// one.
+fn tool_input_split(name: &str) -> Option<usize> {
+    TOOL_INPUT_SPLITS
+        .iter()
+        .find(|(recording, _)| *recording == name)
+        .map(|(_, split)| *split)
+}
+
+/// The boundary really does fall between a `tool_use` block start and its first input delta.
+fn assert_split_is_mid_tool_call(name: &str, lines: &[String], split: usize) {
+    assert!(
+        split > 0 && split < lines.len(),
+        "{name}: the tool-call split must fall inside the recording"
+    );
+    let start = stream_event(&lines[split - 1]);
+    assert!(
+        start["type"] == "content_block_start" && start["content_block"]["type"] == "tool_use",
+        "{name}: line {} must be a tool_use block start",
+        split - 1
+    );
+    assert!(
+        is_input_json_delta(&lines[split]),
+        "{name}: line {split} must be an input_json_delta"
+    );
+}
+
+/// The `event` of a `stream_event` line, or `null` for any other line.
+fn stream_event(line: &str) -> Value {
+    let value: Value = serde_json::from_str(line).unwrap_or_default();
+    if value["type"] == "stream_event" {
+        value["event"].clone()
+    } else {
+        Value::Null
+    }
+}
+
+fn is_input_json_delta(line: &str) -> bool {
+    stream_event(line)["delta"]["type"] == "input_json_delta"
 }
 
 /// The boundary `events_of` splits on really does fall inside a message: a batch that ends
@@ -196,6 +269,16 @@ fn golden_03_bridge_tool_call() {
         events_of("03-bridge-tool-call", 14),
         vec![
             session("690ceb7b-0888-4823-ac71-b61cb3dd7d55"),
+            // Read off the block start, under the same stripped name as the call below.
+            Event::ToolCallStarted(ToolCallStart {
+                id: "toolu_1".to_string(),
+                name: "echo_tool".to_string(),
+            }),
+            // The one `input_json_delta`, `{"text": "hi"}`, is 14 bytes.
+            Event::ToolCallProgress(ToolCallProgress {
+                id: "toolu_1".to_string(),
+                input_bytes: 14,
+            }),
             Event::ToolCall(ToolCallInfo {
                 id: "toolu_1".to_string(),
                 // The `mcp__claude_bridge__` the harness printed is off: it is the prefix this
@@ -464,7 +547,7 @@ fn a_recorded_tool_name_keeps_a_prefix_this_driver_did_not_add() {
     let lines = recorded_lines("03-bridge-tool-call");
 
     let called = |context: &ParseContext| {
-        parse_lines(&lines, context, &mut RunningUsage::new())
+        parse_lines(&lines, context, &mut ParseState::new())
             .into_iter()
             .find_map(|event| match event {
                 Event::ToolCall(call) => Some(call.name),
@@ -481,6 +564,97 @@ fn a_recorded_tool_name_keeps_a_prefix_this_driver_did_not_add() {
         ))),
         harness_name
     );
+}
+
+#[test]
+fn the_recorded_input_size_is_the_bytes_the_harness_streamed_for_the_call() {
+    let lines = recorded_lines("03-bridge-tool-call");
+
+    // The fragments of `toolu_1`, read straight off the fixture: every `input_json_delta` at the
+    // index its block start opened, from that start until the next message begins.
+    let mut index = None;
+    let mut streamed = String::new();
+    for line in &lines {
+        let event = stream_event(line);
+        match event["type"].as_str() {
+            Some("message_start") => index = None,
+            Some("content_block_start") if event["content_block"]["id"] == "toolu_1" => {
+                index = event["index"].as_u64();
+            }
+            Some("content_block_delta")
+                if index.is_some()
+                    && event["index"].as_u64() == index
+                    && event["delta"]["type"] == "input_json_delta" =>
+            {
+                streamed.push_str(event["delta"]["partial_json"].as_str().unwrap_or_default());
+            }
+            _ => {}
+        }
+    }
+
+    let events = events_of("03-bridge-tool-call", 14);
+    let call = events
+        .iter()
+        .find_map(|event| match event {
+            Event::ToolCall(call) if call.id == "toolu_1" => Some(call),
+            _ => None,
+        })
+        .expect("the recording calls toolu_1");
+    let call_at = events
+        .iter()
+        .position(|event| matches!(event, Event::ToolCall(call) if call.id == "toolu_1"))
+        .expect("the recording calls toolu_1");
+
+    // The fragments are the call's input, as the harness wrote it.
+    assert_eq!(
+        serde_json::from_str::<Value>(&streamed).expect("the fragments join into JSON"),
+        serde_json::from_str::<Value>(&call.input).expect("a tool-call's input is JSON"),
+    );
+
+    // 14, not the 13 of the `tool-call`'s `{"text":"hi"}`: the harness streamed
+    // `{"text": "hi"}`, with a space after the colon, and the size counts the bytes it streamed.
+    // The `tool-call`'s input is the complete block's `input` re-serialized compactly.
+    let last_progress = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::ToolCallProgress(progress) if progress.id == "toolu_1" => {
+                Some(progress.input_bytes)
+            }
+            _ => None,
+        })
+        .next_back()
+        .expect("the recording streams toolu_1's input");
+    assert_eq!(streamed.len() as u64, last_progress);
+    assert_eq!(last_progress, 14);
+    assert_eq!(call.input.len(), 13);
+
+    let started_name = events
+        .iter()
+        .find_map(|event| match event {
+            Event::ToolCallStarted(start) if start.id == "toolu_1" => Some(&start.name),
+            _ => None,
+        })
+        .expect("the recording starts toolu_1");
+    assert_eq!(started_name, &call.name);
+
+    // Started, then progress, then the complete call, never the other way round.
+    for (at, event) in events.iter().enumerate() {
+        let reports_on_toolu_1 = match event {
+            Event::ToolCallStarted(start) => start.id == "toolu_1",
+            Event::ToolCallProgress(progress) => progress.id == "toolu_1",
+            _ => false,
+        };
+        if reports_on_toolu_1 {
+            assert!(at < call_at, "{event:?} arrived after the tool-call");
+        }
+    }
+    let started_at = events
+        .iter()
+        .position(|event| matches!(event, Event::ToolCallStarted(_)))
+        .expect("the recording starts toolu_1");
+    assert!(events[..started_at]
+        .iter()
+        .all(|event| !matches!(event, Event::ToolCallProgress(_))));
 }
 
 // ── the tokens each recording reports ────────────────────────────────────────
@@ -649,7 +823,7 @@ fn no_line_but_a_result_line_reports_a_count() {
     // one — measured line by line rather than in aggregate.
     for (name, _) in RECORDINGS {
         for line in recorded_lines(name) {
-            let events = parse_line(&line, &recorded_context(), &mut RunningUsage::new());
+            let events = parse_line(&line, &recorded_context(), &mut ParseState::new());
             let reported = !usage_in(&events).is_empty();
             assert_eq!(
                 reported,

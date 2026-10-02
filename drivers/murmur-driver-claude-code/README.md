@@ -5,7 +5,7 @@ Murmur how to drive the `claude` CLI for one turn: the argument list, the JSON l
 goes out on, the MCP config that points the harness at the capsule's tool bridge, and the
 control request that interrupts a turn.
 
-It is the first artifact in this repo that exports `murmur:driver/process@0.2.0` rather than
+It is the first artifact in this repo that exports `murmur:driver/process@0.3.0` rather than
 `murmur:tool/run`. That export is how the runtime tells a process driver from an HTTP driver —
 both are `runtime: driver` artifacts, and the name decides nothing.
 
@@ -22,25 +22,25 @@ rather than an API key.
 
 ## Which murmur this needs
 
-This artifact exports `murmur:driver/process@0.2.0`, and **the host accepts exactly one version
+This artifact exports `murmur:driver/process@0.3.0`, and **the host accepts exactly one version
 of that interface and carries no fallback for an earlier one.** So it needs a murmur whose
-process-driver runner is at `@0.2.0`; one still at `@0.1.0` refuses it at load, naming both
-versions and telling you to rebuild:
+process-driver runner is at `@0.3.0` — murmur commit `e8bf7c2` or later. A murmur at `@0.3.0`
+refuses a driver built against any other version at load, naming both versions and telling you
+to rebuild:
 
 ```
-error[E-RUN-029]: the transport: process driver does not export the process driver interface
-  murmur-driver-claude-code@0.2.1 exports murmur:driver/process@0.2.0
-  this runtime expects murmur:driver/process@0.1.0
+error[E-RUN-029]: artifact 'murmur-driver-claude-code@0.3.0' is the transport: process driver but does not export murmur:driver/process@0.3.0; it exports murmur:driver/process@0.2.0, built against another version — rebuild it
+  hint: pin a release of murmur-driver-claude-code built against murmur:driver/process@0.3.0 in murmur.yaml, then run `mur install` — or rebuild murmur-driver-claude-code against murmur:driver/process@0.3.0
 ```
 
-The refusal is deliberate and runs the other way too: `murmur-driver-claude-code@0.1.0` no
-longer loads against a murmur at `@0.2.0`. Install `0.2.0` or later — a rebuild is the intended
-cost of the bump.
+That is what `murmur-driver-claude-code@0.3.0` and every earlier release get from a murmur at
+`@0.3.0`: they no longer load. Install `0.4.0` or later — a rebuild is the intended cost of the
+bump. The refusal runs the other way too: a murmur still at `@0.2.0` refuses this release.
 
-`mur --version` does not distinguish the two: it reports `murmur-cli 0.3.0` both before and
+`mur --version` does not distinguish the two: it reports `murmur-cli 0.5.0` both before and
 after the interface moved, because the CLI version string was not bumped with it. If you see
 `E-RUN-029`, no setting in this artifact will change it; build `mur` from a murmur that carries
-the `@0.2.0` runner, or wait for the release that does.
+the `@0.3.0` runner, or wait for the release that does.
 
 `transport: process` with an `inference.driver` is also newer than any published murmur release.
 A murmur without the runner at all refuses the manifest before the driver is loaded, with
@@ -64,7 +64,7 @@ capabilities:
 artifacts:
   - name: murmur-driver-claude-code
     runtime: driver
-    version: "0.2.1"
+    version: "0.4.0"
 ```
 
 The harness starts from an **empty** environment and sees exactly the variables
@@ -182,11 +182,14 @@ that directory's path.
 
 ## Reading what the harness prints
 
-`parse` takes a batch of complete stdout lines and returns the events they carry. Every line
-`claude` prints is self-contained — a `tool_result` carries its own `tool_use_id` — so the
-parser holds nothing across lines, and the same lines split into different batches produce the
-same events. The only thing carried from one call to the next is the bridge's tool prefix, which
-`launch` records so `parse` can strip it off again.
+`parse` takes a batch of complete stdout lines and returns the events they carry. Two things
+are carried from one `parse` call to the next: the bridge's tool prefix, which `launch` records
+so `parse` can strip it off again, and the open tool calls of the message being streamed, which
+tie an `input_json_delta` to the call its block started. The run's token totals are carried the
+same way. `launch` starts the open calls and the totals afresh, because a new process is a new
+stream. Because what one
+line leaves for a later one is carried rather than dropped at a batch boundary, the same lines
+split into different batches still produce the same events.
 
 | Line | Events |
 |---|---|
@@ -196,7 +199,10 @@ same events. The only thing carried from one call to the next is the bridge's to
 | `control_response` | none |
 | `stream_event` whose `event.delta.type` is `text_delta` | `text-delta` when its `text` is non-empty; none when it is empty |
 | `stream_event` whose `event.delta.type` is `thinking_delta` | `thinking-delta` when its `thinking` is non-empty; none when it is empty |
-| `stream_event` anything else (message and block framing, `input_json_delta`, `signature_delta`) | none |
+| `stream_event` `message_start` | none; forgets the previous message's tool calls |
+| `stream_event` `content_block_start` whose `content_block.type` is `tool_use` | `tool-call-started` with the block's `id` and its name, stripped as `tool-call` strips it; none when its `id` is empty |
+| `stream_event` whose `event.delta.type` is `input_json_delta` | `tool-call-progress` with the running UTF-8 byte total of the call's input so far; none when no `tool_use` block in this message opened its `index`, or its `partial_json` is empty |
+| `stream_event` anything else (`content_block_stop`, `message_delta`, `message_stop`, `signature_delta`, other block starts) | none |
 | `assistant` | at most one `thinking`, then at most one `text`, then one `tool-call` per `tool_use` block |
 | `user` `tool_result` block | `tool-result` |
 | `user` any other block, such as the `[Request interrupted by user]` marker | none |
@@ -213,6 +219,36 @@ A line the driver cannot read — not JSON, not a JSON object, or an object whos
 or unrecognised — becomes exactly one `note` reading `unreadable stdout line: <line>`, truncated
 at 512 characters with `…` appended. `parse` never returns an error and never panics, whatever
 it is handed.
+
+### A tool call being written
+
+`claude` streams a tool call while the model writes it: a `content_block_start` names the call,
+then `input_json_delta` lines carry its input a fragment at a time, and the complete call comes
+on the `assistant` line only once the input is finished. A call writing a large file can take
+many seconds to get there. So the driver reports the call as soon as its block starts, as
+`tool-call-started`, and then how much of its input has been written, as `tool-call-progress`.
+
+**It reports a size and never the input.** No event but `tool-call` carries any byte of a call's
+input, and no `note` quotes it either:
+
+- the A2A stream has never carried tool input, and these frames are written to it;
+- `stream/watch` can be held as a read-only scope, which should not become a way to read what a
+  tool is about to be handed;
+- a hook that denies a call cannot unsend fragments already streamed.
+
+**The size is a running total for the call**, never the size of one fragment: the total after a
+given line is the same however the lines are batched, so the report does not depend on where a
+batch boundary fell. Each `tool-call-progress` is larger than the last for its call; an empty
+fragment reports nothing.
+
+**The size counts the bytes the model streamed**, the UTF-8 length of each decoded
+`partial_json`. That can differ from the length of the `tool-call`'s `input`, which is the
+complete block re-serialized compactly: the `03-bridge-tool-call` recording streams
+`{"text": "hi"}`, 14 bytes, and its `tool-call` carries `{"text":"hi"}`, 13.
+
+`tool-call-started` and `tool-call` carry the same id and the same name for one call, and
+`tool-call-started` may arrive with no progress at all: a call whose fragments are all empty
+reports none.
 
 ### `is_error` decides a `result` line, never `subtype`
 
@@ -280,7 +316,7 @@ from a token count and has no equivalent on the http path. Neither are `server_t
 
 #### What goes out is the run's total, not the turn's
 
-`murmur:driver/process@0.2.0` takes every member of `usage` as **cumulative for the harness
+`murmur:driver/process@0.3.0` takes every member of `usage` as **cumulative for the harness
 run**, and the runtime attributes to each turn only the growth of a member over what it has
 already attributed. `claude` reports the opposite — each `result` line carries that turn's own
 spend and nothing earlier — so the driver adds each turn onto the totals it has already
@@ -344,9 +380,12 @@ the roadmap's, each with its stdout, its stderr and its exit code. `tests/golden
 for any of them, including the two that exit `1` — and that no recording whose `result` line
 says `is_error: true` ends the turn successfully.
 
-Each recording is parsed three ways: all lines in one batch, one line per batch, and a two-batch
-split whose boundary falls between a message's deltas and the `assistant` line carrying its full
-text. All three must produce the same events.
+Each recording is parsed four ways, each partition with its own fresh parse state carried
+across its batches: all lines in one batch, one line per batch, a two-batch split whose boundary
+falls between a message's deltas and the `assistant` line carrying its full text, and a
+two-batch split between a tool call's `content_block_start` and its first `input_json_delta`.
+All four must produce the same events. Only `03-bridge-tool-call` streams tool input, so it is
+the only recording the fourth partition applies to; the others are checked to stream none.
 
 ## Building it
 
