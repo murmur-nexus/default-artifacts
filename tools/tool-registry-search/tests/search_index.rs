@@ -261,7 +261,7 @@ fn schema_1_index_is_refused_with_the_regeneration_command() {
     assert_error(
         &out,
         "schema_error",
-        &[SCHEMA_1_FIXTURE, "schema 1", SCHEMA_1_HINT],
+        &[SCHEMA_1_FIXTURE, "schema 1", "schema 2", SCHEMA_1_HINT],
     );
 }
 
@@ -287,7 +287,12 @@ fn integer_schema_1_index_is_refused_the_same_way() {
     assert_error(
         &out,
         "schema_error",
-        &[path.to_str().unwrap(), "schema 1", SCHEMA_1_HINT],
+        &[
+            path.to_str().unwrap(),
+            "schema 1",
+            "schema 2",
+            SCHEMA_1_HINT,
+        ],
     );
 }
 
@@ -504,7 +509,7 @@ fn https_schema_1_index_on_github_is_read_and_refused() {
     assert_error(
         &out,
         "schema_error",
-        &[V0_24_0_RAW_URL, "schema 1", SCHEMA_1_HINT],
+        &[V0_24_0_RAW_URL, "schema 1", "schema 2", SCHEMA_1_HINT],
     );
 }
 

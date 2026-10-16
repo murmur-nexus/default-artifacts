@@ -6,6 +6,16 @@ version of each match under its full `<scope>/<name>`.
 It reads schema 2 indexes, the kind `mur index` writes. A schema 1 index is refused, with the
 `mur index` command its publisher regenerates it with.
 
+## Requires
+
+| Needs | From |
+|---|---|
+| `mur index`, `murmur/<name>` installs, and fit chosen at install | a `mur` released after v0.6.0; until then, `mur` built from murmur's `main` |
+| The default index | the first default-artifacts release after v0.24.0; until then the default answers `fetch_error` `HTTP 404` |
+
+The tool's description tells the agent to install `<scope>/<name>` with no version and let `mur`
+pick the newest fitting one. A `mur` at v0.6.0 or earlier does not do that.
+
 ## Input
 
 | Field | Required | Meaning |

@@ -255,8 +255,8 @@ fn schema_1_error(source: &str) -> Value {
     err_result(
         err::SCHEMA_ERROR,
         format!(
-            "{source} is a schema 1 artifact index, which this tool does not read; its publisher \
-             regenerates it with `mur index <dir> --repo <owner>/<repo> --release <tag>`"
+            "{source} is a schema 1 artifact index, and this tool reads only schema 2; its \
+             publisher regenerates it with `mur index <dir> --repo <owner>/<repo> --release <tag>`"
         ),
     )
 }
@@ -559,8 +559,8 @@ mod tests {
             assert_eq!(out["error_kind"], err::SCHEMA_ERROR);
             assert_eq!(
                 message(&out),
-                "src is a schema 1 artifact index, which this tool does not read; its publisher \
-                 regenerates it with `mur index <dir> --repo <owner>/<repo> --release <tag>`"
+                "src is a schema 1 artifact index, and this tool reads only schema 2; its \
+                 publisher regenerates it with `mur index <dir> --repo <owner>/<repo> --release <tag>`"
             );
         }
     }
