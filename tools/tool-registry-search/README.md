@@ -26,9 +26,10 @@ pick the newest fitting one. A `mur` at v0.6.0 or earlier does not do that.
 
 With no `index`, the tool reads the index on the latest default-artifacts release:
 `https://github.com/murmur-nexus/default-artifacts/releases/latest/download/artifacts-index.json`.
-That URL redirects to `release-assets.githubusercontent.com`, so the manifest grants both
-`https://github.com` and `https://release-assets.githubusercontent.com`. Indexes on other hosts
-need their own grant on the capsule's entry.
+That URL redirects to `release-assets.githubusercontent.com`, so the capsule's own
+`capabilities.network.allow` must list both `https://github.com` and
+`https://release-assets.githubusercontent.com`; an index on another host needs that host there too
+(see [What the capsule must grant](#what-the-capsule-must-grant)).
 
 The `registry` input and `index: "local"` are refused. The global artifact store is on the host,
 and a capsule cannot see it; `mur search <query> --index local` searches it there.
@@ -63,6 +64,16 @@ without a version.
 | `io_error` | The file could not be read |
 | `parse_error` | The index is not JSON, not a JSON object, or a field is missing or of the wrong type |
 | `schema_error` | The index is schema 1, has another `schema_version`, or has none |
+
+## What the capsule must grant
+
+On Linux, from the first `mur` released after v0.6.0, the tool runs in the capsule's own sandbox, with the capsule-wide grants ([Native tools](https://docs.murmur.nexus/reference/containment/#native-tools)). A `capabilities:` block on the tool's entry in the capsule's `artifacts:` does not narrow them and prints `W-SEC-008`.
+
+| Need | Capsule grant |
+|---|---|
+| The default index | `https://github.com` and `https://release-assets.githubusercontent.com` in `capabilities.network.allow` |
+| An `index` URL | Its host, and any host it redirects to, in `capabilities.network.allow` |
+| An `index` file | The file inside the session workdir |
 
 ## Build
 

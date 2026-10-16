@@ -110,8 +110,10 @@ input_schema:
 
 capabilities:
   filesystem:
-    # Declarative intent only — the runtime does not yet enforce path prefixes at
-    # the spawn layer for native tools. This tool reads Rust sources under
+    # Documents what the tool works on; the runtime does not read this block. A
+    # native tool runs in the capsule's own sandbox under the capsule-wide
+    # capabilities, so on Linux every path below must be inside the session
+    # workdir. This tool reads Rust sources under
     # repo_path and writes its graph db + slice payloads under repo_path/.murmur.
     allow:
       - "."

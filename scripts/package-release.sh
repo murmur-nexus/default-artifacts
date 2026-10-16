@@ -8,8 +8,7 @@
 # This compiles nothing. Build first:
 #
 #   ./scripts/build-wasm.sh
-#   cargo build --release -p <crate> ...   one -p per classify-crates.sh
-#                                          `native-artifact` row
+#   ./scripts/build-native.sh
 #
 # Native payloads come from one of two places:
 #

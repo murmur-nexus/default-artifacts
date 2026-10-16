@@ -118,16 +118,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The crates are the `native-artifact` rows of classify-crates.sh, which reads
-      # `implementation: native` from each murmur.yaml. Each binary is named after its
-      # crate, which is the artifact's name.
+      # build-native.sh builds each `native-artifact` row of classify-crates.sh, which
+      # reads `implementation: native` from each murmur.yaml, in its own cargo
+      # invocation, so a tool's bytes never depend on which tools share its build. Each
+      # binary is named after its crate, which is the artifact's name.
       - name: Build
         run: |
           crates=$(bash scripts/classify-crates.sh | awk -F'\t' '$1 == "native-artifact" { print $2 }')
-          args=""
-          for crate in $crates; do args="$args -p $crate"; done
-          # shellcheck disable=SC2086 # one word per -p flag
-          cargo build --release --locked $args
+          bash scripts/build-native.sh --locked
           mkdir -p native-out
           for crate in $crates; do cp "target/release/$crate" native-out/; done
           ls -l native-out
