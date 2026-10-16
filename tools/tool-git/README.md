@@ -2,7 +2,7 @@
 
 ## What it is
 
-`tool-git` is a native binary tool artifact for Murmur capsules. It provides a structured JSON interface to the most common git operations, replacing the need to add `git` to `capabilities.shell.allow` in a capsule manifest. For operations outside its scope, `bash` in the shell allowlist serves as the escape hatch.
+`tool-git` is a native binary tool artifact for Murmur capsules. It provides a structured JSON interface to the most common git operations, returning typed JSON in place of raw `git` output. It runs `git` itself, so the capsule must list `git` in `capabilities.shell.allow` (see [What the capsule must grant](#what-the-capsule-must-grant)). For operations outside its scope, `bash` in the shell allowlist serves as the escape hatch.
 
 Supported operations: `status`, `add`, `diff`, `restore`, `stash`, `log`, `show`, `symbol_history`, `commit`, `cherry_pick`, `branch`, `checkout`, `switch`, `reset`, `fetch`, `pull`, `push`, `clone`, `remote`, `tag`, `merge`, `worktree`, `create_worktree` (compat alias).
 
@@ -137,13 +137,23 @@ artifacts:
 capabilities:
   shell:
     allow:
+      - git    # the tool runs git; the sandbox refuses it otherwise
       - bash   # fallback for operations outside tool-git's scope
-  # git is NOT listed here — tool-git handles all standard git operations.
-  # Adding git to shell.allow would be redundant and would grant broader shell
-  # access to arbitrary git subcommands; the artifact enforces the operation set.
 ```
 
-When `tool-git` is declared as an artifact, the capsule runtime makes the tool available as a structured JSON tool call. The capsule does not need `git` in `shell.allow` for any operation the artifact covers.
+When `tool-git` is declared as an artifact, the capsule runtime makes the tool available as a structured JSON tool call.
+
+## What the capsule must grant
+
+On Linux the tool runs in the capsule's own sandbox, with the capsule-wide grants ([Native tools](https://docs.murmur.nexus/reference/containment/#native-tools)). A `capabilities:` block on the tool's entry in the capsule's `artifacts:` does not narrow them and prints `W-SEC-008`.
+
+| Need | Capsule grant |
+|---|---|
+| Run `git` | `git` in `capabilities.shell.allow`. Without it every operation fails with `failed to execute git: Permission denied (os error 13)` |
+| Read and write the repository | The repository inside the session workdir; under `scoped` and `sealed` nothing outside it is reachable |
+| `fetch`, `pull`, `push`, `clone` | The remote's host in `capabilities.network.allow`, and a `capabilities.shell.interpreter_runtime` grant for `git` naming the directory its remote helpers live in (`/usr/lib/git-core` on Debian and Ubuntu); without it `git` cannot start `git-remote-https` |
+
+`status` and `log` were run confined under both `scoped` and `sealed` with only `git` granted. See [What each native tool needs](https://docs.murmur.nexus/reference/default-artifacts/#native-tool-needs).
 
 ## Building
 

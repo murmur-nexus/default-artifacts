@@ -68,8 +68,10 @@ input_schema:
 
 capabilities:
   filesystem:
-    # Declarative intent only — the runtime does not yet enforce path prefixes at
-    # the spawn layer for native tools. This tool reads the LCOV files under
+    # Documents what the tool works on; the runtime does not read this block. A
+    # native tool runs in the capsule's own sandbox under the capsule-wide
+    # capabilities, so on Linux every path below must be inside the session
+    # workdir. This tool reads the LCOV files under
     # coverage_dir, reads+writes the code graph db under repo_path/.murmur, and
     # writes its full-suspects payload under repo_path/.murmur/coverage.
     allow:

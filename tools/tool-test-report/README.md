@@ -41,6 +41,16 @@ Above 50 failures the inline `failures` array is capped, `truncated` is `true`,
 and the full array is written to `<input-stem>.failures.json` next to the input,
 referenced by `data_path`.
 
+## What the capsule must grant
+
+On Linux the tool runs in the capsule's own sandbox, with the capsule-wide grants ([Native tools](https://docs.murmur.nexus/reference/containment/#native-tools)). A `capabilities:` block on the tool's entry in the capsule's `artifacts:` does not narrow them and prints `W-SEC-008`.
+
+| Need | Capsule grant |
+|---|---|
+| Read the captured output, and write `<input-stem>.failures.json` beside it | `input_path` (and `repo_path`, when given) inside the session workdir |
+
+`parse` was run confined under both `scoped` and `sealed` with no grant beyond the workdir. See [What each native tool needs](https://docs.murmur.nexus/reference/default-artifacts/#native-tool-needs).
+
 ## Build & test
 
 ```bash

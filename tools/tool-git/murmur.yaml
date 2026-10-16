@@ -3,8 +3,8 @@ version: 0.2.0
 runtime: tool
 implementation: native
 description: |
-  Structured git interface for Murmur capsules. Replaces adding `git` to
-  `capabilities.shell.allow`. Returns typed JSON for all operations. Use `bash`
+  Structured git interface for Murmur capsules. Returns typed JSON for all
+  operations. The capsule must list `git` in `capabilities.shell.allow`. Use `bash`
   for anything not listed below.
 
   | op          | sub              | inputs                             | outputs                          |
@@ -219,20 +219,16 @@ allowed_flags:
     positionals: ["dest", "branch"]
 
 capabilities:
+  # The capsule must grant `git` in its own capabilities.shell.allow: the tool
+  # runs git, and the sandbox refuses any program the capsule does not list.
   shell:
     allow:
       - git
   filesystem:
-    # Declares which path prefixes this tool is permitted to operate on.
-    # This mirrors the capabilities.network.allow concept for filesystem paths.
-    #
-    # Runtime-level enforcement is not yet implemented: the capsule runtime enforces
-    # network.allow inside Wasmtime and shell.allow at subprocess spawn time, but has
-    # no equivalent mechanism for validating path arguments passed to subprocess calls.
-    # This field is therefore declarative intent only — the tool itself enforces it via
-    # the MURMUR_FILESYSTEM_ALLOW environment variable (see src/main.rs: resolve_repo).
-    #
-    # Future runtime-level enforcement would intercept path arguments at spawn time,
-    # making the tool-level check in resolve_repo() redundant but harmless.
+    # Documents what the tool works on; the runtime does not read this block. A
+    # native tool runs in the capsule's own sandbox under the capsule-wide
+    # capabilities, so on Linux the repository must be inside the session
+    # workdir. The tool also checks `repo` against MURMUR_FILESYSTEM_ALLOW when
+    # that variable is set (see src/main.rs: resolve_repo).
     allow:
       - "."   # resolved at runtime to the capsule workdir; real paths are task-provided

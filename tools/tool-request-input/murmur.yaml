@@ -5,7 +5,7 @@ implementation: wasm
 description: |
   Pauses the agent loop and requests external input via A2A. The caller supplies
   a prompt; the runtime transitions the task to input-required state and blocks until
-  a follow-up message/send delivers an answer. The answer is returned as the tool result.
+  a follow-up `SendMessage` delivers an answer. The answer is returned as the tool result.
 
 input_schema:
   type: object

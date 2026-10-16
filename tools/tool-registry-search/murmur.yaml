@@ -36,6 +36,10 @@ input_schema:
   required:
     - query
 
+# Documents what the tool reaches; the runtime does not read this block. A
+# native tool runs in the capsule's own sandbox under the capsule-wide
+# capabilities, so the capsule must list these hosts in its own
+# capabilities.network.allow.
 capabilities:
   network:
     allow:
