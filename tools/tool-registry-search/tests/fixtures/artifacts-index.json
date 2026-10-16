@@ -1,0 +1,125 @@
+{
+  "schema_version": 2,
+  "scope": "murmur",
+  "artifacts": [
+    {
+      "name": "driver-anthropic",
+      "runtime": "driver",
+      "description": "Anthropic Messages API inference driver for Murmur agent capsules.",
+      "tags": [
+        "driver",
+        "inference",
+        "anthropic"
+      ],
+      "versions": [
+        {
+          "version": "0.10.0",
+          "release": "v0.25.0",
+          "built_at_level": 1,
+          "interfaces": [
+            "murmur:stream/events@0.1.0",
+            "murmur:tool/run@0.1.0"
+          ],
+          "assets": [
+            {
+              "file": "driver-anthropic-0.10.0.mur.zip",
+              "sha256": "e83cf0c2e88f02b4e7bff73aa3c2f23a1746f06b64e13c61c5f7b40af7d665a4"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "skill-create-manifest",
+      "runtime": "skill",
+      "description": "Skill artifact: complete knowledge for generating valid murmur manifest files",
+      "tags": [
+        "skill",
+        "create",
+        "manifest"
+      ],
+      "versions": [
+        {
+          "version": "0.1.0",
+          "release": "v0.25.0",
+          "built_at_level": 1,
+          "interfaces": [],
+          "assets": [
+            {
+              "file": "skill-create-manifest-0.1.0.mur.zip",
+              "sha256": "d9a1119dd47a324a348fe48103e12f053efd7bffdd629e9d7442ede98bb17771"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "tool-editor",
+      "runtime": "tool",
+      "description": "Structured file editing interface for Murmur capsules.",
+      "tags": [
+        "tool",
+        "editor"
+      ],
+      "versions": [
+        {
+          "version": "0.7.0",
+          "release": "v0.26.0",
+          "built_at_level": 1,
+          "interfaces": [
+            "murmur:tool/run@0.1.0"
+          ],
+          "assets": [
+            {
+              "file": "tool-editor-0.7.0.mur.zip",
+              "sha256": "ce1816485a890a231e23d4eb9a5e6d9aa91b1100c230d002448a885cb97559b8"
+            }
+          ]
+        },
+        {
+          "version": "0.6.0",
+          "release": "v0.25.0",
+          "built_at_level": 1,
+          "interfaces": [
+            "murmur:tool/run@0.1.0"
+          ],
+          "assets": [
+            {
+              "file": "tool-editor-0.6.0.mur.zip",
+              "sha256": "b9dc7f51595353d80cb9d0ec70c04afd381842e73b97829a3daf36f30e5dd7f6"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "tool-git",
+      "runtime": "tool",
+      "description": "Structured git interface for Murmur capsules.",
+      "tags": [
+        "tool",
+        "git"
+      ],
+      "versions": [
+        {
+          "version": "0.2.0",
+          "release": "v0.25.0",
+          "built_at_level": 1,
+          "interfaces": [],
+          "assets": [
+            {
+              "file": "tool-git-0.2.0-darwin-aarch64.mur.zip",
+              "platform": "darwin-aarch64",
+              "sha256": "c771ff6cff43cdb2a4627161e5ab1a866b031a347408a2b4401fd58ea222cc16"
+            },
+            {
+              "file": "tool-git-0.2.0-linux-x86_64.mur.zip",
+              "platform": "linux-x86_64",
+              "sha256": "c771ff6cff43cdb2a4627161e5ab1a866b031a347408a2b4401fd58ea222cc16"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

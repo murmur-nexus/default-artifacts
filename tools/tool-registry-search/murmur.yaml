@@ -1,13 +1,22 @@
 name: tool-registry-search
-version: 0.1.0
+version: 0.2.0
 runtime: tool
 implementation: native
 description: |
-  Search the Murmur artifact registry for artifacts matching a keyword. Returns ranked results
-  with name, version, runtime type, description, and published date.
+  Search a Murmur artifact index (schema 2) for artifacts matching a keyword.
 
-  Supports the public default-artifacts index (default), the local artifact store
-  (registry: "local"), and custom registry URLs or absolute file paths.
+  Each result is a full `<scope>/<name>`, such as `murmur/tool-editor`, with every version the
+  index publishes, newest first. Each version comes with the release that holds it, the WIT level
+  it was built at, and the platforms its payloads cover (`any` for a platform-independent
+  payload).
+
+  The results list what is published, not what will load in this capsule. `mur` decides fit at
+  install time. `mur install <scope>/<name>`, or the `pull-artifact` tool when this capsule may
+  pull artifacts, installs the newest version that fits the running `mur`. An explicit version
+  that does not fit is refused, naming the one that does. So pass `<scope>/<name>` without a
+  version.
+
+  By default it searches the index on the latest default-artifacts release.
 
 requires_files:
   - bin/tool-registry-search
@@ -17,10 +26,10 @@ input_schema:
   properties:
     query:
       type: string
-      description: "Search keyword — matched case-insensitively against artifact name, description, and tags."
-    registry:
+      description: "Search keyword, matched case-insensitively against the full `<scope>/<name>`, the bare name, the description and the tags."
+    index:
       type: string
-      description: 'Registry to search. Omit for the public index; "local" for the local store; a URL or absolute path for a custom registry.'
+      description: "A URL (`http://`/`https://`), or a path to an `artifacts-index.json` file, relative to the working directory or absolute. Omit for the index on the latest default-artifacts release."
     limit:
       type: integer
       description: "Maximum number of results to return. Default: 10."
@@ -30,7 +39,5 @@ input_schema:
 capabilities:
   network:
     allow:
-      - "https://raw.githubusercontent.com"
-  filesystem:
-    allow:
-      - "~/.murmur/artifacts"
+      - "https://github.com"
+      - "https://release-assets.githubusercontent.com"
