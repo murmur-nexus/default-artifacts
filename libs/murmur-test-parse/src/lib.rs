@@ -8,8 +8,8 @@
 //!
 //! This is the single, shared home of `detect_format`/`parse_cargo`/
 //! `parse_pytest`/`parse_go`/`parse_jest`. It was extracted verbatim from
-//! `murmur-tool-test-report`'s `src/parse.rs` so that both that native tool and
-//! the WASM `murmur-hook-regression-verifier` (which cannot invoke the tool
+//! `tool-test-report`'s `src/parse.rs` so that both that native tool and
+//! the WASM `hook-regression-verifier` (which cannot invoke the tool
 //! out-of-process) reuse one copy of the parsers. The crate has no native-only
 //! dependencies, so it builds for `wasm32-wasip2` as well as native targets.
 
@@ -594,7 +594,7 @@ fn jest_location(body: &[&str], cur_file: Option<&str>) -> (Option<String>, Opti
 // ── unit tests ──────────────────────────────────────────────────────────────
 // These exercise the parsers directly as pure functions. The heavier,
 // real-filesystem behaviour of the native tool that wraps them remains covered
-// by `tools/murmur-tool-test-report/tests/test_report_integration.rs`.
+// by `tools/tool-test-report/tests/test_report_integration.rs`.
 #[cfg(test)]
 mod tests {
     use super::*;

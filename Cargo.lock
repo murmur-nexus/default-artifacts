@@ -605,6 +605,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "driver-anthropic"
+version = "0.24.0"
+dependencies = [
+ "murmur-driver-env",
+ "serde",
+ "serde_json",
+ "wasip2",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "driver-claude-code"
+version = "0.24.0"
+dependencies = [
+ "serde_json",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "driver-deepseek"
+version = "0.24.0"
+dependencies = [
+ "murmur-driver-env",
+ "serde",
+ "serde_json",
+ "wasip2",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "driver-moonshotai"
+version = "0.24.0"
+dependencies = [
+ "murmur-driver-env",
+ "serde",
+ "serde_json",
+ "wasip2",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "driver-openai"
+version = "0.24.0"
+dependencies = [
+ "murmur-driver-env",
+ "serde",
+ "serde_json",
+ "wasip2",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
 name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -923,6 +975,74 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
+name = "hook-compact"
+version = "0.24.0"
+dependencies = [
+ "murmur-hook-transcript",
+ "serde_json",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "hook-debug"
+version = "0.24.0"
+dependencies = [
+ "serde_json",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "hook-diff-summary"
+version = "0.24.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "similar",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "hook-eval"
+version = "0.24.0"
+dependencies = [
+ "serde_json",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "hook-grafana"
+version = "0.24.0"
+dependencies = [
+ "serde_json",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "hook-memory"
+version = "0.24.0"
+dependencies = [
+ "murmur-hook-transcript",
+ "serde_json",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "hook-regression-verifier"
+version = "0.24.0"
+dependencies = [
+ "murmur-test-parse",
+ "serde_json",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "hook-shell-desc"
+version = "0.24.0"
+dependencies = [
+ "wit-bindgen 0.59.0",
+]
 
 [[package]]
 name = "http"
@@ -1332,128 +1452,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "murmur-driver-anthropic"
-version = "0.24.0"
-dependencies = [
- "murmur-driver-env",
- "serde",
- "serde_json",
- "wasip2",
- "wit-bindgen 0.59.0",
-]
-
-[[package]]
-name = "murmur-driver-claude-code"
-version = "0.24.0"
-dependencies = [
- "serde_json",
- "wit-bindgen 0.59.0",
-]
-
-[[package]]
-name = "murmur-driver-deepseek"
-version = "0.24.0"
-dependencies = [
- "murmur-driver-env",
- "serde",
- "serde_json",
- "wasip2",
- "wit-bindgen 0.59.0",
-]
-
-[[package]]
 name = "murmur-driver-env"
 version = "0.24.0"
-
-[[package]]
-name = "murmur-driver-moonshotai"
-version = "0.24.0"
-dependencies = [
- "murmur-driver-env",
- "serde",
- "serde_json",
- "wasip2",
- "wit-bindgen 0.59.0",
-]
-
-[[package]]
-name = "murmur-driver-openai"
-version = "0.24.0"
-dependencies = [
- "murmur-driver-env",
- "serde",
- "serde_json",
- "wasip2",
- "wit-bindgen 0.59.0",
-]
-
-[[package]]
-name = "murmur-hook-compact"
-version = "0.24.0"
-dependencies = [
- "murmur-hook-transcript",
- "serde_json",
- "wit-bindgen 0.59.0",
-]
-
-[[package]]
-name = "murmur-hook-debug"
-version = "0.24.0"
-dependencies = [
- "serde_json",
- "wit-bindgen 0.59.0",
-]
-
-[[package]]
-name = "murmur-hook-diff-summary"
-version = "0.24.0"
-dependencies = [
- "serde",
- "serde_json",
- "similar",
- "wit-bindgen 0.59.0",
-]
-
-[[package]]
-name = "murmur-hook-eval"
-version = "0.24.0"
-dependencies = [
- "serde_json",
- "wit-bindgen 0.59.0",
-]
-
-[[package]]
-name = "murmur-hook-grafana"
-version = "0.24.0"
-dependencies = [
- "serde_json",
- "wit-bindgen 0.59.0",
-]
-
-[[package]]
-name = "murmur-hook-memory"
-version = "0.24.0"
-dependencies = [
- "murmur-hook-transcript",
- "serde_json",
- "wit-bindgen 0.59.0",
-]
-
-[[package]]
-name = "murmur-hook-regression-verifier"
-version = "0.24.0"
-dependencies = [
- "murmur-test-parse",
- "serde_json",
- "wit-bindgen 0.59.0",
-]
-
-[[package]]
-name = "murmur-hook-shell-desc"
-version = "0.24.0"
-dependencies = [
- "wit-bindgen 0.59.0",
-]
 
 [[package]]
 name = "murmur-hook-transcript"
@@ -1472,135 +1472,6 @@ dependencies = [
 [[package]]
 name = "murmur-time"
 version = "0.24.0"
-
-[[package]]
-name = "murmur-tool-code-coverage"
-version = "0.24.0"
-dependencies = [
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "murmur-tool-code-graph"
-version = "0.24.0"
-dependencies = [
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tree-sitter",
- "tree-sitter-python",
- "tree-sitter-rust",
-]
-
-[[package]]
-name = "murmur-tool-corpus"
-version = "0.24.0"
-dependencies = [
- "murmur-time",
- "serde",
- "serde_json",
- "tempfile",
- "wasmtime",
- "wasmtime-wasi",
- "wit-bindgen 0.59.0",
-]
-
-[[package]]
-name = "murmur-tool-create"
-version = "0.24.0"
-dependencies = [
- "serde_json",
- "tempfile",
- "wasmtime",
- "wasmtime-wasi",
- "wit-bindgen 0.59.0",
-]
-
-[[package]]
-name = "murmur-tool-editor"
-version = "0.24.0"
-dependencies = [
- "regex",
- "serde_json",
- "walkdir",
- "wasmtime",
- "wasmtime-wasi",
- "wit-bindgen 0.59.0",
-]
-
-[[package]]
-name = "murmur-tool-git"
-version = "0.24.0"
-dependencies = [
- "rusqlite",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "murmur-tool-git-validate"
-version = "0.24.0"
-dependencies = [
- "clap",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "murmur-tool-registry-search"
-version = "0.24.0"
-dependencies = [
- "serde",
- "serde_json",
- "ureq",
-]
-
-[[package]]
-name = "murmur-tool-report"
-version = "0.24.0"
-dependencies = [
- "murmur-time",
- "serde",
- "serde_json",
- "wasmtime",
- "wasmtime-wasi",
- "wit-bindgen 0.59.0",
-]
-
-[[package]]
-name = "murmur-tool-request-input"
-version = "0.24.0"
-dependencies = [
- "serde_json",
- "wit-bindgen 0.59.0",
-]
-
-[[package]]
-name = "murmur-tool-tavily"
-version = "0.24.0"
-dependencies = [
- "serde_json",
- "tempfile",
- "wasip2",
- "wasmtime",
- "wasmtime-wasi",
- "wasmtime-wasi-http",
- "wit-bindgen 0.59.0",
-]
-
-[[package]]
-name = "murmur-tool-test-report"
-version = "0.24.0"
-dependencies = [
- "murmur-test-parse",
- "rusqlite",
- "serde",
- "serde_json",
-]
 
 [[package]]
 name = "native-tls"
@@ -2333,6 +2204,135 @@ name = "toml_writer"
 version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
+
+[[package]]
+name = "tool-code-coverage"
+version = "0.24.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "tool-code-graph"
+version = "0.24.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tree-sitter",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+]
+
+[[package]]
+name = "tool-corpus"
+version = "0.24.0"
+dependencies = [
+ "murmur-time",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "wasmtime",
+ "wasmtime-wasi",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "tool-create"
+version = "0.24.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+ "wasmtime",
+ "wasmtime-wasi",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "tool-editor"
+version = "0.24.0"
+dependencies = [
+ "regex",
+ "serde_json",
+ "walkdir",
+ "wasmtime",
+ "wasmtime-wasi",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "tool-git"
+version = "0.24.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tool-git-validate"
+version = "0.24.0"
+dependencies = [
+ "clap",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "tool-registry-search"
+version = "0.24.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
+name = "tool-report"
+version = "0.24.0"
+dependencies = [
+ "murmur-time",
+ "serde",
+ "serde_json",
+ "wasmtime",
+ "wasmtime-wasi",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "tool-request-input"
+version = "0.24.0"
+dependencies = [
+ "serde_json",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "tool-tavily"
+version = "0.24.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+ "wasip2",
+ "wasmtime",
+ "wasmtime-wasi",
+ "wasmtime-wasi-http",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "tool-test-report"
+version = "0.24.0"
+dependencies = [
+ "murmur-test-parse",
+ "rusqlite",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "tracing"

@@ -1,9 +1,0 @@
-name: murmur-hook-compact
-version: 0.8.0
-runtime: hook
-binding: on-compaction
-execution_mode: blocking
-commit_policy: replace-context
-description: "Summarises conversation history when the session token threshold is reached."
-requires_files:
-  - murmur_hook_compact.wasm

@@ -1,136 +1,108 @@
 #!/usr/bin/env bash
-# Build a default-artifacts artifact (wasm component or native binary) and
-# install it into a capsule. The build path is chosen from the artifact's own
-# `implementation:` field — wasm builds for wasm32-wasip2, native delegates to
-# the artifact's package.sh (host build), same as CI does.
+# Build one default-artifacts artifact and install it into a capsule, packed exactly as
+# a release packs it.
+#
+# The artifact's directory and kind come from scripts/list-artifacts.sh. A wasm
+# artifact is built for wasm32-wasip2 and validated, a native tool is built for the
+# host with `cargo build --release -p <name>`, and a skill compiles nothing; then
+# scripts/package-artifact.sh packs it with `mur build`, and `mur install ./<zip>`
+# installs it into the capsule.
+#
+# An artifact installed from a file belongs to scope `local`, not `murmur`: the store
+# holds it at .murmur/artifacts/local/<name>/<version>/, `mur install` pins it in
+# murmur.lock as `local/<name>`, and the capsule names it `local/<name>` in its
+# `artifacts:`. `mur install` replaces that pin on every install, so a rebuild at an
+# unchanged version re-pins the new bytes; this script checks the pin came out as the
+# zip's sha256 rather than writing it.
 #
 # Usage:
-#   scripts/local-install.sh <artifact-name> <target-capsule-dir> [artifact-path]
+#   scripts/local-install.sh <artifact-name> <target-capsule-dir>
 #
 # Example:
-#   scripts/local-install.sh murmur-hook-compact /path/to/capsule-folder
+#   scripts/local-install.sh hook-compact /path/to/capsule-folder
+#
+# `mur` is $MUR_BIN, else `mur` on PATH, and must have the `index` subcommand.
 set -euo pipefail
 
-NAME="${1:?artifact name, e.g. murmur-hook-compact}"
+NAME="${1:?artifact name, e.g. hook-compact}"
 CAPSULE_DIR="${2:?target capsule dir (the folder whose .murmur/ receives the install)}"
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+. "$SCRIPT_DIR/lib/common.sh"
 
-ART_PATH="${3:-$(awk -v n="$NAME" '
-  $0 ~ "name = \"" n "\"$" {found=1; next}
-  found && /^path *=/ { gsub(/[" ]/,"",$3); print $3; exit }
-  /^\[\[artifact\]\]/ {found=0}
-' "$REPO_ROOT/artifacts.toml")}"
-[ -n "$ART_PATH" ] || { echo "error: could not resolve path for '$NAME' in artifacts.toml (pass it as arg 3)" >&2; exit 1; }
+require_mur
+export MUR_BIN="$MUR"
 
-SRC_DIR="$REPO_ROOT/$ART_PATH"
-WASM_CRATE="${NAME//-/_}"
-WASM="$REPO_ROOT/target/wasm32-wasip2/release/${WASM_CRATE}.wasm"
-VERSION="$(grep '^version:' "$SRC_DIR/murmur.yaml" | awk '{print $2}' | tr -d '"')"
-LOCK="$CAPSULE_DIR/murmur.lock"
-
-# Build+package differ by implementation, so read it rather than assuming wasm:
-# a native tool compiled with --target wasm32-wasip2 fails in its C dependencies
-# (e.g. libsqlite3-sys can't find stdio.h — there is no wasi libc sysroot here).
-# `implementation:` is optional and absent from every driver and hook manifest, so grep exits 1
-# there; without the `|| true` that status propagates out of the assignment and `set -e` aborts.
-IMPL="$(grep '^implementation:' "$SRC_DIR/murmur.yaml" | awk '{print $2}' | tr -d '"' || true)"
-
-if [ "$IMPL" = "native" ]; then
-  # Native artifacts own their build+package step (package.sh), the same entry
-  # point CI's build-native job calls. It compiles for the host, stages
-  # murmur.yaml + bin/<tool>, and writes a platform-tagged .mur.zip beside itself.
-  # Publishing stays opt-in (PUBLISH=--publish), so this only builds locally.
-  echo "→ [1/5] build + package $NAME ($VERSION) — native, via package.sh"
-  chmod +x "$SRC_DIR/package.sh" 2>/dev/null || true
-  [ -f "$SRC_DIR/package.sh" ] || { echo "error: $NAME is implementation: native but has no package.sh" >&2; exit 1; }
-  rm -f "$SRC_DIR"/*.mur.zip
-  ( cd "$SRC_DIR" && ./package.sh )
-  ZIP="$(ls -t "$SRC_DIR"/*.mur.zip 2>/dev/null | head -1)"
-  [ -n "$ZIP" ] || { echo "error: package.sh produced no .mur.zip in $SRC_DIR" >&2; exit 1; }
-
-  echo "→ [2/5] validate component — skipped (native binary, not a wasm component)"
-  echo "→ [3/5] package — done by package.sh: $(basename "$ZIP")"
-else
-  ZIP="/tmp/${NAME}-${VERSION}.mur.zip"
-
-  echo "→ [1/5] cargo build $NAME ($VERSION)"
-  ( cd "$REPO_ROOT" && cargo build -p "$NAME" --target wasm32-wasip2 --release )
-
-  echo "→ [2/5] validate component"
-  "$REPO_ROOT/scripts/validate-component.sh" "$WASM"
-
-  echo "→ [3/5] package via mur build"
-  STAGE="$(mktemp -d)"
-  trap 'rm -rf "$STAGE"' EXIT
-  cp -R "$SRC_DIR/." "$STAGE/"
-  cp "$WASM" "$STAGE/${WASM_CRATE}.wasm"
-  rm -f "$ZIP"
-  mur build "$STAGE" -o "$ZIP"
+ROW="$(bash "$SCRIPT_DIR/list-artifacts.sh" | awk -F'\t' -v n="$NAME" '$2 == n')"
+if [ -z "$ROW" ]; then
+  echo "error: no artifact named '$NAME'; ./scripts/list-artifacts.sh lists them" >&2
+  exit 1
 fi
+IFS=$'\t' read -r ART_PATH _name VERSION _runtime KIND <<< "$ROW"
+CAPSULE_DIR="$(cd "$CAPSULE_DIR" && pwd)"
+LOCK="$CAPSULE_DIR/murmur.lock"
+OUT="$(mktemp -d)"
+trap 'rm -rf "$OUT"' EXIT
 
-echo "→ [4/5] install into $CAPSULE_DIR"
-( cd "$CAPSULE_DIR" && mur install "$ZIP" )
+case "$KIND" in
+  wasm)
+    echo "→ [1/4] cargo build $NAME ($VERSION) — wasm32-wasip2"
+    ( cd "$REPO_ROOT" && cargo build -p "$NAME" --target wasm32-wasip2 --release )
+    "$REPO_ROOT/scripts/validate-component.sh" "$REPO_ROOT/target/wasm32-wasip2/release/${NAME//-/_}.wasm"
+    ;;
+  native)
+    # A native tool compiled with --target wasm32-wasip2 fails in its C dependencies
+    # (libsqlite3-sys can't find stdio.h — there is no wasi libc sysroot here), so it
+    # builds for the host, as build.yml's native job does.
+    echo "→ [1/4] cargo build $NAME ($VERSION) — native, host"
+    ( cd "$REPO_ROOT" && cargo build --release -p "$NAME" )
+    ;;
+  skill)
+    echo "→ [1/4] build $NAME ($VERSION) — skill, nothing to compile"
+    ;;
+esac
 
-# A stale murmur.lock is what breaks `mur run` after a local rebuild: it pins the
-# old version + integrity hash and mur trusts it over the store. `mur install`
-# (no args) can't refresh it for an unpublished local build — it re-resolves from
-# the registry, where this version doesn't exist. So update the lock entry in
-# place. Critically, do NOT recompute the hash: mur's lock records the sha of the
-# .mur.zip, and `mur install` already wrote that exact value to a .sha256 sidecar
-# next to the artifact — read it back so the lock always matches mur's own
-# integrity check. If no lock exists, leave it: `mur run` generates a correct one.
-#
-# Which key the hash goes under is the artifact's payload shape, not a choice:
-# lock_version 2 pins a wasm component under sha256.any and a native binary under
-# sha256.platforms.<tag>, and refuses an entry carrying both. A native .mur.zip is
-# named "<name>-<version>-<platform>.mur.zip", which is where the tag comes from.
-echo "→ [5/5] update lock $NAME@$VERSION"
-SIDECAR=$(ls "$CAPSULE_DIR/.murmur/artifacts/$NAME/$VERSION/"*.sha256 2>/dev/null | head -1 || true)
+echo "→ [2/4] package via mur build"
+ZIP="$(bash "$SCRIPT_DIR/package-artifact.sh" "$REPO_ROOT/$ART_PATH" "$OUT")"
+echo "    $(basename "$ZIP")"
+
+echo "→ [3/4] install into $CAPSULE_DIR"
+( cd "$CAPSULE_DIR" && "$MUR" install "$ZIP" )
+
+# The pin `mur install` wrote must be this zip's sha256, under the key its payload
+# shape takes: sha256.any for a wasm component or skill, sha256.platforms.<tag> for a
+# native tool (lock_version 3 refuses an entry carrying both). No lock is written
+# outside a project directory; the next `mur run` writes one.
+echo "→ [4/4] check lock local/$NAME@$VERSION"
+SHA="$(sha256sum "$ZIP" 2>/dev/null || shasum -a 256 "$ZIP")"; SHA="${SHA%% *}"
+PLATFORM=""
+if [ "$KIND" = "native" ]; then
+  PLATFORM="$(basename "$ZIP" .mur.zip)"; PLATFORM="${PLATFORM#"$NAME-$VERSION-"}"
+fi
 if [ ! -f "$LOCK" ]; then
   echo "    no murmur.lock present — next 'mur run' will generate one"
-elif [ -z "$SIDECAR" ]; then
-  echo "    warning: no .sha256 sidecar under .murmur/artifacts/$NAME/$VERSION/ — left lock unchanged" >&2
 else
-  SHA=$(tr -d '[:space:]' < "$SIDECAR")
-  if [ "$IMPL" = "native" ]; then
-    PLATFORM="$(basename "$ZIP")"; PLATFORM="${PLATFORM#"$NAME-$VERSION-"}"; PLATFORM="${PLATFORM%.mur.zip}"
-    # package.sh hardcodes its own VERSION; if it disagrees with murmur.yaml the
-    # prefix strip above is a no-op and the whole filename would become the key.
-    [[ "$PLATFORM" =~ ^[a-z]+-[a-z0-9_]+$ ]] || {
-      echo "error: could not parse a platform tag from $(basename "$ZIP") (package.sh VERSION vs murmur.yaml $VERSION?)" >&2; exit 1; }
-  else
-    PLATFORM=""
-  fi
-  python3 - "$LOCK" "$NAME" "$VERSION" "$SHA" "$PLATFORM" <<'PY'
+  python3 - "$LOCK" "local/$NAME" "$VERSION" "$SHA" "$PLATFORM" <<'PY'
 import sys, yaml
 lock_path, name, version, sha, platform = sys.argv[1:6]
 doc = yaml.safe_load(open(lock_path)) or {}
-arts = doc.setdefault("artifacts", [])
-entry = next((a for a in arts if a.get("name") == name), None)
-if entry is None:
-    entry = {"name": name}
-    arts.append(entry)
-# Same rule as LockedArtifact::pin: other platforms' hashes for this version stay,
-# since the lock is shared across machines. Otherwise replace whole — an entry
-# holding both sha256.any and sha256.platforms is refused, and whatever is there
-# names the previous version.
-old = entry.get("sha256") or {}
-key = f"platforms.{platform}" if platform else "any"
-if platform and entry.get("resolved_version") == version and "platforms" in old and "any" not in old:
-    old["platforms"][platform] = sha
-    entry["sha256"] = old
-else:
-    entry["sha256"] = {"platforms": {platform: sha}} if platform else {"any": sha}
-entry["resolved_version"] = version
-yaml.safe_dump(doc, open(lock_path, "w"), sort_keys=False)
-print(f"    lock updated: {name}@{version} sha256.{key}={sha[:12]}…")
+entry = next((a for a in doc.get("artifacts", []) or [] if a.get("name") == name), None)
+pinned = None
+if entry is not None and str(entry.get("resolved_version")) == version:
+    hashes = entry.get("sha256") or {}
+    pinned = (hashes.get("platforms") or {}).get(platform) if platform else hashes.get("any")
+key = f"sha256.platforms.{platform}" if platform else "sha256.any"
+if pinned != sha:
+    print(f"error: murmur.lock does not pin {name}@{version} {key} at {sha} (found {pinned!r})", file=sys.stderr)
+    sys.exit(1)
+print(f"    lock pins {name}@{version} {key}={sha[:12]}…")
 PY
 fi
 
 # Regeneration is driven by the manifest pin, so it must name this version, or the
 # next run re-locks the wrong one. Check read-only; never edit the manifest here
 # (it may carry comments / block scalars a YAML round-trip would mangle).
-PINNED="$(python3 - "$CAPSULE_DIR/murmur.yaml" "$NAME" <<'PY'
+PINNED="$(python3 - "$CAPSULE_DIR/murmur.yaml" "local/$NAME" <<'PY'
 import sys, yaml
 try:
     doc = yaml.safe_load(open(sys.argv[1])) or {}
@@ -143,10 +115,13 @@ PY
 )"
 if [ "$PINNED" != "$VERSION" ]; then
   echo
-  echo "⚠  $CAPSULE_DIR/murmur.yaml pins '$NAME' at \"${PINNED:-<unset>}\", not \"$VERSION\"."
-  echo "   Update that pin to \"$VERSION\" or the next run will re-lock the wrong version."
+  echo "⚠  $CAPSULE_DIR/murmur.yaml pins 'local/$NAME' at \"${PINNED:-<unset>}\", not \"$VERSION\"."
+  echo "   Reference this build in the capsule's artifacts: as"
+  echo "     - name: local/$NAME"
+  echo "       version: \"$VERSION\""
+  echo "   — 'murmur/$NAME' names the published release, not this build."
 fi
 
 echo
-echo "✓ installed $NAME@$VERSION → $CAPSULE_DIR (lock refreshes on next 'mur run')"
-echo "  Optional: remove stale older version dirs under .murmur/artifacts/$NAME/"
+echo "✓ installed local/$NAME@$VERSION → $CAPSULE_DIR"
+echo "  Optional: remove stale older version dirs under .murmur/artifacts/local/$NAME/"

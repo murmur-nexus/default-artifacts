@@ -16,7 +16,7 @@
 # (spawning `git`, raw sockets and a native TLS stack) that a wasm32-wasip2
 # guest does not have. Attempting one anyway fails deep inside a C build with an
 # error naming the C compiler rather than the real mistake. build.yml's
-# `build-native` matrix builds them instead.
+# `native` job builds them instead, with `cargo build --release -p <name>`.
 #
 # Usage:   scripts/build-wasm.sh [<extra cargo args>...]
 #          Extra arguments are appended to the cargo invocation (e.g. --locked).

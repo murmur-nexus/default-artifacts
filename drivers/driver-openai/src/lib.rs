@@ -1,0 +1,4569 @@
+// Functions and types are only referenced from the wasm_driver module (cfg-gated to wasm32)
+// or from cfg(test). Suppress dead_code noise in plain host library builds.
+#![cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+
+use serde::Deserialize;
+use serde_json::{json, Map, Value};
+
+/// Reserved key carrying the driver-continuation id, verbatim from the v0.5.12
+/// host/WIT protocol ("Stateful driver continuation, part 1"). Used in two places:
+///   • request-side: an optional top-level field of the incoming murmur request
+///     JSON (`tool-input.data`), injected by the host when it holds an id;
+///   • response-side: the `tool-result.metadata` key this driver returns the
+///     provider response `id` under, so the host can persist and re-supply it.
+/// Both directions must use this exact string — the host reads/writes it verbatim.
+#[allow(dead_code)] // reachable only from the wasm32-gated driver module
+const CONTINUATION_ID_KEY: &str = "continuation_id";
+
+/// Reserved key carrying the prompt-cache routing hint. Read from a top-level member of the
+/// incoming murmur request JSON (never from `params`) and written under the same name into the
+/// provider body, which both the Chat Completions and the Responses API define.
+const PROMPT_CACHE_KEY: &str = "prompt_cache_key";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelFamily {
+    GptClassic,
+    OSeriesReasoning,
+}
+
+// Parameters that cause a 400 error on o-series reasoning models.
+const O_SERIES_UNSUPPORTED_PARAMS: &[&str] = &[
+    "temperature",
+    "top_p",
+    "presence_penalty",
+    "frequency_penalty",
+    "logprobs",
+    "top_logprobs",
+    "logit_bias",
+    "n",
+];
+
+fn classify_model(model: &str) -> ModelFamily {
+    // o-series: model string starts with 'o' followed immediately by a digit.
+    // Covers o1, o1-mini, o3, o3-mini, o4-mini, etc.
+    let bytes = model.trim().as_bytes();
+    if matches!(bytes.first(), Some(b'o'))
+        && matches!(bytes.get(1), Some(b) if b.is_ascii_digit())
+    {
+        return ModelFamily::OSeriesReasoning;
+    }
+    ModelFamily::GptClassic
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApiSurface {
+    ChatCompletions,
+    Responses,
+}
+
+/// Major version following a `gpt-` prefix, e.g. "gpt-5.2-codex" -> Some(5),
+/// "gpt-4.1" -> Some(4), "o3" -> None (no `gpt-` prefix), "gpt-turbo" -> None.
+fn gpt_major_version(model: &str) -> Option<u32> {
+    let rest = model.trim().strip_prefix("gpt-")?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse::<u32>().ok()
+}
+
+/// Selects which OpenAI HTTP API/JSON shape to target.
+///
+/// o-series reasoning models always use Chat Completions, independent of any
+/// version-like number in the name. Otherwise, gpt-<N> with N >= 5 uses the
+/// Responses API; everything else (gpt-4.x, gpt-3.5-*, unknown/non-numbered
+/// names) uses Chat Completions.
+fn classify_api_surface(model: &str, family: ModelFamily) -> ApiSurface {
+    if family == ModelFamily::OSeriesReasoning {
+        return ApiSurface::ChatCompletions;
+    }
+    match gpt_major_version(model) {
+        Some(major) if major >= 5 => ApiSurface::Responses,
+        _ => ApiSurface::ChatCompletions,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct MurmurRequest {
+    model: String,
+    max_tokens: u32,
+    #[serde(default)]
+    system: Option<String>,
+    #[serde(default)]
+    messages: Vec<MurmurMessage>,
+    #[serde(default)]
+    tools: Vec<MurmurTool>,
+    #[serde(default)]
+    params: Map<String, Value>,
+    /// Held continuation id, injected by the host (reserved `continuation_id`
+    /// key). Present only when the host holds a stored provider response id for
+    /// this context; when present, `messages` is already the host-sliced
+    /// incremental tail (see `translate_murmur_request_to_responses`). Absent on
+    /// a first call or right after the host drops the id on a replace-context
+    /// commit, in which case `messages` is the full context and we full-resend.
+    #[serde(default)]
+    continuation_id: Option<String>,
+    /// Prompt-cache routing hint, injected by the host as a reserved top-level
+    /// `prompt_cache_key` member. Constant for every turn of one task, so the turns
+    /// route to the machine holding the previous turn's cache entry. Held as a raw
+    /// `Value` rather than `Option<String>` so a null or non-string does not fail the
+    /// whole request parse: the contract treats anything but a non-blank string as
+    /// "no key" and forwards nothing (see `prompt_cache_key`).
+    #[serde(default)]
+    prompt_cache_key: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct MurmurMessage {
+    role: String,
+    #[serde(default)]
+    tool_call_id: Option<String>,
+    #[serde(default)]
+    content: Vec<MurmurContentBlock>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MurmurTool {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default = "default_object")]
+    parameters: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum MurmurContentBlock {
+    Text {
+        text: String,
+    },
+    // Reasoning persisted by a prior driver response. OpenAI chat-completions has no
+    // request-side slot for reasoning, so these blocks are ignored when translating
+    // history back into a request (no round-trip requirement, unlike Anthropic/DeepSeek).
+    Thinking {
+        #[allow(dead_code)]
+        text: String,
+    },
+    Image {
+        source: MurmurImageSource,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        input: Value,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Deserialize)]
+struct MurmurImageSource {
+    media_type: String,
+    data: String,
+}
+
+fn default_object() -> Value {
+    json!({})
+}
+
+// ── Server-side response retention (`store`) governance ───────────────────────
+//
+// Setting `store: true` on a Responses request makes OpenAI retain the response
+// server-side (retrievable by `id`, ~30 days) — a data-handling implication in
+// the same category as this project's shell / network / filesystem grants, which
+// are always *explicit* opt-ins rather than driver-internal defaults. So retention
+// is NOT an unconditional default here: it is gated behind an explicit capsule-level
+// grant, supplied through the existing `inference.driver.config` manifest object,
+// which the host serializes to the `MURMUR_INFERENCE_DRIVER_CONFIG` env var and never
+// puts on the wire. Opt in with:
+//
+//   inference:
+//     driver:
+//       artifact: murmur/driver-openai
+//       config: { store: true }
+//
+// When unset (the default), `store` stays `false`, no continuation id is returned,
+// and no `previous_response_id` is ever sent — byte-identical to pre-v0.5.16 behavior.
+// Because a first call must be stored for its id to be chainable on the *next* call,
+// retention can't be conditioned on "a continuation is already active"; the capsule
+// author's grant is the gate instead. Enabling `store` is what unlocks the whole
+// continuation feature (the host only ever re-supplies an id this driver first
+// returned), so this single flag governs both retention and continuation.
+
+/// Whether the capsule opted into server-side response retention (`store: true`).
+/// Parses the `MURMUR_INFERENCE_DRIVER_CONFIG` JSON object for a boolean `store`
+/// field; anything missing, malformed, or non-boolean is treated as opt-out.
+fn store_opt_in(driver_config: Option<&str>) -> bool {
+    driver_config
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .and_then(|cfg| cfg.get("store").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
+// ── The `inference.driver.config` vocabulary ──────────────────────────────────
+//
+// The manifest object the host serializes into `MURMUR_INFERENCE_DRIVER_CONFIG` is this
+// driver's whole operator surface: `MurmurRequest.params` is a per-request channel no manifest
+// field populates today, so a dial that does not travel on this block does not reach the
+// provider at all.
+//
+// Every key here is read. A key that is not is a hard error on the first inference call, before
+// any HTTP request is dispatched — a declared setting that is parsed and ignored is a defect,
+// not a convenience. The consequence for capsule authors is that this block is not a place to
+// park a setting meant for something else: the host delivers it to every WASM and shell tool in
+// the session as well, and a per-artifact setting belongs on `artifacts[].config` instead.
+
+/// Every key `inference.driver.config` accepts on this driver, sorted so the error message
+/// listing them is stable. `store` is in the set but is read by `store_opt_in`, which keeps its
+/// lenient parse; the remaining keys are validated here.
+const ACCEPTED_CONFIG_KEYS: &[&str] = &["reasoning_effort", "store", "thinking", "verbosity"];
+
+/// The reasoning/verbosity dials read from `inference.driver.config`. `store` is deliberately
+/// absent: it is a retention grant rather than a provider dial, and `store_opt_in` remains its
+/// only reader.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct DriverConfig {
+    /// `thinking: enabled` — ask the provider for a reasoning summary. Default disabled, which
+    /// is what an unconfigured capsule sent before this key existed.
+    thinking: bool,
+    /// `reasoning_effort` — forwarded verbatim. Only the provider knows which tiers exist, so a
+    /// tier OpenAI ships tomorrow works without rebuilding this artifact.
+    reasoning_effort: Option<String>,
+    /// `verbosity` — forwarded verbatim, for the same reason.
+    verbosity: Option<String>,
+}
+
+/// Reads the driver-config JSON into the dial set, rejecting any key this driver does not
+/// implement and any ill-typed value on a key whose meaning it does implement.
+///
+/// Strict where it can be: the key vocabulary is this driver's own, as is the value vocabulary
+/// of `thinking`. Lenient where only the provider can judge: `reasoning_effort` and `verbosity`
+/// are type-checked and then forwarded verbatim.
+fn parse_driver_config(driver_config: Option<&str>) -> Result<DriverConfig, String> {
+    let Some(raw) = driver_config else {
+        return Ok(DriverConfig::default());
+    };
+    if raw.trim().is_empty() {
+        return Ok(DriverConfig::default());
+    }
+    let parsed: Value = serde_json::from_str(raw)
+        .map_err(|err| format!("driver: inference.driver.config is not valid JSON: {err}"))?;
+    let Some(config) = parsed.as_object() else {
+        return Err("driver: inference.driver.config must be a JSON object".to_string());
+    };
+
+    let unrecognised = config
+        .keys()
+        .filter(|key| !ACCEPTED_CONFIG_KEYS.contains(&key.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unrecognised.is_empty() {
+        // `config` is a serde_json Map, i.e. sorted, so the offending keys come out in a stable
+        // order and one manifest fix clears every one of them.
+        return Err(format!(
+            "driver: unrecognised inference.driver.config key(s): {}. Accepted keys: {}",
+            unrecognised.join(", "),
+            ACCEPTED_CONFIG_KEYS.join(", ")
+        ));
+    }
+
+    let thinking = match config.get("thinking") {
+        None => false,
+        Some(Value::String(value)) if value.trim().eq_ignore_ascii_case("enabled") => true,
+        Some(Value::String(value)) if value.trim().eq_ignore_ascii_case("disabled") => false,
+        Some(other) => {
+            return Err(format!(
+                "driver: inference.driver.config 'thinking' must be \"enabled\" or \"disabled\", got {other}"
+            ))
+        }
+    };
+
+    Ok(DriverConfig {
+        thinking,
+        reasoning_effort: verbatim_string_key(config, "reasoning_effort")?,
+        verbosity: verbatim_string_key(config, "verbosity")?,
+    })
+}
+
+/// A config value this driver type-checks but does not interpret. Absent means the dial is not
+/// set; a blank string means the same, so an emptied manifest field is not sent as an empty
+/// dial the provider would reject.
+fn verbatim_string_key(config: &Map<String, Value>, key: &str) -> Result<Option<String>, String> {
+    match config.get(key) {
+        None => Ok(None),
+        Some(Value::String(value)) => {
+            let trimmed = value.trim();
+            Ok((!trimmed.is_empty()).then(|| trimmed.to_string()))
+        }
+        Some(other) => Err(format!(
+            "driver: inference.driver.config '{key}' must be a string, got {other}"
+        )),
+    }
+}
+
+// ── Provider-field incompatibility ────────────────────────────────────────────
+
+/// Fields the Chat Completions surface does not define at all. Both are Responses-only
+/// containers: `reasoning` holds the effort and summary dials, `text` holds `verbosity`.
+const CHAT_COMPLETIONS_UNSUPPORTED_FIELDS: &[&str] = &["reasoning", "text"];
+
+/// Fields a non-reasoning gpt model rejects on Chat Completions. `reasoning_effort` is the
+/// o-series' dial; gpt-4.x and earlier 400 on it.
+const GPT_CLASSIC_UNSUPPORTED_FIELDS: &[&str] = &["reasoning_effort"];
+
+/// Whether a provider request field may appear in the body for this model family and API
+/// surface. The one incompatibility rule in this driver: the `params` pass-through loop on each
+/// surface and the config-derived dials all ask this, so a field is refused in exactly one
+/// place and the answer cannot drift between the two channels.
+fn provider_field_supported(field: &str, family: ModelFamily, surface: ApiSurface) -> bool {
+    match surface {
+        // The Responses surface has no unsupported-field row yet: it is reached only by
+        // gpt-<N>=5, which accepts every field either channel can put on the body.
+        ApiSurface::Responses => true,
+        ApiSurface::ChatCompletions => {
+            if CHAT_COMPLETIONS_UNSUPPORTED_FIELDS.contains(&field) {
+                return false;
+            }
+            match family {
+                ModelFamily::OSeriesReasoning => !O_SERIES_UNSUPPORTED_PARAMS.contains(&field),
+                ModelFamily::GptClassic => !GPT_CLASSIC_UNSUPPORTED_FIELDS.contains(&field),
+            }
+        }
+    }
+}
+
+/// The provider request fields the config dials ask for on `surface`, before the
+/// incompatibility filter. Each entry's name is the exact body field the dial lands in, which
+/// is also what `provider_field_supported` is asked about — so the table below and the filter
+/// speak the same vocabulary.
+///
+/// Chat Completions returns no reasoning content, only an effort parameter, so `thinking`
+/// contributes nothing there; on an o-series model it is accepted and has no effect.
+fn config_dial_fields(config: &DriverConfig, surface: ApiSurface) -> Vec<(&'static str, Value)> {
+    let mut fields = Vec::new();
+    match surface {
+        ApiSurface::Responses => {
+            let mut reasoning = Map::new();
+            if let Some(effort) = config.reasoning_effort.as_ref() {
+                reasoning.insert("effort".to_string(), Value::String(effort.clone()));
+            }
+            if config.thinking {
+                // "auto" lets the provider pick the best summary granularity it will give this
+                // account, rather than exposing a second spelling of one concept as a key.
+                reasoning.insert("summary".to_string(), Value::String("auto".to_string()));
+            }
+            if !reasoning.is_empty() {
+                fields.push(("reasoning", Value::Object(reasoning)));
+            }
+            if let Some(verbosity) = config.verbosity.as_ref() {
+                fields.push(("text", json!({ "verbosity": verbosity })));
+            }
+        }
+        ApiSurface::ChatCompletions => {
+            if let Some(effort) = config.reasoning_effort.as_ref() {
+                fields.push(("reasoning_effort", Value::String(effort.clone())));
+            }
+            if let Some(verbosity) = config.verbosity.as_ref() {
+                fields.push(("text", json!({ "verbosity": verbosity })));
+            }
+        }
+    }
+    fields
+}
+
+/// Stamps the config-derived dials onto a translated body, dropping each field the surface or
+/// model family does not accept. Applied after translation and before `stamp_streaming_flags`,
+/// so a dial overwrites a same-named `params` key rather than losing to it — the same
+/// precedence the host-supplied `prompt_cache_key` has. A `reasoning` object arriving through
+/// `params` is replaced wholesale, never merged.
+fn apply_config_dials(
+    body: &mut Value,
+    config: &DriverConfig,
+    family: ModelFamily,
+    surface: ApiSurface,
+) {
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    for (field, value) in config_dial_fields(config, surface) {
+        if provider_field_supported(field, family, surface) {
+            obj.insert(field.to_string(), value);
+        }
+    }
+}
+
+/// The complete provider request body for one murmur request: translation, then the
+/// config-derived dials, then the streaming flags. `run_inner` and the tests both build a body
+/// through this one path, so a test asserts on the bytes that go on the wire.
+fn build_provider_request(
+    request: &MurmurRequest,
+    config: &DriverConfig,
+    store: bool,
+    family: ModelFamily,
+    surface: ApiSurface,
+) -> Result<Value, String> {
+    let mut body = match surface {
+        ApiSurface::ChatCompletions => translate_murmur_request_to_openai(request, family)?,
+        ApiSurface::Responses => translate_murmur_request_to_responses(request, store)?,
+    };
+    apply_config_dials(&mut body, config, family, surface);
+    stamp_streaming_flags(&mut body, surface);
+    Ok(body)
+}
+
+/// The routing hint to forward, or `None` when the host sent no usable one. An absent, null,
+/// non-string, empty or whitespace-only value all mean "no key" and are never an error.
+fn prompt_cache_key(request: &MurmurRequest) -> Option<&str> {
+    request
+        .prompt_cache_key
+        .as_str()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+}
+
+fn translate_murmur_request_to_openai(
+    request: &MurmurRequest,
+    family: ModelFamily,
+) -> Result<Value, String> {
+    let mut messages = Vec::new();
+
+    if let Some(system) = request
+        .system
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        messages.push(json!({
+            "role": "system",
+            "content": system,
+        }));
+    }
+
+    for message in &request.messages {
+        match message.role.as_str() {
+            "user" => messages.push(translate_user_message(message)),
+            "assistant" => messages.push(translate_assistant_message(message)?),
+            "tool" => messages.push(translate_tool_message(message)?),
+            other => return Err(format!("driver: unsupported message role '{other}'")),
+        }
+    }
+
+    let tools = request
+        .tools
+        .iter()
+        .map(|tool| {
+            let mut function = Map::new();
+            function.insert("name".to_string(), Value::String(tool.name.clone()));
+            function.insert("parameters".to_string(), tool.parameters.clone());
+            if let Some(description) = tool
+                .description
+                .as_ref()
+                .map(|d| d.trim())
+                .filter(|d| !d.is_empty())
+            {
+                function.insert(
+                    "description".to_string(),
+                    Value::String(description.to_string()),
+                );
+            }
+
+            json!({
+                "type": "function",
+                "function": function,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut body = Map::new();
+    body.insert("model".to_string(), Value::String(request.model.clone()));
+    body.insert("max_completion_tokens".to_string(), Value::from(request.max_tokens));
+    body.insert("messages".to_string(), Value::Array(messages));
+
+    if !tools.is_empty() {
+        body.insert("tools".to_string(), Value::Array(tools));
+    }
+
+    // Inserted before the pass-through loop below, which skips keys already in the body: the
+    // host-supplied hint wins over a same-named key a capsule author put in `params`.
+    if let Some(key) = prompt_cache_key(request) {
+        body.insert(PROMPT_CACHE_KEY.to_string(), Value::String(key.to_string()));
+    }
+
+    for (key, value) in &request.params {
+        if body.contains_key(key) {
+            continue;
+        }
+        if !provider_field_supported(key, family, ApiSurface::ChatCompletions) {
+            continue;
+        }
+        body.insert(key.clone(), value.clone());
+    }
+
+    Ok(Value::Object(body))
+}
+
+fn translate_user_message(message: &MurmurMessage) -> Value {
+    let has_image = message
+        .content
+        .iter()
+        .any(|block| matches!(block, MurmurContentBlock::Image { .. }));
+
+    if has_image {
+        let parts = message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                MurmurContentBlock::Text { text } => Some(json!({
+                    "type": "text",
+                    "text": text,
+                })),
+                MurmurContentBlock::Image { source } => Some(json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{};base64,{}", source.media_type, source.data),
+                    }
+                })),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        json!({
+            "role": "user",
+            "content": parts,
+        })
+    } else {
+        let text = message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                MurmurContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        json!({
+            "role": "user",
+            "content": text,
+        })
+    }
+}
+
+fn translate_assistant_message(message: &MurmurMessage) -> Result<Value, String> {
+    let text = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            MurmurContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut tool_calls = Vec::new();
+    for block in &message.content {
+        if let MurmurContentBlock::ToolCall { id, name, input } = block {
+            let arguments = serde_json::to_string(input)
+                .map_err(|err| format!("driver: failed to serialize tool_call.input: {err}"))?;
+            tool_calls.push(json!({
+                "id": id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": arguments,
+                }
+            }));
+        }
+    }
+
+    if tool_calls.is_empty() {
+        Ok(json!({
+            "role": "assistant",
+            "content": text,
+        }))
+    } else {
+        Ok(json!({
+            "role": "assistant",
+            "content": Value::Null,
+            "tool_calls": tool_calls,
+        }))
+    }
+}
+
+fn translate_tool_message(message: &MurmurMessage) -> Result<Value, String> {
+    let tool_call_id = message.tool_call_id.clone().ok_or_else(|| {
+        "driver: tool message is missing required field 'tool_call_id'".to_string()
+    })?;
+
+    let text = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            MurmurContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Ok(json!({
+        "role": "tool",
+        "tool_call_id": tool_call_id,
+        "content": text,
+    }))
+}
+
+// ── Responses API: request translation ───────────────────────────────────────
+
+/// Translate a murmur request into an OpenAI Responses API body.
+///
+/// `store` is the capsule's retention grant (see `store_opt_in`). A continuation
+/// is *active* only when `store` is granted AND the host supplied a non-empty
+/// `continuation_id`; the host guarantees it only ever re-supplies an id this
+/// driver previously returned, so this can't fire without a prior opt-in.
+///
+/// On the continuation path we send `previous_response_id` and DROP assistant
+/// messages from the input: the host slices `messages` to the incremental tail,
+/// which after a tool-call turn is `[assistant(function_call…), tool_result…]`,
+/// and that assistant turn (its text, function_calls, AND its reasoning items)
+/// already lives server-side under the referenced response. Re-sending it would
+/// duplicate server-side items; sending only the new user/tool items is the
+/// canonical Responses continuation shape — and it is exactly what lets reasoning
+/// items round-trip (they stay server-side and are never re-serialized here,
+/// which the Chat Completions path structurally cannot do).
+fn translate_murmur_request_to_responses(
+    request: &MurmurRequest,
+    store: bool,
+) -> Result<Value, String> {
+    let mut input = Vec::new();
+
+    // Continuation is gated on the retention grant; an id without the grant is ignored.
+    let continuation_id = if store {
+        request
+            .continuation_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+    } else {
+        None
+    };
+    let continuation_active = continuation_id.is_some();
+
+    for message in &request.messages {
+        match message.role.as_str() {
+            "user" => input.push(translate_user_message_responses(message)),
+            // On the continuation path the assistant turn is already retained
+            // server-side under `previous_response_id`; skip it to avoid
+            // duplicating items (and to let its reasoning items round-trip).
+            "assistant" if continuation_active => {}
+            "assistant" => input.extend(translate_assistant_message_responses(message)?),
+            "tool" => input.push(translate_tool_message_responses(message)?),
+            other => return Err(format!("driver: unsupported message role '{other}'")),
+        }
+    }
+
+    let tools = request
+        .tools
+        .iter()
+        .map(|tool| {
+            let mut obj = Map::new();
+            obj.insert("type".to_string(), Value::String("function".to_string()));
+            obj.insert("name".to_string(), Value::String(tool.name.clone()));
+            obj.insert("parameters".to_string(), tool.parameters.clone());
+            if let Some(description) = tool
+                .description
+                .as_ref()
+                .map(|d| d.trim())
+                .filter(|d| !d.is_empty())
+            {
+                obj.insert(
+                    "description".to_string(),
+                    Value::String(description.to_string()),
+                );
+            }
+            Value::Object(obj)
+        })
+        .collect::<Vec<_>>();
+
+    let mut body = Map::new();
+    body.insert("model".to_string(), Value::String(request.model.clone()));
+    body.insert("input".to_string(), Value::Array(input));
+    body.insert(
+        "max_output_tokens".to_string(),
+        Value::from(request.max_tokens),
+    );
+    body.insert("store".to_string(), Value::Bool(store));
+
+    if let Some(id) = continuation_id {
+        body.insert(
+            "previous_response_id".to_string(),
+            Value::String(id.to_string()),
+        );
+    }
+
+    if let Some(system) = request
+        .system
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        body.insert("instructions".to_string(), Value::String(system.to_string()));
+    }
+
+    if !tools.is_empty() {
+        body.insert("tools".to_string(), Value::Array(tools));
+    }
+
+    // Forwarded on the continuation path too: a continuation does not change which prefix the
+    // turns share. Inserted before the pass-through loop, which skips keys already in the body.
+    if let Some(key) = prompt_cache_key(request) {
+        body.insert(PROMPT_CACHE_KEY.to_string(), Value::String(key.to_string()));
+    }
+
+    let family = classify_model(&request.model);
+    for (key, value) in &request.params {
+        if body.contains_key(key) {
+            continue;
+        }
+        if !provider_field_supported(key, family, ApiSurface::Responses) {
+            continue;
+        }
+        body.insert(key.clone(), value.clone());
+    }
+
+    Ok(Value::Object(body))
+}
+
+fn translate_user_message_responses(message: &MurmurMessage) -> Value {
+    let parts = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            MurmurContentBlock::Text { text } => Some(json!({
+                "type": "input_text",
+                "text": text,
+            })),
+            MurmurContentBlock::Image { source } => Some(json!({
+                "type": "input_image",
+                "image_url": format!("data:{};base64,{}", source.media_type, source.data),
+            })),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "role": "user",
+        "content": parts,
+    })
+}
+
+fn translate_assistant_message_responses(message: &MurmurMessage) -> Result<Vec<Value>, String> {
+    let mut items = Vec::new();
+
+    let text = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            MurmurContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if !text.is_empty() {
+        items.push(json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text}],
+        }));
+    }
+
+    for block in &message.content {
+        if let MurmurContentBlock::ToolCall { id, name, input } = block {
+            let arguments = serde_json::to_string(input)
+                .map_err(|err| format!("driver: failed to serialize tool_call.input: {err}"))?;
+            items.push(json!({
+                "type": "function_call",
+                "call_id": id,
+                "name": name,
+                "arguments": arguments,
+            }));
+        }
+    }
+
+    Ok(items)
+}
+
+fn translate_tool_message_responses(message: &MurmurMessage) -> Result<Value, String> {
+    let call_id = message.tool_call_id.clone().ok_or_else(|| {
+        "driver: tool message is missing required field 'tool_call_id'".to_string()
+    })?;
+
+    let text = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            MurmurContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Ok(json!({
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": text,
+    }))
+}
+
+// ── Provider token usage ─────────────────────────────────────────────────────
+
+/// Provider-reported token counts, carried on the reserved top-level `usage` object of the
+/// translated response. Every member is independently optional: a count the provider did not
+/// report is omitted rather than sent as `0`, because the host records a reported `0` as a real
+/// zero and a fabricated one reads as a cache miss on the `inference` trace event.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct UsageTokens {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cached_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+}
+
+impl UsageTokens {
+    /// Take every member `later` reports, keeping the current value for the rest. Streaming
+    /// usage arrives across more than one event, each carrying only part of the picture.
+    fn merge_from(&mut self, later: UsageTokens) {
+        if later.input_tokens.is_some() {
+            self.input_tokens = later.input_tokens;
+        }
+        if later.output_tokens.is_some() {
+            self.output_tokens = later.output_tokens;
+        }
+        if later.cached_tokens.is_some() {
+            self.cached_tokens = later.cached_tokens;
+        }
+        if later.cache_write_tokens.is_some() {
+            self.cache_write_tokens = later.cache_write_tokens;
+        }
+    }
+
+    /// `None` when no member survived, in which case the response carries no `usage` key at all.
+    fn to_value(self) -> Option<Value> {
+        let mut obj = Map::new();
+        for (key, count) in [
+            ("input_tokens", self.input_tokens),
+            ("output_tokens", self.output_tokens),
+            ("cached_tokens", self.cached_tokens),
+            ("cache_write_tokens", self.cache_write_tokens),
+        ] {
+            if let Some(count) = count {
+                obj.insert(key.to_string(), Value::from(count));
+            }
+        }
+        if obj.is_empty() {
+            None
+        } else {
+            Some(Value::Object(obj))
+        }
+    }
+}
+
+/// Read the contract members out of a Chat Completions `usage` object. The two surfaces spell
+/// these differently, so this extractor is not shared with `extract_responses_usage`. Neither
+/// surface reports a cache write count, so that member is always omitted. A member that is
+/// absent, null, or not a non-negative integer is dropped; its siblings are kept.
+fn extract_chat_usage(usage: &Value) -> UsageTokens {
+    UsageTokens {
+        input_tokens: usage.get("prompt_tokens").and_then(Value::as_u64),
+        output_tokens: usage.get("completion_tokens").and_then(Value::as_u64),
+        cached_tokens: usage
+            .pointer("/prompt_tokens_details/cached_tokens")
+            .and_then(Value::as_u64),
+        cache_write_tokens: None,
+    }
+}
+
+/// Read the contract members out of a Responses `usage` object, which spells the request and
+/// completion counts `input_tokens` / `output_tokens` and nests the cache hit under
+/// `input_tokens_details` (see `extract_chat_usage` for the Chat Completions spelling).
+fn extract_responses_usage(usage: &Value) -> UsageTokens {
+    UsageTokens {
+        input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
+        output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
+        cached_tokens: usage
+            .pointer("/input_tokens_details/cached_tokens")
+            .and_then(Value::as_u64),
+        cache_write_tokens: None,
+    }
+}
+
+/// Build the murmur response envelope, attaching `usage` only when a count survived.
+fn murmur_response(stop_reason: &str, content: Vec<Value>, usage: UsageTokens) -> Value {
+    let mut response = json!({
+        "stop_reason": stop_reason,
+        "content": content,
+    });
+    if let Some(usage) = usage.to_value() {
+        response["usage"] = usage;
+    }
+    response
+}
+
+/// Force streaming on, overriding any `stream` key from `params`. Chat Completions additionally
+/// needs `stream_options` before it will send the usage-bearing final chunk; the Responses
+/// surface reports usage on `response.completed` regardless and rejects the option, so the two
+/// flags are stamped together only where both apply.
+fn stamp_streaming_flags(body: &mut Value, surface: ApiSurface) {
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    obj.insert("stream".to_string(), json!(true));
+    if surface == ApiSurface::ChatCompletions {
+        obj.insert("stream_options".to_string(), json!({"include_usage": true}));
+    }
+}
+
+fn translate_openai_response_to_murmur(response: &Value) -> Result<Value, String> {
+    let choice = response
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .ok_or_else(|| "driver: OpenAI response missing choices[0]".to_string())?;
+
+    // Absent, `null`, non-string or empty: the turn did not finish.
+    let finish_reason = choice
+        .get("finish_reason")
+        .and_then(Value::as_str)
+        .filter(|reason| !reason.is_empty())
+        .ok_or_else(|| "driver: OpenAI response has no finish_reason".to_string())?;
+
+    let stop_reason = match finish_reason {
+        "stop" => "end_turn",
+        "tool_calls" => "tool_call",
+        "length" => "max_tokens",
+        "content_filter" => {
+            return Ok(json!({
+                "stop_reason": "error",
+                "error": "OpenAI response blocked by content_filter",
+            }));
+        }
+        other => {
+            return Err(format!(
+                "driver: unsupported OpenAI finish_reason '{other}'"
+            ));
+        }
+    };
+
+    let message = choice.get("message").unwrap_or(&Value::Null);
+
+    let mut content = Vec::new();
+    if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+        for call in tool_calls {
+            let arguments_raw = call
+                .get("function")
+                .and_then(|f| f.get("arguments"))
+                .and_then(Value::as_str)
+                .unwrap_or("{}");
+
+            let arguments: Value = serde_json::from_str(arguments_raw).map_err(|err| {
+                format!("driver: failed to parse OpenAI tool call arguments JSON: {err}")
+            })?;
+
+            content.push(json!({
+                "type": "tool_call",
+                "id": call.get("id").and_then(Value::as_str).unwrap_or_default(),
+                "name": call
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                "input": arguments,
+            }));
+        }
+    }
+
+    if content.is_empty() {
+        match message.get("content") {
+            Some(Value::String(text)) => {
+                content.push(json!({"type": "text", "text": text}));
+            }
+            Some(Value::Array(parts)) => {
+                for part in parts {
+                    if part.get("type").and_then(Value::as_str) == Some("text") {
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            content.push(json!({"type": "text", "text": text}));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let usage = response
+        .get("usage")
+        .map(extract_chat_usage)
+        .unwrap_or_default();
+
+    Ok(murmur_response(stop_reason, content, usage))
+}
+
+// ── Responses API: non-streaming response translation ────────────────────────
+
+/// Result of mapping a Responses `status` (+ incomplete/error details) to a
+/// murmur stop_reason. `Error` carries a ready-to-return error payload so both
+/// the non-streaming and streaming call sites short-circuit identically.
+enum ResponsesStopReason {
+    EndTurn,
+    ToolCall,
+    MaxTokens,
+    Error(Value),
+}
+
+impl ResponsesStopReason {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::EndTurn => "end_turn",
+            Self::ToolCall => "tool_call",
+            Self::MaxTokens => "max_tokens",
+            Self::Error(_) => "error",
+        }
+    }
+
+    fn into_error(self) -> Option<Value> {
+        match self {
+            Self::Error(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Borrowing test, so call sites can record whether the turn hit the output
+    /// cap before `into_error` consumes the value.
+    fn is_max_tokens(&self) -> bool {
+        matches!(self, Self::MaxTokens)
+    }
+}
+
+/// Error payload for a tool call whose arguments the output cap cut in half.
+///
+/// This is an error rather than a `max_tokens` turn because the arguments are
+/// unusable: the tool cannot be run, and reporting the turn as capped would let
+/// it degrade into a text turn and be recorded as an answer. The truncated
+/// arguments are deliberately left out of the message — they are kilobytes of
+/// noise, and the cap, not JSON syntax, is what the operator has to act on.
+fn truncated_tool_call_at_cap(name: &str) -> Value {
+    let name = if name.is_empty() { "<unnamed>" } else { name };
+    error_payload(&format!(
+        "driver: OpenAI Responses turn stopped at the inference.max_tokens output cap; tool call '{name}' was cut off mid-arguments and cannot be run — raise the cap and re-run"
+    ))
+}
+
+fn responses_stop_reason(
+    status: &str,
+    has_function_call: bool,
+    incomplete_reason: Option<&str>,
+) -> Result<ResponsesStopReason, String> {
+    match status {
+        "completed" => Ok(if has_function_call {
+            ResponsesStopReason::ToolCall
+        } else {
+            ResponsesStopReason::EndTurn
+        }),
+        "incomplete" => match incomplete_reason {
+            Some("max_output_tokens") => Ok(ResponsesStopReason::MaxTokens),
+            other => Ok(ResponsesStopReason::Error(error_payload(&format!(
+                "OpenAI Responses incomplete: {}",
+                other.unwrap_or("unknown reason")
+            )))),
+        },
+        "failed" => Ok(ResponsesStopReason::Error(error_payload(
+            "OpenAI Responses request failed",
+        ))),
+        other => Err(format!(
+            "driver: unsupported OpenAI Responses status '{other}'"
+        )),
+    }
+}
+
+fn translate_responses_to_murmur(response: &Value) -> Result<Value, String> {
+    if let Some(err) = response.get("error").filter(|e| !e.is_null()) {
+        let msg = err
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown error");
+        return Ok(error_payload(&format!("OpenAI Responses error: {msg}")));
+    }
+
+    let status = response
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "driver: OpenAI Responses response has no status".to_string())?;
+    let output = response
+        .get("output")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let has_function_call = output
+        .iter()
+        .any(|item| item.get("type").and_then(Value::as_str) == Some("function_call"));
+
+    let incomplete_reason = response
+        .get("incomplete_details")
+        .and_then(|d| d.get("reason"))
+        .and_then(Value::as_str);
+
+    let stop_reason = responses_stop_reason(status, has_function_call, incomplete_reason)?;
+    let stop_reason_str = stop_reason.as_str();
+    let capped = stop_reason.is_max_tokens();
+    if let Some(err_payload) = stop_reason.into_error() {
+        return Ok(err_payload);
+    }
+
+    let mut content = Vec::new();
+    for item in &output {
+        match item.get("type").and_then(Value::as_str) {
+            Some("message") => {
+                if let Some(parts) = item.get("content").and_then(Value::as_array) {
+                    for part in parts {
+                        match part.get("type").and_then(Value::as_str) {
+                            Some("output_text") => {
+                                if let Some(text) = part.get("text").and_then(Value::as_str) {
+                                    content.push(json!({"type": "text", "text": text}));
+                                }
+                            }
+                            Some("refusal") => {
+                                let msg = part
+                                    .get("refusal")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("response refused");
+                                return Ok(error_payload(&format!(
+                                    "OpenAI response refused: {msg}"
+                                )));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Some("function_call") => {
+                let arguments_raw = item.get("arguments").and_then(Value::as_str).unwrap_or("{}");
+                let name = item.get("name").and_then(Value::as_str).unwrap_or_default();
+                let arguments: Value = match serde_json::from_str(arguments_raw) {
+                    Ok(value) => value,
+                    // On a capped turn the arguments are the longest thing in the
+                    // response, so they are what truncation lands in; the parse
+                    // failure is a symptom of the cap, not a provider fault.
+                    Err(_) if capped => return Ok(truncated_tool_call_at_cap(name)),
+                    Err(err) => {
+                        return Err(format!(
+                            "driver: failed to parse Responses function_call arguments JSON: {err}"
+                        ));
+                    }
+                };
+                content.push(json!({
+                    "type": "tool_call",
+                    "id": item.get("call_id").and_then(Value::as_str).unwrap_or_default(),
+                    "name": name,
+                    "input": arguments,
+                }));
+            }
+            // "reasoning" items and anything else are intentionally dropped — no
+            // request-side round-trip slot for reasoning in this driver (see
+            // MurmurContentBlock::Thinking comment above).
+            _ => {}
+        }
+    }
+
+    let usage = response
+        .get("usage")
+        .map(extract_responses_usage)
+        .unwrap_or_default();
+
+    Ok(murmur_response(stop_reason_str, content, usage))
+}
+
+// ── SSE streaming types and parsing ──────────────────────────────────────────
+
+/// State machine for routing `<think>…</think>` content to a separate emit callback.
+/// Handles tags that are split across SSE chunk boundaries.
+struct ThinkingState {
+    in_thinking: bool,
+    /// Bytes that may be a partial `<think>` or `</think>` tag, held from the previous chunk.
+    partial_tag: String,
+}
+
+impl ThinkingState {
+    fn new() -> Self {
+        Self { in_thinking: false, partial_tag: String::new() }
+    }
+
+    /// Process `content`, routing text to `emit_text` and thinking to `emit_thinking`.
+    fn process(
+        &mut self,
+        content: &str,
+        emit_text: &mut impl FnMut(&str),
+        emit_thinking: &mut impl FnMut(&str),
+    ) {
+        if self.partial_tag.is_empty() {
+            self.scan(content, emit_text, emit_thinking);
+        } else {
+            let mut combined = std::mem::take(&mut self.partial_tag);
+            combined.push_str(content);
+            self.scan(&combined, emit_text, emit_thinking);
+        }
+    }
+
+    fn scan(
+        &mut self,
+        s: &str,
+        emit_text: &mut impl FnMut(&str),
+        emit_thinking: &mut impl FnMut(&str),
+    ) {
+        let target = if self.in_thinking { "</think>" } else { "<think>" };
+        if let Some(pos) = s.find(target) {
+            if pos > 0 {
+                if self.in_thinking {
+                    emit_thinking(&s[..pos]);
+                } else {
+                    emit_text(&s[..pos]);
+                }
+            }
+            self.in_thinking = !self.in_thinking;
+            self.scan(&s[pos + target.len()..], emit_text, emit_thinking);
+        } else {
+            // No complete tag. Find the longest suffix of `s` that is a strict prefix of
+            // `target`, buffer it for the next chunk, and emit the rest now.
+            let tag_b = target.as_bytes();
+            let s_b = s.as_bytes();
+            let max_partial = tag_b.len().min(s_b.len());
+            let partial_len = (1..=max_partial)
+                .rev()
+                .find(|&n| s_b.ends_with(&tag_b[..n]))
+                .unwrap_or(0);
+            let emit_end = s_b.len() - partial_len;
+            if emit_end > 0 {
+                if self.in_thinking {
+                    emit_thinking(&s[..emit_end]);
+                } else {
+                    emit_text(&s[..emit_end]);
+                }
+            }
+            if partial_len > 0 {
+                self.partial_tag = s[emit_end..].to_owned();
+            }
+        }
+    }
+
+    /// Flush any partial tag buffer after the stream ends. Emits in the current mode.
+    fn flush(
+        &mut self,
+        emit_text: &mut impl FnMut(&str),
+        emit_thinking: &mut impl FnMut(&str),
+    ) {
+        if !self.partial_tag.is_empty() {
+            let partial = std::mem::take(&mut self.partial_tag);
+            if self.in_thinking {
+                emit_thinking(&partial);
+            } else {
+                emit_text(&partial);
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct ToolCallState {
+    id: String,
+    name: String,
+    arguments: String,
+    /// `Started` has been signalled for this call.
+    started: bool,
+    /// The last `InputBytes` total signalled for this call.
+    reported_bytes: u64,
+}
+
+impl ToolCallState {
+    /// Signal what this call's state newly supports, after a delta has been merged into it:
+    /// its start, once both its id and name are known, then its argument text's byte length
+    /// whenever that has grown past the last total. A call whose id has not arrived yet is not
+    /// reported; once it arrives, the start and the total so far go out together.
+    fn signal_due(&mut self, signal: &mut impl FnMut(ToolCallSignal<'_>)) {
+        if !self.started {
+            if self.id.is_empty() || self.name.is_empty() {
+                return;
+            }
+            signal(ToolCallSignal::Started {
+                id: &self.id,
+                name: &self.name,
+            });
+            self.started = true;
+        }
+        let bytes = self.arguments.len() as u64;
+        if bytes > self.reported_bytes {
+            signal(ToolCallSignal::InputBytes {
+                id: &self.id,
+                bytes,
+            });
+            self.reported_bytes = bytes;
+        }
+    }
+}
+
+/// A tool-call fact read from the provider stream. Carries no part of the call's input.
+///
+/// The id and name are the `id` and `name` the returned `tool_call` block carries (`call_id` on
+/// the Responses surface). `InputBytes` is the running UTF-8 byte length of the call's argument
+/// text, so it only rises and ends at the length of the text parsed into the returned `input`.
+enum ToolCallSignal<'a> {
+    Started { id: &'a str, name: &'a str },
+    InputBytes { id: &'a str, bytes: u64 },
+}
+
+/// Process one complete SSE line. Returns `true` when the stream is done (`[DONE]`).
+///
+/// Text content is routed through `thinking` and split between `emit_text` (which the
+/// caller also uses to accumulate `text_acc`) and `emit_thinking`. Structured thinking
+/// blocks in array-format content are dispatched directly to `emit_thinking`.
+#[allow(clippy::too_many_arguments)]
+fn process_openai_sse_line(
+    line: &str,
+    tool_states: &mut Vec<ToolCallState>,
+    stop_reason: &mut Option<String>,
+    usage: &mut UsageTokens,
+    thinking: &mut ThinkingState,
+    emit_text: &mut impl FnMut(&str),
+    emit_thinking: &mut impl FnMut(&str),
+    signal: &mut impl FnMut(ToolCallSignal<'_>),
+) -> bool {
+    if line == "data: [DONE]" {
+        return true;
+    }
+    let Some(json_str) = line.strip_prefix("data: ") else {
+        return false;
+    };
+    let Ok(data) = serde_json::from_str::<Value>(json_str) else {
+        return false;
+    };
+
+    // Read before the `choices`-shaped early returns below: the chunk that carries usage (sent
+    // only when `stream_options.include_usage` was requested) has an empty `choices` array.
+    if let Some(reported) = data.get("usage").filter(|value| !value.is_null()) {
+        usage.merge_from(extract_chat_usage(reported));
+    }
+
+    let choice = data
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|c| c.first());
+
+    // Capture finish_reason (non-null only in the final delta line).
+    if let Some(reason) = choice
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        *stop_reason = Some(reason.to_string());
+    }
+
+    let Some(delta) = choice.and_then(|c| c.get("delta")) else {
+        return false;
+    };
+
+    // Text delta — handle both string and array content forms.
+    match delta.get("content") {
+        Some(Value::String(content)) if !content.is_empty() => {
+            thinking.process(content, emit_text, emit_thinking);
+        }
+        Some(Value::Array(parts)) => {
+            for part in parts {
+                match part.get("type").and_then(Value::as_str) {
+                    Some("text") => {
+                        if let Some(t) = part.get("text").and_then(Value::as_str) {
+                            if !t.is_empty() {
+                                thinking.process(t, emit_text, emit_thinking);
+                            }
+                        }
+                    }
+                    Some("thinking") | Some("reasoning") => {
+                        if let Some(t) = part.get("text").and_then(Value::as_str) {
+                            if !t.is_empty() {
+                                emit_thinking(t);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+
+    // Tool call fragments.
+    if let Some(tc_arr) = delta.get("tool_calls").and_then(Value::as_array) {
+        for tc in tc_arr {
+            let idx = tc.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+            while tool_states.len() <= idx {
+                tool_states.push(ToolCallState::default());
+            }
+            if let Some(id) = tc.get("id").and_then(Value::as_str) {
+                if tool_states[idx].id.is_empty() {
+                    tool_states[idx].id = id.to_string();
+                }
+            }
+            if let Some(func) = tc.get("function") {
+                if let Some(name) = func.get("name").and_then(Value::as_str) {
+                    if tool_states[idx].name.is_empty() {
+                        tool_states[idx].name = name.to_string();
+                    }
+                }
+                if let Some(args) = func.get("arguments").and_then(Value::as_str) {
+                    tool_states[idx].arguments.push_str(args);
+                }
+            }
+            tool_states[idx].signal_due(signal);
+        }
+    }
+
+    false
+}
+
+/// Parse a complete SSE body string (used in tests).
+#[cfg(test)]
+fn parse_openai_sse_body<F: FnMut(&str), G: FnMut(&str)>(
+    body: &str,
+    emit_text: &mut F,
+    emit_thinking: &mut G,
+) -> Result<Value, String> {
+    parse_openai_sse_body_with_signals(body, emit_text, emit_thinking).0
+}
+
+/// A tool-call signal as the tests collect it.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RecordedSignal {
+    Started { id: String, name: String },
+    InputBytes { id: String, bytes: u64 },
+}
+
+#[cfg(test)]
+impl From<ToolCallSignal<'_>> for RecordedSignal {
+    fn from(signal: ToolCallSignal<'_>) -> Self {
+        match signal {
+            ToolCallSignal::Started { id, name } => Self::Started {
+                id: id.to_string(),
+                name: name.to_string(),
+            },
+            ToolCallSignal::InputBytes { id, bytes } => Self::InputBytes {
+                id: id.to_string(),
+                bytes,
+            },
+        }
+    }
+}
+
+/// Parse a complete SSE body string, also returning every tool-call signal in the order it was
+/// sent (used in tests).
+#[cfg(test)]
+fn parse_openai_sse_body_with_signals<F: FnMut(&str), G: FnMut(&str)>(
+    body: &str,
+    emit_text: &mut F,
+    emit_thinking: &mut G,
+) -> (Result<Value, String>, Vec<RecordedSignal>) {
+    let mut text_acc = String::new();
+    let mut thinking_acc = String::new();
+    let mut tool_states: Vec<ToolCallState> = Vec::new();
+    let mut stop_reason: Option<String> = None;
+    let mut usage = UsageTokens::default();
+    let mut thinking = ThinkingState::new();
+    let mut signals = Vec::new();
+
+    for line in body.lines() {
+        let line = line.trim_end_matches('\r');
+        let done = {
+            let mut combined_text = |t: &str| {
+                emit_text(t);
+                text_acc.push_str(t);
+            };
+            let mut combined_thinking = |t: &str| {
+                emit_thinking(t);
+                thinking_acc.push_str(t);
+            };
+            process_openai_sse_line(
+                line,
+                &mut tool_states,
+                &mut stop_reason,
+                &mut usage,
+                &mut thinking,
+                &mut combined_text,
+                &mut combined_thinking,
+                &mut |s| signals.push(RecordedSignal::from(s)),
+            )
+        };
+        if done {
+            break;
+        }
+    }
+    {
+        let mut combined_text = |t: &str| {
+            emit_text(t);
+            text_acc.push_str(t);
+        };
+        let mut combined_thinking = |t: &str| {
+            emit_thinking(t);
+            thinking_acc.push_str(t);
+        };
+        thinking.flush(&mut combined_text, &mut combined_thinking);
+    }
+
+    let result = assemble_openai_streaming_response(
+        &text_acc,
+        &thinking_acc,
+        tool_states,
+        stop_reason,
+        usage,
+    );
+    (result, signals)
+}
+
+/// Parse a complete Responses API SSE body string (used in tests).
+#[cfg(test)]
+fn parse_responses_sse_body<F: FnMut(&str), G: FnMut(&str)>(
+    body: &str,
+    emit_text: &mut F,
+    emit_thinking: &mut G,
+) -> Result<Value, String> {
+    parse_responses_sse_body_with_signals(body, emit_text, emit_thinking).0
+}
+
+/// Parse a complete Responses API SSE body string, also returning every tool-call signal in the
+/// order it was sent (used in tests).
+#[cfg(test)]
+fn parse_responses_sse_body_with_signals<F: FnMut(&str), G: FnMut(&str)>(
+    body: &str,
+    emit_text: &mut F,
+    emit_thinking: &mut G,
+) -> (Result<Value, String>, Vec<RecordedSignal>) {
+    let mut signals = Vec::new();
+    let mut text_acc = String::new();
+    let mut thinking_acc = String::new();
+    let mut tool_states: Vec<ToolCallState> = Vec::new();
+    let mut tool_index_by_output_index = std::collections::HashMap::new();
+    let mut status: Option<String> = None;
+    let mut incomplete_reason: Option<String> = None;
+    let mut error_message: Option<String> = None;
+    let mut response_id: Option<String> = None;
+    let mut usage = UsageTokens::default();
+
+    for line in body.lines() {
+        let line = line.trim_end_matches('\r');
+        let done = {
+            let mut combined_text = |t: &str| {
+                emit_text(t);
+                text_acc.push_str(t);
+            };
+            let mut combined_thinking = |t: &str| {
+                emit_thinking(t);
+                thinking_acc.push_str(t);
+            };
+            process_responses_sse_line(
+                line,
+                &mut tool_states,
+                &mut tool_index_by_output_index,
+                &mut status,
+                &mut incomplete_reason,
+                &mut error_message,
+                &mut response_id,
+                &mut usage,
+                &mut combined_text,
+                &mut combined_thinking,
+                &mut |s| signals.push(RecordedSignal::from(s)),
+            )
+        };
+        if done {
+            break;
+        }
+    }
+
+    let result = assemble_responses_streaming_response(
+        &text_acc,
+        &thinking_acc,
+        tool_states,
+        status,
+        incomplete_reason,
+        error_message,
+        usage,
+    );
+    (result, signals)
+}
+
+fn assemble_openai_streaming_response(
+    text_acc: &str,
+    thinking_acc: &str,
+    tool_states: Vec<ToolCallState>,
+    stop_reason: Option<String>,
+    usage: UsageTokens,
+) -> Result<Value, String> {
+    // No chunk carried a finish_reason, so the stream ended before the turn did.
+    let finish_reason = stop_reason
+        .as_deref()
+        .ok_or_else(|| "driver: OpenAI stream ended with no finish_reason".to_string())?;
+    let stop_reason_str = match finish_reason {
+        "stop" => "end_turn",
+        "tool_calls" => "tool_call",
+        "length" => "max_tokens",
+        "content_filter" => {
+            return Ok(error_payload("OpenAI response blocked by content_filter"));
+        }
+        other => {
+            return Err(format!("driver: unsupported OpenAI finish_reason '{other}'"));
+        }
+    };
+
+    let mut tool_content = Vec::new();
+    for state in tool_states {
+        if state.id.is_empty() && state.name.is_empty() {
+            continue;
+        }
+        let input: Value = serde_json::from_str(&state.arguments).map_err(|err| {
+            format!("driver: failed to parse OpenAI tool call arguments JSON: {err}")
+        })?;
+        tool_content.push(json!({
+            "type": "tool_call",
+            "id": state.id,
+            "name": state.name,
+            "input": input,
+        }));
+    }
+
+    Ok(murmur_response(
+        stop_reason_str,
+        assemble_content_tail(thinking_acc, tool_content, text_acc),
+        usage,
+    ))
+}
+
+fn error_payload(message: &str) -> Value {
+    json!({
+        "stop_reason": "error",
+        "error": message,
+    })
+}
+
+/// Shared tail: orders content blocks as thinking (if any) first, then either
+/// tool_call blocks or a single text block. Used by both Chat Completions and
+/// Responses streaming assembly.
+fn assemble_content_tail(thinking_acc: &str, tool_content: Vec<Value>, text_acc: &str) -> Vec<Value> {
+    let mut content = Vec::new();
+    if !thinking_acc.is_empty() {
+        content.push(json!({"type": "thinking", "text": thinking_acc}));
+    }
+    if !tool_content.is_empty() {
+        content.extend(tool_content);
+    } else if !text_acc.is_empty() {
+        content.push(json!({"type": "text", "text": text_acc}));
+    }
+    content
+}
+
+// ── Responses API: streaming ──────────────────────────────────────────────────
+
+/// Process one complete SSE line of Responses API typed events. Returns `true`
+/// when the stream is done (`data: [DONE]`, if the provider sends one).
+#[allow(clippy::too_many_arguments)]
+fn process_responses_sse_line(
+    line: &str,
+    tool_states: &mut Vec<ToolCallState>,
+    tool_index_by_output_index: &mut std::collections::HashMap<u64, usize>,
+    status: &mut Option<String>,
+    incomplete_reason: &mut Option<String>,
+    error_message: &mut Option<String>,
+    response_id: &mut Option<String>,
+    usage: &mut UsageTokens,
+    emit_text: &mut impl FnMut(&str),
+    emit_thinking: &mut impl FnMut(&str),
+    signal: &mut impl FnMut(ToolCallSignal<'_>),
+) -> bool {
+    let Some(json_str) = line.strip_prefix("data: ") else {
+        return false;
+    };
+    if json_str == "[DONE]" {
+        return true;
+    }
+    let Ok(data) = serde_json::from_str::<Value>(json_str) else {
+        return false;
+    };
+    let event_type = data.get("type").and_then(Value::as_str).unwrap_or("");
+
+    match event_type {
+        "response.output_text.delta" => {
+            if let Some(delta) = data.get("delta").and_then(Value::as_str) {
+                if !delta.is_empty() {
+                    emit_text(delta);
+                }
+            }
+        }
+        "response.reasoning_summary_text.delta" => {
+            if let Some(delta) = data.get("delta").and_then(Value::as_str) {
+                if !delta.is_empty() {
+                    emit_thinking(delta);
+                }
+            }
+        }
+        "response.output_item.added" => {
+            let item = data.get("item").unwrap_or(&Value::Null);
+            if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                let output_index = data.get("output_index").and_then(Value::as_u64).unwrap_or(0);
+                let idx = tool_states.len();
+                tool_states.push(ToolCallState {
+                    id: item
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    name: item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    ..ToolCallState::default()
+                });
+                tool_index_by_output_index.insert(output_index, idx);
+                tool_states[idx].signal_due(signal);
+            }
+        }
+        "response.function_call_arguments.delta" => {
+            let output_index = data.get("output_index").and_then(Value::as_u64).unwrap_or(0);
+            if let (Some(&idx), Some(delta)) = (
+                tool_index_by_output_index.get(&output_index),
+                data.get("delta").and_then(Value::as_str),
+            ) {
+                tool_states[idx].arguments.push_str(delta);
+                tool_states[idx].signal_due(signal);
+            }
+        }
+        "response.function_call_arguments.done" => {
+            let output_index = data.get("output_index").and_then(Value::as_u64).unwrap_or(0);
+            if let (Some(&idx), Some(arguments)) = (
+                tool_index_by_output_index.get(&output_index),
+                data.get("arguments").and_then(Value::as_str),
+            ) {
+                // Authoritative; it reports only when longer than the deltas' total.
+                tool_states[idx].arguments = arguments.to_string();
+                tool_states[idx].signal_due(signal);
+            }
+        }
+        "response.completed" | "response.incomplete" | "response.failed" => {
+            let response_obj = data.get("response").unwrap_or(&Value::Null);
+            *status = response_obj
+                .get("status")
+                .and_then(Value::as_str)
+                .or_else(|| Some(event_type.trim_start_matches("response.")))
+                .map(String::from);
+            if let Some(id) = response_obj.get("id").and_then(Value::as_str) {
+                *response_id = Some(id.to_string());
+            }
+            *incomplete_reason = response_obj
+                .get("incomplete_details")
+                .and_then(|d| d.get("reason"))
+                .and_then(Value::as_str)
+                .map(String::from);
+            let err = response_obj
+                .get("error")
+                .filter(|e| !e.is_null())
+                .or_else(|| data.get("error").filter(|e| !e.is_null()));
+            if let Some(err) = err {
+                *error_message = Some(
+                    err.get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown error")
+                        .to_string(),
+                );
+            }
+            if let Some(reported) = response_obj.get("usage").filter(|value| !value.is_null()) {
+                usage.merge_from(extract_responses_usage(reported));
+            }
+        }
+        _ => {}
+    }
+
+    false
+}
+
+fn assemble_responses_streaming_response(
+    text_acc: &str,
+    thinking_acc: &str,
+    tool_states: Vec<ToolCallState>,
+    status: Option<String>,
+    incomplete_reason: Option<String>,
+    error_message: Option<String>,
+    usage: UsageTokens,
+) -> Result<Value, String> {
+    if let Some(msg) = error_message {
+        return Ok(error_payload(&format!("OpenAI Responses error: {msg}")));
+    }
+
+    // `status` is set only by a `response.completed`, `.incomplete` or `.failed` event.
+    let status = status.as_deref().ok_or_else(|| {
+        "driver: OpenAI Responses stream ended with no terminal event".to_string()
+    })?;
+    let has_function_call = !tool_states.is_empty();
+    let stop_reason = responses_stop_reason(
+        status,
+        has_function_call,
+        incomplete_reason.as_deref(),
+    )?;
+    let stop_reason_str = stop_reason.as_str();
+    let capped = stop_reason.is_max_tokens();
+    if let Some(err_payload) = stop_reason.into_error() {
+        return Ok(err_payload);
+    }
+
+    let mut tool_content = Vec::new();
+    for state in tool_states {
+        let input: Value = match serde_json::from_str(&state.arguments) {
+            Ok(value) => value,
+            // The stream stops mid-`function_call_arguments.delta` when the cap
+            // hits, leaving this state holding a prefix of the argument JSON.
+            Err(_) if capped => return Ok(truncated_tool_call_at_cap(&state.name)),
+            Err(err) => {
+                return Err(format!(
+                    "driver: failed to parse Responses function_call arguments JSON: {err}"
+                ));
+            }
+        };
+        tool_content.push(json!({
+            "type": "tool_call",
+            "id": state.id,
+            "name": state.name,
+            "input": input,
+        }));
+    }
+
+    Ok(murmur_response(
+        stop_reason_str,
+        assemble_content_tail(thinking_acc, tool_content, text_acc),
+        usage,
+    ))
+}
+
+#[cfg(target_arch = "wasm32")]
+mod wasm_driver {
+    use super::{
+        assemble_openai_streaming_response, assemble_responses_streaming_response,
+        build_provider_request, classify_api_surface, classify_model, error_payload,
+        parse_driver_config, process_openai_sse_line, process_responses_sse_line, store_opt_in,
+        translate_openai_response_to_murmur, translate_responses_to_murmur, ApiSurface,
+        MurmurRequest, ThinkingState, ToolCallSignal, ToolCallState, UsageTokens,
+        CONTINUATION_ID_KEY,
+    };
+    use std::collections::HashMap;
+    use serde_json::Value;
+
+    wit_bindgen::generate!({
+        path: "../../wit/guest",
+        world: "driver",
+        generate_all,
+    });
+
+    /// Hand a tool-call signal to the host, which writes it as a `tool-call-started` or
+    /// `tool-call-progress` frame.
+    fn signal_tool_call(signal: ToolCallSignal<'_>) {
+        match signal {
+            ToolCallSignal::Started { id, name } => {
+                murmur::stream::events::tool_call_started(id, name)
+            }
+            ToolCallSignal::InputBytes { id, bytes } => {
+                murmur::stream::events::tool_call_input_bytes(id, bytes)
+            }
+        }
+    }
+
+    pub struct OpenAiDriver;
+
+    impl exports::murmur::tool::run::Guest for OpenAiDriver {
+        fn run(
+            input: exports::murmur::tool::run::ToolInput,
+        ) -> exports::murmur::tool::run::ToolResult {
+            let (response, continuation_id) = match run_inner(input) {
+                Ok(pair) => pair,
+                Err(err) => (error_payload(&err), None),
+            };
+
+            let stop_reason = response
+                .get("stop_reason")
+                .and_then(Value::as_str)
+                .unwrap_or("error");
+
+            let status = if stop_reason == "error" {
+                exports::murmur::tool::run::Status::Error
+            } else {
+                exports::murmur::tool::run::Status::Passed
+            };
+
+            let summary = if stop_reason == "error" {
+                response
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .map(|v| v.to_string())
+            } else {
+                None
+            };
+
+            // Hand the provider response id back to the host on the reserved
+            // `continuation_id` metadata key so it can persist it and chain the
+            // next call. Only populated when retention (`store`) was granted and
+            // the response succeeded (see `run_inner`); otherwise the list is
+            // empty and the host holds no id — byte-identical to pre-v0.5.16.
+            let metadata = match continuation_id {
+                Some(id) => vec![(CONTINUATION_ID_KEY.to_string(), id)],
+                None => vec![],
+            };
+
+            exports::murmur::tool::run::ToolResult {
+                status,
+                summary,
+                data: Some(response.to_string()),
+                data_path: None,
+                truncated: false,
+                metadata,
+            }
+        }
+    }
+
+    /// Returns the murmur response plus, on the Responses surface with retention
+    /// granted, the provider response `id` to hand back on the `continuation_id`
+    /// metadata key. The id is `None` on the Chat Completions surface, without a
+    /// `store` grant, or on an error response.
+    fn run_inner(
+        input: exports::murmur::tool::run::ToolInput,
+    ) -> Result<(Value, Option<String>), String> {
+        // Read and validated before every other step, including the endpoint lookup: an
+        // unrecognised key must fail the call before any HTTP request is dispatched, and a
+        // capsule whose config is wrong should learn that rather than an endpoint complaint.
+        let driver_config = std::env::var("MURMUR_INFERENCE_DRIVER_CONFIG").ok();
+        let config = parse_driver_config(driver_config.as_deref())?;
+        // Capsule-level server-side retention grant (see `store_opt_in`). Gates
+        // `store: true` and, transitively, the whole continuation feature.
+        let store = store_opt_in(driver_config.as_deref());
+
+        let endpoint = murmur_driver_env::require_endpoint(
+            std::env::var(murmur_driver_env::INFERENCE_ENDPOINT_VAR)
+                .ok()
+                .as_deref(),
+        )?;
+
+        let raw = input
+            .data
+            .ok_or_else(|| "driver: missing tool-input.data".to_string())?;
+
+        let murmur_request: MurmurRequest = serde_json::from_str(&raw)
+            .map_err(|err| format!("driver: failed to parse tool-input.data: {err}"))?;
+
+        let family = classify_model(&murmur_request.model);
+        let surface = classify_api_surface(&murmur_request.model, family);
+
+        let provider_request =
+            build_provider_request(&murmur_request, &config, store, family, surface)?;
+        let url_suffix = match surface {
+            ApiSurface::ChatCompletions => "chat/completions",
+            ApiSurface::Responses => "responses",
+        };
+
+        let body = serde_json::to_vec(&provider_request)
+            .map_err(|err| format!("driver: failed to encode request body: {err}"))?;
+
+        let url = format!("{}/{}", endpoint.trim_end_matches('/'), url_suffix);
+
+        let headers = vec![
+            ("content-type", "application/json".to_string()),
+            ("content-length", body.len().to_string()),
+        ];
+
+        let response = dispatch_request(&url, headers, &body)?;
+        let status = response.status();
+
+        if status >= 400 {
+            let text = consume_body_as_string(response)?;
+            return Ok((error_payload(&format!("HTTP {status}: {text}")), None));
+        }
+
+        let incoming_body = response
+            .consume()
+            .map_err(|()| "driver: failed to consume response body".to_string())?;
+        let stream = incoming_body
+            .stream()
+            .map_err(|()| "driver: failed to stream response body".to_string())?;
+
+        // Detect format from first read: JSON bodies start with '{' or '['.
+        let first = read_chunk(&stream)?;
+        let is_json = first
+            .iter()
+            .find(|&&b| !b.is_ascii_whitespace())
+            .map(|&b| b == b'{' || b == b'[')
+            .unwrap_or(false);
+
+        // `provider_response_id` is the raw Responses `id` (streaming or not);
+        // `result` is the translated murmur response.
+        let (result, provider_response_id): (Value, Option<String>) = if is_json {
+            // Non-streaming fallback (test servers, providers ignoring stream:true).
+            let mut all = first;
+            loop {
+                let chunk = read_chunk(&stream)?;
+                if chunk.is_empty() {
+                    break;
+                }
+                all.extend_from_slice(&chunk);
+            }
+            drop(stream);
+            let _ = wasip2::http::types::IncomingBody::finish(incoming_body);
+            let text = String::from_utf8(all)
+                .map_err(|err| format!("driver: response body is not UTF-8: {err}"))?;
+            let json: Value = serde_json::from_str(&text)
+                .map_err(|err| format!("driver: failed to parse OpenAI response JSON: {err}"))?;
+            match surface {
+                ApiSurface::ChatCompletions => {
+                    (translate_openai_response_to_murmur(&json)?, None)
+                }
+                ApiSurface::Responses => (
+                    translate_responses_to_murmur(&json)?,
+                    json.get("id").and_then(Value::as_str).map(String::from),
+                ),
+            }
+        } else {
+            match surface {
+                ApiSurface::ChatCompletions => {
+                    (run_chat_completions_sse(stream, &first, incoming_body)?, None)
+                }
+                ApiSurface::Responses => run_responses_sse(stream, &first, incoming_body)?,
+            }
+        };
+
+        // Only surface a continuation id when retention was granted and the
+        // response succeeded — an errored/empty response is not chainable.
+        let continuation_id = if store
+            && surface == ApiSurface::Responses
+            && result.get("stop_reason").and_then(Value::as_str) != Some("error")
+        {
+            provider_response_id.filter(|id| !id.is_empty())
+        } else {
+            None
+        };
+
+        Ok((result, continuation_id))
+    }
+
+    /// SSE streaming for the Chat Completions surface: process lines incrementally,
+    /// emitting chunks as they arrive.
+    fn run_chat_completions_sse(
+        stream: wasip2::io::streams::InputStream,
+        first: &[u8],
+        incoming_body: wasip2::http::types::IncomingBody,
+    ) -> Result<Value, String> {
+        let mut line_buf: Vec<u8> = Vec::new();
+        let mut text_acc = String::new();
+        let mut thinking_acc = String::new();
+        let mut tool_states: Vec<ToolCallState> = Vec::new();
+        let mut stop_reason: Option<String> = None;
+        let mut usage = UsageTokens::default();
+        let mut thinking = ThinkingState::new();
+        let mut done = false;
+
+        // Process bytes already read.
+        for &b in first {
+            if b == b'\n' {
+                let line = String::from_utf8_lossy(&line_buf);
+                let line = line.trim_end_matches('\r');
+                {
+                    let mut emit_t = |t: &str| { murmur::stream::events::emit_chunk(t); text_acc.push_str(t); };
+                    let mut emit_think = |t: &str| { murmur::stream::events::emit_thinking_chunk(t); thinking_acc.push_str(t); };
+                    done = process_openai_sse_line(
+                        line,
+                        &mut tool_states,
+                        &mut stop_reason,
+                        &mut usage,
+                        &mut thinking,
+                        &mut emit_t,
+                        &mut emit_think,
+                        &mut signal_tool_call,
+                    );
+                }
+                line_buf.clear();
+                if done {
+                    break;
+                }
+            } else {
+                line_buf.push(b);
+            }
+        }
+
+        // Continue reading remaining chunks.
+        if !done {
+            'outer: loop {
+                let chunk = read_chunk(&stream)?;
+                if chunk.is_empty() {
+                    break;
+                }
+                for &b in &chunk {
+                    if b == b'\n' {
+                        let line = String::from_utf8_lossy(&line_buf);
+                        let line = line.trim_end_matches('\r');
+                        {
+                            let mut emit_t = |t: &str| { murmur::stream::events::emit_chunk(t); text_acc.push_str(t); };
+                            let mut emit_think = |t: &str| { murmur::stream::events::emit_thinking_chunk(t); thinking_acc.push_str(t); };
+                            done = process_openai_sse_line(
+                                line,
+                                &mut tool_states,
+                                &mut stop_reason,
+                                &mut usage,
+                                &mut thinking,
+                                &mut emit_t,
+                                &mut emit_think,
+                                &mut signal_tool_call,
+                            );
+                        }
+                        line_buf.clear();
+                        if done {
+                            break 'outer;
+                        }
+                    } else {
+                        line_buf.push(b);
+                    }
+                }
+            }
+        }
+
+        drop(stream);
+        let _ = wasip2::http::types::IncomingBody::finish(incoming_body);
+        {
+            let mut emit_t = |t: &str| { murmur::stream::events::emit_chunk(t); text_acc.push_str(t); };
+            let mut emit_think = |t: &str| { murmur::stream::events::emit_thinking_chunk(t); thinking_acc.push_str(t); };
+            thinking.flush(&mut emit_t, &mut emit_think);
+        }
+        assemble_openai_streaming_response(&text_acc, &thinking_acc, tool_states, stop_reason, usage)
+    }
+
+    /// SSE streaming for the Responses surface: process lines incrementally,
+    /// emitting chunks as they arrive.
+    fn run_responses_sse(
+        stream: wasip2::io::streams::InputStream,
+        first: &[u8],
+        incoming_body: wasip2::http::types::IncomingBody,
+    ) -> Result<(Value, Option<String>), String> {
+        let mut line_buf: Vec<u8> = Vec::new();
+        let mut text_acc = String::new();
+        let mut thinking_acc = String::new();
+        let mut tool_states: Vec<ToolCallState> = Vec::new();
+        let mut tool_index_by_output_index: HashMap<u64, usize> = HashMap::new();
+        let mut status: Option<String> = None;
+        let mut incomplete_reason: Option<String> = None;
+        let mut error_message: Option<String> = None;
+        let mut response_id: Option<String> = None;
+        let mut usage = UsageTokens::default();
+        let mut done = false;
+
+        // Process bytes already read.
+        for &b in first {
+            if b == b'\n' {
+                let line = String::from_utf8_lossy(&line_buf);
+                let line = line.trim_end_matches('\r');
+                {
+                    let mut emit_t = |t: &str| { murmur::stream::events::emit_chunk(t); text_acc.push_str(t); };
+                    let mut emit_think = |t: &str| { murmur::stream::events::emit_thinking_chunk(t); thinking_acc.push_str(t); };
+                    done = process_responses_sse_line(
+                        line,
+                        &mut tool_states,
+                        &mut tool_index_by_output_index,
+                        &mut status,
+                        &mut incomplete_reason,
+                        &mut error_message,
+                        &mut response_id,
+                        &mut usage,
+                        &mut emit_t,
+                        &mut emit_think,
+                        &mut signal_tool_call,
+                    );
+                }
+                line_buf.clear();
+                if done {
+                    break;
+                }
+            } else {
+                line_buf.push(b);
+            }
+        }
+
+        // Continue reading remaining chunks.
+        if !done {
+            'outer: loop {
+                let chunk = read_chunk(&stream)?;
+                if chunk.is_empty() {
+                    break;
+                }
+                for &b in &chunk {
+                    if b == b'\n' {
+                        let line = String::from_utf8_lossy(&line_buf);
+                        let line = line.trim_end_matches('\r');
+                        {
+                            let mut emit_t = |t: &str| { murmur::stream::events::emit_chunk(t); text_acc.push_str(t); };
+                            let mut emit_think = |t: &str| { murmur::stream::events::emit_thinking_chunk(t); thinking_acc.push_str(t); };
+                            done = process_responses_sse_line(
+                                line,
+                                &mut tool_states,
+                                &mut tool_index_by_output_index,
+                                &mut status,
+                                &mut incomplete_reason,
+                                &mut error_message,
+                                &mut response_id,
+                                &mut usage,
+                                &mut emit_t,
+                                &mut emit_think,
+                                &mut signal_tool_call,
+                            );
+                        }
+                        line_buf.clear();
+                        if done {
+                            break 'outer;
+                        }
+                    } else {
+                        line_buf.push(b);
+                    }
+                }
+            }
+        }
+
+        drop(stream);
+        let _ = wasip2::http::types::IncomingBody::finish(incoming_body);
+        let result = assemble_responses_streaming_response(
+            &text_acc,
+            &thinking_acc,
+            tool_states,
+            status,
+            incomplete_reason,
+            error_message,
+            usage,
+        )?;
+        Ok((result, response_id))
+    }
+
+    fn dispatch_request(
+        url: &str,
+        headers: Vec<(&str, String)>,
+        body: &[u8],
+    ) -> Result<wasip2::http::types::IncomingResponse, String> {
+        let (scheme, authority, path_with_query) = split_url(url)?;
+
+        let fields = wasip2::http::types::Fields::new();
+        for (name, value) in headers {
+            fields
+                .append(name, &value.into_bytes())
+                .map_err(|err| format!("driver: failed to set header '{name}': {err:?}"))?;
+        }
+
+        let request = wasip2::http::types::OutgoingRequest::new(fields);
+        request
+            .set_method(&wasip2::http::types::Method::Post)
+            .map_err(|()| "driver: failed to set method".to_string())?;
+        request
+            .set_scheme(Some(&scheme))
+            .map_err(|()| "driver: failed to set scheme".to_string())?;
+        request
+            .set_authority(Some(&authority))
+            .map_err(|()| "driver: failed to set authority".to_string())?;
+        request
+            .set_path_with_query(Some(&path_with_query))
+            .map_err(|()| "driver: failed to set path".to_string())?;
+
+        let outgoing_body = request
+            .body()
+            .map_err(|()| "driver: failed to acquire request body".to_string())?;
+        {
+            let stream = outgoing_body
+                .write()
+                .map_err(|()| "driver: failed to open request body stream".to_string())?;
+            let mut remaining: &[u8] = body;
+            while !remaining.is_empty() {
+                let budget = stream
+                    .check_write()
+                    .map_err(|e| format!("driver: check-write failed: {e:?}"))? as usize;
+                if budget == 0 {
+                    stream.subscribe().block();
+                    continue;
+                }
+                let n = budget.min(remaining.len());
+                stream
+                    .write(&remaining[..n])
+                    .map_err(|e| format!("driver: write failed: {e:?}"))?;
+                remaining = &remaining[n..];
+            }
+            stream
+                .flush()
+                .map_err(|e| format!("driver: flush failed: {e:?}"))?;
+            stream.subscribe().block();
+        }
+        wasip2::http::types::OutgoingBody::finish(outgoing_body, None)
+            .map_err(|err| format!("driver: failed to finalize request body: {err:?}"))?;
+
+        let future = wasip2::http::outgoing_handler::handle(request, None)
+            .map_err(|err| format!("driver: failed to dispatch HTTP request: {err:?}"))?;
+
+        await_response(future)
+    }
+
+    fn consume_body_as_string(
+        response: wasip2::http::types::IncomingResponse,
+    ) -> Result<String, String> {
+        let incoming_body = response
+            .consume()
+            .map_err(|()| "driver: failed to consume error response body".to_string())?;
+        let stream = incoming_body
+            .stream()
+            .map_err(|()| "driver: failed to stream error response body".to_string())?;
+        let mut bytes = Vec::new();
+        loop {
+            let chunk = read_chunk(&stream)?;
+            if chunk.is_empty() {
+                break;
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        drop(stream);
+        let _ = wasip2::http::types::IncomingBody::finish(incoming_body);
+        String::from_utf8(bytes)
+            .map_err(|err| format!("driver: error response body is not UTF-8: {err}"))
+    }
+
+    fn read_chunk(
+        stream: &wasip2::io::streams::InputStream,
+    ) -> Result<Vec<u8>, String> {
+        match stream.blocking_read(16 * 1024) {
+            Ok(chunk) => Ok(chunk),
+            Err(wasip2::io::streams::StreamError::Closed) => Ok(Vec::new()),
+            Err(err) => Err(format!("driver: failed to read response stream: {err:?}")),
+        }
+    }
+
+    fn await_response(
+        future: wasip2::http::types::FutureIncomingResponse,
+    ) -> Result<wasip2::http::types::IncomingResponse, String> {
+        loop {
+            match future.get() {
+                Some(Ok(Ok(response))) => return Ok(response),
+                Some(Ok(Err(err))) => {
+                    return Err(format!(
+                        "driver: transport error while awaiting response: {err:?}"
+                    ));
+                }
+                Some(Err(())) => return Err("driver: response future already consumed".to_string()),
+                None => {
+                    let pollable = future.subscribe();
+                    pollable.block();
+                }
+            }
+        }
+    }
+
+    fn split_url(url: &str) -> Result<(wasip2::http::types::Scheme, String, String), String> {
+        let (scheme, rest) = if let Some(rest) = url.strip_prefix("https://") {
+            (wasip2::http::types::Scheme::Https, rest)
+        } else if let Some(rest) = url.strip_prefix("http://") {
+            (wasip2::http::types::Scheme::Http, rest)
+        } else {
+            return Err(format!(
+                "driver: endpoint must start with http:// or https://: '{url}'"
+            ));
+        };
+
+        let mut parts = rest.splitn(2, '/');
+        let authority = parts.next().unwrap_or_default().trim().to_string();
+        if authority.is_empty() {
+            return Err(format!("driver: endpoint missing authority: '{url}'"));
+        }
+
+        let path = match parts.next() {
+            Some("") | None => "/".to_string(),
+            Some(path) => format!("/{path}"),
+        };
+
+        Ok((scheme, authority, path))
+    }
+
+    export!(OpenAiDriver);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_provider_request, classify_api_surface, classify_model, gpt_major_version,
+        parse_driver_config, parse_openai_sse_body, parse_responses_sse_body,
+        process_responses_sse_line, provider_field_supported, stamp_streaming_flags, store_opt_in,
+        translate_murmur_request_to_openai, translate_murmur_request_to_responses,
+        translate_openai_response_to_murmur, translate_responses_to_murmur, ApiSurface,
+        DriverConfig, ModelFamily, MurmurRequest, ToolCallState, UsageTokens,
+    };
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+
+    #[test]
+    fn translates_murmur_request_to_openai_chat_completions() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-4.1",
+            "max_tokens": 512,
+            "system": "You are helpful",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_call", "id": "tc-1", "name": "calc", "input": {"x": 1}}
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "tc-1",
+                    "content": [{"type": "text", "text": "2"}]
+                }
+            ],
+            "tools": [
+                {
+                    "name": "calc",
+                    "description": "calculate",
+                    "parameters": {"type": "object"}
+                }
+            ]
+        }))
+        .unwrap();
+
+        let translated =
+            translate_murmur_request_to_openai(&request, ModelFamily::GptClassic).unwrap();
+
+        assert_eq!(translated["messages"][0]["role"], "system");
+        assert_eq!(translated["messages"][1]["role"], "assistant");
+        assert_eq!(
+            translated["messages"][1]["content"],
+            serde_json::Value::Null
+        );
+        assert_eq!(translated["messages"][1]["tool_calls"][0]["id"], "tc-1");
+        assert_eq!(
+            translated["messages"][1]["tool_calls"][0]["function"]["arguments"],
+            "{\"x\":1}"
+        );
+        assert_eq!(translated["messages"][2]["role"], "tool");
+        assert_eq!(translated["messages"][2]["tool_call_id"], "tc-1");
+
+        assert_eq!(translated["tools"][0]["type"], "function");
+        assert_eq!(translated["tools"][0]["function"]["name"], "calc");
+        assert_eq!(
+            translated["tools"][0]["function"]["parameters"],
+            json!({"type": "object"})
+        );
+    }
+
+    #[test]
+    fn translates_openai_response_to_murmur_format() {
+        let openai = json!({
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [
+                            {
+                                "id": "tc-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "calc",
+                                    "arguments": "{\"x\":2}"
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        });
+
+        let translated = translate_openai_response_to_murmur(&openai).unwrap();
+
+        assert_eq!(translated["stop_reason"], "tool_call");
+        assert_eq!(translated["content"][0]["type"], "tool_call");
+        assert_eq!(translated["content"][0]["id"], "tc-1");
+        assert_eq!(translated["content"][0]["name"], "calc");
+        assert_eq!(translated["content"][0]["input"], json!({"x": 2}));
+    }
+
+    #[test]
+    fn maps_content_filter_to_error_stop_reason() {
+        let openai = json!({
+            "choices": [
+                {
+                    "finish_reason": "content_filter",
+                    "message": {"role": "assistant", "content": null}
+                }
+            ]
+        });
+
+        let translated = translate_openai_response_to_murmur(&openai).unwrap();
+        assert_eq!(translated["stop_reason"], "error");
+        assert!(translated["error"]
+            .as_str()
+            .unwrap()
+            .contains("content_filter"));
+    }
+
+    #[test]
+    fn classifies_gpt_models_as_classic() {
+        for model in &[
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-4.1",
+            "gpt-4.1-mini",
+            "gpt-4.1-nano",
+            "gpt-4-turbo",
+            "gpt-3.5-turbo",
+            "gpt-5",
+        ] {
+            assert_eq!(
+                classify_model(model),
+                ModelFamily::GptClassic,
+                "expected GptClassic for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn classifies_o_series_as_reasoning() {
+        for model in &[
+            "o1",
+            "o1-mini",
+            "o1-preview",
+            "o3",
+            "o3-mini",
+            "o4-mini",
+        ] {
+            assert_eq!(
+                classify_model(model),
+                ModelFamily::OSeriesReasoning,
+                "expected OSeriesReasoning for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn o_series_strips_unsupported_params() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "o3-mini",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            "params": {
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "presence_penalty": 0.5,
+                "frequency_penalty": 0.3,
+                "reasoning_effort": "high",
+                "stream": false
+            }
+        }))
+        .unwrap();
+
+        let translated =
+            translate_murmur_request_to_openai(&request, ModelFamily::OSeriesReasoning).unwrap();
+
+        assert!(translated.get("temperature").is_none(), "temperature must be stripped");
+        assert!(translated.get("top_p").is_none(), "top_p must be stripped");
+        assert!(translated.get("presence_penalty").is_none(), "presence_penalty must be stripped");
+        assert!(translated.get("frequency_penalty").is_none(), "frequency_penalty must be stripped");
+        assert_eq!(translated["reasoning_effort"], "high");
+        assert_eq!(translated["stream"], false);
+    }
+
+    #[test]
+    fn gpt_classic_passes_temperature_through() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-4o",
+            "max_tokens": 512,
+            "messages": [],
+            "params": {
+                "temperature": 0.5,
+                "top_p": 0.9
+            }
+        }))
+        .unwrap();
+
+        let translated =
+            translate_murmur_request_to_openai(&request, ModelFamily::GptClassic).unwrap();
+
+        assert_eq!(translated["temperature"], 0.5);
+        assert_eq!(translated["top_p"], 0.9);
+    }
+
+    #[test]
+    fn openai_streaming_text_response() {
+        let body = concat!(
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"He\"},\"finish_reason\":null}]}\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"llo\"},\"finish_reason\":null}]}\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"},\"finish_reason\":null}]}\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n",
+            "data: [DONE]\n",
+        );
+
+        let mut emitted: Vec<String> = Vec::new();
+        let result = parse_openai_sse_body(body, &mut |chunk| emitted.push(chunk.to_string()), &mut |_| {})
+            .unwrap();
+
+        assert_eq!(emitted, vec!["He", "llo", " world"]);
+        assert_eq!(result["stop_reason"], "end_turn");
+        assert_eq!(result["content"][0]["type"], "text");
+        assert_eq!(result["content"][0]["text"], "Hello world");
+    }
+
+    #[test]
+    fn openai_streaming_tool_call() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"cmd\\\":\"}}]},\"finish_reason\":null}]}\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"ls\\\"}\"}}]},\"finish_reason\":null}]}\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n",
+            "data: [DONE]\n",
+        );
+
+        let mut emitted: Vec<String> = Vec::new();
+        let result = parse_openai_sse_body(body, &mut |chunk| emitted.push(chunk.to_string()), &mut |_| {})
+            .unwrap();
+
+        assert!(emitted.is_empty(), "no text chunks expected for tool calls");
+        assert_eq!(result["stop_reason"], "tool_call");
+        assert_eq!(result["content"][0]["type"], "tool_call");
+        assert_eq!(result["content"][0]["id"], "call_abc");
+        assert_eq!(result["content"][0]["name"], "bash");
+        assert_eq!(result["content"][0]["input"], json!({"cmd": "ls"}));
+    }
+
+    #[test]
+    fn thinking_tags_routed_to_thinking_callback() {
+        // Typical DeepSeek R1 / Qwen pattern: response starts with <think>…</think>
+        // then the actual answer follows.
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"<think>Let me\"},\"finish_reason\":null}]}\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\" reason.\"},\"finish_reason\":null}]}\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"</think>\"},\"finish_reason\":null}]}\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"The answer is 42.\"},\"finish_reason\":null}]}\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n",
+            "data: [DONE]\n",
+        );
+
+        let mut text_chunks: Vec<String> = Vec::new();
+        let mut thinking_chunks: Vec<String> = Vec::new();
+        let result = parse_openai_sse_body(
+            body,
+            &mut |t| text_chunks.push(t.to_string()),
+            &mut |t| thinking_chunks.push(t.to_string()),
+        ).unwrap();
+
+        assert_eq!(thinking_chunks.join(""), "Let me reason.");
+        assert_eq!(text_chunks, vec!["The answer is 42."]);
+        // Reasoning is persisted as a first-class thinking block, ahead of the text block.
+        assert_eq!(result["content"][0]["type"], "thinking");
+        assert_eq!(result["content"][0]["text"], "Let me reason.");
+        assert_eq!(result["content"][1]["type"], "text");
+        assert_eq!(result["content"][1]["text"], "The answer is 42.");
+        assert_eq!(result["stop_reason"], "end_turn");
+    }
+
+    #[test]
+    fn thinking_tag_split_across_sse_chunks() {
+        // The closing </think> tag is split: </thi in one chunk, nk> in the next.
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"<think>thoughts</thi\"},\"finish_reason\":null}]}\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"nk>answer\"},\"finish_reason\":null}]}\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n",
+            "data: [DONE]\n",
+        );
+
+        let mut text_chunks: Vec<String> = Vec::new();
+        let mut thinking_chunks: Vec<String> = Vec::new();
+        let result = parse_openai_sse_body(
+            body,
+            &mut |t| text_chunks.push(t.to_string()),
+            &mut |t| thinking_chunks.push(t.to_string()),
+        ).unwrap();
+
+        assert_eq!(thinking_chunks.join(""), "thoughts");
+        assert_eq!(text_chunks.join(""), "answer");
+        assert_eq!(result["content"][0]["type"], "thinking");
+        assert_eq!(result["content"][0]["text"], "thoughts");
+        assert_eq!(result["content"][1]["type"], "text");
+        assert_eq!(result["content"][1]["text"], "answer");
+    }
+
+    #[test]
+    fn thinking_tag_absent_passes_text_through_unchanged() {
+        // Models that don't emit <think> tags should behave exactly as before.
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello \"},\"finish_reason\":null}]}\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"world\"},\"finish_reason\":null}]}\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n",
+            "data: [DONE]\n",
+        );
+
+        let mut text_chunks: Vec<String> = Vec::new();
+        let mut thinking_chunks: Vec<String> = Vec::new();
+        let result = parse_openai_sse_body(
+            body,
+            &mut |t| text_chunks.push(t.to_string()),
+            &mut |t| thinking_chunks.push(t.to_string()),
+        ).unwrap();
+
+        assert!(thinking_chunks.is_empty());
+        assert_eq!(text_chunks, vec!["Hello ", "world"]);
+        assert_eq!(result["content"][0]["text"], "Hello world");
+    }
+
+    #[test]
+    fn array_content_with_structured_thinking_block() {
+        // Future OpenAI / provider format: delta.content is an array with typed blocks.
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":[{\"type\":\"thinking\",\"text\":\"inner thought\"}]},\"finish_reason\":null}]}\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":[{\"type\":\"text\",\"text\":\"reply\"}]},\"finish_reason\":null}]}\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n",
+            "data: [DONE]\n",
+        );
+
+        let mut text_chunks: Vec<String> = Vec::new();
+        let mut thinking_chunks: Vec<String> = Vec::new();
+        let result = parse_openai_sse_body(
+            body,
+            &mut |t| text_chunks.push(t.to_string()),
+            &mut |t| thinking_chunks.push(t.to_string()),
+        ).unwrap();
+
+        assert_eq!(thinking_chunks, vec!["inner thought"]);
+        assert_eq!(text_chunks, vec!["reply"]);
+        assert_eq!(result["content"][0]["type"], "thinking");
+        assert_eq!(result["content"][0]["text"], "inner thought");
+        assert_eq!(result["content"][1]["type"], "text");
+        assert_eq!(result["content"][1]["text"], "reply");
+    }
+
+    // ── Responses API: model routing ─────────────────────────────────────────
+
+    #[test]
+    fn gpt_major_version_extracts_leading_digits() {
+        assert_eq!(gpt_major_version("gpt-5"), Some(5));
+        assert_eq!(gpt_major_version("gpt-5-mini"), Some(5));
+        assert_eq!(gpt_major_version("gpt-5.1"), Some(5));
+        assert_eq!(gpt_major_version("gpt-5.2-codex"), Some(5));
+        assert_eq!(gpt_major_version("gpt-4.1"), Some(4));
+        assert_eq!(gpt_major_version("gpt-4o"), Some(4));
+        assert_eq!(gpt_major_version("gpt-3.5-turbo"), Some(3));
+        assert_eq!(gpt_major_version("gpt-turbo"), None);
+        assert_eq!(gpt_major_version("gpt-"), None);
+        assert_eq!(gpt_major_version("o3"), None);
+        assert_eq!(gpt_major_version(""), None);
+    }
+
+    #[test]
+    fn classifies_gpt5_and_above_as_responses() {
+        for model in &["gpt-5", "gpt-5-mini", "gpt-5.1", "gpt-5.2-codex"] {
+            assert_eq!(
+                classify_api_surface(model, ModelFamily::GptClassic),
+                ApiSurface::Responses,
+                "expected Responses for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn classifies_below_gpt5_as_chat_completions() {
+        for model in &["gpt-4.1", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"] {
+            assert_eq!(
+                classify_api_surface(model, ModelFamily::GptClassic),
+                ApiSurface::ChatCompletions,
+                "expected ChatCompletions for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn o_series_always_chat_completions_even_if_version_like() {
+        for model in &["o1", "o3", "o4-mini"] {
+            assert_eq!(
+                classify_api_surface(model, ModelFamily::OSeriesReasoning),
+                ApiSurface::ChatCompletions,
+                "expected ChatCompletions for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_model_name_defaults_to_chat_completions() {
+        for model in &["custom-model-x", ""] {
+            assert_eq!(
+                classify_api_surface(model, ModelFamily::GptClassic),
+                ApiSurface::ChatCompletions,
+                "expected ChatCompletions for {model}"
+            );
+        }
+    }
+
+    // ── Responses API: request translation ───────────────────────────────────
+
+    #[test]
+    fn translates_system_to_instructions() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-5",
+            "max_tokens": 256,
+            "system": "You are helpful",
+            "messages": []
+        }))
+        .unwrap();
+        let translated = translate_murmur_request_to_responses(&request, false).unwrap();
+        assert_eq!(translated["instructions"], "You are helpful");
+
+        let request_empty: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-5",
+            "max_tokens": 256,
+            "system": "   ",
+            "messages": []
+        }))
+        .unwrap();
+        let translated_empty = translate_murmur_request_to_responses(&request_empty, false).unwrap();
+        assert!(translated_empty.get("instructions").is_none());
+
+        let request_absent: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-5",
+            "max_tokens": 256,
+            "messages": []
+        }))
+        .unwrap();
+        let translated_absent = translate_murmur_request_to_responses(&request_absent, false).unwrap();
+        assert!(translated_absent.get("instructions").is_none());
+    }
+
+    #[test]
+    fn translates_tools_to_flat_responses_shape() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-5",
+            "max_tokens": 256,
+            "messages": [],
+            "tools": [
+                {"name": "calc", "description": "calculate", "parameters": {"type": "object"}}
+            ]
+        }))
+        .unwrap();
+        let translated = translate_murmur_request_to_responses(&request, false).unwrap();
+        assert_eq!(translated["tools"][0]["type"], "function");
+        assert_eq!(translated["tools"][0]["name"], "calc");
+        assert_eq!(translated["tools"][0]["description"], "calculate");
+        assert_eq!(translated["tools"][0]["parameters"], json!({"type": "object"}));
+        assert!(translated["tools"][0].get("function").is_none());
+    }
+
+    #[test]
+    fn translates_multiturn_history_with_tool_call_round_trip() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-5",
+            "max_tokens": 256,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_call", "id": "tc-1", "name": "calc", "input": {"x": 1}}
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "tc-1",
+                    "content": [{"type": "text", "text": "2"}]
+                }
+            ]
+        }))
+        .unwrap();
+        let translated = translate_murmur_request_to_responses(&request, false).unwrap();
+
+        assert_eq!(translated["input"][0]["type"], "function_call");
+        assert_eq!(translated["input"][0]["call_id"], "tc-1");
+        assert_eq!(translated["input"][0]["name"], "calc");
+        assert_eq!(translated["input"][0]["arguments"], "{\"x\":1}");
+
+        assert_eq!(translated["input"][1]["type"], "function_call_output");
+        assert_eq!(translated["input"][1]["call_id"], "tc-1");
+        assert_eq!(translated["input"][1]["output"], "2");
+    }
+
+    #[test]
+    fn assistant_message_with_text_and_tool_call_produces_two_items() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-5",
+            "max_tokens": 256,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "Let me check that."},
+                        {"type": "tool_call", "id": "tc-1", "name": "calc", "input": {"x": 1}}
+                    ]
+                }
+            ]
+        }))
+        .unwrap();
+        let translated = translate_murmur_request_to_responses(&request, false).unwrap();
+
+        assert_eq!(translated["input"].as_array().unwrap().len(), 2);
+        assert_eq!(translated["input"][0]["type"], "message");
+        assert_eq!(translated["input"][0]["role"], "assistant");
+        assert_eq!(translated["input"][0]["content"][0]["type"], "output_text");
+        assert_eq!(translated["input"][0]["content"][0]["text"], "Let me check that.");
+        assert_eq!(translated["input"][1]["type"], "function_call");
+        assert_eq!(translated["input"][1]["call_id"], "tc-1");
+    }
+
+    #[test]
+    fn translates_user_image_content_to_input_image_part() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-5",
+            "max_tokens": 256,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What is this?"},
+                        {"type": "image", "source": {"media_type": "image/png", "data": "abc123"}}
+                    ]
+                }
+            ]
+        }))
+        .unwrap();
+        let translated = translate_murmur_request_to_responses(&request, false).unwrap();
+
+        assert_eq!(translated["input"][0]["role"], "user");
+        assert_eq!(translated["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(translated["input"][0]["content"][1]["type"], "input_image");
+        assert_eq!(
+            translated["input"][0]["content"][1]["image_url"],
+            "data:image/png;base64,abc123"
+        );
+    }
+
+    #[test]
+    fn max_output_tokens_set_and_store_defaults_false_when_not_opted_in() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-5",
+            "max_tokens": 777,
+            "messages": []
+        }))
+        .unwrap();
+        let translated = translate_murmur_request_to_responses(&request, false).unwrap();
+        assert_eq!(translated["max_output_tokens"], 777);
+        assert_eq!(translated["store"], false);
+        assert!(translated.get("previous_response_id").is_none());
+    }
+
+    // ── Server-side retention (`store`) governance + continuation wiring ───────
+
+    #[test]
+    fn store_opt_in_parses_driver_config() {
+        assert!(store_opt_in(Some(r#"{"store":true}"#)));
+        assert!(!store_opt_in(Some(r#"{"store":false}"#)));
+        // Missing key, empty object, malformed JSON, non-bool, and absent config
+        // all mean opt-out — retention is never an accidental default.
+        assert!(!store_opt_in(Some(r#"{}"#)));
+        assert!(!store_opt_in(Some(r#"{"store":"true"}"#)));
+        assert!(!store_opt_in(Some("not json")));
+        assert!(!store_opt_in(None));
+    }
+
+    #[test]
+    fn store_opt_in_sets_store_true_without_continuation_on_first_call() {
+        // Opted in, but no continuation id yet (first call / post-drop full resend):
+        // store is true so the response id becomes retrievable, full messages are
+        // sent, and no previous_response_id is present.
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-5",
+            "max_tokens": 256,
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "hello"}]}
+            ]
+        }))
+        .unwrap();
+        let translated = translate_murmur_request_to_responses(&request, true).unwrap();
+        assert_eq!(translated["store"], true);
+        assert!(translated.get("previous_response_id").is_none());
+        assert_eq!(translated["input"].as_array().unwrap().len(), 1);
+        assert_eq!(translated["input"][0]["role"], "user");
+    }
+
+    #[test]
+    fn continuation_sends_previous_response_id_and_drops_assistant_items() {
+        // The host-sliced incremental tail after a tool-call turn:
+        // [assistant(function_call), tool_result]. With a continuation active the
+        // assistant turn is already server-side, so only the new tool result is
+        // wired, plus previous_response_id.
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-5",
+            "max_tokens": 256,
+            "continuation_id": "resp_prev_123",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "let me compute"},
+                        {"type": "tool_call", "id": "tc-1", "name": "calc", "input": {"x": 1}}
+                    ]
+                },
+                {"role": "tool", "tool_call_id": "tc-1", "content": [{"type": "text", "text": "2"}]}
+            ]
+        }))
+        .unwrap();
+        let translated = translate_murmur_request_to_responses(&request, true).unwrap();
+
+        assert_eq!(translated["store"], true);
+        assert_eq!(translated["previous_response_id"], "resp_prev_123");
+        let input = translated["input"].as_array().unwrap();
+        assert_eq!(input.len(), 1, "assistant items must be dropped on continuation");
+        assert_eq!(input[0]["type"], "function_call_output");
+        assert_eq!(input[0]["call_id"], "tc-1");
+        assert_eq!(input[0]["output"], "2");
+    }
+
+    #[test]
+    fn continuation_with_new_user_message_keeps_only_user_item() {
+        // Same-context next Task (Scenario 7): tail is [assistant, user]; the
+        // assistant is already retained, so only the new user message is wired.
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-5",
+            "max_tokens": 256,
+            "continuation_id": "resp_prev_456",
+            "messages": [
+                {"role": "assistant", "content": [{"type": "text", "text": "prior answer"}]},
+                {"role": "user", "content": [{"type": "text", "text": "follow-up"}]}
+            ]
+        }))
+        .unwrap();
+        let translated = translate_murmur_request_to_responses(&request, true).unwrap();
+        let input = translated["input"].as_array().unwrap();
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"][0]["text"], "follow-up");
+        assert_eq!(translated["previous_response_id"], "resp_prev_456");
+    }
+
+    #[test]
+    fn continuation_id_ignored_when_store_not_opted_in() {
+        // Defense in depth: a continuation id without the retention grant is
+        // ignored — full translation, store false, no previous_response_id.
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-5",
+            "max_tokens": 256,
+            "continuation_id": "resp_prev_789",
+            "messages": [
+                {"role": "assistant", "content": [{"type": "text", "text": "prior"}]},
+                {"role": "user", "content": [{"type": "text", "text": "next"}]}
+            ]
+        }))
+        .unwrap();
+        let translated = translate_murmur_request_to_responses(&request, false).unwrap();
+        assert_eq!(translated["store"], false);
+        assert!(translated.get("previous_response_id").is_none());
+        // Full translation — assistant item is NOT dropped.
+        assert_eq!(translated["input"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn empty_continuation_id_is_treated_as_no_continuation() {
+        // An empty/whitespace id is not a real continuation (matches the host's
+        // empty-value-drops semantics) → full resend, no previous_response_id.
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-5",
+            "max_tokens": 256,
+            "continuation_id": "  ",
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+            ]
+        }))
+        .unwrap();
+        let translated = translate_murmur_request_to_responses(&request, true).unwrap();
+        assert!(translated.get("previous_response_id").is_none());
+        assert_eq!(translated["store"], true);
+        assert_eq!(translated["input"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reasoning_items_round_trip_via_continuation_not_re_serialized() {
+        // Reasoning continuity: turn 1 returns reasoning + a function_call; those
+        // items live server-side under the response id. Turn 2's incremental tail
+        // carries the assistant(function_call) + tool result, but on the
+        // continuation path the assistant (and thus any reasoning the driver would
+        // otherwise have to re-serialize, which it cannot) is dropped — the model
+        // still sees the reasoning because previous_response_id chains it. This is
+        // exactly what the Chat Completions path cannot do.
+        let turn1: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-5",
+            "max_tokens": 256,
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "think hard"}]}
+            ]
+        }))
+        .unwrap();
+        let t1 = translate_murmur_request_to_responses(&turn1, true).unwrap();
+        assert_eq!(t1["store"], true, "turn 1 must be stored for reasoning to persist");
+        assert!(t1.get("previous_response_id").is_none());
+
+        // Turn 2 chains via previous_response_id; the reasoning-bearing assistant
+        // turn is not re-sent, only the new tool result is.
+        let turn2: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-5",
+            "max_tokens": 256,
+            "continuation_id": "resp_turn1",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "text": "some server-side reasoning"},
+                        {"type": "tool_call", "id": "tc-9", "name": "calc", "input": {"x": 2}}
+                    ]
+                },
+                {"role": "tool", "tool_call_id": "tc-9", "content": [{"type": "text", "text": "4"}]}
+            ]
+        }))
+        .unwrap();
+        let t2 = translate_murmur_request_to_responses(&turn2, true).unwrap();
+        assert_eq!(t2["previous_response_id"], "resp_turn1");
+        let input = t2["input"].as_array().unwrap();
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "function_call_output");
+        assert_eq!(input[0]["call_id"], "tc-9");
+    }
+
+    #[test]
+    fn responses_streaming_captures_response_id_from_completed_event() {
+        // The provider response id (returned to the host on the continuation
+        // metadata key) is captured from the terminal streaming event.
+        let mut tool_states: Vec<ToolCallState> = Vec::new();
+        let mut idx: HashMap<u64, usize> = HashMap::new();
+        let mut status: Option<String> = None;
+        let mut incomplete_reason: Option<String> = None;
+        let mut error_message: Option<String> = None;
+        let mut response_id: Option<String> = None;
+        let mut usage = UsageTokens::default();
+        let line = r#"data: {"type":"response.completed","response":{"id":"resp_stream_42","status":"completed"}}"#;
+        let done = process_responses_sse_line(
+            line,
+            &mut tool_states,
+            &mut idx,
+            &mut status,
+            &mut incomplete_reason,
+            &mut error_message,
+            &mut response_id,
+            &mut usage,
+            &mut |_| {},
+            &mut |_| {},
+            &mut |_| {},
+        );
+        assert!(!done);
+        assert_eq!(response_id.as_deref(), Some("resp_stream_42"));
+    }
+
+    #[test]
+    fn responses_tool_message_without_tool_call_id_errors() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-5",
+            "max_tokens": 256,
+            "messages": [
+                {"role": "tool", "content": [{"type": "text", "text": "2"}]}
+            ]
+        }))
+        .unwrap();
+        assert!(translate_murmur_request_to_responses(&request, false).is_err());
+    }
+
+    #[test]
+    fn responses_unsupported_message_role_errors() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-5",
+            "max_tokens": 256,
+            "messages": [
+                {"role": "system", "content": [{"type": "text", "text": "hi"}]}
+            ]
+        }))
+        .unwrap();
+        assert!(translate_murmur_request_to_responses(&request, false).is_err());
+    }
+
+    // ── Responses API: non-streaming response translation ─────────────────────
+
+    #[test]
+    fn translates_responses_completed_text_to_murmur() {
+        let response = json!({
+            "status": "completed",
+            "output": [
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Hello!"}]}
+            ]
+        });
+        let translated = translate_responses_to_murmur(&response).unwrap();
+        assert_eq!(translated["stop_reason"], "end_turn");
+        assert_eq!(translated["content"][0]["type"], "text");
+        assert_eq!(translated["content"][0]["text"], "Hello!");
+    }
+
+    #[test]
+    fn translates_responses_completed_function_call_to_tool_call_stop_reason() {
+        let response = json!({
+            "status": "completed",
+            "output": [
+                {"type": "function_call", "call_id": "call_abc", "name": "calc", "arguments": "{\"x\":2}"}
+            ]
+        });
+        let translated = translate_responses_to_murmur(&response).unwrap();
+        assert_eq!(translated["stop_reason"], "tool_call");
+        assert_eq!(translated["content"][0]["type"], "tool_call");
+        assert_eq!(translated["content"][0]["id"], "call_abc");
+        assert_eq!(translated["content"][0]["name"], "calc");
+        assert_eq!(translated["content"][0]["input"], json!({"x": 2}));
+    }
+
+    #[test]
+    fn translates_responses_incomplete_max_output_tokens_to_max_tokens() {
+        let response = json!({
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": []
+        });
+        let translated = translate_responses_to_murmur(&response).unwrap();
+        assert_eq!(translated["stop_reason"], "max_tokens");
+    }
+
+    #[test]
+    fn translates_responses_incomplete_unknown_reason_to_error() {
+        let response = json!({
+            "status": "incomplete",
+            "incomplete_details": {"reason": "something_else"},
+            "output": []
+        });
+        let translated = translate_responses_to_murmur(&response).unwrap();
+        assert_eq!(translated["stop_reason"], "error");
+    }
+
+    #[test]
+    fn translates_responses_failed_to_error() {
+        let response = json!({"status": "failed", "output": []});
+        let translated = translate_responses_to_murmur(&response).unwrap();
+        assert_eq!(translated["stop_reason"], "error");
+    }
+
+    #[test]
+    fn translates_responses_top_level_error_object_to_error() {
+        let response = json!({
+            "error": {"message": "rate limited"},
+            "output": []
+        });
+        let translated = translate_responses_to_murmur(&response).unwrap();
+        assert_eq!(translated["stop_reason"], "error");
+        assert!(translated["error"].as_str().unwrap().contains("rate limited"));
+    }
+
+    #[test]
+    fn ignores_reasoning_items_in_responses_output() {
+        let response = json!({
+            "status": "completed",
+            "output": [
+                {"type": "reasoning", "id": "r1", "summary": []},
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "answer"}]}
+            ]
+        });
+        let translated = translate_responses_to_murmur(&response).unwrap();
+        assert_eq!(translated["content"].as_array().unwrap().len(), 1);
+        assert_eq!(translated["content"][0]["type"], "text");
+        assert_eq!(translated["content"][0]["text"], "answer");
+    }
+
+    #[test]
+    fn refusal_content_part_maps_to_error() {
+        let response = json!({
+            "status": "completed",
+            "output": [
+                {"type": "message", "role": "assistant", "content": [{"type": "refusal", "refusal": "cannot help with that"}]}
+            ]
+        });
+        let translated = translate_responses_to_murmur(&response).unwrap();
+        assert_eq!(translated["stop_reason"], "error");
+        assert!(translated["error"].as_str().unwrap().contains("cannot help with that"));
+    }
+
+    // ── Responses API: streaming ────────────────────────────────────────────
+
+    #[test]
+    fn responses_streaming_output_text_delta_assembly() {
+        let body = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"He\"}\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"llo\"}\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n",
+        );
+        let mut emitted: Vec<String> = Vec::new();
+        let result = parse_responses_sse_body(body, &mut |t| emitted.push(t.to_string()), &mut |_| {})
+            .unwrap();
+        assert_eq!(emitted, vec!["He", "llo"]);
+        assert_eq!(result["stop_reason"], "end_turn");
+        assert_eq!(result["content"][0]["type"], "text");
+        assert_eq!(result["content"][0]["text"], "Hello");
+    }
+
+    #[test]
+    fn responses_streaming_function_call_arguments_delta_assembles_tool_call() {
+        let body = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"bash\"}}\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"cmd\\\":\"}\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"\\\"ls\\\"}\"}\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n",
+        );
+        let result = parse_responses_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap();
+        assert_eq!(result["stop_reason"], "tool_call");
+        assert_eq!(result["content"][0]["type"], "tool_call");
+        assert_eq!(result["content"][0]["id"], "call_1");
+        assert_eq!(result["content"][0]["name"], "bash");
+        assert_eq!(result["content"][0]["input"], json!({"cmd": "ls"}));
+    }
+
+    #[test]
+    fn responses_streaming_function_call_arguments_done_overwrites_partial_deltas() {
+        let body = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"bash\"}}\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"cmd\\\":\"}\n",
+            "data: {\"type\":\"response.function_call_arguments.done\",\"output_index\":0,\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n",
+        );
+        let result = parse_responses_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap();
+        assert_eq!(result["content"][0]["input"], json!({"cmd": "ls"}));
+    }
+
+    #[test]
+    fn responses_streaming_reasoning_summary_delta_routes_to_thinking() {
+        let body = concat!(
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Thinking...\"}\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Answer.\"}\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n",
+        );
+        let mut text_chunks: Vec<String> = Vec::new();
+        let mut thinking_chunks: Vec<String> = Vec::new();
+        let result = parse_responses_sse_body(
+            body,
+            &mut |t| text_chunks.push(t.to_string()),
+            &mut |t| thinking_chunks.push(t.to_string()),
+        )
+        .unwrap();
+        assert_eq!(thinking_chunks, vec!["Thinking..."]);
+        assert_eq!(text_chunks, vec!["Answer."]);
+        assert_eq!(result["content"][0]["type"], "thinking");
+        assert_eq!(result["content"][1]["type"], "text");
+    }
+
+    #[test]
+    fn responses_streaming_incomplete_max_output_tokens() {
+        let body = "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n";
+        let result = parse_responses_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap();
+        assert_eq!(result["stop_reason"], "max_tokens");
+    }
+
+    #[test]
+    fn responses_streaming_error_event_handling() {
+        let body = "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"boom\"}}}\n";
+        let result = parse_responses_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap();
+        assert_eq!(result["stop_reason"], "error");
+        assert!(result["error"].as_str().unwrap().contains("boom"));
+    }
+
+    #[test]
+    fn responses_streaming_multiple_tool_calls_keyed_by_output_index() {
+        let body = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"a\"}}\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_2\",\"name\":\"b\"}}\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"delta\":\"{\\\"y\\\":2}\"}\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"x\\\":1}\"}\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n",
+        );
+        let result = parse_responses_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap();
+        let content = result["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["id"], "call_1");
+        assert_eq!(content[0]["name"], "a");
+        assert_eq!(content[0]["input"], json!({"x": 1}));
+        assert_eq!(content[1]["id"], "call_2");
+        assert_eq!(content[1]["name"], "b");
+        assert_eq!(content[1]["input"], json!({"y": 2}));
+    }
+
+    // ── prompt_cache_key ──────────────────────────────────────────────────────
+
+    fn request_with_cache_key(model: &str, extra: Value) -> MurmurRequest {
+        let mut payload = json!({
+            "model": model,
+            "max_tokens": 256,
+            "prompt_cache_key": "demo-capsule:1.0.0:ctx-7",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+        });
+        for (key, value) in extra.as_object().cloned().unwrap_or_default() {
+            payload[key] = value;
+        }
+        serde_json::from_value(payload).unwrap()
+    }
+
+    #[test]
+    fn chat_completions_forwards_prompt_cache_key() {
+        let request = request_with_cache_key("gpt-4o", json!({}));
+        let translated =
+            translate_murmur_request_to_openai(&request, ModelFamily::GptClassic).unwrap();
+        assert_eq!(translated["prompt_cache_key"], "demo-capsule:1.0.0:ctx-7");
+    }
+
+    #[test]
+    fn chat_completions_host_key_wins_over_a_same_named_param() {
+        let request = request_with_cache_key(
+            "gpt-4o",
+            json!({"params": {"prompt_cache_key": "from-params"}}),
+        );
+        let translated =
+            translate_murmur_request_to_openai(&request, ModelFamily::GptClassic).unwrap();
+        assert_eq!(translated["prompt_cache_key"], "demo-capsule:1.0.0:ctx-7");
+    }
+
+    #[test]
+    fn responses_forwards_prompt_cache_key() {
+        let request = request_with_cache_key("gpt-5", json!({}));
+        let translated = translate_murmur_request_to_responses(&request, false).unwrap();
+        assert_eq!(translated["prompt_cache_key"], "demo-capsule:1.0.0:ctx-7");
+    }
+
+    #[test]
+    fn responses_continuation_still_forwards_prompt_cache_key() {
+        // A continuation does not change which prefix the turns share.
+        let request = request_with_cache_key("gpt-5", json!({"continuation_id": "resp_abc"}));
+        let translated = translate_murmur_request_to_responses(&request, true).unwrap();
+        assert_eq!(translated["previous_response_id"], "resp_abc");
+        assert_eq!(translated["prompt_cache_key"], "demo-capsule:1.0.0:ctx-7");
+    }
+
+    #[test]
+    fn absent_null_or_blank_prompt_cache_key_adds_no_member() {
+        for hint in [
+            None,
+            Some(Value::Null),
+            Some(json!("")),
+            Some(json!("   ")),
+            Some(json!(7)),
+        ] {
+            let mut payload = json!({
+                "model": "gpt-4o",
+                "max_tokens": 256,
+                "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+            });
+            if let Some(hint) = hint.clone() {
+                payload["prompt_cache_key"] = hint;
+            }
+            let request: MurmurRequest = serde_json::from_value(payload).unwrap();
+
+            let chat =
+                translate_murmur_request_to_openai(&request, ModelFamily::GptClassic).unwrap();
+            assert!(
+                chat.get("prompt_cache_key").is_none(),
+                "chat body carried a key for {hint:?}: {chat}"
+            );
+
+            let responses = translate_murmur_request_to_responses(&request, false).unwrap();
+            assert!(
+                responses.get("prompt_cache_key").is_none(),
+                "responses body carried a key for {hint:?}: {responses}"
+            );
+        }
+    }
+
+    // ── usage ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn chat_completions_usage_round_trip() {
+        let response = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "Hello"}
+            }],
+            "usage": {
+                "prompt_tokens": 900,
+                "completion_tokens": 40,
+                "prompt_tokens_details": {"cached_tokens": 768}
+            }
+        });
+
+        let translated = translate_openai_response_to_murmur(&response).unwrap();
+
+        assert_eq!(translated["stop_reason"], "end_turn");
+        assert_eq!(translated["content"][0]["text"], "Hello");
+        assert_eq!(translated["usage"]["input_tokens"], 900);
+        assert_eq!(translated["usage"]["output_tokens"], 40);
+        assert_eq!(translated["usage"]["cached_tokens"], 768);
+        // Neither OpenAI surface reports a cache write count.
+        assert!(translated["usage"].get("cache_write_tokens").is_none());
+    }
+
+    #[test]
+    fn responses_usage_round_trip() {
+        let response = json!({
+            "status": "completed",
+            "output": [
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Hello"}]}
+            ],
+            "usage": {
+                "input_tokens": 900,
+                "output_tokens": 40,
+                "input_tokens_details": {"cached_tokens": 768}
+            }
+        });
+
+        let translated = translate_responses_to_murmur(&response).unwrap();
+
+        assert_eq!(translated["stop_reason"], "end_turn");
+        assert_eq!(translated["content"][0]["text"], "Hello");
+        assert_eq!(translated["usage"]["input_tokens"], 900);
+        assert_eq!(translated["usage"]["output_tokens"], 40);
+        assert_eq!(translated["usage"]["cached_tokens"], 768);
+        assert!(translated["usage"].get("cache_write_tokens").is_none());
+    }
+
+    #[test]
+    fn chat_completions_streaming_usage_arrives_on_the_choices_less_final_chunk() {
+        let body = concat!(
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n",
+            "data: {\"id\":\"c1\",\"choices\":[],\"usage\":{\"prompt_tokens\":900,\"completion_tokens\":40,\"prompt_tokens_details\":{\"cached_tokens\":768}}}\n",
+            "data: [DONE]\n",
+        );
+
+        let result = parse_openai_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap();
+
+        assert_eq!(result["stop_reason"], "end_turn");
+        assert_eq!(result["content"][0]["text"], "Hello");
+        assert_eq!(
+            result["usage"],
+            json!({"input_tokens": 900, "output_tokens": 40, "cached_tokens": 768})
+        );
+    }
+
+    #[test]
+    fn responses_streaming_usage_arrives_on_the_completed_event() {
+        let body = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":900,\"output_tokens\":40,\"input_tokens_details\":{\"cached_tokens\":768}}}}\n",
+        );
+
+        let result = parse_responses_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap();
+
+        assert_eq!(result["stop_reason"], "end_turn");
+        assert_eq!(result["content"][0]["text"], "Hello");
+        assert_eq!(
+            result["usage"],
+            json!({"input_tokens": 900, "output_tokens": 40, "cached_tokens": 768})
+        );
+    }
+
+    #[test]
+    fn missing_or_malformed_usage_omits_the_member_on_both_surfaces() {
+        for usage in [
+            None,
+            Some(json!("12043")),
+            Some(json!({"input_tokens": "12043", "output_tokens": -4, "cached_tokens": 1.5})),
+            Some(json!({})),
+            Some(Value::Null),
+        ] {
+            let mut chat = json!({
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "Hello"}
+                }]
+            });
+            let mut responses = json!({
+                "status": "completed",
+                "output": [
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Hello"}]}
+                ]
+            });
+            if let Some(usage) = usage.clone() {
+                chat["usage"] = usage.clone();
+                responses["usage"] = usage;
+            }
+
+            let translated = translate_openai_response_to_murmur(&chat).unwrap();
+            assert!(
+                translated.get("usage").is_none(),
+                "chat surface kept a usage key for {usage:?}: {translated}"
+            );
+
+            let translated = translate_responses_to_murmur(&responses).unwrap();
+            assert!(
+                translated.get("usage").is_none(),
+                "responses surface kept a usage key for {usage:?}: {translated}"
+            );
+        }
+    }
+
+    #[test]
+    fn reported_zero_is_kept_and_unreported_siblings_are_omitted() {
+        let response = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "Hello"}
+            }],
+            "usage": {"prompt_tokens": 40, "prompt_tokens_details": {"cached_tokens": 0}}
+        });
+
+        let translated = translate_openai_response_to_murmur(&response).unwrap();
+
+        assert_eq!(
+            translated["usage"],
+            json!({"input_tokens": 40, "cached_tokens": 0})
+        );
+    }
+
+    #[test]
+    fn error_payloads_carry_no_usage() {
+        let response = json!({
+            "choices": [{"finish_reason": "content_filter", "message": {"content": "x"}}],
+            "usage": {"prompt_tokens": 900, "completion_tokens": 40}
+        });
+        let translated = translate_openai_response_to_murmur(&response).unwrap();
+        assert_eq!(translated["stop_reason"], "error");
+        assert!(translated.get("usage").is_none());
+    }
+
+    #[test]
+    fn streaming_flags_include_usage_only_on_chat_completions() {
+        let mut chat = json!({"model": "gpt-4o", "stream": false});
+        stamp_streaming_flags(&mut chat, ApiSurface::ChatCompletions);
+        assert_eq!(chat["stream"], json!(true));
+        assert_eq!(chat["stream_options"], json!({"include_usage": true}));
+
+        let mut responses = json!({"model": "gpt-5"});
+        stamp_streaming_flags(&mut responses, ApiSurface::Responses);
+        assert_eq!(responses["stream"], json!(true));
+        assert!(responses.get("stream_options").is_none());
+    }
+
+    // ── `inference.driver.config` vocabulary ──────────────────────────────────
+
+    /// The body `run_inner` would put on the wire: classify, translate, stamp the dials, stamp
+    /// the streaming flags. Tests assert on this rather than on a bare translation.
+    fn provider_body(request: &MurmurRequest, config: &DriverConfig, store: bool) -> Value {
+        let family = classify_model(&request.model);
+        let surface = classify_api_surface(&request.model, family);
+        build_provider_request(request, config, store, family, surface).unwrap()
+    }
+
+    fn config(raw: &str) -> DriverConfig {
+        parse_driver_config(Some(raw)).unwrap()
+    }
+
+    fn request(model: &str) -> MurmurRequest {
+        serde_json::from_value(json!({
+            "model": model,
+            "max_tokens": 1024,
+            "system": "You are a careful assistant.",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "Why is the sky blue?"}]}]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn responses_body_with_reasoning_dials_matches_golden_fixture() {
+        let body = provider_body(
+            &request("gpt-5"),
+            &config(r#"{"thinking":"enabled","reasoning_effort":"high"}"#),
+            false,
+        );
+        assert_eq!(
+            format!("{}\n", serde_json::to_string_pretty(&body).unwrap()),
+            include_str!("../tests/fixtures/responses_gpt5_reasoning_effort_high.json"),
+        );
+        // The effort dial nests under `reasoning` on this surface; the Chat Completions
+        // spelling must not leak onto it.
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn verbosity_lands_under_text_and_asks_for_no_reasoning() {
+        let body = provider_body(&request("gpt-5.1"), &config(r#"{"verbosity":"low"}"#), false);
+        assert_eq!(body["text"], json!({"verbosity": "low"}));
+        assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn reasoning_summary_deltas_reach_the_host_as_thinking_chunks() {
+        let body = include_str!("../tests/fixtures/responses_reasoning_summary_stream.sse");
+        let mut text_chunks: Vec<String> = Vec::new();
+        let mut thinking_chunks: Vec<String> = Vec::new();
+        let result = parse_responses_sse_body(
+            body,
+            &mut |t| text_chunks.push(t.to_string()),
+            &mut |t| thinking_chunks.push(t.to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            thinking_chunks,
+            vec!["The sky scatters ", "short wavelengths, ", "so blue dominates."]
+        );
+        assert_eq!(text_chunks, vec!["Because of ", "Rayleigh scattering."]);
+        assert_eq!(result["content"][0]["type"], "thinking");
+        assert_eq!(
+            result["content"][0]["text"],
+            "The sky scatters short wavelengths, so blue dominates."
+        );
+        assert_eq!(result["content"][1]["type"], "text");
+        assert_eq!(result["content"][1]["text"], "Because of Rayleigh scattering.");
+    }
+
+    #[test]
+    fn unrecognised_config_key_names_the_key_and_the_accepted_set() {
+        let err = parse_driver_config(Some(r#"{"store":true,"reasoning_efort":"high"}"#))
+            .expect_err("an unread key must not be accepted");
+        assert_eq!(
+            err,
+            "driver: unrecognised inference.driver.config key(s): reasoning_efort. \
+             Accepted keys: reasoning_effort, store, thinking, verbosity"
+        );
+    }
+
+    #[test]
+    fn several_unrecognised_config_keys_are_reported_together_in_sorted_order() {
+        // An Anthropic driver config pasted onto this driver: one error, both keys, so the
+        // manifest is fixed once.
+        let err = parse_driver_config(Some(r#"{"thinking_budget_tokens":4096,"beta_features":"x"}"#))
+            .expect_err("both unread keys must be reported");
+        assert_eq!(
+            err,
+            "driver: unrecognised inference.driver.config key(s): beta_features, \
+             thinking_budget_tokens. Accepted keys: reasoning_effort, store, thinking, verbosity"
+        );
+    }
+
+    #[test]
+    fn thinking_accepts_only_enabled_or_disabled() {
+        assert!(config(r#"{"thinking":"enabled"}"#).thinking);
+        assert!(config(r#"{"thinking":"  ENABLED "}"#).thinking);
+        assert!(!config(r#"{"thinking":"disabled"}"#).thinking);
+        assert!(!config(r#"{}"#).thinking);
+
+        let err = parse_driver_config(Some(r#"{"thinking":"on"}"#))
+            .expect_err("an unrecognised thinking value must not be accepted");
+        assert_eq!(
+            err,
+            "driver: inference.driver.config 'thinking' must be \"enabled\" or \"disabled\", \
+             got \"on\""
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_is_type_checked_then_forwarded_verbatim() {
+        let err = parse_driver_config(Some(r#"{"reasoning_effort":3}"#))
+            .expect_err("a non-string effort must not be accepted");
+        assert_eq!(
+            err,
+            "driver: inference.driver.config 'reasoning_effort' must be a string, got 3"
+        );
+
+        // A tier this driver has never heard of is the provider's business, not its own.
+        let body = provider_body(
+            &request("gpt-5"),
+            &config(r#"{"reasoning_effort":"xhigh"}"#),
+            false,
+        );
+        assert_eq!(body["reasoning"], json!({"effort": "xhigh"}));
+    }
+
+    #[test]
+    fn verbosity_is_type_checked_the_same_way() {
+        let err = parse_driver_config(Some(r#"{"verbosity":true}"#))
+            .expect_err("a non-string verbosity must not be accepted");
+        assert_eq!(
+            err,
+            "driver: inference.driver.config 'verbosity' must be a string, got true"
+        );
+    }
+
+    #[test]
+    fn o_series_gets_the_effort_dial_and_no_reasoning_request() {
+        let body = provider_body(
+            &request("o3-mini"),
+            &config(r#"{"thinking":"enabled","reasoning_effort":"high","verbosity":"low"}"#),
+            false,
+        );
+        assert_eq!(body["reasoning_effort"], "high");
+        // Chat Completions defines neither container, so `thinking` and `verbosity` ask for
+        // nothing here — an o-series capsule cannot display reasoning at all.
+        assert!(body.get("reasoning").is_none());
+        assert!(body.get("text").is_none());
+        assert!(body.get("verbosity").is_none());
+    }
+
+    #[test]
+    fn gpt_classic_drops_the_effort_dial_through_the_incompatibility_predicate() {
+        let body = provider_body(&request("gpt-4o"), &config(r#"{"reasoning_effort":"high"}"#), false);
+        assert!(body.get("reasoning_effort").is_none());
+        // Dropped by the one predicate both the dials and the `params` loop consult.
+        assert!(!provider_field_supported(
+            "reasoning_effort",
+            ModelFamily::GptClassic,
+            ApiSurface::ChatCompletions
+        ));
+        assert!(provider_field_supported(
+            "reasoning_effort",
+            ModelFamily::OSeriesReasoning,
+            ApiSurface::ChatCompletions
+        ));
+    }
+
+    #[test]
+    fn an_unconfigured_capsule_sends_what_it_sent_before_the_dials_existed() {
+        for raw in [None, Some("{}")] {
+            let parsed = parse_driver_config(raw).unwrap();
+            assert_eq!(parsed, DriverConfig::default());
+
+            let responses = provider_body(&request("gpt-5"), &parsed, false);
+            assert!(responses.get("reasoning").is_none());
+            assert!(responses.get("text").is_none());
+            assert_eq!(responses["store"], false);
+
+            let chat = provider_body(&request("gpt-4o"), &parsed, false);
+            assert!(chat.get("reasoning_effort").is_none());
+            assert!(chat.get("text").is_none());
+        }
+    }
+
+    #[test]
+    fn store_keeps_its_lenient_parse_under_the_strict_key_check() {
+        // `store` is in the accepted set, so a non-boolean value is not a key error — and
+        // `store_opt_in` still reads it as opt-out.
+        assert_eq!(config(r#"{"store":"true"}"#), DriverConfig::default());
+        assert!(!store_opt_in(Some(r#"{"store":"true"}"#)));
+    }
+
+    #[test]
+    fn a_config_dial_overwrites_a_same_named_params_key_wholesale() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-5",
+            "max_tokens": 256,
+            "messages": [],
+            "params": {"reasoning": {"effort": "low", "generate_summary": "concise"}}
+        }))
+        .unwrap();
+        let body = provider_body(&request, &config(r#"{"reasoning_effort":"high"}"#), false);
+        assert_eq!(body["reasoning"], json!({"effort": "high"}));
+    }
+
+    #[test]
+    fn malformed_or_non_object_config_is_an_error_not_a_silent_default() {
+        assert!(parse_driver_config(Some("not json")).is_err());
+        assert!(parse_driver_config(Some("[]")).is_err());
+        // An unset variable and a variable the host set to nothing both mean "no config".
+        assert_eq!(parse_driver_config(None).unwrap(), DriverConfig::default());
+        assert_eq!(parse_driver_config(Some("  ")).unwrap(), DriverConfig::default());
+    }
+
+    #[test]
+    fn config_parse_precedes_the_endpoint_lookup_in_run_inner() {
+        // With the endpoint unset, the config error must still be the one an operator sees —
+        // which is the proof that no HTTP request can be dispatched with a rejected config.
+        // `run_inner` is wasm-only, so its statement order is asserted from the source.
+        let source = include_str!("lib.rs");
+        let run_inner = &source[source
+            .find("fn run_inner(")
+            .expect("run_inner must exist")..];
+        let parse_at = run_inner
+            .find("parse_driver_config(")
+            .expect("run_inner must parse the driver config");
+        let endpoint_at = run_inner
+            .find("INFERENCE_ENDPOINT_VAR")
+            .expect("run_inner must read the endpoint");
+        assert!(
+            parse_at < endpoint_at,
+            "the driver config must be parsed before the endpoint is looked up"
+        );
+    }
+
+    /// Fixture: a Responses turn cut off at the output cap, its lone `function_call`
+    /// holding a prefix of the argument JSON.
+    fn capped_buffered_truncated_call(name: Option<&str>) -> Value {
+        let mut item = json!({
+            "type": "function_call",
+            "call_id": "call_1",
+            "arguments": "{\"task\":\"do the thi"
+        });
+        if let Some(name) = name {
+            item["name"] = json!(name);
+        }
+        json!({
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [item]
+        })
+    }
+
+    /// Same turn as `capped_buffered_truncated_call`, delivered as SSE.
+    fn capped_streaming_truncated_call(name: Option<&str>) -> String {
+        let name_field = match name {
+            Some(name) => format!(",\"name\":\"{name}\""),
+            None => String::new(),
+        };
+        format!(
+            concat!(
+                "data: {{\"type\":\"response.output_item.added\",\"output_index\":0,",
+                "\"item\":{{\"type\":\"function_call\",\"call_id\":\"call_1\"{name_field}}}}}\n",
+                "data: {{\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,",
+                "\"delta\":\"{{\\\"task\\\":\\\"do the thi\"}}\n",
+                "data: {{\"type\":\"response.incomplete\",\"response\":{{\"status\":\"incomplete\",",
+                "\"incomplete_details\":{{\"reason\":\"max_output_tokens\"}}}}}}\n",
+            ),
+            name_field = name_field
+        )
+    }
+
+    #[test]
+    fn responses_capped_truncated_tool_call_reports_the_cap() {
+        let translated =
+            translate_responses_to_murmur(&capped_buffered_truncated_call(Some("delegate-task")))
+                .unwrap();
+        assert_eq!(translated["stop_reason"], "error");
+        let message = translated["error"].as_str().unwrap();
+        // Pinned verbatim: operators grep for this line, and the streaming path
+        // is held to it in turn by the cross-path equality test below.
+        assert_eq!(
+            message,
+            "driver: OpenAI Responses turn stopped at the inference.max_tokens output cap; \
+             tool call 'delegate-task' was cut off mid-arguments and cannot be run — \
+             raise the cap and re-run"
+        );
+        assert!(!message.contains("do the thi"), "{message}");
+    }
+
+    #[test]
+    fn responses_streaming_capped_truncated_tool_call_reports_the_cap() {
+        let body = capped_streaming_truncated_call(Some("delegate-task"));
+        let result = parse_responses_sse_body(&body, &mut |_| {}, &mut |_| {}).unwrap();
+        assert_eq!(result["stop_reason"], "error");
+        let message = result["error"].as_str().unwrap();
+        assert!(message.contains("inference.max_tokens"), "{message}");
+        assert!(message.contains("delegate-task"), "{message}");
+        assert!(!message.contains("failed to parse"), "{message}");
+        assert!(!message.contains("do the thi"), "{message}");
+    }
+
+    #[test]
+    fn responses_capped_truncated_tool_call_message_is_identical_on_both_paths() {
+        let buffered =
+            translate_responses_to_murmur(&capped_buffered_truncated_call(Some("delegate-task")))
+                .unwrap();
+        let body = capped_streaming_truncated_call(Some("delegate-task"));
+        let streamed = parse_responses_sse_body(&body, &mut |_| {}, &mut |_| {}).unwrap();
+        assert_eq!(buffered["error"], streamed["error"]);
+    }
+
+    #[test]
+    fn responses_capped_truncated_tool_call_without_a_name_says_unnamed() {
+        let buffered =
+            translate_responses_to_murmur(&capped_buffered_truncated_call(None)).unwrap();
+        let body = capped_streaming_truncated_call(None);
+        let streamed = parse_responses_sse_body(&body, &mut |_| {}, &mut |_| {}).unwrap();
+        let message = buffered["error"].as_str().unwrap();
+        assert!(message.contains("'<unnamed>'"), "{message}");
+        assert!(message.contains("inference.max_tokens"), "{message}");
+        assert!(!message.contains("failed to parse"), "{message}");
+        assert_eq!(buffered["error"], streamed["error"]);
+    }
+
+    #[test]
+    fn responses_capped_names_the_first_tool_call_that_fails_to_parse() {
+        let response = json!({
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [
+                {"type": "function_call", "call_id": "c1", "name": "first", "arguments": "{\"a\":1}"},
+                {"type": "function_call", "call_id": "c2", "name": "second", "arguments": "{\"b\":2}"},
+                {"type": "function_call", "call_id": "c3", "name": "third", "arguments": "{\"c\":\"do the thi"}
+            ]
+        });
+        let translated = translate_responses_to_murmur(&response).unwrap();
+        assert_eq!(translated["stop_reason"], "error");
+        let message = translated["error"].as_str().unwrap();
+        assert!(message.contains("'third'"), "{message}");
+        assert!(!message.contains("first"), "{message}");
+    }
+
+    #[test]
+    fn responses_streaming_capped_names_the_first_tool_call_that_fails_to_parse() {
+        let body = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"first\"}}\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"call_id\":\"c2\",\"name\":\"second\"}}\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"function_call\",\"call_id\":\"c3\",\"name\":\"third\"}}\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"a\\\":1}\"}\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"delta\":\"{\\\"b\\\":2}\"}\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":2,\"delta\":\"{\\\"c\\\":\\\"do the thi\"}\n",
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n",
+        );
+        let result = parse_responses_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap();
+        assert_eq!(result["stop_reason"], "error");
+        let message = result["error"].as_str().unwrap();
+        assert!(message.contains("'third'"), "{message}");
+        assert!(!message.contains("first"), "{message}");
+    }
+
+    #[test]
+    fn responses_completed_malformed_tool_call_still_reports_a_parse_error() {
+        let response = json!({
+            "status": "completed",
+            "output": [
+                {"type": "function_call", "call_id": "c1", "name": "delegate-task", "arguments": "{\"task\": "}
+            ]
+        });
+        let err = translate_responses_to_murmur(&response).unwrap_err();
+        assert!(
+            err.starts_with("driver: failed to parse Responses function_call arguments JSON:"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn responses_streaming_completed_malformed_tool_call_still_reports_a_parse_error() {
+        let body = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"delegate-task\"}}\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"task\\\": \"}\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n",
+        );
+        let err = parse_responses_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap_err();
+        assert!(
+            err.starts_with("driver: failed to parse Responses function_call arguments JSON:"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn responses_capped_error_payload_carries_no_content_or_usage() {
+        let mut response = capped_buffered_truncated_call(Some("delegate-task"));
+        response["usage"] = json!({"input_tokens": 900, "output_tokens": 4096});
+        let translated = translate_responses_to_murmur(&response).unwrap();
+        assert!(translated.get("content").is_none());
+        assert!(translated.get("usage").is_none());
+    }
+
+    // ── A missing stop signal is refused ──────────────────────────────────────
+
+    const NO_FINISH_REASON: &str = "driver: OpenAI response has no finish_reason";
+    const STREAM_NO_FINISH_REASON: &str = "driver: OpenAI stream ended with no finish_reason";
+
+    #[test]
+    fn chat_response_with_no_finish_reason_is_refused() {
+        for finish_reason in [None, Some(Value::Null), Some(json!("")), Some(json!(1))] {
+            let mut choice = json!({"message": {"role": "assistant", "content": "partial"}});
+            if let Some(finish_reason) = finish_reason.clone() {
+                choice["finish_reason"] = finish_reason;
+            }
+            let response = json!({"choices": [choice]});
+            assert_eq!(
+                translate_openai_response_to_murmur(&response).unwrap_err(),
+                NO_FINISH_REASON,
+                "finish_reason = {finish_reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_stream_that_ends_with_no_finish_reason_is_refused() {
+        let cut_off = concat!(
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"He\"},\"finish_reason\":null}]}\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"llo\"},\"finish_reason\":null}]}\n",
+        );
+        let blank_reason = concat!(
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"\"}]}\n",
+            "data: [DONE]\n",
+        );
+        for body in [cut_off, blank_reason, ""] {
+            let err = parse_openai_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap_err();
+            assert_eq!(err, STREAM_NO_FINISH_REASON, "body = {body:?}");
+        }
+    }
+
+    #[test]
+    fn responses_response_with_no_status_is_refused() {
+        for status in [None, Some(Value::Null), Some(json!(3))] {
+            let mut response = json!({
+                "output": [
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Hi"}]}
+                ]
+            });
+            if let Some(status) = status.clone() {
+                response["status"] = status;
+            }
+            assert_eq!(
+                translate_responses_to_murmur(&response).unwrap_err(),
+                "driver: OpenAI Responses response has no status",
+                "status = {status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn responses_top_level_error_is_still_read_before_the_status() {
+        let response = json!({"error": {"message": "boom"}});
+        let payload = translate_responses_to_murmur(&response).unwrap();
+        assert_eq!(payload["stop_reason"], "error");
+        assert_eq!(payload["error"], "OpenAI Responses error: boom");
+    }
+
+    #[test]
+    fn responses_stream_with_no_terminal_event_is_refused() {
+        let body = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"He\"}\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"llo\"}\n",
+        );
+        for body in [body, ""] {
+            assert_eq!(
+                parse_responses_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap_err(),
+                "driver: OpenAI Responses stream ended with no terminal event",
+                "body = {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_provider_url_is_hardcoded_anywhere_in_the_crate() {
+        // Where inference goes is the host's fact. A literal provider URL in a driver is a
+        // value that would become silently effective the moment the host stopped supplying
+        // one, and it would carry the capsule's credentials with it. The needle is assembled
+        // rather than written out so that this assertion does not itself become the only
+        // occurrence of what it forbids.
+        let provider_url = concat!("https://", "api.");
+        assert!(
+            !include_str!("lib.rs").contains(provider_url),
+            "the driver must not name a provider URL; the endpoint comes from the host"
+        );
+    }
+
+    #[test]
+    fn run_inner_resolves_the_endpoint_through_the_shared_contract() {
+        // One implementation of "a missing endpoint is a refusal" exists, in
+        // murmur-driver-env. An inline `std::env::var` read here would be a second one, free
+        // to disagree with it again. `run_inner` is wasm-only, so this is asserted from the
+        // source; the needle is assembled so that this test is not its own evidence.
+        let source = include_str!("lib.rs");
+        let run_inner = &source[source
+            .find("fn run_inner(")
+            .expect("run_inner must exist")..];
+        assert!(
+            run_inner.contains(concat!("require_", "endpoint(")),
+            "run_inner must resolve the endpoint through murmur_driver_env::require_endpoint"
+        );
+    }
+
+    #[test]
+    fn manifest_declares_the_upstream_auth_scheme_the_gateway_will_read() {
+        // The runtime builds the auth header from these two fields, so a dropped quote pair
+        // (`value: {key}` is a YAML flow mapping, not a string) or a renamed key leaves the
+        // gateway with no scheme to apply and every request unauthenticated.
+        const BLOCK: &str = "upstream_auth:\n  header: Authorization\n  value: \"Bearer {key}\"\n";
+        assert!(
+            include_str!("../murmur.yaml").contains(BLOCK),
+            "drivers/driver-openai/murmur.yaml must contain verbatim:\n{BLOCK}"
+        );
+    }
+
+    #[test]
+    fn the_driver_neither_reads_a_credential_nor_builds_an_auth_header() {
+        // The runtime attaches the header declared under `upstream_auth:`, so a driver-side
+        // credential read would put the key back in the guest.
+        let source = include_str!("lib.rs");
+        let non_test = source[..source.find("\nmod tests {").expect("mod tests must exist")]
+            .to_lowercase();
+        for needle in [
+            concat!("murmur_inference_", "api_key"),
+            concat!("\"author", "ization\""),
+            concat!("\"x-api", "-key\""),
+            concat!("bear", "er "),
+        ] {
+            assert!(
+                !non_test.contains(needle),
+                "driver-openai: non-test source must not contain {needle}"
+            );
+        }
+    }
+
+    // ── Tool-call signals ─────────────────────────────────────────────────────
+
+    use super::{
+        parse_openai_sse_body_with_signals, parse_responses_sse_body_with_signals, RecordedSignal,
+    };
+
+    fn started(id: &str, name: &str) -> RecordedSignal {
+        RecordedSignal::Started {
+            id: id.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    fn input_bytes(id: &str, bytes: u64) -> RecordedSignal {
+        RecordedSignal::InputBytes {
+            id: id.to_string(),
+            bytes,
+        }
+    }
+
+    /// `marker` sits only inside a call's arguments, so no signal may carry it.
+    fn assert_no_signal_carries(signals: &[RecordedSignal], marker: &str) {
+        for signal in signals {
+            assert!(
+                !format!("{signal:?}").contains(marker),
+                "a tool-call signal carries argument text: {signal:?}"
+            );
+        }
+    }
+
+    /// One Chat Completions chunk carrying a `tool_calls` fragment for `index`.
+    fn chat_tool_delta(
+        index: u64,
+        id: Option<&str>,
+        name: Option<&str>,
+        arguments: Option<&str>,
+    ) -> String {
+        let mut call = json!({"index": index, "function": {}});
+        if let Some(id) = id {
+            call["id"] = json!(id);
+            call["type"] = json!("function");
+        }
+        if let Some(name) = name {
+            call["function"]["name"] = json!(name);
+        }
+        if let Some(arguments) = arguments {
+            call["function"]["arguments"] = json!(arguments);
+        }
+        let chunk = json!({"choices": [{"delta": {"tool_calls": [call]}, "finish_reason": null}]});
+        format!("data: {chunk}\n")
+    }
+
+    const CHAT_TOOL_CALLS_FINISH: &str =
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\ndata: [DONE]\n";
+
+    fn parse_chat_with_signals(body: &str) -> (Value, Vec<RecordedSignal>) {
+        let (result, signals) = parse_openai_sse_body_with_signals(body, &mut |_| {}, &mut |_| {});
+        (result.unwrap(), signals)
+    }
+
+    fn responses_event(event: Value) -> String {
+        format!("data: {event}\n\n")
+    }
+
+    fn function_call_added(output_index: u64, call_id: &str, name: &str) -> String {
+        responses_event(json!({
+            "type": "response.output_item.added",
+            "output_index": output_index,
+            "item": {
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": call_id,
+                "name": name,
+                "arguments": "",
+            },
+        }))
+    }
+
+    fn function_call_arguments_delta(output_index: u64, delta: &str) -> String {
+        responses_event(json!({
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_1",
+            "output_index": output_index,
+            "delta": delta,
+        }))
+    }
+
+    fn function_call_arguments_done(output_index: u64, arguments: &str) -> String {
+        responses_event(json!({
+            "type": "response.function_call_arguments.done",
+            "item_id": "fc_1",
+            "output_index": output_index,
+            "arguments": arguments,
+        }))
+    }
+
+    const RESPONSES_COMPLETED: &str = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\"}}\n\n";
+
+    fn parse_responses_with_signals(body: &str) -> (Value, Vec<RecordedSignal>) {
+        let (result, signals) =
+            parse_responses_sse_body_with_signals(body, &mut |_| {}, &mut |_| {});
+        (result.unwrap(), signals)
+    }
+
+    #[test]
+    fn responses_tool_call_signals_its_call_id_then_one_total_per_delta() {
+        let body = [
+            function_call_added(1, "call_abc", "tool-editor"),
+            function_call_arguments_delta(1, r#"{"text":"ZQXJ"#),
+            function_call_arguments_delta(1, r#" é"}"#),
+            function_call_arguments_done(1, r#"{"text":"ZQXJ é"}"#),
+            RESPONSES_COMPLETED.to_string(),
+        ]
+        .concat();
+
+        let (result, signals) = parse_responses_with_signals(&body);
+
+        assert_eq!(
+            signals,
+            vec![
+                started("call_abc", "tool-editor"),
+                input_bytes("call_abc", 13),
+                input_bytes("call_abc", 18),
+            ]
+        );
+        assert_eq!(r#"{"text":"ZQXJ é"}"#.len(), 18);
+        assert_eq!(result["stop_reason"], "tool_call");
+        let call = &result["content"][0];
+        assert_eq!(call["id"], "call_abc");
+        assert_eq!(call["name"], "tool-editor");
+        assert_eq!(call["input"], json!({"text": "ZQXJ é"}));
+        for signal in &signals {
+            assert!(
+                !format!("{signal:?}").contains("fc_1"),
+                "{signal:?} names the item id"
+            );
+        }
+        assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    #[test]
+    fn responses_done_longer_than_the_deltas_adds_one_total() {
+        let body = [
+            function_call_added(1, "call_abc", "tool-editor"),
+            function_call_arguments_delta(1, r#"{"text":"ZQXJ"#),
+            function_call_arguments_done(1, r#"{"text":"ZQXJ é"}"#),
+            RESPONSES_COMPLETED.to_string(),
+        ]
+        .concat();
+
+        let (result, signals) = parse_responses_with_signals(&body);
+
+        assert_eq!(
+            signals,
+            vec![
+                started("call_abc", "tool-editor"),
+                input_bytes("call_abc", 13),
+                input_bytes("call_abc", 18),
+            ]
+        );
+        assert_eq!(result["content"][0]["input"], json!({"text": "ZQXJ é"}));
+        assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    #[test]
+    fn responses_tool_call_with_an_empty_call_id_signals_nothing() {
+        let body = [
+            function_call_added(1, "", "tool-editor"),
+            function_call_arguments_delta(1, r#"{"text":"ZQXJ"}"#),
+            function_call_arguments_done(1, r#"{"text":"ZQXJ"}"#),
+            RESPONSES_COMPLETED.to_string(),
+        ]
+        .concat();
+
+        let (result, signals) = parse_responses_with_signals(&body);
+
+        assert_eq!(signals, vec![]);
+        assert_eq!(
+            result["content"],
+            json!([{"type": "tool_call", "id": "", "name": "tool-editor", "input": {"text": "ZQXJ"}}])
+        );
+    }
+
+    #[test]
+    fn responses_tool_call_signals_leave_text_and_reasoning_chunks_unchanged() {
+        let body = [
+            responses_event(
+                json!({"type": "response.reasoning_summary_text.delta", "delta": "Write it."}),
+            ),
+            responses_event(json!({"type": "response.output_text.delta", "delta": "Writing "})),
+            function_call_added(1, "call_abc", "tool-editor"),
+            responses_event(json!({"type": "response.output_text.delta", "delta": "now."})),
+            function_call_arguments_delta(1, r#"{"text":"ZQXJ"}"#),
+            responses_event(
+                json!({"type": "response.reasoning_summary_text.delta", "delta": " Done."}),
+            ),
+            function_call_arguments_done(1, r#"{"text":"ZQXJ"}"#),
+            RESPONSES_COMPLETED.to_string(),
+        ]
+        .concat();
+
+        let mut text: Vec<String> = Vec::new();
+        let mut thinking: Vec<String> = Vec::new();
+        let (result, signals) = parse_responses_sse_body_with_signals(
+            &body,
+            &mut |c| text.push(c.to_string()),
+            &mut |c| thinking.push(c.to_string()),
+        );
+
+        assert_eq!(text, vec!["Writing ", "now."]);
+        assert_eq!(thinking, vec!["Write it.", " Done."]);
+        assert_eq!(
+            result.unwrap()["content"],
+            json!([
+                {"type": "thinking", "text": "Write it. Done."},
+                {"type": "tool_call", "id": "call_abc", "name": "tool-editor", "input": {"text": "ZQXJ"}}
+            ])
+        );
+        assert_eq!(
+            signals,
+            vec![
+                started("call_abc", "tool-editor"),
+                input_bytes("call_abc", 15),
+            ]
+        );
+        assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    #[test]
+    fn chat_tool_call_signals_its_start_then_rising_input_byte_totals() {
+        let body = [
+            chat_tool_delta(0, Some("call_1"), Some("bash"), Some("")),
+            chat_tool_delta(0, None, None, Some(r#"{"cmd":"#)),
+            chat_tool_delta(0, None, None, Some(r#""ZQXJ ü"}"#)),
+            CHAT_TOOL_CALLS_FINISH.to_string(),
+        ]
+        .concat();
+
+        let (result, signals) = parse_chat_with_signals(&body);
+
+        assert_eq!(
+            signals,
+            vec![
+                started("call_1", "bash"),
+                input_bytes("call_1", 7),
+                input_bytes("call_1", 17),
+            ]
+        );
+        assert_eq!(r#"{"cmd":"ZQXJ ü"}"#.len(), 17);
+        let call = &result["content"][0];
+        assert_eq!(call["id"], "call_1");
+        assert_eq!(call["name"], "bash");
+        assert_eq!(call["input"], json!({"cmd": "ZQXJ ü"}));
+        assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    #[test]
+    fn chat_tool_calls_at_two_indexes_keep_separate_ids_and_totals() {
+        let body = [
+            chat_tool_delta(0, Some("call_a"), Some("read"), Some("")),
+            chat_tool_delta(1, Some("call_b"), Some("bash"), Some("")),
+            chat_tool_delta(0, None, None, Some(r#"{"path":"#)),
+            chat_tool_delta(1, None, None, Some(r#"{"cmd":"#)),
+            chat_tool_delta(0, None, None, Some(r#""ZQXJ.md"}"#)),
+            chat_tool_delta(1, None, None, Some(r#""ls ZQXJ"}"#)),
+            CHAT_TOOL_CALLS_FINISH.to_string(),
+        ]
+        .concat();
+
+        let (result, signals) = parse_chat_with_signals(&body);
+
+        assert_eq!(
+            signals,
+            vec![
+                started("call_a", "read"),
+                started("call_b", "bash"),
+                input_bytes("call_a", 8),
+                input_bytes("call_b", 7),
+                input_bytes("call_a", 18),
+                input_bytes("call_b", 17),
+            ]
+        );
+        assert_eq!(result["content"][0]["id"], "call_a");
+        assert_eq!(result["content"][0]["input"], json!({"path": "ZQXJ.md"}));
+        assert_eq!(result["content"][1]["id"], "call_b");
+        assert_eq!(result["content"][1]["input"], json!({"cmd": "ls ZQXJ"}));
+        assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    #[test]
+    fn chat_tool_call_whose_id_arrives_late_is_reported_once_it_does() {
+        let head = [
+            chat_tool_delta(0, None, Some("bash"), Some(r#"{"cmd":"#)),
+            chat_tool_delta(0, None, None, Some(r#""ZQXJ"}"#)),
+        ]
+        .concat();
+        let (_, before_the_id) =
+            parse_openai_sse_body_with_signals(&head, &mut |_| {}, &mut |_| {});
+        assert_eq!(before_the_id, vec![]);
+
+        let body = [
+            head,
+            chat_tool_delta(0, Some("call_late"), None, None),
+            CHAT_TOOL_CALLS_FINISH.to_string(),
+        ]
+        .concat();
+
+        let (result, signals) = parse_chat_with_signals(&body);
+
+        assert_eq!(
+            signals,
+            vec![started("call_late", "bash"), input_bytes("call_late", 14)]
+        );
+        assert_eq!(result["content"][0]["id"], "call_late");
+        assert_eq!(result["content"][0]["input"], json!({"cmd": "ZQXJ"}));
+        assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    #[test]
+    fn chat_tool_call_that_never_gets_an_id_signals_nothing_and_is_returned_as_before() {
+        let body = [
+            chat_tool_delta(0, None, Some("bash"), Some(r#"{"cmd":"#)),
+            chat_tool_delta(0, None, None, Some(r#""ZQXJ"}"#)),
+            CHAT_TOOL_CALLS_FINISH.to_string(),
+        ]
+        .concat();
+
+        let (result, signals) = parse_chat_with_signals(&body);
+
+        assert_eq!(signals, vec![]);
+        assert_eq!(
+            result["content"],
+            json!([{"type": "tool_call", "id": "", "name": "bash", "input": {"cmd": "ZQXJ"}}])
+        );
+    }
+
+    #[test]
+    fn chat_tool_call_with_no_arguments_signals_its_start_and_the_empty_object() {
+        // OpenAI sends `{}` for a call with no arguments; empty argument text does not parse
+        // on this surface.
+        let body = [
+            chat_tool_delta(0, Some("call_1"), Some("list"), Some("")),
+            chat_tool_delta(0, None, None, Some("{}")),
+            CHAT_TOOL_CALLS_FINISH.to_string(),
+        ]
+        .concat();
+
+        let (result, signals) = parse_chat_with_signals(&body);
+
+        assert_eq!(
+            signals,
+            vec![started("call_1", "list"), input_bytes("call_1", 2)]
+        );
+        assert_eq!(result["content"][0]["input"], json!({}));
+    }
+
+    #[test]
+    fn wasm_driver_reports_tool_calls_on_murmur_stream_events_only() {
+        let source = include_str!("lib.rs");
+        // Ends at `mod tests` so the needles below cannot match themselves.
+        let start = source
+            .find("\nmod wasm_driver {")
+            .expect("mod wasm_driver must exist");
+        let end = source.find("\nmod tests {").expect("mod tests must exist");
+        let wasm = &source[start..end];
+        for call in [
+            "murmur::stream::events::tool_call_started(",
+            "murmur::stream::events::tool_call_input_bytes(",
+        ] {
+            assert!(wasm.contains(call), "mod wasm_driver must call {call}");
+        }
+        for retired in [concat!("murmur::", "text"), concat!("murmur:", "text")] {
+            assert!(!source.contains(retired), "lib.rs must not name {retired}");
+        }
+    }
+}

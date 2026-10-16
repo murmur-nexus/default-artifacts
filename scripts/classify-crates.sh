@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Classify every `[workspace] members` crate as targeting wasm32-wasip2 or not.
 #
-# This is the single derivation behind "what does the workspace wasm build skip":
-# scripts/build-wasm.sh turns it into `--exclude` flags, and
-# scripts/check-build-coverage.sh uses it to hold build.yml's matrices to the
-# same answer. Nothing hand-maintains a list of crate names.
+# This is the single derivation behind "what does the workspace wasm build skip"
+# and "which crates are native binaries": scripts/build-wasm.sh turns it into
+# `--exclude` flags, and build.yml's native job builds one `-p` per
+# `native-artifact` row. Nothing hand-maintains a list of crate names.
 #
 # Two independent rules produce an exclusion, and each catches a different set:
 #
@@ -13,14 +13,14 @@
 #                    link C sources (bundled SQLite, tree-sitter) or need host
 #                    capabilities (subprocesses, raw sockets) that a
 #                    wasm32-wasip2 guest does not have.
-#                    Catches: murmur-tool-{git,registry-search,code-graph,
+#                    Catches: tool-{git,registry-search,code-graph,
 #                    code-coverage,test-report}.
 #
-#   internal-bin     A crate with no murmur.yaml (so: unpublishable, absent from
-#                    artifacts.toml) whose Cargo.toml declares a `[[bin]]`. These
+#   internal-bin     A crate with no murmur.yaml (so: never published, absent from
+#                    list-artifacts.sh) whose Cargo.toml declares a `[[bin]]`. These
 #                    are host-side helpers, built and run on the developer's
 #                    machine, never shipped as a component.
-#                    Catches: murmur-tool-git-validate.
+#                    Catches: tool-git-validate.
 #
 # The two included classes:
 #
@@ -37,8 +37,8 @@
 #
 # Output: one tab-separated `<class>\t<crate-name>\t<path>` row per member, in
 # `[workspace] members` order. The crate name is read from Cargo.toml, not
-# inferred from the path — `tools/murmur-tool-git/validate` is the crate
-# `murmur-tool-git-validate`.
+# inferred from the path — `tools/tool-git/validate` is the crate
+# `tool-git-validate`.
 #
 # Usage:   scripts/classify-crates.sh
 # Exit:    0 — every member classified

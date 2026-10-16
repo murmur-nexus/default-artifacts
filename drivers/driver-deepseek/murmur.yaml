@@ -1,0 +1,11 @@
+name: driver-deepseek
+version: 0.8.0
+runtime: driver
+description: "DeepSeek inference driver — deepseek-v4-flash and deepseek-v4-pro with thinking mode"
+requires_files:
+  - driver_deepseek.wasm
+
+# How this provider expects the inference credential to be presented; the runtime substitutes {key}.
+upstream_auth:
+  header: Authorization
+  value: "Bearer {key}"
