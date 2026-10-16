@@ -3,8 +3,9 @@
 #
 # This is the single derivation behind "what does the workspace wasm build skip"
 # and "which crates are native binaries": scripts/build-wasm.sh turns it into
-# `--exclude` flags, and build.yml's native job builds one `-p` per
-# `native-artifact` row. Nothing hand-maintains a list of crate names.
+# its crate lists, and scripts/build-native.sh (which build.yml's native job
+# calls) builds one cargo invocation per `native-artifact` row. Nothing
+# hand-maintains a list of crate names.
 #
 # Two independent rules produce an exclusion, and each catches a different set:
 #
@@ -28,7 +29,7 @@
 #                    `implementation:` key at all (drivers and hooks).
 #   internal-lib     No murmur.yaml, no `[[bin]]`, but a library — it is linked
 #                    into wasm artifacts, so it must cross-compile.
-#                    Catches: murmur-test-parse, murmur-hook-transcript.
+#                    Catches: murmur-{driver-env,hook-transcript,test-parse,time}.
 #
 # A member matching none of the four is a hard error rather than a silent guess
 # in either direction: excluding it would drop an artifact out of the build, and

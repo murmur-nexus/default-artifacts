@@ -34,7 +34,7 @@ from its `name:` or a name with a `murmur-` prefix.
 | Kind | Declared by | Payload | Built by |
 |---|---|---|---|
 | wasm | `implementation: wasm`, or none (drivers, hooks) | `<name with - as _>.wasm` | `./scripts/build-wasm.sh` |
-| native | `implementation: native` | `bin/<name>`, one zip per platform | `cargo build --release -p <name>` |
+| native | `implementation: native` | `bin/<name>`, one zip per platform | `./scripts/build-native.sh` (all) / `cargo build --release -p <name>` (one) |
 | skill | `runtime: skill` | `skill.md` | nothing to compile |
 
 A tool is native only when a `wasm32-wasip2` guest cannot do its job — spawning `git`, raw sockets
@@ -60,12 +60,13 @@ at the exact interface version in `wit/`; run bare, it validates every `.wasm` i
 `local-install.sh` builds, packs and installs one artifact into a capsule, where it is
 `local/<name>` — reference it that way in the capsule's `artifacts:`.
 
-A component's bytes depend on which crates cargo built in the same invocation, because cargo
-unifies dependency features across them. A zip packed after `cargo build -p <one>` can therefore
-differ from the release's. Pack a release only from `./scripts/build-wasm.sh` and one
-`cargo build --release` over every native crate, as `build.yml` does. `cargo test` counts as a
-single-crate build here: the `wasm_component` suites rebuild their own crate into the same
-`target/`, so run `./scripts/build-wasm.sh` again between testing and packing.
+Cargo unifies dependency features across every crate one invocation builds, so the build scripts
+give each artifact its own invocation. `cargo build -p <name>`, `local-install.sh`, the
+`wasm_component` tests and the release therefore produce the same bytes for an artifact, and
+nothing needs rebuilding between testing and packing. `./scripts/check-build-isolation.sh
+[<name>...]` proves it: it runs the release's build, rebuilds each artifact alone, and fails on any
+zip that differs. It needs `MUR_BIN`; run it after changing a build script or a dependency's
+features.
 
 ## Add one
 
@@ -97,8 +98,8 @@ block, see murmur's [manifest reference](https://docs.murmur.nexus/reference/man
    `cargo update --workspace --offline`. CI tests with `--locked`, so a stale `Cargo.lock` fails.
 3. Merge, then tag the merge commit `v<workspace version>` and push the tag.
 4. The `build` workflow runs. `verify` checks that the tag is `v` + the workspace version and the
-   newest `v*` tag, and that no artifact drifted. `native` builds the native tools on each platform
-   runner. `release` builds `mur` at `MURMUR_REV` and the wasm artifacts, validates them, packs
+   newest `v*` tag, and that no artifact drifted. `native` runs `./scripts/build-native.sh` on each
+   platform runner. `release` builds `mur` at `MURMUR_REV` and the wasm artifacts, validates them, packs
    every artifact with `./scripts/package-release.sh`, and writes `artifacts-index.json` with
    `./scripts/index-release.sh`, merged with the latest release's index. Then
    `./scripts/check-release-installs.sh` installs every new version through `mur` against a
