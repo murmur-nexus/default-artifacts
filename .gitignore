@@ -16,7 +16,7 @@
 **/workdir/
 .nexus/
 
-# murmur-tool-code-graph on-disk graph db + slice payloads — created under a target
+# tool-code-graph on-disk graph db + slice payloads — created under a target
 # repo's .murmur/ at index/slice time; a runtime artifact, never committed.
 **/.murmur/
 

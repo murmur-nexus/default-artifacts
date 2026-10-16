@@ -11,21 +11,19 @@
 #
 # Category is derived from the artifact's crate/file name (hyphen- and
 # underscore-insensitive), NOT from an argument, so the same mapping is enforced
-# identically in both `ci.yml` and `build.yml` (which calls this once per matrix
-# entry):
+# identically in both `ci.yml` and `build.yml`, which validate the whole build
+# output with no argument:
 #
-#   murmur-hook-*                      -> HOOK   category
-#   murmur-driver-claude-code          -> PROCESS-DRIVER category
-#   murmur-driver-*                    -> TOOL   category
-#   murmur-tool-request-input          -> TOOL   category
-#   murmur-tool-{create,editor,corpus, -> TOOL   category (ported to wasm32-wasip2
-#     report}                                   components that export murmur:tool/run;
-#                                               they import zero murmur:* interfaces)
-#   murmur-tool-{git,git-validate,     -> SKIP   (still native bin crates cross-compiled
-#     registry-search}                          to wasm by the workspace build;
-#                                               shipped as native binaries, they
-#                                               export wasi:cli/run and are NOT
-#                                               murmur guest components)
+#   hook-*                             -> HOOK   category
+#   driver-claude-code                 -> PROCESS-DRIVER category
+#   driver-*                           -> TOOL   category
+#   tool-{request-input,create,editor, -> TOOL   category (wasm32-wasip2 components
+#     corpus,report,tavily}                     that export murmur:tool/run)
+#   tool-{git,git-validate,            -> SKIP   (native bin crates the workspace build
+#     registry-search}                          may still leave a .wasm for; shipped as
+#                                               native binaries, they export
+#                                               wasi:cli/run and are NOT murmur guest
+#                                               components)
 #   anything else                      -> ERROR  (fail closed: an unrecognised
 #                                               artifact must not silently skip)
 #
@@ -47,11 +45,11 @@
 #         load — there is nothing to satisfy it with.
 #
 # A process driver is told apart from an http driver by the interface it exports, not by its
-# name: both are `murmur-driver-*` artifacts with `runtime: driver`. So the `murmur-driver-*`
-# wildcard below cannot decide between them, and every process driver is listed here by name in
-# its own `case` arm ahead of that wildcard — a `case` takes its first matching arm, so a new
-# process driver added after the wildcard would be validated as an http driver and fail on its
-# export. The second one goes beside `murmur-driver-claude-code`.
+# name: both are `driver-*` artifacts with `runtime: driver`. So the `driver-*` wildcard below
+# cannot decide between them, and every process driver is listed here by name in its own `case`
+# arm ahead of that wildcard — a `case` takes its first matching arm, so a new process driver
+# added after the wildcard would be validated as an http driver and fail on its export. The
+# second one goes beside `driver-claude-code`.
 #
 # The exported interface's version is read from the vendored WIT that the
 # components are built against ($HOOK_WIT / $TOOL_WIT / $PROCESS_DRIVER_WIT below), never
@@ -128,21 +126,21 @@ validate_one() {
 
   # ---- category resolution ---------------------------------------------------
   case "$name" in
-    murmur-tool-git|murmur-tool-git-validate|murmur-tool-registry-search)
+    tool-git|tool-git-validate|tool-registry-search)
       echo "skip: $base is a native command component (exports wasi:cli/run), not a murmur guest component — not validated"
       return 0
       ;;
-    murmur-hook-*)
+    hook-*)
       category="hook"
       expected_export="murmur:hook/lifecycle"
       expected_version="$hook_version"
       ;;
-    murmur-driver-claude-code)
+    driver-claude-code)
       category="process-driver"
       expected_export="murmur:driver/process"
       expected_version="$process_driver_version"
       ;;
-    murmur-driver-*|murmur-tool-request-input|murmur-tool-create|murmur-tool-editor|murmur-tool-corpus|murmur-tool-report|murmur-tool-tavily)
+    driver-*|tool-request-input|tool-create|tool-editor|tool-corpus|tool-report|tool-tavily)
       category="tool"
       expected_export="murmur:tool/run"
       expected_version="$tool_version"

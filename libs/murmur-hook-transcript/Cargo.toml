@@ -6,10 +6,10 @@ license.workspace = true
 
 # Internal-only shared library: the host's tool-result envelope marker and the two
 # readers that turn a WIT `message`'s `content` into text a driver accepts, shared by
-# murmur-hook-compact and murmur-hook-memory so the marker and the envelope's field
+# hook-compact and hook-memory so the marker and the envelope's field
 # names have one definition rather than two to keep in step. It depends on serde_json
-# alone, so it cross-compiles to wasm32-wasip2 cleanly. NOT a publishable artifact —
-# never listed in artifacts.toml.
+# alone, so it cross-compiles to wasm32-wasip2 cleanly. NOT an artifact: it has no
+# murmur.yaml, so nothing publishes it.
 
 [lib]
 name = "murmur_hook_transcript"

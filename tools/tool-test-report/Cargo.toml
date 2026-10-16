@@ -1,0 +1,24 @@
+[package]
+name = "tool-test-report"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tool-test-report"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+# Shared parsers (detect_format/parse_cargo/parse_pytest/parse_go/parse_jest),
+# extracted so hook-regression-verifier can reuse them at the source level.
+murmur-test-parse = { path = "../../libs/murmur-test-parse" }
+
+[dev-dependencies]
+# Used only by the integration suite to hand-build a code-graph fixture db
+# matching tool-code-graph's schema (scenarios 7–9), since that tool's
+# branch was not merged to main when this slice was implemented.
+serde_json.workspace = true
+rusqlite.workspace = true

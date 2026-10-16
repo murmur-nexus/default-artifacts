@@ -1,0 +1,1812 @@
+//! Structured file editor tool, packaged as a `wasm32-wasip2` component exporting
+//! `murmur:tool/run` (world `tool`).
+//!
+//! The dispatch logic (operation parsing, the file operations, and the old-protocol
+//! output envelope) is deliberately split into a `cfg`-independent
+//! [`logic`] module so it can be unit-tested on the host with `cargo test` — exactly the
+//! split every hook crate uses (see `hooks/hook-compact/src/lib.rs`). The
+//! `wasm_tool` module (compiled only for `wasm32`) is a thin adapter: it rewraps the
+//! `murmur:tool/run` `ToolInput` into the stdin-envelope shape [`logic::run`] already
+//! parses, then maps the returned old-protocol JSON `Value` back to a WIT `ToolResult`.
+
+// ── Pure, host-testable dispatch logic (no WASM bindings, no `cfg`) ────────────
+pub mod logic {
+    use std::collections::HashSet;
+    use std::path::Path;
+
+    use regex::Regex;
+    use serde_json::{json, Value};
+    use walkdir::WalkDir;
+
+    // ── Configuration ──────────────────────────────────────────────────────────
+
+    const FIND_RESULT_SIZE_LIMIT: usize = 500 * 1024; // 500 KB ceiling for find_in_files output
+
+    // Upper bound on a single ranged `read_file` request, in lines. A bounded read exists to
+    // let an agent inspect a function instead of a whole module, so the cap enforces by
+    // construction that a ranged read is always *smaller* than the whole-file read it
+    // replaces. 2000 lines is generous enough to cover any single function or type while
+    // still being a small fraction of a large module.
+    const MAX_READ_RANGE_LINES: usize = 2000;
+
+    // Upper bound on `find_in_files` `context_lines`, mirroring the range a `grep -C` user
+    // would realistically ask for. Beyond this the context stops being "the surrounding
+    // function" and starts re-transmitting whole files, defeating the bounded-read intent.
+    const MAX_CONTEXT_LINES: i64 = 20;
+
+    // ── Error kind constants ────────────────────────────────────────────────────
+
+    mod err {
+        pub const NOT_FOUND: &str = "not_found";
+        pub const PERMISSION_DENIED: &str = "permission_denied";
+        pub const IO_ERROR: &str = "io_error";
+        pub const STRING_NOT_FOUND: &str = "string_not_found";
+        pub const INVALID_PATTERN: &str = "invalid_pattern";
+        pub const SEARCH_TOO_BROAD: &str = "search_too_broad";
+        pub const RESULT_SIZE_EXCEEDED: &str = "result_size_exceeded";
+        // read_file range validation: start_line < 1, an inverted span (start > end), or a
+        // start_line past the end of the file. All three are caller mistakes about *which*
+        // lines to read, so they share one kind; the message states which one occurred.
+        pub const INVALID_RANGE: &str = "invalid_range";
+        // read_file resolved span exceeds MAX_READ_RANGE_LINES — a valid but too-wide range.
+        pub const RANGE_TOO_LARGE: &str = "range_too_large";
+        // find_in_files context_lines is negative or exceeds MAX_CONTEXT_LINES.
+        pub const CONTEXT_TOO_LARGE: &str = "context_too_large";
+        // A path input (`path`, `dest_path` or `dir`) was given as an absolute value, which
+        // the manifest's contract forbids: every path this tool takes is relative to the
+        // capsule workdir.
+        pub const ABSOLUTE_PATH: &str = "absolute_path";
+    }
+
+    // ── Dispatch entry point ────────────────────────────────────────────────────
+
+    /// Parse a stdin-envelope string `{"data": <string-or-object>, "log_path": ...}`,
+    /// dispatch on `data.operation`, and return the old-protocol result `Value`. This is
+    /// the exact contract the native binary's `main` fed from stdin; the `wasm_tool`
+    /// adapter reconstructs the same envelope from the WIT `ToolInput` so behavior is
+    /// identical across the port.
+    pub fn run(raw: &str) -> Value {
+        if raw.trim().is_empty() {
+            return fail_msg("missing input on stdin");
+        }
+
+        let envelope: Value = match serde_json::from_str(raw) {
+            Ok(e) => e,
+            Err(e) => return fail_msg(format!("invalid stdin JSON: {e}")),
+        };
+
+        let data_value = match envelope.get("data") {
+            None | Some(Value::Null) => return fail_msg("missing data field"),
+            Some(v) => v.clone(),
+        };
+
+        // data may be a JSON-encoded string (double-encoded) or a JSON object directly
+        let op: Value = match &data_value {
+            Value::String(s) => match serde_json::from_str(s) {
+                Ok(v) => v,
+                Err(e) => return fail_msg(format!("invalid data JSON string: {e}")),
+            },
+            Value::Object(_) => data_value.clone(),
+            _ => return fail_msg("data must be a JSON string or object"),
+        };
+
+        // An absent, non-string or empty `operation` is "missing", the same as every other
+        // required string input in this tool.
+        let name = match op.get("operation") {
+            Some(Value::String(name)) if !name.is_empty() => name,
+            _ => return fail_msg(format!("missing \"operation\": {}", expected_operations())),
+        };
+        match OPERATIONS.iter().find(|(known, _, _)| known == name) {
+            Some((_, handler, effect)) => with_state_effect(handler(&op), effect),
+            None => fail_msg(format!(
+                "unknown operation {name:?}: {}",
+                expected_operations()
+            )),
+        }
+    }
+
+    /// An operation's entry point: the `data` object in, the old-protocol result out.
+    type Handler = fn(&Value) -> Value;
+
+    /// Every operation this tool dispatches: its name, its handler, and the `state_effect` a
+    /// successful call declares. The names are listed, in this order, in every error that
+    /// rejects an `operation`, and must equal the `operation` enum in `murmur.yaml`.
+    ///
+    /// The effect goes out via the runtime's reserved `state_effect` metadata key (see the
+    /// host's wit/tool.wit). This is what lets `mur trace` redundant-call detection reason
+    /// about these operations without hardcoding any of their names. Only successful calls
+    /// declare an effect — a failed read did not read, and a failed write did not mutate, so
+    /// those stay undeclared.
+    const OPERATIONS: [(&str, Handler, &str); 4] = [
+        ("read_file", op_read_file, "read"),
+        ("write_file", op_write_file, "mutate"),
+        ("replace_in_file", op_replace_in_file, "mutate"),
+        ("find_in_files", op_find_in_files, "read"),
+    ];
+
+    /// `expected one of ` followed by the [`OPERATIONS`] names, comma-separated — the tail of
+    /// every message that rejects an `operation`.
+    fn expected_operations() -> String {
+        let names: Vec<&str> = OPERATIONS.iter().map(|(name, _, _)| *name).collect();
+        format!("expected one of {}", names.join(", "))
+    }
+
+    /// Attach the reserved `state_effect` metadata key to a successful result. Failures are
+    /// left untouched (metadata stays `null`), so a call that did not complete declares no
+    /// effect.
+    fn with_state_effect(mut result: Value, effect: &str) -> Value {
+        if result.get("ok").and_then(Value::as_bool) == Some(true) {
+            result["metadata"] = json!({ "state_effect": effect });
+        }
+        result
+    }
+
+    // ── FILE operations ─────────────────────────────────────────────────────────
+
+    fn op_read_file(op: &Value) -> Value {
+        let path = match op.get("path").and_then(|v| v.as_str()) {
+            Some(p) if !p.is_empty() => p.to_string(),
+            _ => return fail_msg("missing required field: path"),
+        };
+        if let Some(refusal) = reject_absolute("path", &path) {
+            return refusal;
+        }
+
+        // Optional 1-based, inclusive line bounds. Reading through `as_i64` (not `as_u64`) is
+        // deliberate: a negative or zero `start_line` must surface as an INVALID_RANGE error,
+        // not be silently dropped as "absent". A field present as anything non-integer (or
+        // JSON null) is treated as absent.
+        let start_arg = op.get("start_line").and_then(Value::as_i64);
+        let end_arg = op.get("end_line").and_then(Value::as_i64);
+
+        // Whole-file read: the content verbatim, plus `total_lines` so an agent can size a
+        // follow-up ranged read.
+        if start_arg.is_none() && end_arg.is_none() {
+            return match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    let byte_count = content.len();
+                    let total_lines = content.lines().count();
+                    ok_with(
+                        format!("read {path}"),
+                        json!({
+                            "content": content,
+                            "total_lines": total_lines,
+                        }),
+                        format!("{byte_count} bytes"),
+                    )
+                }
+                Err(e) => err_result(io_error_kind(&e), format!("{path}: {e}")),
+            };
+        }
+
+        // Ranged read. The whole file is read to count its lines and validate the span.
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => return err_result(io_error_kind(&e), format!("{path}: {e}")),
+        };
+        let total_lines = content.lines().count();
+
+        let start = start_arg.unwrap_or(1);
+        if start < 1 {
+            return err_result(
+                err::INVALID_RANGE,
+                format!("start_line must be >= 1, got {start}"),
+            );
+        }
+        // start beyond EOF errors (states the real line count) rather than silently falling
+        // back to the whole file. An empty file (0 lines) rejects any start_line here.
+        if start as usize > total_lines {
+            return err_result(
+                err::INVALID_RANGE,
+                format!("start_line {start} is beyond end of file ({total_lines} lines)"),
+            );
+        }
+        // end defaults to EOF; an explicit end past EOF *clamps* (read-to-EOF is what an agent
+        // means) — the one case that clamps instead of erroring.
+        let mut end = end_arg.unwrap_or(total_lines as i64);
+        if end > total_lines as i64 {
+            end = total_lines as i64;
+        }
+        if start > end {
+            return err_result(
+                err::INVALID_RANGE,
+                format!("inverted range: start_line {start} is greater than end_line {end}"),
+            );
+        }
+
+        let start = start as usize;
+        let end = end as usize;
+        let span = end - start + 1;
+        if span > MAX_READ_RANGE_LINES {
+            return err_result(
+                err::RANGE_TOO_LARGE,
+                format!(
+                    "requested range of {span} lines exceeds the maximum of {MAX_READ_RANGE_LINES}; narrow start_line/end_line"
+                ),
+            );
+        }
+
+        // Slice `[start-1, end)` (0-based half-open), join with "\n". `lines()` already strips
+        // line terminators, so the join reproduces the original text of the span.
+        let sliced: String = content
+            .lines()
+            .skip(start - 1)
+            .take(end - start + 1)
+            .collect::<Vec<&str>>()
+            .join("\n");
+        let byte_count = sliced.len();
+
+        ok_with(
+            format!("read {path} lines {start}-{end}"),
+            json!({
+                "content": sliced,
+                "total_lines": total_lines,
+                "start_line": start,
+                "end_line": end,
+            }),
+            format!("{byte_count} bytes (lines {start}-{end} of {total_lines})"),
+        )
+    }
+
+    fn op_write_file(op: &Value) -> Value {
+        let path = match op.get("dest_path").and_then(|v| v.as_str()) {
+            Some(p) if !p.is_empty() => p.to_string(),
+            _ => return fail_msg("missing required field: dest_path"),
+        };
+        // Before `content` is read and before `create_dir_all` below, so an absolute
+        // destination never manufactures the directory tree it names.
+        if let Some(refusal) = reject_absolute("dest_path", &path) {
+            return refusal;
+        }
+        let content = match op.get("content").and_then(|v| v.as_str()) {
+            Some(c) => c.to_string(),
+            None => return fail_msg("missing required field: content"),
+        };
+
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            if !parent.as_os_str().is_empty() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    return err_result(io_error_kind(&e), format!("failed to create directories for {path}: {e}"));
+                }
+            }
+        }
+
+        let byte_count = content.len();
+        match std::fs::write(&path, content) {
+            Ok(()) => ok_summary_only(format!("wrote {path}"), format!("{byte_count} bytes written")),
+            Err(e) => err_result(io_error_kind(&e), format!("{path}: {e}")),
+        }
+    }
+
+    fn op_replace_in_file(op: &Value) -> Value {
+        let path = match op.get("dest_path").and_then(|v| v.as_str()) {
+            Some(p) if !p.is_empty() => p.to_string(),
+            _ => return fail_msg("missing required field: dest_path"),
+        };
+        if let Some(refusal) = reject_absolute("dest_path", &path) {
+            return refusal;
+        }
+        let old_string = match op.get("old_string").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => return fail_msg("missing required field: old_string"),
+        };
+        let new_string = match op.get("new_string").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => return fail_msg("missing required field: new_string"),
+        };
+
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => return err_result(io_error_kind(&e), format!("{path}: {e}")),
+        };
+
+        // Count BEFORE replacing; bail out without writing if absent.
+        let count = contents.matches(old_string.as_str()).count();
+        if count == 0 {
+            return err_result(
+                err::STRING_NOT_FOUND,
+                format!("old_string not found in {path}"),
+            );
+        }
+
+        let new_contents = contents.replace(old_string.as_str(), new_string.as_str());
+
+        match std::fs::write(&path, new_contents) {
+            Ok(()) => ok_with(
+                format!("{count} replacement(s) in {path}"),
+                json!({ "count": count }),
+                format!("{count} replacements"),
+            ),
+            Err(e) => err_result(io_error_kind(&e), format!("{path}: {e}")),
+        }
+    }
+
+    fn op_find_in_files(op: &Value) -> Value {
+        let pattern = match op.get("pattern").and_then(|v| v.as_str()) {
+            Some(p) if !p.is_empty() => p.to_string(),
+            _ => return fail_msg("missing required field: pattern"),
+        };
+        // Distinguish an absent `dir` field (missing required field) from a present-but-empty
+        // one. An empty string, ".", or "./" all resolve to "no scope narrower than repo
+        // root" and must be rejected identically to an explicit repo-root search.
+        let dir = match op.get("dir").and_then(|v| v.as_str()) {
+            Some(d) => d.to_string(),
+            None => return fail_msg("missing required field: dir"),
+        };
+        // An absolute scope is refused ahead of the scope check below: `/` is neither empty,
+        // "." nor "./", so search_too_broad would otherwise let it through to a full walk of
+        // the preopen.
+        if let Some(refusal) = reject_absolute("dir", &dir) {
+            return refusal;
+        }
+        let recursive = op.get("recursive").and_then(|v| v.as_bool()).unwrap_or(true);
+
+        // Optional grep-style context window. Default 0 reproduces the historical match shape
+        // exactly (no context keys). Validate before any filesystem walk so a rejected input
+        // performs no search. A negative value or one above the cap is rejected — the latter
+        // would re-transmit whole files and defeat the bounded-read intent.
+        let context_lines = op.get("context_lines").and_then(Value::as_i64).unwrap_or(0);
+        if !(0..=MAX_CONTEXT_LINES).contains(&context_lines) {
+            return err_result(
+                err::CONTEXT_TOO_LARGE,
+                format!(
+                    "context_lines must be between 0 and {MAX_CONTEXT_LINES}, got {context_lines}"
+                ),
+            );
+        }
+
+        // Scope check: reject any input that does not narrow the search below repo root.
+        let scope = dir.trim();
+        if scope.is_empty() || scope == "." || scope == "./" {
+            return err_result(
+                err::SEARCH_TOO_BROAD,
+                "find_in_files requires a specific subdirectory scope, not repo root. Provide a more specific path.",
+            );
+        }
+
+        let re = match Regex::new(&pattern) {
+            Ok(r) => r,
+            Err(e) => {
+                return err_result(
+                    err::INVALID_PATTERN,
+                    format!("invalid regex '{pattern}': {e}"),
+                )
+            }
+        };
+
+        let file_paths: Vec<std::path::PathBuf> = if recursive {
+            WalkDir::new(&dir)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+                .map(|e| e.into_path())
+                .collect()
+        } else {
+            match std::fs::read_dir(&dir) {
+                Ok(entries) => entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                    .map(|e| e.path())
+                    .collect(),
+                Err(e) => return err_result(io_error_kind(&e), format!("{dir}: {e}")),
+            }
+        };
+
+        let mut matches: Vec<Value> = Vec::new();
+        let mut files_matched = HashSet::new();
+        // Running lower bound on the final serialized output. `ok_with` emits each match
+        // object twice — nested under `data.matches` and flattened at the top-level
+        // `matches` field — so every match contributes ~2x its serialized length to the
+        // real payload. The original code counted it once, under-bounding the true output by
+        // roughly half. This early-exit guard bounds memory on pathological inputs; the
+        // authoritative ceiling check below measures the exact bytes that go out the door.
+        let mut approx_out_size: usize = 0;
+
+        for file_path in file_paths {
+            let contents = match std::fs::read_to_string(&file_path) {
+                Ok(c) => c,
+                Err(_) => continue, // skip binary or unreadable files
+            };
+
+            let relative = file_path
+                .strip_prefix(&dir)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| file_path.to_string_lossy().to_string());
+            // Normalize away leading slash that strip_prefix can produce on some paths.
+            let relative = relative.trim_start_matches('/').to_string();
+
+            let lines: Vec<&str> = contents.lines().collect();
+            for (idx, line) in lines.iter().enumerate() {
+                if re.is_match(line) {
+                    let mut match_obj = json!({
+                        "path": relative,
+                        "line": idx + 1,
+                        "text": line,
+                    });
+                    // Attach context only when requested, so the default shape is byte-for-byte
+                    // unchanged (no empty arrays). Each side is clamped to the lines that exist
+                    // — a match near a file boundary gets a shorter array, never padding.
+                    if context_lines > 0 {
+                        let cl = context_lines as usize;
+                        let before_start = idx.saturating_sub(cl);
+                        let after_end = std::cmp::min(idx + 1 + cl, lines.len());
+                        match_obj["context_before"] = json!(&lines[before_start..idx]);
+                        match_obj["context_after"] = json!(&lines[idx + 1..after_end]);
+                    }
+                    // The running lower bound is measured *after* context is attached, so a
+                    // large context window inflating the payload is caught here (and again by
+                    // the authoritative post-serialization check below).
+                    approx_out_size += 2 * serde_json::to_string(&match_obj).unwrap_or_default().len();
+                    if approx_out_size > FIND_RESULT_SIZE_LIMIT {
+                        return err_result(err::RESULT_SIZE_EXCEEDED, size_exceeded_message());
+                    }
+
+                    matches.push(match_obj);
+                    files_matched.insert(relative.clone());
+                }
+            }
+        }
+
+        let match_count = matches.len();
+        let file_count = files_matched.len();
+        let summary = format!("{match_count} matches in {file_count} files");
+        let result = ok_with(summary.clone(), json!({ "matches": matches }), summary);
+
+        // Authoritative ceiling: measure the actual serialized output that the tool will
+        // return, not an intermediate representation. This catches boundary cases where the
+        // running lower bound stayed under the limit but the full envelope (both copies of
+        // the matches array plus the wrapper fields) tips it over.
+        let serialized_len = serde_json::to_string(&result).map(|s| s.len()).unwrap_or(0);
+        if serialized_len > FIND_RESULT_SIZE_LIMIT {
+            return err_result(err::RESULT_SIZE_EXCEEDED, size_exceeded_message());
+        }
+
+        result
+    }
+
+    fn size_exceeded_message() -> String {
+        format!(
+            "search result would exceed size limit of {FIND_RESULT_SIZE_LIMIT} bytes. Try a more specific pattern or narrower scope."
+        )
+    }
+
+    // ── I/O error mapping ───────────────────────────────────────────────────────
+
+    fn io_error_kind(e: &std::io::Error) -> &'static str {
+        match e.kind() {
+            std::io::ErrorKind::NotFound => err::NOT_FOUND,
+            std::io::ErrorKind::PermissionDenied => err::PERMISSION_DENIED,
+            _ => err::IO_ERROR,
+        }
+    }
+
+    // ── Output constructors ─────────────────────────────────────────────────────
+    //
+    // Mirrors the git-tool protocol so the capsule runtime can extract data/summary.
+    // Fields: ok, message, status, summary, data, data_path, metadata.
+    // Error results additionally carry error_kind at the top level.
+
+    fn ok_with(message: impl Into<String>, data: Value, summary: impl Into<String>) -> Value {
+        let msg = message.into();
+        let sum = summary.into();
+        let data_clone = data.clone();
+        let mut obj = json!({
+            "ok": true,
+            "message": &msg,
+            "status": "passed",
+            "summary": &sum,
+            "data": data_clone,
+            "data_path": null,
+            "metadata": null,
+        });
+        // Flatten data fields at the top level for new-protocol callers.
+        if let Value::Object(map) = data {
+            for (k, v) in map {
+                obj[k] = v;
+            }
+        }
+        obj
+    }
+
+    fn ok_summary_only(message: impl Into<String>, summary: impl Into<String>) -> Value {
+        let msg = message.into();
+        let sum = summary.into();
+        json!({
+            "ok": true,
+            "message": &msg,
+            "status": "passed",
+            "summary": &sum,
+            "data": null,
+            "data_path": null,
+            "metadata": null,
+        })
+    }
+
+    fn fail_msg(message: impl Into<String>) -> Value {
+        let msg = message.into();
+        json!({
+            "ok": false,
+            "message": &msg,
+            "status": "error",
+            "summary": &msg,
+            "data": null,
+            "data_path": null,
+            "metadata": null,
+        })
+    }
+
+    fn err_result(error_kind: &str, message: impl Into<String>) -> Value {
+        let msg = message.into();
+        json!({
+            "ok": false,
+            "error_kind": error_kind,
+            "message": &msg,
+            "status": "error",
+            "summary": &msg,
+            "data": null,
+            "data_path": null,
+            "metadata": null,
+        })
+    }
+
+    /// The refusal for an absolute path input, or `None` when `value` is relative.
+    ///
+    /// Under the single WASI preopen a tool is dispatched with, an absolute value resolves
+    /// *inside* the preopen: `/app/results.txt` lands at `<workdir>/app/results.txt`, which a
+    /// later read of the same value resolves identically, so nothing inside the capsule can
+    /// see the divergence from what the caller named. Refusing is therefore the only way the
+    /// contract in `murmur.yaml` — every path is relative to the capsule workdir — is
+    /// observable at all.
+    ///
+    /// `property` is the key the caller actually wrote (`path`, `dest_path` or `dir`), so the
+    /// message names the field to fix. The suggestion is the value's final component: the tool
+    /// cannot know which leading components the caller mistook for a root, but under a
+    /// `Sealed` capsule the workdir is the only writable location, so the bare file name is
+    /// the likely intended target. Values with no final component (`/`, or one ending in
+    /// `..`) get no suggestion rather than an empty one.
+    fn reject_absolute(property: &str, value: &str) -> Option<Value> {
+        let path = Path::new(value);
+        if !path.is_absolute() {
+            return None;
+        }
+        let suggestion = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => format!(" (did you mean '{name}'?)"),
+            None => String::new(),
+        };
+        Some(err_result(
+            err::ABSOLUTE_PATH,
+            format!(
+                "'{property}' must be relative to the capsule workdir; got '{value}'{suggestion}"
+            ),
+        ))
+    }
+
+    // ── Unit tests ──────────────────────────────────────────────────────────────
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::fs;
+
+        // Fixture root for every test that drives an operation, relative to the process CWD
+        // (the crate root, under `cargo test`). Every operation refuses an absolute path
+        // input, so a fixture under `std::env::temp_dir()` is unreachable through the tool —
+        // a workdir-relative tree is the only shape a host test can address, and it is also
+        // the shape a real capsule uses. Gitignored; each test removes its own subtree.
+        const SCRATCH_ROOT: &str = ".test-scratch";
+
+        // An empty fixture directory at `.test-scratch/<tag>`, as a relative path.
+        fn scratch(tag: &str) -> std::path::PathBuf {
+            let dir = std::path::PathBuf::from(SCRATCH_ROOT).join(tag);
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).expect("failed to create scratch dir");
+            dir
+        }
+
+        #[test]
+        fn fail_msg_returns_ok_false() {
+            let out = fail_msg("something went wrong");
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["message"], "something went wrong");
+        }
+
+        #[test]
+        fn err_result_includes_error_kind() {
+            let out = err_result(err::NOT_FOUND, "file.txt: not found");
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::NOT_FOUND);
+            assert_eq!(out["message"], "file.txt: not found");
+        }
+
+        #[test]
+        fn err_constants_are_distinct() {
+            let kinds = [
+                err::NOT_FOUND,
+                err::PERMISSION_DENIED,
+                err::IO_ERROR,
+                err::STRING_NOT_FOUND,
+                err::INVALID_PATTERN,
+                err::SEARCH_TOO_BROAD,
+                err::RESULT_SIZE_EXCEEDED,
+                err::INVALID_RANGE,
+                err::RANGE_TOO_LARGE,
+                err::CONTEXT_TOO_LARGE,
+                err::ABSOLUTE_PATH,
+            ];
+            for (i, a) in kinds.iter().enumerate() {
+                for (j, b) in kinds.iter().enumerate() {
+                    if i != j {
+                        assert_ne!(a, b, "error kind constants must be unique");
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn ok_with_flattens_data_fields() {
+            let out = ok_with("done", json!({ "count": 3 }), "3 replacements");
+            assert_eq!(out["ok"], true);
+            assert_eq!(out["message"], "done");
+            assert_eq!(out["summary"], "3 replacements");
+            assert_eq!(out["data"]["count"], 3);
+            assert_eq!(out["count"], 3); // flattened
+        }
+
+        #[test]
+        fn run_returns_error_for_empty_input() {
+            let out = run("");
+            assert_eq!(out["ok"], false);
+            assert!(out["message"].as_str().unwrap().contains("missing input"));
+        }
+
+        #[test]
+        fn run_returns_error_for_unknown_operation() {
+            let input = r#"{"data":{"operation":"bogus_op_xyz"}}"#;
+            let out = run(input);
+            assert_eq!(out["ok"], false);
+            assert_eq!(
+                out["message"],
+                "unknown operation \"bogus_op_xyz\": expected one of read_file, write_file, \
+                 replace_in_file, find_in_files"
+            );
+        }
+
+        const MISSING_OPERATION: &str = "missing \"operation\": expected one of read_file, \
+                                         write_file, replace_in_file, find_in_files";
+
+        #[test]
+        fn run_names_a_missing_operation_and_writes_nothing() {
+            // Write-shaped input with every field but `operation`.
+            let dir = scratch("missing_operation");
+            let path = dir.join("out.txt");
+            let envelope = json!({
+                "data": { "dest_path": path.to_str().unwrap(), "content": "x" },
+            });
+            let out = run(&envelope.to_string());
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["status"], "error");
+            assert_eq!(out["message"], MISSING_OPERATION);
+            assert_eq!(out["summary"], MISSING_OPERATION);
+            assert!(out.get("error_kind").is_none(), "got {out:?}");
+            assert!(out["metadata"].is_null(), "got {out:?}");
+            assert!(
+                !path.exists(),
+                "a rejected operation must not reach the filesystem"
+            );
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn run_treats_a_non_string_or_empty_operation_as_missing() {
+            for operation in [
+                json!(null),
+                json!(42),
+                json!(true),
+                json!(["write_file"]),
+                json!({}),
+                json!(""),
+            ] {
+                let envelope = json!({ "data": { "operation": operation } });
+                let out = run(&envelope.to_string());
+                assert_eq!(out["ok"], false, "operation {operation}");
+                assert_eq!(out["status"], "error", "operation {operation}");
+                assert_eq!(out["message"], MISSING_OPERATION, "operation {operation}");
+                assert!(out["metadata"].is_null(), "operation {operation}");
+            }
+        }
+
+        #[test]
+        fn run_escapes_an_unknown_operation_name() {
+            let out = run(&json!({ "data": { "operation": "write\"file" } }).to_string());
+            let message = out["message"].as_str().unwrap();
+            assert!(
+                message.starts_with(r#"unknown operation "write\"file": expected one of "#),
+                "got {message}"
+            );
+
+            let out = run(&json!({ "data": { "operation": "write\nfile" } }).to_string());
+            let message = out["message"].as_str().unwrap();
+            assert!(!message.contains('\n'), "got {message:?}");
+            assert!(
+                message.starts_with(r#"unknown operation "write\nfile": "#),
+                "got {message:?}"
+            );
+        }
+
+        #[test]
+        fn a_rejected_operation_never_ends_in_a_dangling_colon() {
+            let dir = scratch("dangling_colon");
+            let dest = dir.join("out.txt");
+            let inputs = [
+                json!({ "data": { "dest_path": dest.to_str().unwrap(), "content": "x" } })
+                    .to_string(),
+                json!({ "data": { "operation": null } }).to_string(),
+                json!({ "data": { "operation": 42 } }).to_string(),
+                json!({ "data": { "operation": true } }).to_string(),
+                json!({ "data": { "operation": ["write_file"] } }).to_string(),
+                json!({ "data": { "operation": {} } }).to_string(),
+                json!({ "data": { "operation": "" } }).to_string(),
+                json!({ "data": { "operation": "bogus_op_xyz" } }).to_string(),
+                json!({ "data": r#"{"operation":"bogus_double_enc"}"# }).to_string(),
+                json!({ "data": { "operation": "write\"file" } }).to_string(),
+                json!({ "data": { "operation": "write\nfile" } }).to_string(),
+            ];
+            for input in inputs {
+                let out = run(&input);
+                let message = out["message"].as_str().unwrap();
+                assert!(
+                    !message.ends_with(':') && !message.ends_with(": "),
+                    "{input}: {message}"
+                );
+                assert!(message.ends_with("find_in_files"), "{input}: {message}");
+            }
+            assert!(
+                !dest.exists(),
+                "a rejected operation must not reach the filesystem"
+            );
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn every_listed_operation_reaches_its_handler() {
+            // With no other fields, each handler refuses on its own first required input —
+            // proof the name passed both the missing and the unknown check and reached the
+            // handler it is paired with.
+            let first_required = [
+                ("read_file", "path"),
+                ("write_file", "dest_path"),
+                ("replace_in_file", "dest_path"),
+                ("find_in_files", "pattern"),
+            ];
+            for (name, _, _) in OPERATIONS {
+                let (_, field) = first_required
+                    .iter()
+                    .find(|(op, _)| *op == name)
+                    .unwrap_or_else(|| panic!("no expected first required field for {name}"));
+                let out = run(&json!({ "data": { "operation": name } }).to_string());
+                assert_eq!(out["ok"], false, "{name}");
+                assert_eq!(
+                    out["message"],
+                    format!("missing required field: {field}"),
+                    "{name} did not reach its own handler"
+                );
+            }
+        }
+
+        // One half of the drift check: the message lists OPERATIONS, in order. The other half,
+        // in tests/manifest_declares_destination.rs, holds the manifest's enum to the message.
+        #[test]
+        fn the_rejection_message_lists_exactly_the_operations_table() {
+            let out = run(r#"{"data":{}}"#);
+            let message = out["message"].as_str().unwrap();
+            let (_, listed) = message
+                .split_once("expected one of ")
+                .unwrap_or_else(|| panic!("no list in {message}"));
+            let listed: Vec<&str> = listed.split(", ").collect();
+            let table: Vec<&str> = OPERATIONS.iter().map(|(name, _, _)| *name).collect();
+            assert_eq!(listed, table);
+        }
+
+        #[test]
+        fn with_state_effect_declares_on_success_only() {
+            let ok = with_state_effect(ok_summary_only("done", "done"), "mutate");
+            assert_eq!(ok["metadata"]["state_effect"], "mutate");
+
+            let failed = with_state_effect(fail_msg("nope"), "mutate");
+            assert!(
+                failed["metadata"].is_null(),
+                "a failed op must not declare a state effect"
+            );
+        }
+
+        #[test]
+        fn read_file_declares_read_effect() {
+            let dir = scratch("state_effect_read");
+            let path = dir.join("hello.txt");
+            fs::write(&path, "hi\n").unwrap();
+            let envelope = json!({
+                "data": { "operation": "read_file", "path": path.to_str().unwrap() },
+                "log_path": null,
+            });
+            let out = run(&envelope.to_string());
+            assert_eq!(out["ok"], true, "read should succeed: {out:?}");
+            assert_eq!(out["metadata"]["state_effect"], "read");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn write_file_declares_mutate_effect() {
+            let dir = scratch("state_effect_write");
+            let path = dir.join("out.txt");
+            let envelope = json!({
+                "data": { "operation": "write_file", "dest_path": path.to_str().unwrap(), "content": "x" },
+                "log_path": null,
+            });
+            let out = run(&envelope.to_string());
+            assert_eq!(out["ok"], true, "write should succeed: {out:?}");
+            assert_eq!(out["metadata"]["state_effect"], "mutate");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn write_file_rejects_the_legacy_path_spelling() {
+            // 0.2.0 spelled the write destination `path`. Falling back to it would leave the
+            // call judged by key name rather than by the `dest_path` destination the input
+            // schema declares, so the old spelling is rejected outright.
+            let dir = scratch("write_legacy_spelling");
+            let path = dir.join("out.txt");
+            let out = op_write_file(&json!({
+                "operation": "write_file",
+                "path": path.to_str().unwrap(),
+                "content": "x",
+            }));
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["message"], "missing required field: dest_path");
+            assert!(!path.exists(), "a rejected write must not reach the filesystem");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn replace_in_file_rejects_the_legacy_path_spelling() {
+            let dir = scratch("replace_legacy_spelling");
+            let path = dir.join("patch.txt");
+            fs::write(&path, "hello\n").unwrap();
+            let out = op_replace_in_file(&json!({
+                "operation": "replace_in_file",
+                "path": path.to_str().unwrap(),
+                "old_string": "hello",
+                "new_string": "goodbye",
+            }));
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["message"], "missing required field: dest_path");
+            assert_eq!(fs::read_to_string(&path).unwrap(), "hello\n");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn write_and_replace_take_dest_path() {
+            let dir = scratch("dest_path_roundtrip");
+            let path = dir.join("out.txt");
+            let written = op_write_file(&json!({
+                "operation": "write_file",
+                "dest_path": path.to_str().unwrap(),
+                "content": "hello\n",
+            }));
+            assert_eq!(written["ok"], true, "write should succeed: {written:?}");
+
+            let replaced = op_replace_in_file(&json!({
+                "operation": "replace_in_file",
+                "dest_path": path.to_str().unwrap(),
+                "old_string": "hello",
+                "new_string": "goodbye",
+            }));
+            assert_eq!(replaced["ok"], true, "replace should succeed: {replaced:?}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye\n");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn run_handles_double_encoded_data() {
+            let inner = r#"{"operation":"bogus_double_enc"}"#;
+            let envelope = format!(
+                r#"{{"data":"{}","log_path":null}}"#,
+                inner.replace('"', "\\\"")
+            );
+            let out = run(&envelope);
+            assert_eq!(out["ok"], false);
+            assert_eq!(
+                out["message"],
+                "unknown operation \"bogus_double_enc\": expected one of read_file, write_file, \
+                 replace_in_file, find_in_files"
+            );
+        }
+
+        // ── Scoped search tests ─────────────────────────────────────────────────
+
+        #[test]
+        fn find_in_files_rejects_repo_root_dot() {
+            let op = json!({
+                "operation": "find_in_files",
+                "pattern": "test",
+                "dir": ".",
+                "recursive": true,
+            });
+            let out = op_find_in_files(&op);
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::SEARCH_TOO_BROAD);
+            assert!(out["message"]
+                .as_str()
+                .unwrap()
+                .contains("specific subdirectory"));
+        }
+
+        #[test]
+        fn find_in_files_rejects_empty_dir() {
+            // Regression: dir="" means "no scope narrower than repo root", exactly like
+            // dir=".", so it must return error_kind=search_too_broad — not a bare
+            // missing-field message. The old test only checked ok==false and so passed even
+            // while the branch returned the wrong error kind.
+            let op = json!({
+                "operation": "find_in_files",
+                "pattern": "test",
+                "dir": "",
+                "recursive": true,
+            });
+            let out = op_find_in_files(&op);
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::SEARCH_TOO_BROAD);
+        }
+
+        #[test]
+        fn find_in_files_rejects_dot_slash_dir() {
+            let op = json!({
+                "operation": "find_in_files",
+                "pattern": "test",
+                "dir": "./",
+                "recursive": true,
+            });
+            let out = op_find_in_files(&op);
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::SEARCH_TOO_BROAD);
+        }
+
+        #[test]
+        fn find_in_files_absent_dir_is_missing_field() {
+            // An absent dir field is distinct from an empty one: it is a missing required
+            // field, not a too-broad scope.
+            let op = json!({
+                "operation": "find_in_files",
+                "pattern": "test",
+            });
+            let out = op_find_in_files(&op);
+            assert_eq!(out["ok"], false);
+            assert!(out["error_kind"].is_null());
+            assert!(out["message"].as_str().unwrap().contains("missing required field"));
+        }
+
+        // ── Absolute path refusal ───────────────────────────────────────────────
+        //
+        // Every path input is relative to the capsule workdir. Under the single WASI preopen a
+        // tool is dispatched with, an absolute value resolves *inside* the preopen rather than
+        // failing, and every operation resolves it the same way — so the only place the
+        // divergence from the contract shows up is outside the capsule. Each operation
+        // therefore refuses an absolute value before it reaches the filesystem.
+
+        #[test]
+        fn reject_absolute_renders_one_message_shape_for_every_property() {
+            assert!(
+                reject_absolute("path", "src/main.rs").is_none(),
+                "a relative value is not refused"
+            );
+            assert!(
+                reject_absolute("dir", "").is_none(),
+                "an empty value is not absolute — it is the scope check's business"
+            );
+
+            for (property, value, expected) in [
+                (
+                    "path",
+                    "/etc/hosts",
+                    "'path' must be relative to the capsule workdir; got '/etc/hosts' (did you mean 'hosts'?)",
+                ),
+                (
+                    "dest_path",
+                    "/app/results.txt",
+                    "'dest_path' must be relative to the capsule workdir; got '/app/results.txt' (did you mean 'results.txt'?)",
+                ),
+                (
+                    "dir",
+                    "/app",
+                    "'dir' must be relative to the capsule workdir; got '/app' (did you mean 'app'?)",
+                ),
+                // No final component to suggest: the parenthetical is omitted entirely rather
+                // than rendered empty.
+                ("dir", "/", "'dir' must be relative to the capsule workdir; got '/'"),
+                (
+                    "dest_path",
+                    "/app/..",
+                    "'dest_path' must be relative to the capsule workdir; got '/app/..'",
+                ),
+            ] {
+                let out = reject_absolute(property, value).expect("an absolute value is refused");
+                assert_eq!(out["ok"], false);
+                assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
+                assert_eq!(out["message"], expected);
+                assert_eq!(out["summary"], expected);
+            }
+        }
+
+        #[test]
+        fn read_file_refuses_an_absolute_path_even_when_the_file_exists() {
+            // The behaviour this refusal removes: an absolute value that a previous write
+            // already created reads back "correctly" from the wrong place. The fixture exists,
+            // so a not-found cannot stand in for the contract error.
+            let dir = scratch("absolute_read");
+            let file = dir.join("results.txt");
+            fs::write(&file, "content from the wrong place\n").unwrap();
+            let absolute = fs::canonicalize(&file).unwrap().to_string_lossy().to_string();
+
+            let out = op_read_file(&json!({ "operation": "read_file", "path": &absolute }));
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
+            assert!(out["content"].is_null(), "a refused read returns no content: {out:?}");
+            let msg = out["message"].as_str().unwrap();
+            assert!(
+                msg.starts_with("'path' must be relative to the capsule workdir"),
+                "the refusal names the property the caller wrote: {msg}"
+            );
+            assert!(msg.contains("did you mean 'results.txt'"), "{msg}");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn write_file_refuses_an_absolute_dest_path_before_creating_directories() {
+            // The `create_dir_all` in op_write_file is what manufactured `<workdir>/app/` for
+            // `/app/results.txt`. The refusal lands ahead of it, so a rejected write leaves no
+            // stray directory behind.
+            let dir = scratch("absolute_write");
+            let absolute = fs::canonicalize(&dir)
+                .unwrap()
+                .join("app")
+                .join("results.txt")
+                .to_string_lossy()
+                .to_string();
+
+            let out = op_write_file(&json!({
+                "operation": "write_file",
+                "dest_path": &absolute,
+                "content": "written to the wrong place",
+            }));
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
+            assert!(
+                out["message"].as_str().unwrap().contains("'dest_path'"),
+                "the refusal names dest_path, not path: {out:?}"
+            );
+            assert!(
+                !dir.join("app").exists(),
+                "a refused write must not create the directories it named"
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn absolute_write_through_dispatch_declares_no_mutation() {
+            // Through `run`, so the state_effect wrapper is in play: a refused write is not
+            // recorded as a mutation.
+            let envelope = json!({
+                "data": {
+                    "operation": "write_file",
+                    "dest_path": "/app/results.txt",
+                    "content": "written to the wrong place",
+                },
+                "log_path": null,
+            });
+            let out = run(&envelope.to_string());
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
+            assert!(out["metadata"].is_null(), "a refused write declares no effect: {out:?}");
+        }
+
+        #[test]
+        fn replace_in_file_refuses_an_absolute_dest_path_and_edits_nothing() {
+            let dir = scratch("absolute_replace");
+            let file = dir.join("patch.txt");
+            fs::write(&file, "hello world\n").unwrap();
+            let absolute = fs::canonicalize(&file).unwrap().to_string_lossy().to_string();
+
+            let out = op_replace_in_file(&json!({
+                "operation": "replace_in_file",
+                "dest_path": &absolute,
+                "old_string": "hello",
+                "new_string": "goodbye",
+            }));
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
+            assert!(out["message"].as_str().unwrap().contains("'dest_path'"), "{out:?}");
+            assert_eq!(
+                fs::read_to_string(&file).unwrap(),
+                "hello world\n",
+                "a refused replacement leaves the file byte-identical"
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn find_in_files_refuses_an_absolute_dir() {
+            let out = op_find_in_files(&json!({
+                "operation": "find_in_files",
+                "pattern": "needle",
+                "dir": "/app",
+                "recursive": true,
+            }));
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
+            let msg = out["message"].as_str().unwrap();
+            assert!(msg.contains("'dir'"), "{msg}");
+            assert!(msg.contains("did you mean 'app'"), "{msg}");
+            assert!(out["matches"].is_null(), "a refused search performs no walk: {out:?}");
+        }
+
+        #[test]
+        fn find_in_files_refuses_the_bare_root_ahead_of_the_scope_check() {
+            // "/" is neither empty, "." nor "./", so the search_too_broad check does not catch
+            // it — it would walk the whole preopen. The absolute check runs first, and with no
+            // final component there is nothing to suggest.
+            let out = op_find_in_files(&json!({
+                "operation": "find_in_files",
+                "pattern": "needle",
+                "dir": "/",
+                "recursive": true,
+            }));
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
+            let msg = out["message"].as_str().unwrap();
+            assert!(msg.contains("'dir'"), "{msg}");
+            assert!(msg.contains("got '/'"), "{msg}");
+            assert!(!msg.contains("did you mean"), "no file name to suggest: {msg}");
+        }
+
+        #[test]
+        fn an_absent_path_input_still_reports_the_missing_field() {
+            // The absolute check only runs on a value that was successfully extracted, so an
+            // absent input keeps its missing-field message and carries no error_kind.
+            for out in [
+                op_read_file(&json!({ "operation": "read_file" })),
+                op_write_file(&json!({ "operation": "write_file", "content": "x" })),
+                op_find_in_files(&json!({ "operation": "find_in_files", "pattern": "needle" })),
+            ] {
+                assert_eq!(out["ok"], false);
+                assert!(
+                    out["error_kind"].is_null(),
+                    "a missing field is not an absolute-path refusal: {out:?}"
+                );
+                assert!(
+                    out["message"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("missing required field: "),
+                    "{out:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn an_absolute_dest_path_is_reported_ahead_of_a_missing_sibling_field() {
+            // dest_path is validated at its extraction site, before `content` is read, so the
+            // caller hears about the path they cannot use rather than a second field.
+            let out = op_write_file(&json!({
+                "operation": "write_file",
+                "dest_path": "/app/results.txt",
+            }));
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
+            assert!(
+                !out["message"].as_str().unwrap().contains("content"),
+                "the absolute path is the first thing reported: {out:?}"
+            );
+        }
+
+        #[test]
+        fn find_in_files_enforces_size_ceiling() {
+            // This fixture is sized to catch the ~2x accounting bug specifically: the sum of
+            // the individual match objects (the quantity the OLD code counted) stays UNDER
+            // the 500KB ceiling, but the real serialized output — in which `ok_with` emits
+            // the matches array twice — is comfortably OVER it. The old accounting therefore
+            // passed this input; correct accounting must reject it.
+            let temp_dir = scratch("find_2x_ceiling");
+
+            let test_file = temp_dir.join("large_match_file.txt");
+            // Each line -> a match object of ~230 bytes serialized. 1400 lines -> single-count
+            // sum ~320KB (< 500KB, old code passes), doubled ~640KB (> 500KB, new code fails).
+            let padding = "x".repeat(200);
+            let mut content = String::new();
+            for i in 0..1400 {
+                content.push_str(&format!("line {i} has marker {padding}\n"));
+            }
+            fs::write(&test_file, content).expect("failed to write test file");
+
+            // Independently reconstruct the single-count sum the OLD code measured and assert
+            // it is under the ceiling — proving this fixture would have passed the old check.
+            let single_count_sum: usize = std::fs::read_to_string(&test_file)
+                .unwrap()
+                .lines()
+                .enumerate()
+                .filter(|(_, l)| l.contains("marker"))
+                .map(|(idx, line)| {
+                    serde_json::to_string(&json!({
+                        "path": "large_match_file.txt",
+                        "line": idx + 1,
+                        "text": line,
+                    }))
+                    .unwrap()
+                    .len()
+                })
+                .sum();
+            assert!(
+                single_count_sum < FIND_RESULT_SIZE_LIMIT,
+                "fixture invalid: single-count sum {single_count_sum} is not below the ceiling, \
+                 so it would not distinguish the old 1x accounting from correct 2x accounting"
+            );
+
+            let dir_name = temp_dir.to_string_lossy().to_string();
+            let op = json!({
+                "operation": "find_in_files",
+                "pattern": "marker",
+                "dir": &dir_name,
+                "recursive": false,
+            });
+
+            let out = op_find_in_files(&op);
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::RESULT_SIZE_EXCEEDED);
+            assert!(out["message"].as_str().unwrap().contains("size limit"));
+
+            let _ = fs::remove_dir_all(&temp_dir);
+        }
+
+        #[test]
+        fn find_in_files_respects_specific_dir() {
+            // This test verifies that find works with a valid specific directory
+            let temp_dir = scratch("find_valid");
+
+            let test_file = temp_dir.join("test.txt");
+            fs::write(&test_file, "hello world\nfoo bar\n").expect("failed to write test file");
+
+            let dir_name = temp_dir.to_string_lossy().to_string();
+            let op = json!({
+                "operation": "find_in_files",
+                "pattern": "world",
+                "dir": &dir_name,
+                "recursive": false,
+            });
+
+            let out = op_find_in_files(&op);
+            assert_eq!(out["ok"], true);
+            assert!(out["matches"].is_array());
+            assert_eq!(out["matches"].as_array().unwrap().len(), 1);
+
+            // Cleanup
+            let _ = fs::remove_dir_all(&temp_dir);
+        }
+
+        // Asserts a successful result's `data` carries exactly `keys` — no more, no fewer — so
+        // a key the contract does not name cannot ride along unnoticed.
+        fn assert_data_keys(out: &Value, keys: &[&str]) {
+            let mut got: Vec<&str> = out["data"]
+                .as_object()
+                .unwrap_or_else(|| panic!("data is not an object: {out:?}"))
+                .keys()
+                .map(String::as_str)
+                .collect();
+            got.sort_unstable();
+            let mut want = keys.to_vec();
+            want.sort_unstable();
+            assert_eq!(got, want, "{out:?}");
+        }
+
+        #[test]
+        fn read_file_returns_content_and_total_lines_only() {
+            let temp_dir = scratch("read");
+
+            let test_file = temp_dir.join("test.txt");
+            fs::write(&test_file, "test content").expect("failed to write test file");
+
+            let path = test_file.to_string_lossy().to_string();
+            let op = json!({
+                "operation": "read_file",
+                "path": &path,
+            });
+
+            let out = op_read_file(&op);
+            assert_eq!(out["ok"], true);
+            assert_eq!(out["content"], "test content");
+            assert_data_keys(&out, &["content", "total_lines"]);
+
+            let _ = fs::remove_dir_all(&temp_dir);
+        }
+
+        // ── Bounded read_file (start_line / end_line) ────────────────────────────
+        //
+        // A shared helper writes a file of `n` numbered lines ("line 1".."line n"), the fixture
+        // every range test slices.
+
+        fn write_numbered_file(dir: &std::path::Path, name: &str, n: usize) -> String {
+            let _ = fs::remove_dir_all(dir);
+            fs::create_dir_all(dir).expect("failed to create temp dir");
+            let mut content = String::new();
+            for i in 1..=n {
+                content.push_str(&format!("line {i}\n"));
+            }
+            let path = dir.join(name);
+            fs::write(&path, content).expect("failed to write test file");
+            path.to_string_lossy().to_string()
+        }
+
+        #[test]
+        fn read_file_whole_file_reports_total_lines() {
+            // A whole-file read (no start/end) returns its content and total_lines — but NO
+            // start_line/end_line keys.
+            let dir = scratch("read_wholefile_total");
+            let path = write_numbered_file(&dir, "f.txt", 5);
+            let op = json!({ "operation": "read_file", "path": &path });
+
+            let out = op_read_file(&op);
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(out["content"], "line 1\nline 2\nline 3\nline 4\nline 5\n");
+            assert_eq!(out["total_lines"], 5);
+            assert_data_keys(&out, &["content", "total_lines"]);
+            assert!(out["start_line"].is_null(), "whole-file read must not add start_line");
+            assert!(out["end_line"].is_null(), "whole-file read must not add end_line");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_ranged_happy_path() {
+            let dir = scratch("read_ranged");
+            let path = write_numbered_file(&dir, "f.txt", 10);
+            let op = json!({ "operation": "read_file", "path": &path, "start_line": 2, "end_line": 4 });
+
+            let out = op_read_file(&op);
+            assert_eq!(out["ok"], true, "{out:?}");
+            // Sliced span, joined with "\n" (no trailing newline — lines() strips terminators).
+            assert_eq!(out["content"], "line 2\nline 3\nline 4");
+            assert_eq!(out["total_lines"], 10);
+            assert_eq!(out["start_line"], 2);
+            assert_eq!(out["end_line"], 4);
+            assert_data_keys(&out, &["content", "total_lines", "start_line", "end_line"]);
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_ranged_start_only_reads_to_eof() {
+            let dir = scratch("read_start_only");
+            let path = write_numbered_file(&dir, "f.txt", 6);
+            let op = json!({ "operation": "read_file", "path": &path, "start_line": 5 });
+
+            let out = op_read_file(&op);
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(out["content"], "line 5\nline 6");
+            assert_eq!(out["start_line"], 5);
+            assert_eq!(out["end_line"], 6); // resolved to total_lines
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_ranged_end_only_reads_from_top() {
+            let dir = scratch("read_end_only");
+            let path = write_numbered_file(&dir, "f.txt", 6);
+            let op = json!({ "operation": "read_file", "path": &path, "end_line": 3 });
+
+            let out = op_read_file(&op);
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(out["content"], "line 1\nline 2\nline 3");
+            assert_eq!(out["start_line"], 1); // resolved default
+            assert_eq!(out["end_line"], 3);
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_ranged_inverted_span_errors() {
+            let dir = scratch("read_inverted");
+            let path = write_numbered_file(&dir, "f.txt", 10);
+            let op = json!({ "operation": "read_file", "path": &path, "start_line": 5, "end_line": 2 });
+
+            let out = op_read_file(&op);
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::INVALID_RANGE);
+            assert!(out["message"].as_str().unwrap().contains("inverted"));
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_ranged_start_below_one_errors() {
+            let dir = scratch("read_start_zero");
+            let path = write_numbered_file(&dir, "f.txt", 10);
+            let op = json!({ "operation": "read_file", "path": &path, "start_line": 0 });
+
+            let out = op_read_file(&op);
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::INVALID_RANGE);
+            assert!(out["message"].as_str().unwrap().contains(">= 1"));
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_ranged_start_beyond_eof_errors() {
+            // start past EOF errors and states the real line count — never silently falls back
+            // to the whole file.
+            let dir = scratch("read_start_eof");
+            let path = write_numbered_file(&dir, "f.txt", 4);
+            let op = json!({ "operation": "read_file", "path": &path, "start_line": 99 });
+
+            let out = op_read_file(&op);
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::INVALID_RANGE);
+            let msg = out["message"].as_str().unwrap();
+            assert!(msg.contains("beyond end of file"), "{msg}");
+            assert!(msg.contains("4 lines"), "message must state real line count: {msg}");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_ranged_end_beyond_eof_clamps() {
+            // The one asymmetric case: end past EOF clamps to total_lines rather than erroring.
+            let dir = scratch("read_end_eof");
+            let path = write_numbered_file(&dir, "f.txt", 4);
+            let op = json!({ "operation": "read_file", "path": &path, "start_line": 3, "end_line": 999 });
+
+            let out = op_read_file(&op);
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(out["content"], "line 3\nline 4");
+            assert_eq!(out["end_line"], 4); // clamped, reported as resolved
+            assert_eq!(out["total_lines"], 4);
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_ranged_oversized_span_errors() {
+            let dir = scratch("read_oversized");
+            // A file larger than the cap, requested whole via an explicit span.
+            let path = write_numbered_file(&dir, "big.txt", MAX_READ_RANGE_LINES + 500);
+            let op = json!({
+                "operation": "read_file",
+                "path": &path,
+                "start_line": 1,
+                "end_line": MAX_READ_RANGE_LINES + 500,
+            });
+
+            let out = op_read_file(&op);
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::RANGE_TOO_LARGE);
+            assert!(out["message"].as_str().unwrap().contains("exceeds the maximum"));
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        // ── Repeat reads: every successful read returns the bytes ────────────────
+        //
+        // Nothing an earlier read did can change what a later read returns: the tool keeps no
+        // state between calls and writes nothing, so each read reflects the file as it is now.
+
+        #[test]
+        fn read_file_repeat_whole_file_read_returns_content_again() {
+            let dir = scratch("read_repeat_whole");
+            let path = write_numbered_file(&dir, "f.txt", 5);
+            let op = json!({ "operation": "read_file", "path": &path });
+
+            let first = op_read_file(&op);
+            let second = op_read_file(&op);
+            for out in [&first, &second] {
+                assert_eq!(out["ok"], true, "{out:?}");
+                assert_eq!(out["content"], "line 1\nline 2\nline 3\nline 4\nline 5\n");
+                assert_eq!(out["total_lines"], 5);
+                assert_eq!(out["message"], format!("read {path}"));
+                assert_data_keys(out, &["content", "total_lines"]);
+            }
+            assert_eq!(first, second);
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_repeat_ranged_read_returns_content_again() {
+            let dir = scratch("read_repeat_ranged");
+            let path = write_numbered_file(&dir, "f.txt", 10);
+            let op =
+                json!({ "operation": "read_file", "path": &path, "start_line": 3, "end_line": 5 });
+
+            for _ in 0..2 {
+                let out = op_read_file(&op);
+                assert_eq!(out["ok"], true, "{out:?}");
+                assert_eq!(out["content"], "line 3\nline 4\nline 5");
+                assert_eq!(out["total_lines"], 10);
+                assert_eq!(out["start_line"], 3);
+                assert_eq!(out["end_line"], 5);
+                assert_eq!(out["message"], format!("read {path} lines 3-5"));
+                assert_data_keys(&out, &["content", "total_lines", "start_line", "end_line"]);
+            }
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_sees_a_same_second_same_length_edit() {
+            // No pause: the rewrite lands within the same second as the first read and keeps
+            // the byte length, so neither a whole-second mtime nor the size tells them apart.
+            let dir = scratch("read_same_second_edit");
+            let file = dir.join("f.txt");
+            fs::write(&file, "aaaa").unwrap();
+            let path = file.to_string_lossy().to_string();
+            let op = json!({ "operation": "read_file", "path": &path });
+
+            let before = op_read_file(&op);
+            assert_eq!(before["content"], "aaaa", "{before:?}");
+
+            fs::write(&file, "bbbb").unwrap();
+            let after = op_read_file(&op);
+            assert_eq!(after["ok"], true, "{after:?}");
+            assert_eq!(after["content"], "bbbb");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_of_a_missing_file_is_not_found_and_declares_no_effect() {
+            let dir = scratch("read_missing");
+            let path = dir.join("absent.txt").to_string_lossy().to_string();
+
+            for extra in [json!({}), json!({ "start_line": 1, "end_line": 2 })] {
+                let mut data = json!({ "operation": "read_file", "path": &path });
+                data.as_object_mut()
+                    .unwrap()
+                    .extend(extra.as_object().unwrap().clone());
+                let out = run(&json!({ "data": data }).to_string());
+                assert_eq!(out["ok"], false, "{out:?}");
+                assert_eq!(out["error_kind"], err::NOT_FOUND, "{out:?}");
+                let message = out["message"].as_str().unwrap();
+                assert!(message.starts_with(&format!("{path}: ")), "{out:?}");
+                assert!(
+                    out["metadata"].is_null(),
+                    "a failed read declares no effect: {out:?}"
+                );
+            }
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_ignores_unknown_inputs() {
+            let dir = scratch("read_unknown_inputs");
+            let path = write_numbered_file(&dir, "f.txt", 3);
+
+            let out = run(&json!({
+                "data": { "operation": "read_file", "path": &path, "no_cache": true }
+            })
+            .to_string());
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(out["content"], "line 1\nline 2\nline 3\n");
+            assert_eq!(out["metadata"]["state_effect"], "read");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        // ── find_in_files context_lines ─────────────────────────────────────────
+
+        fn write_find_fixture(dir: &std::path::Path, name: &str, content: &str) -> String {
+            let _ = fs::remove_dir_all(dir);
+            fs::create_dir_all(dir).expect("failed to create temp dir");
+            fs::write(dir.join(name), content).expect("failed to write fixture");
+            dir.to_string_lossy().to_string()
+        }
+
+        #[test]
+        fn find_in_files_default_has_no_context_keys() {
+            // context_lines omitted → the match shape is byte-for-byte the historical one:
+            // {path, line, text} with NO context_before/context_after keys at all.
+            let dir = scratch("find_no_ctx");
+            let dir_name = write_find_fixture(&dir, "a.txt", "one\ntwo needle\nthree\n");
+            let op = json!({ "operation": "find_in_files", "pattern": "needle", "dir": &dir_name, "recursive": false });
+
+            let out = op_find_in_files(&op);
+            assert_eq!(out["ok"], true, "{out:?}");
+            let m = &out["matches"][0];
+            assert_eq!(m["line"], 2);
+            assert_eq!(m["text"], "two needle");
+            assert!(m.get("context_before").is_none(), "no context key when omitted");
+            assert!(m.get("context_after").is_none(), "no context key when omitted");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn find_in_files_context_lines_happy_path() {
+            let dir = scratch("find_ctx");
+            let dir_name = write_find_fixture(&dir, "a.txt", "L1\nL2\nL3 needle\nL4\nL5\n");
+            let op = json!({
+                "operation": "find_in_files", "pattern": "needle",
+                "dir": &dir_name, "recursive": false, "context_lines": 1
+            });
+
+            let out = op_find_in_files(&op);
+            assert_eq!(out["ok"], true, "{out:?}");
+            let m = &out["matches"][0];
+            assert_eq!(m["line"], 3);
+            assert_eq!(m["context_before"], json!(["L2"]));
+            assert_eq!(m["context_after"], json!(["L4"]));
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn find_in_files_context_clamped_at_boundaries() {
+            // A match on the first line gets an empty context_before (clamped, never padded)
+            // and a context_after shortened to the lines that exist.
+            let dir = scratch("find_ctx_boundary");
+            let dir_name = write_find_fixture(&dir, "a.txt", "head needle\nb\nc\n");
+            let op = json!({
+                "operation": "find_in_files", "pattern": "needle",
+                "dir": &dir_name, "recursive": false, "context_lines": 5
+            });
+
+            let out = op_find_in_files(&op);
+            assert_eq!(out["ok"], true, "{out:?}");
+            let m = &out["matches"][0];
+            assert_eq!(m["line"], 1);
+            assert_eq!(m["context_before"], json!([]), "top-of-file match: empty before");
+            assert_eq!(m["context_after"], json!(["b", "c"]), "clamped to existing lines");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn find_in_files_rejects_oversized_context() {
+            let dir = scratch("find_ctx_toobig");
+            let dir_name = write_find_fixture(&dir, "a.txt", "needle\n");
+            for bad in [MAX_CONTEXT_LINES + 1, -1] {
+                let op = json!({
+                    "operation": "find_in_files", "pattern": "needle",
+                    "dir": &dir_name, "recursive": false, "context_lines": bad
+                });
+                let out = op_find_in_files(&op);
+                assert_eq!(out["ok"], false, "context_lines {bad} must be rejected");
+                assert_eq!(out["error_kind"], err::CONTEXT_TOO_LARGE);
+            }
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn find_in_files_size_ceiling_accounts_for_context() {
+            // The fixture is under the 500KB ceiling with NO context, but the same search with
+            // a non-zero context window blows past it — proving the size accounting measures
+            // the context text, not just the match lines.
+            let dir = scratch("find_ctx_ceiling");
+
+            let padding = "x".repeat(200);
+            let mut content = String::new();
+            // 1200 lines; every 4th is a match. The 900 non-matching lines are heavy padding
+            // that only enters the payload once context is requested.
+            for i in 0..1200 {
+                if i % 4 == 0 {
+                    content.push_str(&format!("marker {padding}\n"));
+                } else {
+                    content.push_str(&format!("{padding}\n"));
+                }
+            }
+            fs::write(dir.join("big.txt"), content).expect("failed to write fixture");
+            let dir_name = dir.to_string_lossy().to_string();
+
+            // Without context: comfortably under the ceiling.
+            let no_ctx = op_find_in_files(&json!({
+                "operation": "find_in_files", "pattern": "marker",
+                "dir": &dir_name, "recursive": false, "context_lines": 0
+            }));
+            assert_eq!(no_ctx["ok"], true, "no-context search should fit: {}", no_ctx["message"]);
+
+            // With context: the added neighbor text tips it over, and it is rejected.
+            let with_ctx = op_find_in_files(&json!({
+                "operation": "find_in_files", "pattern": "marker",
+                "dir": &dir_name, "recursive": false, "context_lines": 3
+            }));
+            assert_eq!(with_ctx["ok"], false);
+            assert_eq!(with_ctx["error_kind"], err::RESULT_SIZE_EXCEEDED);
+            assert!(with_ctx["message"].as_str().unwrap().contains("size limit"));
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+}
+
+// ── WASM adapter: WIT bindings + envelope/result mapping (wasm32 only) ─────────
+#[cfg(target_arch = "wasm32")]
+mod wasm_tool {
+    wit_bindgen::generate!({
+        path: "../../wit/guest",
+        world: "tool",
+        generate_all,
+    });
+
+    use exports::murmur::tool::run::{Guest, Status, ToolInput, ToolResult};
+    use serde_json::Value;
+
+    struct Component;
+
+    impl Guest for Component {
+        fn run(input: ToolInput) -> ToolResult {
+            // The host places the tool-call arguments (the `data` field the native binary
+            // read from its stdin envelope) directly in `input.data`. Rewrap them into the
+            // same `{"data": ...}` envelope `logic::run` parses so the ported component
+            // reproduces the native dispatch exactly — including the double-encoded-string
+            // path (a JSON string value re-parses inside `logic::run`).
+            let raw = match input.data.as_deref() {
+                Some(d) => {
+                    let data_val = serde_json::from_str::<Value>(d)
+                        .unwrap_or_else(|_| Value::String(d.to_string()));
+                    serde_json::json!({ "data": data_val }).to_string()
+                }
+                // Absent data reproduces the native "missing data field" error: an envelope
+                // with no `data` key.
+                None => "{}".to_string(),
+            };
+
+            let result = crate::logic::run(&raw);
+
+            let status = match result.get("status").and_then(Value::as_str) {
+                Some("passed") => Status::Passed,
+                Some("failed") => Status::Failed,
+                _ => Status::Error,
+            };
+            let summary = result
+                .get("summary")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            // Success declares its `state_effect` via the reserved metadata key; failures
+            // leave metadata null and so emit an empty list.
+            let metadata = result
+                .get("metadata")
+                .and_then(|m| m.get("state_effect"))
+                .and_then(Value::as_str)
+                .map(|effect| vec![("state_effect".to_string(), effect.to_string())])
+                .unwrap_or_default();
+            // Map `data` exactly as the host's native dispatch did from the tool's stdout
+            // (crates/capsule-runtime dispatch_native_tool): the envelope's `data` *field* —
+            // a string used verbatim, else a non-null value re-serialized, else None. This
+            // reproduces the pre-port `ToolResult.data` byte-for-byte (e.g. whole-file read ->
+            // `{"content":...,"total_lines":...}`, ranged read -> the same plus
+            // `start_line`/`end_line`, write/error -> None). Status/summary/state_effect carry the rest.
+            let data = result
+                .get("data")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| {
+                    result
+                        .get("data")
+                        .filter(|d| !d.is_null())
+                        .map(|d| d.to_string())
+                });
+
+            ToolResult {
+                status,
+                summary,
+                data,
+                data_path: None,
+                truncated: false,
+                metadata,
+            }
+        }
+    }
+
+    export!(Component);
+}

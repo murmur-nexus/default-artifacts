@@ -1,0 +1,3639 @@
+// Functions and types are only referenced from the wasm_driver module (cfg-gated to wasm32)
+// or from cfg(test). Suppress dead_code noise in plain host library builds.
+#![cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+
+use serde::Deserialize;
+use serde_json::{json, Map, Value};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelFamily {
+    Claude3,
+    Claude4Plus,
+}
+
+fn classify_model(model: &str) -> ModelFamily {
+    // Anthropic uses two naming conventions:
+    //   Claude 3.x: claude-{major}-{size}-{date}    e.g. claude-3-opus-20240229
+    //   Claude 4.x: claude-{size}-{major}-{minor}   e.g. claude-opus-4-6
+    // We extract the major version number from whichever position it appears in.
+    if let Some(rest) = model.trim().strip_prefix("claude-") {
+        let parts: Vec<&str> = rest.splitn(3, '-').collect();
+        if let Some(first) = parts.first() {
+            if let Ok(major) = first.parse::<u32>() {
+                // claude-{N}-... format: major is the first segment
+                return if major >= 4 {
+                    ModelFamily::Claude4Plus
+                } else {
+                    ModelFamily::Claude3
+                };
+            }
+            // claude-{size}-{N}-... format: major is the second segment
+            if let Some(Ok(major)) = parts.get(1).map(|s| s.parse::<u32>()) {
+                return if major >= 4 {
+                    ModelFamily::Claude4Plus
+                } else {
+                    ModelFamily::Claude3
+                };
+            }
+        }
+    }
+    ModelFamily::Claude3
+}
+
+// Reads `beta_features` from the driver config JSON and returns a comma-separated
+// string suitable for the `anthropic-beta` header. Accepts a single string or a list.
+fn parse_beta_features(config_json: &str) -> Option<String> {
+    let config: Value = serde_json::from_str(config_json).ok()?;
+    match config.get("beta_features")? {
+        Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Value::Array(arr) => {
+            let joined = arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(",");
+            if joined.is_empty() {
+                None
+            } else {
+                Some(joined)
+            }
+        }
+        _ => None,
+    }
+}
+
+// ── Extended-thinking config ──────────────────────────────────────────────────
+
+// Parameters Anthropic rejects (or that must equal their default) when extended thinking
+// is enabled. Stripped from the outgoing request body in that case.
+const THINKING_STRIPPED_PARAMS: &[&str] = &["temperature", "top_p", "top_k"];
+
+const DEFAULT_THINKING_BUDGET_TOKENS: u32 = 1024;
+
+#[derive(Debug, Clone, Copy)]
+struct ThinkingConfig {
+    enabled: bool,
+    budget_tokens: u32,
+}
+
+impl ThinkingConfig {
+    fn disabled() -> Self {
+        Self { enabled: false, budget_tokens: DEFAULT_THINKING_BUDGET_TOKENS }
+    }
+}
+
+// Reads `thinking` ("enabled"/"disabled", default disabled) and `thinking_budget_tokens`
+// (default 1024) from the driver config JSON.
+fn parse_thinking_config(config_json: &str) -> ThinkingConfig {
+    let Ok(config) = serde_json::from_str::<Value>(config_json) else {
+        return ThinkingConfig::disabled();
+    };
+    let enabled = config
+        .get("thinking")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().eq_ignore_ascii_case("enabled"))
+        .unwrap_or(false);
+    let budget_tokens = config
+        .get("thinking_budget_tokens")
+        .and_then(Value::as_u64)
+        .map(|v| v as u32)
+        .unwrap_or(DEFAULT_THINKING_BUDGET_TOKENS);
+    ThinkingConfig { enabled, budget_tokens }
+}
+
+// ── Prompt caching ────────────────────────────────────────────────────────────
+
+// Anthropic's per-request ceiling on `cache_control` markers; a fifth marker is a 400.
+const MAX_CACHE_BREAKPOINTS: usize = 4;
+
+// Markers this driver places: the tool inventory, the system prompt, and the tail of the
+// settled conversation. The remaining slot is left free for an intermediate message-level
+// marker, which a turn appending more than 20 content blocks would need — a breakpoint
+// walks backward at most 20 blocks looking for a prior entry, so a longer turn pushes the
+// previous entry out of the window and rewrites instead of reading.
+const DRIVER_CACHE_BREAKPOINTS: usize = 3;
+
+const _: () = assert!(DRIVER_CACHE_BREAKPOINTS < MAX_CACHE_BREAKPOINTS);
+
+// Content-block types Anthropic accepts a `cache_control` member on. A `thinking` block is
+// not among them.
+const CACHE_ELIGIBLE_BLOCK_TYPES: &[&str] =
+    &["text", "image", "tool_use", "tool_result", "document"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheTtl {
+    FiveMinutes,
+    OneHour,
+}
+
+/// Where the driver places prompt-cache breakpoints, read from `inference.driver.config`.
+///
+/// Caching is on by default: it needs no capsule change, leaves the body a valid Messages API
+/// request, and does not affect the model's output. `enabled: false` exists for an
+/// Anthropic-compatible gateway that rejects `cache_control`, and as the escape hatch for a
+/// capsule that supplies its own marker through `params`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PromptCacheConfig {
+    enabled: bool,
+    ttl: CacheTtl,
+}
+
+impl Default for PromptCacheConfig {
+    fn default() -> Self {
+        Self { enabled: true, ttl: CacheTtl::FiveMinutes }
+    }
+}
+
+impl PromptCacheConfig {
+    // The marker value every breakpoint in one request carries. One TTL per request satisfies
+    // Anthropic's rule that longer-TTL entries precede shorter-TTL ones with no ordering logic.
+    fn marker(&self) -> Value {
+        match self.ttl {
+            CacheTtl::FiveMinutes => json!({"type": "ephemeral"}),
+            CacheTtl::OneHour => json!({"type": "ephemeral", "ttl": "1h"}),
+        }
+    }
+}
+
+// Reads `prompt_cache` ("enabled"/"disabled" or a bool, default enabled) and `prompt_cache_ttl`
+// ("5m"/"1h", default "5m") from this artifact's own config JSON. Every unrecognised, ill-typed,
+// absent or malformed input falls back to the default; neither key can produce an error.
+fn parse_prompt_cache_config(config_json: &str) -> PromptCacheConfig {
+    let Ok(config) = serde_json::from_str::<Value>(config_json) else {
+        return PromptCacheConfig::default();
+    };
+    let enabled = match config.get("prompt_cache") {
+        Some(Value::String(value)) => !value.trim().eq_ignore_ascii_case("disabled"),
+        Some(Value::Bool(value)) => *value,
+        _ => true,
+    };
+    let ttl = match config.get("prompt_cache_ttl").and_then(Value::as_str) {
+        Some(value) if value.trim().eq_ignore_ascii_case("1h") => CacheTtl::OneHour,
+        _ => CacheTtl::FiveMinutes,
+    };
+    PromptCacheConfig { enabled, ttl }
+}
+
+// Adds the marker to a content block, reporting whether it landed. A block that is not a JSON
+// object cannot carry one.
+fn mark_cache_breakpoint(block: &mut Value, marker: &Value) -> bool {
+    match block.as_object_mut() {
+        Some(object) => {
+            object.insert("cache_control".to_string(), marker.clone());
+            true
+        }
+        None => false,
+    }
+}
+
+fn is_cache_eligible_block(block: &Value) -> bool {
+    block
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| CACHE_ELIGIBLE_BLOCK_TYPES.contains(&kind))
+}
+
+// Marks the end of the settled conversation — the last block the next request can read up to,
+// given `messages` only ever grows by append.
+//
+// The search runs backwards and crosses message boundaries: the final message can translate to
+// an empty content array (a `thinking` block dropped because thinking is off), and a `thinking`
+// block itself is not an eligible target. When no eligible block exists anywhere, no marker is
+// placed — the tools and system breakpoints still stand on their own.
+fn mark_last_eligible_message_block(messages: &mut [Value], marker: &Value) -> bool {
+    for message in messages.iter_mut().rev() {
+        let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for block in content.iter_mut().rev() {
+            if is_cache_eligible_block(block) && mark_cache_breakpoint(block, marker) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[derive(Debug, Deserialize)]
+struct MurmurRequest {
+    // The host sends a prompt-cache routing hint as a reserved top-level `prompt_cache_key`
+    // member. It is deliberately not declared here: the Messages API rejects a body carrying
+    // any field it does not define, and it defines no cache-key field. An undeclared member is
+    // dropped by serde, so it cannot reach the provider body — do not add a field and filter it.
+    model: String,
+    max_tokens: u32,
+    #[serde(default)]
+    system: Option<String>,
+    #[serde(default)]
+    messages: Vec<MurmurMessage>,
+    #[serde(default)]
+    tools: Vec<MurmurTool>,
+    #[serde(default)]
+    params: Map<String, Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MurmurMessage {
+    role: String,
+    #[serde(default)]
+    tool_call_id: Option<String>,
+    #[serde(default)]
+    content: Vec<MurmurContentBlock>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MurmurTool {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default = "default_object")]
+    parameters: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum MurmurContentBlock {
+    Text {
+        text: String,
+    },
+    // Extended-thinking block persisted from a prior driver response. Anthropic requires the
+    // original `thinking` block (with its `signature`) to be replayed verbatim on the assistant
+    // turn that precedes a tool_result, or it returns 400. Re-sent only when thinking is enabled.
+    Thinking {
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        signature: String,
+    },
+    Image {
+        source: MurmurImageSource,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        input: Value,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Deserialize)]
+struct MurmurImageSource {
+    #[serde(default)]
+    r#type: Option<String>,
+    media_type: String,
+    data: String,
+}
+
+fn default_object() -> Value {
+    json!({})
+}
+
+fn translate_murmur_request_to_anthropic(
+    request: &MurmurRequest,
+    family: ModelFamily,
+    thinking: &ThinkingConfig,
+    prompt_cache: &PromptCacheConfig,
+) -> Result<Value, String> {
+    let mut messages = Vec::with_capacity(request.messages.len());
+
+    for message in &request.messages {
+        match message.role.as_str() {
+            "user" | "assistant" => {
+                messages.push(json!({
+                    "role": message.role,
+                    "content": translate_standard_content_blocks(&message.content, thinking.enabled),
+                }));
+            }
+            "tool" => {
+                let tool_use_id = message.tool_call_id.clone().ok_or_else(|| {
+                    "driver: tool message is missing required field 'tool_call_id'".to_string()
+                })?;
+
+                let content = message
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        MurmurContentBlock::Text { text } => Some(json!({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": [{"type": "text", "text": text}],
+                        })),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+
+                messages.push(json!({
+                    "role": "user",
+                    "content": content,
+                }));
+            }
+            other => {
+                return Err(format!("driver: unsupported message role '{other}'"));
+            }
+        }
+    }
+
+    let mut tools = request
+        .tools
+        .iter()
+        .map(|tool| {
+            let mut mapped = Map::new();
+            mapped.insert("name".to_string(), Value::String(tool.name.clone()));
+            mapped.insert("input_schema".to_string(), tool.parameters.clone());
+            if let Some(description) = tool
+                .description
+                .as_ref()
+                .map(|d| d.trim())
+                .filter(|d| !d.is_empty())
+            {
+                mapped.insert(
+                    "description".to_string(),
+                    Value::String(description.to_string()),
+                );
+            }
+            Value::Object(mapped)
+        })
+        .collect::<Vec<_>>();
+
+    // Breakpoints, in the order Anthropic renders the prompt: `tools` → `system` → `messages`.
+    // Each site places at most one marker and there are DRIVER_CACHE_BREAKPOINTS of them, which
+    // is how the per-request budget is held below MAX_CACHE_BREAKPOINTS.
+    let marker = prompt_cache.marker();
+
+    if prompt_cache.enabled {
+        if let Some(last_tool) = tools.last_mut() {
+            mark_cache_breakpoint(last_tool, &marker);
+        }
+        mark_last_eligible_message_block(&mut messages, &marker);
+    }
+
+    let mut body = Map::new();
+    body.insert("model".to_string(), Value::String(request.model.clone()));
+    body.insert("max_tokens".to_string(), Value::from(request.max_tokens));
+    body.insert("messages".to_string(), Value::Array(messages));
+
+    if let Some(system) = request
+        .system
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        // With caching on, `system` is emitted as a one-element array of text blocks so the
+        // marker has a block to sit on; with caching off it stays the bare string. Because tools
+        // render first, this marker caches the tool inventory and the system prompt together.
+        let value = if prompt_cache.enabled {
+            json!([{"type": "text", "text": system, "cache_control": marker}])
+        } else {
+            Value::String(system.to_string())
+        };
+        body.insert("system".to_string(), value);
+    }
+
+    if !tools.is_empty() {
+        body.insert("tools".to_string(), Value::Array(tools));
+    }
+
+    if request.params.get("tool_choice").and_then(Value::as_str) == Some("required") {
+        body.insert("tool_choice".to_string(), json!({"type": "any"}));
+    }
+
+    // Extended thinking: inject the `thinking` block and strip sampling params Anthropic
+    // rejects while thinking is on (temperature/top_p/top_k). budget_tokens must be < max_tokens.
+    if thinking.enabled {
+        let budget = thinking
+            .budget_tokens
+            .min(request.max_tokens.saturating_sub(1))
+            .max(1);
+        body.insert(
+            "thinking".to_string(),
+            json!({"type": "enabled", "budget_tokens": budget}),
+        );
+    }
+
+    // Claude 4+ rejects requests that send both temperature and top_p; drop top_p in that case.
+    let drop_top_p = family == ModelFamily::Claude4Plus
+        && request.params.contains_key("temperature")
+        && request.params.contains_key("top_p");
+
+    for (key, value) in &request.params {
+        if body.contains_key(key) {
+            continue;
+        }
+        if drop_top_p && key == "top_p" {
+            continue;
+        }
+        if thinking.enabled && THINKING_STRIPPED_PARAMS.contains(&key.as_str()) {
+            continue;
+        }
+        body.insert(key.clone(), value.clone());
+    }
+
+    Ok(Value::Object(body))
+}
+
+fn translate_standard_content_blocks(
+    blocks: &[MurmurContentBlock],
+    thinking_enabled: bool,
+) -> Vec<Value> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            MurmurContentBlock::Text { text } => Some(json!({
+                "type": "text",
+                "text": text,
+            })),
+            // Replay the original signed thinking block so Anthropic can verify it on tool-use
+            // continuation turns. Only when thinking is enabled and we have a signature — an
+            // unsigned or stale block sent with thinking off is a 400.
+            MurmurContentBlock::Thinking { text, signature } => {
+                if thinking_enabled && !signature.is_empty() {
+                    Some(json!({
+                        "type": "thinking",
+                        "thinking": text,
+                        "signature": signature,
+                    }))
+                } else {
+                    None
+                }
+            }
+            MurmurContentBlock::Image { source } => Some(json!({
+                "type": "image",
+                "source": {
+                    "type": source.r#type.as_deref().unwrap_or("base64"),
+                    "media_type": source.media_type,
+                    "data": source.data,
+                }
+            })),
+            MurmurContentBlock::ToolCall { id, name, input } => Some(json!({
+                "type": "tool_use",
+                "id": id,
+                "name": name,
+                "input": input,
+            })),
+            MurmurContentBlock::Unknown => None,
+        })
+        .collect()
+}
+
+// ── Provider token usage ─────────────────────────────────────────────
+
+/// Provider-reported token counts, carried on the reserved top-level `usage` object of the
+/// translated response. Every member is independently optional: a count the provider did not
+/// report is omitted rather than sent as `0`, because the host records a reported `0` as a real
+/// zero and a fabricated one reads as a cache miss on the `inference` trace event.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct UsageTokens {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cached_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+}
+
+impl UsageTokens {
+    /// Take every member `later` reports, keeping the current value for the rest. Streaming
+    /// usage arrives across more than one event, each carrying only part of the picture.
+    fn merge_from(&mut self, later: UsageTokens) {
+        if later.input_tokens.is_some() {
+            self.input_tokens = later.input_tokens;
+        }
+        if later.output_tokens.is_some() {
+            self.output_tokens = later.output_tokens;
+        }
+        if later.cached_tokens.is_some() {
+            self.cached_tokens = later.cached_tokens;
+        }
+        if later.cache_write_tokens.is_some() {
+            self.cache_write_tokens = later.cache_write_tokens;
+        }
+    }
+
+    /// `None` when no member survived, in which case the response carries no `usage` key at all.
+    fn to_value(self) -> Option<Value> {
+        let mut obj = Map::new();
+        for (key, count) in [
+            ("input_tokens", self.input_tokens),
+            ("output_tokens", self.output_tokens),
+            ("cached_tokens", self.cached_tokens),
+            ("cache_write_tokens", self.cache_write_tokens),
+        ] {
+            if let Some(count) = count {
+                obj.insert(key.to_string(), Value::from(count));
+            }
+        }
+        if obj.is_empty() {
+            None
+        } else {
+            Some(Value::Object(obj))
+        }
+    }
+}
+
+/// Read the four contract members out of an Anthropic `usage` object. A member that is absent,
+/// null, or not a non-negative integer is dropped; its siblings are kept. A non-object argument
+/// yields no members at all.
+fn extract_anthropic_usage(usage: &Value) -> UsageTokens {
+    UsageTokens {
+        input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
+        output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
+        cached_tokens: usage.get("cache_read_input_tokens").and_then(Value::as_u64),
+        cache_write_tokens: usage
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64),
+    }
+}
+
+/// Build the murmur response envelope, attaching `usage` only when a count survived.
+fn murmur_response(stop_reason: &str, content: Vec<Value>, usage: UsageTokens) -> Value {
+    let mut response = json!({
+        "stop_reason": stop_reason,
+        "content": content,
+    });
+    if let Some(usage) = usage.to_value() {
+        response["usage"] = usage;
+    }
+    response
+}
+
+/// Force streaming on, overriding any `stream` key from `params`. The Messages API reports usage
+/// on the stream's own `message_start` and `message_delta` events, and rejects a body carrying
+/// any field it does not define, so no usage opt-in is stamped alongside it.
+fn stamp_streaming_flags(body: &mut Value) {
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("stream".to_string(), json!(true));
+    }
+}
+
+/// A Messages API `stop_reason: "refusal"`, on either path. It carries no `driver: ` prefix: the
+/// provider declined the turn, and the driver read that correctly.
+const REFUSED: &str = "Anthropic response refused";
+const NO_STOP_REASON: &str = "driver: Anthropic response has no stop_reason";
+const STREAM_NO_STOP_REASON: &str = "driver: Anthropic stream ended with no stop_reason";
+/// A body that holds lines but not one SSE `event:` line, such as a Chat Completions stream.
+const NOT_AN_EVENT_STREAM: &str = "driver: response is not an Anthropic event stream";
+
+fn malformed_response(detail: std::fmt::Arguments<'_>) -> String {
+    format!("driver: malformed Anthropic response: {detail}")
+}
+
+fn malformed_stream(detail: std::fmt::Arguments<'_>) -> String {
+    format!("driver: malformed Anthropic stream: {detail}")
+}
+
+/// `Anthropic error: <type>: <message>` for a Messages API error object, delivered in a 2xx body
+/// or an SSE `error` event. A part that is absent or not a string reads `unknown`: the text is
+/// diagnostic only, since the call has already failed.
+fn provider_error_message(error: Option<&Value>) -> String {
+    let part = |key: &str| {
+        error
+            .and_then(|error| error.get(key))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+    };
+    format!("Anthropic error: {}: {}", part("type"), part("message"))
+}
+
+fn map_anthropic_stop_reason(anthropic_stop: &str) -> Result<&'static str, String> {
+    match anthropic_stop {
+        "end_turn" | "stop_sequence" => Ok("end_turn"),
+        "tool_use" => Ok("tool_call"),
+        "max_tokens" => Ok("max_tokens"),
+        other => Err(format!(
+            "driver: unsupported Anthropic stop_reason '{other}'"
+        )),
+    }
+}
+
+/// Translate a buffered Messages API body. Provider errors and refusals come back as
+/// `Ok(error_payload(..))`; a body the driver cannot read as a finished turn is an `Err`.
+fn translate_anthropic_response_to_murmur(response: &Value) -> Result<Value, String> {
+    if response.get("type").and_then(Value::as_str) == Some("error") {
+        return Ok(error_payload(&provider_error_message(response.get("error"))));
+    }
+
+    // Absent, `null` or non-string: not a finished Messages API response.
+    let anthropic_stop = response
+        .get("stop_reason")
+        .and_then(Value::as_str)
+        .ok_or_else(|| NO_STOP_REASON.to_string())?;
+    if anthropic_stop == "refusal" {
+        return Ok(error_payload(REFUSED));
+    }
+    let stop_reason = map_anthropic_stop_reason(anthropic_stop)?;
+
+    // `content: []` is an empty turn; no array at all cannot be told apart from a lost reply.
+    let blocks = response
+        .get("content")
+        .and_then(Value::as_array)
+        .ok_or_else(|| malformed_response(format_args!("no content array")))?;
+
+    let mut content = Vec::with_capacity(blocks.len());
+    for (index, block) in blocks.iter().enumerate() {
+        if let Some(block) = translate_anthropic_content_block(index, block)? {
+            content.push(block);
+        }
+    }
+
+    let usage = response
+        .get("usage")
+        .map(extract_anthropic_usage)
+        .unwrap_or_default();
+
+    Ok(murmur_response(stop_reason, content, usage))
+}
+
+/// One buffered content block as murmur content, or `None` for a block murmur has no shape for.
+fn translate_anthropic_content_block(index: usize, block: &Value) -> Result<Option<Value>, String> {
+    let field = |key: &str| block.get(key).and_then(Value::as_str);
+    let block_type = field("type")
+        .ok_or_else(|| malformed_response(format_args!("content block {index} has no type")))?;
+
+    match block_type {
+        "text" => {
+            let text = field("text")
+                .ok_or_else(|| malformed_response(format_args!("text block {index} has no text")))?;
+            Ok(Some(json!({"type": "text", "text": text})))
+        }
+        "tool_use" => {
+            let id = field("id")
+                .ok_or_else(|| malformed_response(format_args!("tool_use block {index} has no id")))?;
+            let name = field("name").ok_or_else(|| {
+                malformed_response(format_args!("tool_use block {index} has no name"))
+            })?;
+            let input = block.get("input").filter(|input| input.is_object()).ok_or_else(|| {
+                malformed_response(format_args!(
+                    "tool_use block {index} input is not a JSON object"
+                ))
+            })?;
+            Ok(Some(json!({
+                "type": "tool_call",
+                "id": id,
+                "name": name,
+                "input": input,
+            })))
+        }
+        "thinking" => {
+            let text = field("thinking").ok_or_else(|| {
+                malformed_response(format_args!("thinking block {index} has no thinking"))
+            })?;
+            // Unsigned is representable: the request translation replays only signed blocks.
+            let signature = field("signature").unwrap_or_default();
+            Ok(Some(json!({
+                "type": "thinking",
+                "text": text,
+                "signature": signature,
+            })))
+        }
+        // `redacted_thinking` has no murmur content block. Other types are server-tool blocks
+        // the driver never requests, or types added to the Messages API since; none carries
+        // anything murmur could forward.
+        _ => Ok(None),
+    }
+}
+
+// ── SSE streaming types and parsing ──────────────────────────────────────────
+
+enum AnthropicBlock {
+    Text { text: String },
+    Thinking { text: String, signature: String },
+    ToolUse { id: String, name: String, input: String },
+    /// A block type murmur has no content block for (see `translate_anthropic_content_block`).
+    /// Its deltas are dropped.
+    Ignored,
+}
+
+impl AnthropicBlock {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Text { .. } => "text",
+            Self::Thinking { .. } => "thinking",
+            Self::ToolUse { .. } => "tool_use",
+            Self::Ignored => "ignored",
+        }
+    }
+}
+
+/// A tool-call fact read from the provider stream. Carries no part of the call's input.
+///
+/// `Started` comes once per call, when its `tool_use` block opens with a non-empty id and name,
+/// which are the `id` and `name` the returned `tool_call` block carries. `InputBytes` is the
+/// running UTF-8 byte length of the call's `partial_json` text, reported after each non-empty
+/// delta, so it only rises and ends at the length of the text parsed into the returned `input`.
+enum ToolCallSignal<'a> {
+    Started { id: &'a str, name: &'a str },
+    InputBytes { id: &'a str, bytes: u64 },
+}
+
+/// Why a stream stopped being read before its turn finished.
+enum StreamFailure {
+    /// An `event: error`; its `Anthropic error: ` message ends the turn as a provider error.
+    Provider(String),
+    /// A `driver: ` message: the stream cannot be read as a Messages API turn.
+    Malformed(String),
+}
+
+struct AnthropicSseState {
+    blocks: Vec<Option<AnthropicBlock>>,
+    stop_reason: Option<String>,
+    usage: UsageTokens,
+    current_event: String,
+    current_data: String,
+    done: bool,
+    /// The first failure; once set, `done` is too and no later line is dispatched.
+    failure: Option<StreamFailure>,
+    /// An SSE `event:` line was read, so the body is in the Messages API's shape.
+    saw_event_line: bool,
+    /// A non-blank line other than an SSE comment was read.
+    saw_content_line: bool,
+}
+
+impl AnthropicSseState {
+    fn new() -> Self {
+        Self {
+            blocks: Vec::new(),
+            stop_reason: None,
+            usage: UsageTokens::default(),
+            current_event: String::new(),
+            current_data: String::new(),
+            done: false,
+            failure: None,
+            saw_event_line: false,
+            saw_content_line: false,
+        }
+    }
+}
+
+/// Process one SSE line as read off the wire, without its `\n`, the way
+/// `process_anthropic_sse_line` does. A line that is not UTF-8 is a malformed stream rather than
+/// decoded lossily: a replaced byte inside tool input would still parse, and the tool would run
+/// with arguments the model never sent.
+fn process_anthropic_sse_bytes(
+    line: &[u8],
+    state: &mut AnthropicSseState,
+    emit: &mut impl FnMut(&str),
+    emit_thinking: &mut impl FnMut(&str),
+    signal: &mut impl FnMut(ToolCallSignal<'_>),
+) -> bool {
+    if state.done {
+        return true;
+    }
+    let Ok(line) = std::str::from_utf8(line) else {
+        state.failure = Some(StreamFailure::Malformed(malformed_stream(format_args!(
+            "a line is not UTF-8"
+        ))));
+        state.done = true;
+        return true;
+    };
+    process_anthropic_sse_line(
+        line.trim_end_matches('\r'),
+        state,
+        emit,
+        emit_thinking,
+        signal,
+    )
+}
+
+/// Process one SSE line, updating state, calling `emit` for text deltas and `signal` for
+/// tool-call starts and input sizes.
+/// Returns `true` when reading should stop: `message_stop` was dispatched, or a failure was
+/// recorded.
+fn process_anthropic_sse_line(
+    line: &str,
+    state: &mut AnthropicSseState,
+    emit: &mut impl FnMut(&str),
+    emit_thinking: &mut impl FnMut(&str),
+    signal: &mut impl FnMut(ToolCallSignal<'_>),
+) -> bool {
+    if state.done {
+        return true;
+    }
+    if !line.trim().is_empty() && !line.starts_with(':') {
+        state.saw_content_line = true;
+    }
+    if let Some(event) = line.strip_prefix("event: ") {
+        state.saw_event_line = true;
+        state.current_event = event.to_string();
+    } else if let Some(data) = line.strip_prefix("data: ") {
+        state.current_data = data.to_string();
+    } else if line.starts_with(':') {
+        // heartbeat comment — ignore
+    } else if line.is_empty() && !state.current_event.is_empty() {
+        let event = std::mem::take(&mut state.current_event);
+        let data = std::mem::take(&mut state.current_data);
+        if let Err(failure) =
+            dispatch_anthropic_sse_event(&event, &data, state, emit, emit_thinking, signal)
+        {
+            state.failure = Some(failure);
+            state.done = true;
+        }
+    }
+    state.done
+}
+
+fn dispatch_anthropic_sse_event(
+    event: &str,
+    data: &str,
+    state: &mut AnthropicSseState,
+    emit: &mut impl FnMut(&str),
+    emit_thinking: &mut impl FnMut(&str),
+    signal: &mut impl FnMut(ToolCallSignal<'_>),
+) -> Result<(), StreamFailure> {
+    let malformed = |detail: std::fmt::Arguments<'_>| StreamFailure::Malformed(malformed_stream(detail));
+    // Only the events whose data the driver reads are parsed, so only they can fail to parse.
+    let parse = || {
+        serde_json::from_str::<Value>(data)
+            .map_err(|_| malformed(format_args!("{event} data is not JSON")))
+    };
+    let block_index = |val: &Value| {
+        val.get("index")
+            .and_then(Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok())
+            .ok_or_else(|| malformed(format_args!("{event} has no index")))
+    };
+
+    match event {
+        "error" => {
+            // A provider error even when its data does not parse.
+            let val = serde_json::from_str::<Value>(data).ok();
+            let error = val.as_ref().and_then(|val| val.get("error"));
+            return Err(StreamFailure::Provider(provider_error_message(error)));
+        }
+        "content_block_start" => {
+            let val = parse()?;
+            let index = block_index(&val)?;
+            let block_type = val
+                .pointer("/content_block/type")
+                .and_then(Value::as_str)
+                .ok_or_else(|| malformed(format_args!("content block {index} has no type")))?;
+
+            let block = match block_type {
+                "text" => AnthropicBlock::Text { text: String::new() },
+                "thinking" => AnthropicBlock::Thinking {
+                    text: String::new(),
+                    signature: String::new(),
+                },
+                "tool_use" => {
+                    let field = |key: &str| {
+                        val.pointer(&format!("/content_block/{key}"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .ok_or_else(|| {
+                                malformed(format_args!("tool_use block {index} has no {key}"))
+                            })
+                    };
+                    let (id, name) = (field("id")?, field("name")?);
+                    // A call with no id or name could never be matched to the returned block.
+                    if !id.is_empty() && !name.is_empty() {
+                        signal(ToolCallSignal::Started {
+                            id: &id,
+                            name: &name,
+                        });
+                    }
+                    AnthropicBlock::ToolUse {
+                        id,
+                        name,
+                        input: String::new(),
+                    }
+                }
+                _ => AnthropicBlock::Ignored,
+            };
+
+            while state.blocks.len() <= index {
+                state.blocks.push(None);
+            }
+            state.blocks[index] = Some(block);
+        }
+        "content_block_delta" => {
+            let val = parse()?;
+            let index = block_index(&val)?;
+            let delta_type = val
+                .pointer("/delta/type")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    malformed(format_args!(
+                        "content_block_delta for block {index} has no delta type"
+                    ))
+                })?;
+            let Some(Some(block)) = state.blocks.get_mut(index) else {
+                return Err(malformed(format_args!(
+                    "{delta_type} for block {index}, which never started"
+                )));
+            };
+            if matches!(block, AnthropicBlock::Ignored) {
+                return Ok(());
+            }
+            let field = match delta_type {
+                "text_delta" => "text",
+                "input_json_delta" => "partial_json",
+                "thinking_delta" => "thinking",
+                "signature_delta" => "signature",
+                // e.g. `citations_delta`: nothing in it that murmur content represents.
+                _ => return Ok(()),
+            };
+            let kind = block.kind();
+            // A present empty string is a real delta: tool input opens with `partial_json: ""`.
+            let payload = || {
+                val.pointer(&format!("/delta/{field}"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        malformed(format_args!("{delta_type} for block {index} has no {field}"))
+                    })
+            };
+
+            match (delta_type, block) {
+                ("text_delta", AnthropicBlock::Text { text }) => {
+                    let delta = payload()?;
+                    if !delta.is_empty() {
+                        emit(delta);
+                        text.push_str(delta);
+                    }
+                }
+                ("input_json_delta", AnthropicBlock::ToolUse { id, name, input }) => {
+                    let delta = payload()?;
+                    input.push_str(delta);
+                    // Only a call that was started is sized, and only when its text grew.
+                    if !delta.is_empty() && !id.is_empty() && !name.is_empty() {
+                        signal(ToolCallSignal::InputBytes {
+                            id,
+                            bytes: input.len() as u64,
+                        });
+                    }
+                }
+                ("thinking_delta", AnthropicBlock::Thinking { text, .. }) => {
+                    let delta = payload()?;
+                    if !delta.is_empty() {
+                        emit_thinking(delta);
+                        text.push_str(delta);
+                    }
+                }
+                ("signature_delta", AnthropicBlock::Thinking { signature, .. }) => {
+                    signature.push_str(payload()?);
+                }
+                _ => {
+                    return Err(malformed(format_args!(
+                        "{delta_type} sent to {kind} block {index}"
+                    )));
+                }
+            }
+        }
+        "message_start" => {
+            let val = parse()?;
+            // Carries the request-side counts plus a placeholder `output_tokens` that a later
+            // `message_delta` supersedes.
+            if let Some(usage) = val.pointer("/message/usage") {
+                state.usage.merge_from(extract_anthropic_usage(usage));
+            }
+        }
+        "message_delta" => {
+            let val = parse()?;
+            if let Some(reason) = val.pointer("/delta/stop_reason").and_then(Value::as_str) {
+                if !reason.is_empty() {
+                    state.stop_reason = Some(reason.to_string());
+                }
+            }
+            // Cumulative counts for the completion so far; the last one dispatched wins.
+            if let Some(usage) = val.get("usage") {
+                state.usage.merge_from(extract_anthropic_usage(usage));
+            }
+        }
+        "message_stop" => {
+            state.done = true;
+        }
+        // content_block_stop and ping carry nothing the driver reads, and the Messages API may
+        // add event types a client is expected to tolerate.
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Parse a complete SSE body string (used in tests).
+#[cfg(test)]
+fn parse_anthropic_sse_body<F: FnMut(&str), G: FnMut(&str)>(
+    body: &str,
+    emit: &mut F,
+    emit_thinking: &mut G,
+) -> Result<Value, String> {
+    parse_anthropic_sse_body_with_signals(body, emit, emit_thinking).0
+}
+
+/// A tool-call signal as the tests collect it.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RecordedSignal {
+    Started { id: String, name: String },
+    InputBytes { id: String, bytes: u64 },
+}
+
+#[cfg(test)]
+impl From<ToolCallSignal<'_>> for RecordedSignal {
+    fn from(signal: ToolCallSignal<'_>) -> Self {
+        match signal {
+            ToolCallSignal::Started { id, name } => Self::Started {
+                id: id.to_string(),
+                name: name.to_string(),
+            },
+            ToolCallSignal::InputBytes { id, bytes } => Self::InputBytes {
+                id: id.to_string(),
+                bytes,
+            },
+        }
+    }
+}
+
+/// Parse a complete SSE body string, also returning every tool-call signal in the order it was
+/// sent (used in tests).
+#[cfg(test)]
+fn parse_anthropic_sse_body_with_signals<F: FnMut(&str), G: FnMut(&str)>(
+    body: &str,
+    emit: &mut F,
+    emit_thinking: &mut G,
+) -> (Result<Value, String>, Vec<RecordedSignal>) {
+    let mut state = AnthropicSseState::new();
+    let mut signals = Vec::new();
+    for line in body.lines() {
+        let line = line.trim_end_matches('\r');
+        process_anthropic_sse_line(line, &mut state, emit, emit_thinking, &mut |s| {
+            signals.push(RecordedSignal::from(s))
+        });
+        if state.done {
+            break;
+        }
+    }
+    (assemble_anthropic_streaming_response(state), signals)
+}
+
+/// Build the turn a stream carried. A provider error or refusal comes back as
+/// `Ok(error_payload(..))`; a stream the driver cannot read as a finished turn is an `Err`.
+fn assemble_anthropic_streaming_response(state: AnthropicSseState) -> Result<Value, String> {
+    match state.failure {
+        Some(StreamFailure::Provider(message)) => return Ok(error_payload(&message)),
+        Some(StreamFailure::Malformed(message)) => return Err(message),
+        None => {}
+    }
+    if state.saw_content_line && !state.saw_event_line {
+        return Err(NOT_AN_EVENT_STREAM.to_string());
+    }
+    // No `message_delta` carried a stop reason, so the stream ended before the turn did.
+    let anthropic_stop = state
+        .stop_reason
+        .as_deref()
+        .ok_or_else(|| STREAM_NO_STOP_REASON.to_string())?;
+    if anthropic_stop == "refusal" {
+        return Ok(error_payload(REFUSED));
+    }
+    let stop_reason = map_anthropic_stop_reason(anthropic_stop)?;
+    let stopped_at_cap = anthropic_stop == "max_tokens";
+
+    let usage = state.usage;
+    let mut content = Vec::new();
+    for (index, block) in state.blocks.into_iter().enumerate() {
+        match block {
+            Some(AnthropicBlock::Text { text }) if !text.is_empty() => {
+                content.push(json!({"type": "text", "text": text}));
+            }
+            Some(AnthropicBlock::Thinking { text, signature }) if !text.is_empty() => {
+                content.push(json!({
+                    "type": "thinking",
+                    "text": text,
+                    "signature": signature,
+                }));
+            }
+            Some(AnthropicBlock::ToolUse { id, name, input }) => {
+                let input = parse_streamed_tool_input(index, &name, &input, stopped_at_cap)?;
+                content.push(json!({
+                    "type": "tool_call",
+                    "id": id,
+                    "name": name,
+                    "input": input,
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(murmur_response(stop_reason, content, usage))
+}
+
+/// The input of a streamed `tool_use` block, whose SSE index is `index`. Neither error echoes
+/// the partial input.
+fn parse_streamed_tool_input(
+    index: usize,
+    name: &str,
+    input: &str,
+    stopped_at_cap: bool,
+) -> Result<Value, String> {
+    // No `input_json_delta`, or only empty ones: how the Messages API streams a call with no
+    // arguments.
+    if input.is_empty() {
+        return Ok(json!({}));
+    }
+    let Ok(value) = serde_json::from_str::<Value>(input) else {
+        return Err(if stopped_at_cap {
+            format!(
+                "driver: Anthropic turn stopped at the inference.max_tokens output cap; tool call '{name}' was cut off mid-input and cannot be run — raise the cap and re-run"
+            )
+        } else {
+            malformed_stream(format_args!(
+                "tool_use block {index} ('{name}') input is not valid JSON"
+            ))
+        });
+    };
+    if !value.is_object() {
+        return Err(malformed_stream(format_args!(
+            "tool_use block {index} ('{name}') input is not a JSON object"
+        )));
+    }
+    Ok(value)
+}
+
+fn error_payload(message: &str) -> Value {
+    json!({
+        "stop_reason": "error",
+        "error": message,
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+mod wasm_driver {
+    use super::{
+        assemble_anthropic_streaming_response, classify_model, error_payload, parse_beta_features,
+        parse_prompt_cache_config, parse_thinking_config, process_anthropic_sse_bytes,
+        stamp_streaming_flags,
+        translate_anthropic_response_to_murmur, translate_murmur_request_to_anthropic,
+        AnthropicSseState, MurmurRequest, ThinkingConfig, ToolCallSignal,
+    };
+    use serde_json::Value;
+
+    wit_bindgen::generate!({
+        path: "../../wit/guest",
+        world: "driver",
+        generate_all,
+    });
+
+    const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+    /// Hand a tool-call signal to the host, which writes it as a `tool-call-started` or
+    /// `tool-call-progress` frame.
+    fn signal_tool_call(signal: ToolCallSignal<'_>) {
+        match signal {
+            ToolCallSignal::Started { id, name } => {
+                murmur::stream::events::tool_call_started(id, name)
+            }
+            ToolCallSignal::InputBytes { id, bytes } => {
+                murmur::stream::events::tool_call_input_bytes(id, bytes)
+            }
+        }
+    }
+
+    pub struct AnthropicDriver;
+
+    impl exports::murmur::tool::run::Guest for AnthropicDriver {
+        fn run(
+            input: exports::murmur::tool::run::ToolInput,
+        ) -> exports::murmur::tool::run::ToolResult {
+            let response = match run_inner(input) {
+                Ok(value) => value,
+                Err(err) => error_payload(&err),
+            };
+
+            let stop_reason = response
+                .get("stop_reason")
+                .and_then(Value::as_str)
+                .unwrap_or("error");
+
+            let status = if stop_reason == "error" {
+                exports::murmur::tool::run::Status::Error
+            } else {
+                exports::murmur::tool::run::Status::Passed
+            };
+
+            let summary = if stop_reason == "error" {
+                response
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .map(|v| v.to_string())
+            } else {
+                None
+            };
+
+            exports::murmur::tool::run::ToolResult {
+                status,
+                summary,
+                data: Some(response.to_string()),
+                data_path: None,
+                truncated: false,
+                metadata: vec![],
+            }
+        }
+    }
+
+    fn run_inner(input: exports::murmur::tool::run::ToolInput) -> Result<Value, String> {
+        let endpoint = murmur_driver_env::require_endpoint(
+            std::env::var(murmur_driver_env::INFERENCE_ENDPOINT_VAR)
+                .ok()
+                .as_deref(),
+        )?;
+        let driver_config = std::env::var("MURMUR_INFERENCE_DRIVER_CONFIG").ok();
+        // Prompt caching is configured per artifact, not per driver role: `cache_control`
+        // breakpoints exist only in the Messages API, so the keys travel on this artifact's own
+        // `config:` block rather than on the role-wide `inference.driver.config`.
+        let artifact_config = std::env::var("MURMUR_ARTIFACT_CONFIG").ok();
+
+        let raw = input
+            .data
+            .ok_or_else(|| "driver: missing tool-input.data".to_string())?;
+
+        let murmur_request: MurmurRequest = serde_json::from_str(&raw)
+            .map_err(|err| format!("driver: failed to parse tool-input.data: {err}"))?;
+
+        let family = classify_model(&murmur_request.model);
+        let thinking = driver_config
+            .as_deref()
+            .map(parse_thinking_config)
+            .unwrap_or_else(ThinkingConfig::disabled);
+        // Prompt caching is GA — it needs no `anthropic-beta` header, only the markers.
+        let prompt_cache = artifact_config
+            .as_deref()
+            .map(parse_prompt_cache_config)
+            .unwrap_or_default();
+        let mut provider_request = translate_murmur_request_to_anthropic(
+            &murmur_request,
+            family,
+            &thinking,
+            &prompt_cache,
+        )?;
+
+        stamp_streaming_flags(&mut provider_request);
+
+        let body = serde_json::to_vec(&provider_request)
+            .map_err(|err| format!("driver: failed to encode request body: {err}"))?;
+
+        let url = format!("{}/v1/messages", endpoint.trim_end_matches('/'));
+
+        let beta_features = driver_config.as_deref().and_then(parse_beta_features);
+
+        let mut headers = vec![
+            ("content-type", "application/json".to_string()),
+            ("anthropic-version", ANTHROPIC_VERSION.to_string()),
+            ("content-length", body.len().to_string()),
+        ];
+
+        if let Some(beta) = beta_features {
+            headers.push(("anthropic-beta", beta));
+        }
+
+        let response = dispatch_request(&url, headers, &body)?;
+        let status = response.status();
+
+        if status >= 400 {
+            let text = consume_body_as_string(response)?;
+            return Ok(error_payload(&format!("HTTP {status}: {text}")));
+        }
+
+        let incoming_body = response
+            .consume()
+            .map_err(|()| "driver: failed to consume response body".to_string())?;
+        let stream = incoming_body
+            .stream()
+            .map_err(|()| "driver: failed to stream response body".to_string())?;
+
+        // Detect format from first read: JSON bodies start with '{' or '['.
+        let first = read_chunk(&stream)?;
+        let is_json = first
+            .iter()
+            .find(|&&b| !b.is_ascii_whitespace())
+            .map(|&b| b == b'{' || b == b'[')
+            .unwrap_or(false);
+
+        let result = if is_json {
+            // Non-streaming fallback (test servers, providers ignoring stream:true).
+            let mut all = first;
+            loop {
+                let chunk = read_chunk(&stream)?;
+                if chunk.is_empty() {
+                    break;
+                }
+                all.extend_from_slice(&chunk);
+            }
+            drop(stream);
+            let _ = wasip2::http::types::IncomingBody::finish(incoming_body);
+            let text = String::from_utf8(all)
+                .map_err(|err| format!("driver: response body is not UTF-8: {err}"))?;
+            let json: Value = serde_json::from_str(&text).map_err(|err| {
+                format!("driver: failed to parse Anthropic response JSON: {err}")
+            })?;
+            translate_anthropic_response_to_murmur(&json)?
+        } else {
+            // SSE streaming: process lines incrementally, emitting chunks as they arrive.
+            let mut line_buf: Vec<u8> = Vec::new();
+            let mut state = AnthropicSseState::new();
+            let mut done = false;
+
+            // Process bytes already read.
+            for &b in &first {
+                if b == b'\n' {
+                    done = process_anthropic_sse_bytes(
+                        &line_buf,
+                        &mut state,
+                        &mut |chunk| murmur::stream::events::emit_chunk(chunk),
+                        &mut |chunk| murmur::stream::events::emit_thinking_chunk(chunk),
+                        &mut signal_tool_call,
+                    );
+                    line_buf.clear();
+                    if done {
+                        break;
+                    }
+                } else {
+                    line_buf.push(b);
+                }
+            }
+
+            // Continue reading remaining chunks.
+            if !done {
+                'outer: loop {
+                    let chunk = read_chunk(&stream)?;
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    for &b in &chunk {
+                        if b == b'\n' {
+                            done = process_anthropic_sse_bytes(
+                                &line_buf,
+                                &mut state,
+                                &mut |chunk| murmur::stream::events::emit_chunk(chunk),
+                                &mut |chunk| murmur::stream::events::emit_thinking_chunk(chunk),
+                                &mut signal_tool_call,
+                            );
+                            line_buf.clear();
+                            if done {
+                                break 'outer;
+                            }
+                        } else {
+                            line_buf.push(b);
+                        }
+                    }
+                }
+            }
+
+            drop(stream);
+            let _ = wasip2::http::types::IncomingBody::finish(incoming_body);
+            assemble_anthropic_streaming_response(state)?
+        };
+
+        Ok(result)
+    }
+
+    fn dispatch_request(
+        url: &str,
+        headers: Vec<(&str, String)>,
+        body: &[u8],
+    ) -> Result<wasip2::http::types::IncomingResponse, String> {
+        let (scheme, authority, path_with_query) = split_url(url)?;
+
+        let fields = wasip2::http::types::Fields::new();
+        for (name, value) in headers {
+            fields
+                .append(name, &value.into_bytes())
+                .map_err(|err| format!("driver: failed to set header '{name}': {err:?}"))?;
+        }
+
+        let request = wasip2::http::types::OutgoingRequest::new(fields);
+        request
+            .set_method(&wasip2::http::types::Method::Post)
+            .map_err(|()| "driver: failed to set method".to_string())?;
+        request
+            .set_scheme(Some(&scheme))
+            .map_err(|()| "driver: failed to set scheme".to_string())?;
+        request
+            .set_authority(Some(&authority))
+            .map_err(|()| "driver: failed to set authority".to_string())?;
+        request
+            .set_path_with_query(Some(&path_with_query))
+            .map_err(|()| "driver: failed to set path".to_string())?;
+
+        let outgoing_body = request
+            .body()
+            .map_err(|()| "driver: failed to acquire request body".to_string())?;
+        {
+            let stream = outgoing_body
+                .write()
+                .map_err(|()| "driver: failed to open request body stream".to_string())?;
+            let mut remaining: &[u8] = body;
+            while !remaining.is_empty() {
+                let budget = stream
+                    .check_write()
+                    .map_err(|e| format!("driver: check-write failed: {e:?}"))? as usize;
+                if budget == 0 {
+                    stream.subscribe().block();
+                    continue;
+                }
+                let n = budget.min(remaining.len());
+                stream
+                    .write(&remaining[..n])
+                    .map_err(|e| format!("driver: write failed: {e:?}"))?;
+                remaining = &remaining[n..];
+            }
+            stream
+                .flush()
+                .map_err(|e| format!("driver: flush failed: {e:?}"))?;
+            stream.subscribe().block();
+        }
+        wasip2::http::types::OutgoingBody::finish(outgoing_body, None)
+            .map_err(|err| format!("driver: failed to finalize request body: {err:?}"))?;
+
+        let future = wasip2::http::outgoing_handler::handle(request, None)
+            .map_err(|err| format!("driver: failed to dispatch HTTP request: {err:?}"))?;
+
+        await_response(future)
+    }
+
+    fn consume_body_as_string(
+        response: wasip2::http::types::IncomingResponse,
+    ) -> Result<String, String> {
+        let incoming_body = response
+            .consume()
+            .map_err(|()| "driver: failed to consume error response body".to_string())?;
+        let stream = incoming_body
+            .stream()
+            .map_err(|()| "driver: failed to stream error response body".to_string())?;
+        let mut bytes = Vec::new();
+        loop {
+            let chunk = read_chunk(&stream)?;
+            if chunk.is_empty() {
+                break;
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        drop(stream);
+        let _ = wasip2::http::types::IncomingBody::finish(incoming_body);
+        String::from_utf8(bytes)
+            .map_err(|err| format!("driver: error response body is not UTF-8: {err}"))
+    }
+
+    fn read_chunk(stream: &wasip2::io::streams::InputStream) -> Result<Vec<u8>, String> {
+        match stream.blocking_read(16 * 1024) {
+            Ok(chunk) => Ok(chunk),
+            Err(wasip2::io::streams::StreamError::Closed) => Ok(Vec::new()),
+            Err(err) => Err(format!("driver: failed to read response stream: {err:?}")),
+        }
+    }
+
+    fn await_response(
+        future: wasip2::http::types::FutureIncomingResponse,
+    ) -> Result<wasip2::http::types::IncomingResponse, String> {
+        loop {
+            match future.get() {
+                Some(Ok(Ok(response))) => return Ok(response),
+                Some(Ok(Err(err))) => {
+                    return Err(format!(
+                        "driver: transport error while awaiting response: {err:?}"
+                    ));
+                }
+                Some(Err(())) => {
+                    return Err("driver: response future already consumed".to_string())
+                }
+                None => {
+                    let pollable = future.subscribe();
+                    pollable.block();
+                }
+            }
+        }
+    }
+
+    fn split_url(url: &str) -> Result<(wasip2::http::types::Scheme, String, String), String> {
+        let (scheme, rest) = if let Some(rest) = url.strip_prefix("https://") {
+            (wasip2::http::types::Scheme::Https, rest)
+        } else if let Some(rest) = url.strip_prefix("http://") {
+            (wasip2::http::types::Scheme::Http, rest)
+        } else {
+            return Err(format!(
+                "driver: endpoint must start with http:// or https://: '{url}'"
+            ));
+        };
+
+        let mut parts = rest.splitn(2, '/');
+        let authority = parts.next().unwrap_or_default().trim().to_string();
+        if authority.is_empty() {
+            return Err(format!("driver: endpoint missing authority: '{url}'"));
+        }
+
+        let path = match parts.next() {
+            Some("") | None => "/".to_string(),
+            Some(path) => format!("/{path}"),
+        };
+
+        Ok((scheme, authority, path))
+    }
+
+    export!(AnthropicDriver);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        classify_model, parse_anthropic_sse_body, parse_beta_features, parse_prompt_cache_config,
+        parse_thinking_config, stamp_streaming_flags, translate_anthropic_response_to_murmur,
+        translate_murmur_request_to_anthropic, CacheTtl, ModelFamily, MurmurRequest,
+        PromptCacheConfig, ThinkingConfig, DRIVER_CACHE_BREAKPOINTS, MAX_CACHE_BREAKPOINTS,
+    };
+    use serde_json::{json, Value};
+
+    fn thinking_off() -> ThinkingConfig {
+        ThinkingConfig::disabled()
+    }
+
+    fn cache_default() -> PromptCacheConfig {
+        PromptCacheConfig::default()
+    }
+
+    fn cache_off() -> PromptCacheConfig {
+        PromptCacheConfig { enabled: false, ..PromptCacheConfig::default() }
+    }
+
+    // Counts `cache_control` members at every nesting depth of a serialized body.
+    fn count_cache_markers(value: &Value) -> usize {
+        match value {
+            Value::Object(map) => {
+                map.iter()
+                    .map(|(key, nested)| {
+                        usize::from(key == "cache_control") + count_cache_markers(nested)
+                    })
+                    .sum()
+            }
+            Value::Array(items) => items.iter().map(count_cache_markers).sum(),
+            _ => 0,
+        }
+    }
+
+    #[test]
+    fn translates_murmur_request_to_anthropic_messages_api() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "claude-opus-4-6",
+            "max_tokens": 2048,
+            "system": "You are helpful",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "I'll call a tool."},
+                        {"type": "tool_call", "id": "tc-1", "name": "calc", "input": {"x": 1}}
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "tc-1",
+                    "content": [{"type": "text", "text": "2"}]
+                }
+            ],
+            "tools": [
+                {
+                    "name": "calc",
+                    "description": "calculate",
+                    "parameters": {"type": "object", "properties": {"x": {"type": "number"}}}
+                }
+            ],
+            "params": {
+                "temperature": 0.2
+            }
+        }))
+        .unwrap();
+
+        let translated =
+            translate_murmur_request_to_anthropic(
+                &request,
+                ModelFamily::Claude4Plus,
+                &thinking_off(),
+                &cache_default(),
+            )
+            .unwrap();
+        let messages = translated["messages"].as_array().unwrap();
+
+        assert_eq!(
+            translated["model"],
+            Value::String("claude-opus-4-6".to_string())
+        );
+        assert_eq!(messages[0]["content"][1]["type"], "tool_use");
+        assert_eq!(messages[0]["content"][1]["id"], "tc-1");
+
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"][0]["type"], "tool_result");
+        assert_eq!(messages[1]["content"][0]["tool_use_id"], "tc-1");
+
+        assert_eq!(
+            translated["tools"][0]["input_schema"],
+            json!({
+                "type": "object",
+                "properties": {"x": {"type": "number"}}
+            })
+        );
+        assert_eq!(translated["temperature"], json!(0.2));
+    }
+
+    #[test]
+    fn maps_required_tool_choice_to_anthropic_any() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "claude-opus-4-6",
+            "max_tokens": 2048,
+            "messages": [],
+            "tools": [
+                {
+                    "name": "calc",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            ],
+            "params": {
+                "tool_choice": "required"
+            }
+        }))
+        .unwrap();
+
+        let translated =
+            translate_murmur_request_to_anthropic(
+                &request,
+                ModelFamily::Claude4Plus,
+                &thinking_off(),
+                &cache_default(),
+            )
+            .unwrap();
+
+        assert_eq!(translated["tool_choice"], json!({"type": "any"}));
+    }
+
+    #[test]
+    fn translates_anthropic_response_to_murmur_format() {
+        let anthropic = json!({
+            "stop_reason": "tool_use",
+            "content": [
+                {"type": "text", "text": "Need tool"},
+                {"type": "tool_use", "id": "tc-1", "name": "calc", "input": {"x": 2}}
+            ]
+        });
+
+        let translated = translate_anthropic_response_to_murmur(&anthropic).unwrap();
+        assert_eq!(translated["stop_reason"], "tool_call");
+
+        let content = translated["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "tool_call");
+        assert_eq!(content[1]["id"], "tc-1");
+        assert_eq!(content[1]["input"], json!({"x": 2}));
+    }
+
+    #[test]
+    fn maps_stop_sequence_to_end_turn() {
+        let anthropic = json!({
+            "stop_reason": "stop_sequence",
+            "content": [{"type": "text", "text": "done"}]
+        });
+
+        let translated = translate_anthropic_response_to_murmur(&anthropic).unwrap();
+        assert_eq!(translated["stop_reason"], "end_turn");
+    }
+
+    const NO_STOP_REASON: &str = "driver: Anthropic response has no stop_reason";
+    const STREAM_NO_STOP_REASON: &str = "driver: Anthropic stream ended with no stop_reason";
+
+    #[test]
+    fn chat_completions_body_is_refused_without_echoing_it() {
+        let body = json!({"id":"x","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"hi"}}]});
+
+        let err = translate_anthropic_response_to_murmur(&body).unwrap_err();
+        assert_eq!(err, NO_STOP_REASON);
+        assert!(!err.contains("chat.completion"));
+        assert!(!err.contains("choices"));
+    }
+
+    #[test]
+    fn null_stop_reason_is_refused() {
+        let body = json!({
+            "type": "message",
+            "role": "assistant",
+            "stop_reason": null,
+            "content": [{"type": "text", "text": "partial"}]
+        });
+
+        assert_eq!(
+            translate_anthropic_response_to_murmur(&body).unwrap_err(),
+            NO_STOP_REASON
+        );
+    }
+
+    #[test]
+    fn end_turn_with_empty_content_is_a_successful_empty_turn() {
+        let body = json!({"stop_reason": "end_turn", "content": []});
+
+        let translated = translate_anthropic_response_to_murmur(&body).unwrap();
+        assert_eq!(translated["stop_reason"], "end_turn");
+        assert_eq!(translated["content"], json!([]));
+        assert!(translated.get("usage").is_none());
+    }
+
+    #[test]
+    fn stream_cut_off_before_message_delta_is_refused() {
+        let body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-4-6\",\"stop_reason\":null,\"stop_sequence\":null}}\n",
+            "\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\n",
+            "\n",
+        );
+
+        let mut emitted: Vec<String> = Vec::new();
+        let err = parse_anthropic_sse_body(
+            body,
+            &mut |chunk| emitted.push(chunk.to_string()),
+            &mut |_| {},
+        )
+        .unwrap_err();
+
+        assert_eq!(err, STREAM_NO_STOP_REASON);
+        assert_eq!(emitted, vec!["Hello", " world"]);
+    }
+
+    #[test]
+    fn empty_stream_is_refused() {
+        let err = parse_anthropic_sse_body("", &mut |_| {}, &mut |_| {}).unwrap_err();
+        assert_eq!(err, STREAM_NO_STOP_REASON);
+    }
+
+    #[test]
+    fn stream_whose_only_message_delta_carries_null_stop_reason_is_refused() {
+        let body = concat!(
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n",
+            "\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":null,\"stop_sequence\":null},\"usage\":{\"output_tokens\":1}}\n",
+            "\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n",
+            "\n",
+        );
+
+        let err = parse_anthropic_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap_err();
+        assert_eq!(err, STREAM_NO_STOP_REASON);
+    }
+
+    #[test]
+    fn stream_with_stop_reason_but_no_message_stop_is_accepted() {
+        let body = concat!(
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello world\"}}\n",
+            "\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":2}}\n",
+            "\n",
+        );
+
+        let result = parse_anthropic_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap();
+        assert_eq!(result["stop_reason"], "end_turn");
+        assert_eq!(result["content"][0]["type"], "text");
+        assert_eq!(result["content"][0]["text"], "Hello world");
+    }
+
+    // ── Malformed, provider-error and refused responses ──────────────────────
+
+    const REFUSED: &str = "Anthropic response refused";
+    const NOT_AN_EVENT_STREAM: &str = "driver: response is not an Anthropic event stream";
+
+    /// Build an SSE body from `(event, data)` pairs, each closed by the blank line that
+    /// dispatches it.
+    fn sse(events: &[(&str, &str)]) -> String {
+        events
+            .iter()
+            .map(|(event, data)| format!("event: {event}\ndata: {data}\n\n"))
+            .collect()
+    }
+
+    const TEXT_START_0: &str =
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+    const TOOL_START_0: &str = r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"bash","input":{}}}"#;
+    const THINKING_START_0: &str = r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#;
+    const END_TURN: &str =
+        r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}"#;
+    const TOOL_USE_STOP: &str =
+        r#"{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null}}"#;
+    const MAX_TOKENS_STOP: &str =
+        r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null}}"#;
+    const MESSAGE_STOP: &str = r#"{"type":"message_stop"}"#;
+
+    fn text_delta(index: u64, text: &str) -> String {
+        json!({"type": "content_block_delta", "index": index, "delta": {"type": "text_delta", "text": text}})
+            .to_string()
+    }
+
+    fn input_delta(index: u64, partial: &str) -> String {
+        json!({"type": "content_block_delta", "index": index, "delta": {"type": "input_json_delta", "partial_json": partial}})
+            .to_string()
+    }
+
+    fn parse_stream(body: &str) -> Result<Value, String> {
+        parse_anthropic_sse_body(body, &mut |_| {}, &mut |_| {})
+    }
+
+    fn buffered_block_err(block: Value) -> String {
+        let body = json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "fine"}, block]
+        });
+        translate_anthropic_response_to_murmur(&body).unwrap_err()
+    }
+
+    #[test]
+    fn content_absent_null_or_not_an_array_is_malformed() {
+        for content in [None, Some(Value::Null), Some(json!("hi")), Some(json!({"type": "text"}))] {
+            let mut body = json!({"stop_reason": "end_turn"});
+            if let Some(content) = content.clone() {
+                body["content"] = content;
+            }
+            assert_eq!(
+                translate_anthropic_response_to_murmur(&body).unwrap_err(),
+                "driver: malformed Anthropic response: no content array",
+                "content = {content:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn buffered_block_with_no_type_is_malformed() {
+        for block in [json!({"text": "x"}), json!({"type": null, "text": "x"}), json!({"type": 3})] {
+            assert_eq!(
+                buffered_block_err(block),
+                "driver: malformed Anthropic response: content block 1 has no type"
+            );
+        }
+    }
+
+    #[test]
+    fn buffered_text_block_with_no_text_is_malformed() {
+        for block in [json!({"type": "text"}), json!({"type": "text", "text": 7})] {
+            assert_eq!(
+                buffered_block_err(block),
+                "driver: malformed Anthropic response: text block 1 has no text"
+            );
+        }
+    }
+
+    #[test]
+    fn buffered_tool_use_with_no_id_is_malformed() {
+        let err = buffered_block_err(
+            json!({"type": "tool_use", "name": "bash", "input": {"cmd": "wipe-disk"}}),
+        );
+        assert_eq!(err, "driver: malformed Anthropic response: tool_use block 1 has no id");
+        assert!(!err.contains("wipe-disk"));
+    }
+
+    #[test]
+    fn buffered_tool_use_with_no_name_is_malformed() {
+        assert_eq!(
+            buffered_block_err(json!({"type": "tool_use", "id": "toolu_01", "name": null, "input": {}})),
+            "driver: malformed Anthropic response: tool_use block 1 has no name"
+        );
+    }
+
+    #[test]
+    fn buffered_tool_use_input_that_is_not_an_object_is_malformed() {
+        for input in [None, Some(Value::Null), Some(json!("{\"cmd\":\"ls\"}")), Some(json!([1]))] {
+            let mut block = json!({"type": "tool_use", "id": "toolu_01", "name": "bash"});
+            if let Some(input) = input.clone() {
+                block["input"] = input;
+            }
+            assert_eq!(
+                buffered_block_err(block),
+                "driver: malformed Anthropic response: tool_use block 1 input is not a JSON object",
+                "input = {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn buffered_argument_less_tool_call_keeps_its_empty_input() {
+        let body = json!({
+            "stop_reason": "tool_use",
+            "content": [{"type": "tool_use", "id": "toolu_01", "name": "now", "input": {}}]
+        });
+        let translated = translate_anthropic_response_to_murmur(&body).unwrap();
+        assert_eq!(
+            translated["content"],
+            json!([{"type": "tool_call", "id": "toolu_01", "name": "now", "input": {}}])
+        );
+    }
+
+    #[test]
+    fn buffered_thinking_block_with_no_thinking_is_malformed() {
+        assert_eq!(
+            buffered_block_err(json!({"type": "thinking", "signature": "sig"})),
+            "driver: malformed Anthropic response: thinking block 1 has no thinking"
+        );
+    }
+
+    #[test]
+    fn buffered_thinking_block_is_kept_like_the_stream_keeps_it() {
+        let body = json!({
+            "stop_reason": "end_turn",
+            "content": [
+                {"type": "thinking", "thinking": "signed thought", "signature": "sig-abc"},
+                {"type": "thinking", "thinking": "unsigned thought"},
+                {"type": "text", "text": "answer"}
+            ]
+        });
+        let translated = translate_anthropic_response_to_murmur(&body).unwrap();
+        assert_eq!(
+            translated["content"],
+            json!([
+                {"type": "thinking", "text": "signed thought", "signature": "sig-abc"},
+                {"type": "thinking", "text": "unsigned thought", "signature": ""},
+                {"type": "text", "text": "answer"}
+            ])
+        );
+    }
+
+    #[test]
+    fn buffered_unknown_and_redacted_thinking_blocks_are_dropped() {
+        let body = json!({
+            "stop_reason": "end_turn",
+            "content": [
+                {"type": "redacted_thinking", "data": "opaque"},
+                {"type": "server_tool_use", "id": "srvtoolu_01", "name": "web_search", "input": {}},
+                {"type": "text", "text": "answer"}
+            ]
+        });
+        let translated = translate_anthropic_response_to_murmur(&body).unwrap();
+        assert_eq!(translated["stop_reason"], "end_turn");
+        assert_eq!(translated["content"], json!([{"type": "text", "text": "answer"}]));
+    }
+
+    #[test]
+    fn buffered_error_body_is_a_provider_error() {
+        let body = json!({
+            "type": "error",
+            "error": {"type": "overloaded_error", "message": "Overloaded"}
+        });
+        let payload = translate_anthropic_response_to_murmur(&body).unwrap();
+        assert_eq!(
+            payload,
+            json!({"stop_reason": "error", "error": "Anthropic error: overloaded_error: Overloaded"})
+        );
+    }
+
+    #[test]
+    fn buffered_error_body_with_unreadable_detail_falls_back_to_unknown() {
+        for (body, expected) in [
+            (json!({"type": "error"}), "Anthropic error: unknown: unknown"),
+            (json!({"type": "error", "error": {"type": 5}}), "Anthropic error: unknown: unknown"),
+            (
+                json!({"type": "error", "error": {"message": "slow down"}}),
+                "Anthropic error: unknown: slow down",
+            ),
+        ] {
+            let payload = translate_anthropic_response_to_murmur(&body).unwrap();
+            assert_eq!(payload["stop_reason"], "error");
+            assert_eq!(payload["error"], expected);
+        }
+    }
+
+    #[test]
+    fn buffered_refusal_is_a_refusal() {
+        let body = json!({"stop_reason": "refusal", "content": [{"type": "text", "text": "no"}]});
+        assert_eq!(
+            translate_anthropic_response_to_murmur(&body).unwrap(),
+            json!({"stop_reason": "error", "error": REFUSED})
+        );
+    }
+
+    #[test]
+    fn buffered_unmapped_stop_reasons_stay_unsupported() {
+        for reason in ["", "pause_turn", "model_context_window_exceeded"] {
+            let body = json!({"stop_reason": reason, "content": []});
+            assert_eq!(
+                translate_anthropic_response_to_murmur(&body).unwrap_err(),
+                format!("driver: unsupported Anthropic stop_reason '{reason}'")
+            );
+        }
+    }
+
+    #[test]
+    fn stream_error_event_mid_text_is_a_provider_error() {
+        let body = sse(&[
+            ("content_block_start", TEXT_START_0),
+            ("content_block_delta", &text_delta(0, "Hello")),
+            (
+                "error",
+                r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+            ),
+            ("content_block_delta", &text_delta(0, " after")),
+            ("message_delta", END_TURN),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+
+        let mut emitted: Vec<String> = Vec::new();
+        let payload =
+            parse_anthropic_sse_body(&body, &mut |c| emitted.push(c.to_string()), &mut |_| {})
+                .unwrap();
+
+        assert_eq!(
+            payload,
+            json!({"stop_reason": "error", "error": "Anthropic error: overloaded_error: Overloaded"})
+        );
+        assert_eq!(emitted, vec!["Hello"]);
+    }
+
+    #[test]
+    fn stream_error_event_with_unparseable_data_is_still_a_provider_error() {
+        let body = sse(&[("content_block_start", TEXT_START_0), ("error", "overloaded!")]);
+        assert_eq!(
+            parse_stream(&body).unwrap(),
+            json!({"stop_reason": "error", "error": "Anthropic error: unknown: unknown"})
+        );
+    }
+
+    #[test]
+    fn stream_refusal_is_a_refusal() {
+        let body = sse(&[
+            ("content_block_start", TEXT_START_0),
+            ("content_block_delta", &text_delta(0, "I can")),
+            ("message_delta", r#"{"type":"message_delta","delta":{"stop_reason":"refusal"}}"#),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+        assert_eq!(parse_stream(&body).unwrap(), json!({"stop_reason": "error", "error": REFUSED}));
+    }
+
+    #[test]
+    fn stream_event_whose_data_is_not_json_is_malformed() {
+        for event in ["message_start", "content_block_start", "content_block_delta", "message_delta"]
+        {
+            let body = sse(&[(event, "{not json"), ("message_delta", END_TURN)]);
+            assert_eq!(
+                parse_stream(&body).unwrap_err(),
+                format!("driver: malformed Anthropic stream: {event} data is not JSON")
+            );
+        }
+    }
+
+    #[test]
+    fn stream_events_whose_data_is_not_read_are_not_checked() {
+        let body = sse(&[
+            ("ping", "not json"),
+            ("content_block_start", TEXT_START_0),
+            ("content_block_delta", &text_delta(0, "hi")),
+            ("content_block_stop", "not json"),
+            ("some_future_event", "not json either"),
+            ("message_delta", END_TURN),
+            ("message_stop", "not json"),
+        ]);
+        let result = parse_stream(&body).unwrap();
+        assert_eq!(result["content"], json!([{"type": "text", "text": "hi"}]));
+    }
+
+    #[test]
+    fn stream_event_with_no_index_is_malformed() {
+        let start = sse(&[(
+            "content_block_start",
+            r#"{"type":"content_block_start","content_block":{"type":"text","text":""}}"#,
+        )]);
+        assert_eq!(
+            parse_stream(&start).unwrap_err(),
+            "driver: malformed Anthropic stream: content_block_start has no index"
+        );
+
+        let delta = sse(&[
+            ("content_block_start", TEXT_START_0),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":"1","delta":{"type":"text_delta","text":"x"}}"#,
+            ),
+        ]);
+        assert_eq!(
+            parse_stream(&delta).unwrap_err(),
+            "driver: malformed Anthropic stream: content_block_delta has no index"
+        );
+    }
+
+    #[test]
+    fn stream_block_with_no_type_is_malformed() {
+        let body = sse(&[(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":2,"content_block":{"text":""}}"#,
+        )]);
+        assert_eq!(
+            parse_stream(&body).unwrap_err(),
+            "driver: malformed Anthropic stream: content block 2 has no type"
+        );
+    }
+
+    #[test]
+    fn stream_tool_use_with_no_id_or_name_is_malformed() {
+        let no_id = sse(&[(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","name":"bash","input":{}}}"#,
+        )]);
+        assert_eq!(
+            parse_stream(&no_id).unwrap_err(),
+            "driver: malformed Anthropic stream: tool_use block 1 has no id"
+        );
+
+        let no_name = sse(&[(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01","input":{}}}"#,
+        )]);
+        assert_eq!(
+            parse_stream(&no_name).unwrap_err(),
+            "driver: malformed Anthropic stream: tool_use block 1 has no name"
+        );
+    }
+
+    #[test]
+    fn stream_delta_with_no_delta_type_is_malformed() {
+        let body = sse(&[
+            ("content_block_start", TEXT_START_0),
+            ("content_block_delta", r#"{"type":"content_block_delta","index":0,"delta":{"text":"x"}}"#),
+        ]);
+        assert_eq!(
+            parse_stream(&body).unwrap_err(),
+            "driver: malformed Anthropic stream: content_block_delta for block 0 has no delta type"
+        );
+    }
+
+    #[test]
+    fn stream_delta_for_a_block_that_never_started_is_malformed() {
+        let body = sse(&[
+            ("content_block_start", TEXT_START_0),
+            ("content_block_delta", &text_delta(3, "lost")),
+            ("message_delta", END_TURN),
+        ]);
+        let mut emitted: Vec<String> = Vec::new();
+        let err =
+            parse_anthropic_sse_body(&body, &mut |c| emitted.push(c.to_string()), &mut |_| {})
+                .unwrap_err();
+        assert_eq!(
+            err,
+            "driver: malformed Anthropic stream: text_delta for block 3, which never started"
+        );
+        assert!(emitted.is_empty());
+
+        // An index inside the block list whose own start never arrived is the same failure.
+        let gap = sse(&[
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            ),
+            ("content_block_delta", &input_delta(0, "{}")),
+        ]);
+        assert_eq!(
+            parse_stream(&gap).unwrap_err(),
+            "driver: malformed Anthropic stream: input_json_delta for block 0, which never started"
+        );
+    }
+
+    #[test]
+    fn stream_delta_sent_to_a_block_of_another_kind_is_malformed() {
+        let text_to_tool = sse(&[
+            ("content_block_start", TOOL_START_0),
+            ("content_block_delta", &text_delta(0, "x")),
+        ]);
+        assert_eq!(
+            parse_stream(&text_to_tool).unwrap_err(),
+            "driver: malformed Anthropic stream: text_delta sent to tool_use block 0"
+        );
+
+        let input_to_text = sse(&[
+            ("content_block_start", TEXT_START_0),
+            ("content_block_delta", &input_delta(0, "{}")),
+        ]);
+        assert_eq!(
+            parse_stream(&input_to_text).unwrap_err(),
+            "driver: malformed Anthropic stream: input_json_delta sent to text block 0"
+        );
+
+        let signature_to_text = sse(&[
+            ("content_block_start", TEXT_START_0),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"s"}}"#,
+            ),
+        ]);
+        assert_eq!(
+            parse_stream(&signature_to_text).unwrap_err(),
+            "driver: malformed Anthropic stream: signature_delta sent to text block 0"
+        );
+
+        let thinking_to_tool = sse(&[
+            ("content_block_start", TOOL_START_0),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"t"}}"#,
+            ),
+        ]);
+        assert_eq!(
+            parse_stream(&thinking_to_tool).unwrap_err(),
+            "driver: malformed Anthropic stream: thinking_delta sent to tool_use block 0"
+        );
+
+        let text_to_thinking = sse(&[
+            ("content_block_start", THINKING_START_0),
+            ("content_block_delta", &text_delta(0, "x")),
+        ]);
+        assert_eq!(
+            parse_stream(&text_to_thinking).unwrap_err(),
+            "driver: malformed Anthropic stream: text_delta sent to thinking block 0"
+        );
+    }
+
+    #[test]
+    fn stream_delta_with_no_payload_is_malformed() {
+        for (start, delta_type, field) in [
+            (TEXT_START_0, "text_delta", "text"),
+            (TOOL_START_0, "input_json_delta", "partial_json"),
+            (THINKING_START_0, "thinking_delta", "thinking"),
+            (THINKING_START_0, "signature_delta", "signature"),
+        ] {
+            for payload in [None, Some(Value::Null), Some(json!(4))] {
+                let mut delta = json!({"type": delta_type});
+                if let Some(payload) = payload.clone() {
+                    delta[field] = payload;
+                }
+                let event = json!({"type": "content_block_delta", "index": 0, "delta": delta});
+                let body = sse(&[
+                    ("content_block_start", start),
+                    ("content_block_delta", &event.to_string()),
+                    ("message_delta", END_TURN),
+                ]);
+                assert_eq!(
+                    parse_stream(&body).unwrap_err(),
+                    format!(
+                        "driver: malformed Anthropic stream: {delta_type} for block 0 has no {field}"
+                    ),
+                    "payload = {payload:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stream_tool_input_cut_off_at_the_output_cap_names_the_cap() {
+        let body = sse(&[
+            ("content_block_start", TOOL_START_0),
+            ("content_block_delta", &input_delta(0, "{\"cmd\":\"wipe-disk")),
+            ("message_delta", MAX_TOKENS_STOP),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+        let err = parse_stream(&body).unwrap_err();
+        assert_eq!(
+            err,
+            "driver: Anthropic turn stopped at the inference.max_tokens output cap; tool call 'bash' was cut off mid-input and cannot be run — raise the cap and re-run"
+        );
+        assert!(!err.contains("wipe-disk"));
+    }
+
+    #[test]
+    fn stream_tool_input_that_is_not_json_is_malformed() {
+        let body = sse(&[
+            ("content_block_start", TOOL_START_0),
+            ("content_block_delta", &input_delta(0, "{\"cmd\":\"wipe-disk")),
+            ("message_delta", TOOL_USE_STOP),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+        let err = parse_stream(&body).unwrap_err();
+        assert_eq!(
+            err,
+            "driver: malformed Anthropic stream: tool_use block 0 ('bash') input is not valid JSON"
+        );
+        assert!(!err.contains("wipe-disk"));
+    }
+
+    #[test]
+    fn stream_tool_input_that_is_not_an_object_is_malformed() {
+        let body = sse(&[
+            ("content_block_start", TEXT_START_0),
+            ("content_block_delta", &text_delta(0, "Calling.")),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_02","name":"calc","input":{}}}"#,
+            ),
+            ("content_block_delta", &input_delta(1, "[1, 2]")),
+            ("message_delta", TOOL_USE_STOP),
+        ]);
+        assert_eq!(
+            parse_stream(&body).unwrap_err(),
+            "driver: malformed Anthropic stream: tool_use block 1 ('calc') input is not a JSON object"
+        );
+    }
+
+    #[test]
+    fn stream_argument_less_tool_call_gets_an_empty_object() {
+        let no_delta = sse(&[
+            ("content_block_start", TOOL_START_0),
+            ("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
+            ("message_delta", TOOL_USE_STOP),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+        let empty_delta = sse(&[
+            ("content_block_start", TOOL_START_0),
+            ("content_block_delta", &input_delta(0, "")),
+            ("message_delta", TOOL_USE_STOP),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+        for body in [no_delta, empty_delta] {
+            let result = parse_stream(&body).unwrap();
+            assert_eq!(result["stop_reason"], "tool_call");
+            assert_eq!(
+                result["content"],
+                json!([{"type": "tool_call", "id": "toolu_01", "name": "bash", "input": {}}])
+            );
+        }
+    }
+
+    #[test]
+    fn stream_tolerates_unknown_events_deltas_and_block_types() {
+        let body = sse(&[
+            ("content_block_start", TEXT_START_0),
+            ("content_block_delta", &text_delta(0, "See ")),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"type":"char_location","cited_text":"x"}}}"#,
+            ),
+            ("content_block_delta", &text_delta(0, "source.")),
+            ("some_future_event", r#"{"type":"some_future_event"}"#),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"redacted_thinking","data":"opaque"}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"hidden"}}"#,
+            ),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":2,"content_block":{"type":"thinking","thinking":""}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":2,"delta":{"type":"thinking_delta","thinking":"unsigned"}}"#,
+            ),
+            ("message_delta", END_TURN),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+
+        let mut emitted: Vec<String> = Vec::new();
+        let result =
+            parse_anthropic_sse_body(&body, &mut |c| emitted.push(c.to_string()), &mut |_| {})
+                .unwrap();
+
+        assert_eq!(emitted, vec!["See ", "source."]);
+        assert_eq!(result["stop_reason"], "end_turn");
+        assert_eq!(
+            result["content"],
+            json!([
+                {"type": "text", "text": "See source."},
+                {"type": "thinking", "text": "unsigned", "signature": ""}
+            ])
+        );
+    }
+
+    #[test]
+    fn chat_completions_stream_is_not_an_anthropic_event_stream() {
+        let body = concat!(
+            "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n",
+            "\n",
+            "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n",
+            "\n",
+            "data: [DONE]\n",
+            "\n",
+        );
+        let mut emitted: Vec<String> = Vec::new();
+        let err =
+            parse_anthropic_sse_body(body, &mut |c| emitted.push(c.to_string()), &mut |_| {})
+                .unwrap_err();
+        assert_eq!(err, NOT_AN_EVENT_STREAM);
+        assert!(emitted.is_empty());
+    }
+
+    #[test]
+    fn stream_line_that_is_not_utf8_is_malformed() {
+        use super::{
+            assemble_anthropic_streaming_response, process_anthropic_sse_bytes, AnthropicSseState,
+        };
+
+        let read = |lines: &[&[u8]]| {
+            let mut state = AnthropicSseState::new();
+            let mut emitted: Vec<String> = Vec::new();
+            for line in lines {
+                if process_anthropic_sse_bytes(
+                    line,
+                    &mut state,
+                    &mut |c| emitted.push(c.to_string()),
+                    &mut |_| {},
+                    &mut |_| {},
+                ) {
+                    break;
+                }
+            }
+            (assemble_anthropic_streaming_response(state), emitted)
+        };
+        let start = format!("data: {TOOL_START_0}");
+        let stop = format!("data: {TOOL_USE_STOP}");
+
+        // Tool input whose string value carries a byte that is not UTF-8. Decoded lossily it
+        // would parse, and the tool would run on a replacement character.
+        let (result, _) = read(&[
+            b"event: content_block_start",
+            start.as_bytes(),
+            b"",
+            b"event: content_block_delta",
+            b"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"cmd\\\":\\\"rm \xff\\\"}\"}}",
+            b"",
+            b"event: message_delta",
+            stop.as_bytes(),
+            b"",
+        ]);
+        assert_eq!(
+            result.unwrap_err(),
+            "driver: malformed Anthropic stream: a line is not UTF-8"
+        );
+
+        // The same stream in valid UTF-8, with CRLF line endings, still reads.
+        let (result, _) = read(&[
+            b"event: content_block_start\r",
+            format!("{start}\r").as_bytes(),
+            b"\r",
+            b"event: content_block_delta\r",
+            format!("data: {}\r", input_delta(0, "{\"cmd\":\"ls\"}")).as_bytes(),
+            b"\r",
+            b"event: message_delta\r",
+            format!("{stop}\r").as_bytes(),
+            b"\r",
+        ]);
+        assert_eq!(
+            result.unwrap()["content"],
+            json!([{"type": "tool_call", "id": "toolu_01", "name": "bash", "input": {"cmd": "ls"}}])
+        );
+    }
+
+    #[test]
+    fn blank_or_comment_only_stream_keeps_the_no_stop_reason_message() {
+        for body in ["\n\n", "   \n\t\n", ": keep-alive\n\n: keep-alive\n"] {
+            assert_eq!(parse_stream(body).unwrap_err(), STREAM_NO_STOP_REASON, "body = {body:?}");
+        }
+    }
+
+    #[test]
+    fn classifies_claude3_models() {
+        for model in &[
+            "claude-3-opus-20240229",
+            "claude-3-5-sonnet-20241022",
+            "claude-3-haiku-20240307",
+        ] {
+            assert_eq!(
+                classify_model(model),
+                ModelFamily::Claude3,
+                "expected Claude3 for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn classifies_claude4_plus_models() {
+        for model in &[
+            "claude-opus-4-6",
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-7",
+        ] {
+            assert_eq!(
+                classify_model(model),
+                ModelFamily::Claude4Plus,
+                "expected Claude4Plus for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude4_drops_top_p_when_temperature_also_present() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "claude-opus-4-6",
+            "max_tokens": 1024,
+            "messages": [],
+            "params": {
+                "temperature": 0.7,
+                "top_p": 0.9
+            }
+        }))
+        .unwrap();
+
+        let translated =
+            translate_murmur_request_to_anthropic(
+                &request,
+                ModelFamily::Claude4Plus,
+                &thinking_off(),
+                &cache_default(),
+            )
+            .unwrap();
+
+        assert_eq!(translated["temperature"], 0.7);
+        assert!(
+            translated.get("top_p").is_none(),
+            "top_p must be dropped when temperature is also set on Claude 4+"
+        );
+    }
+
+    #[test]
+    fn claude4_keeps_top_p_when_temperature_absent() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "claude-opus-4-6",
+            "max_tokens": 1024,
+            "messages": [],
+            "params": {
+                "top_p": 0.9
+            }
+        }))
+        .unwrap();
+
+        let translated =
+            translate_murmur_request_to_anthropic(
+                &request,
+                ModelFamily::Claude4Plus,
+                &thinking_off(),
+                &cache_default(),
+            )
+            .unwrap();
+
+        assert_eq!(translated["top_p"], 0.9);
+    }
+
+    #[test]
+    fn claude3_allows_both_temperature_and_top_p() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "claude-3-5-sonnet-20241022",
+            "max_tokens": 512,
+            "messages": [],
+            "params": {
+                "temperature": 0.5,
+                "top_p": 0.8
+            }
+        }))
+        .unwrap();
+
+        let translated =
+            translate_murmur_request_to_anthropic(
+                &request,
+                ModelFamily::Claude3,
+                &thinking_off(),
+                &cache_default(),
+            )
+            .unwrap();
+
+        assert_eq!(translated["temperature"], 0.5);
+        assert_eq!(translated["top_p"], 0.8);
+    }
+
+    #[test]
+    fn parse_beta_features_from_string() {
+        let config = r#"{"beta_features": "interleaved-thinking-2025-05-14"}"#;
+        assert_eq!(
+            parse_beta_features(config),
+            Some("interleaved-thinking-2025-05-14".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_beta_features_from_list() {
+        let config = r#"{"beta_features": ["interleaved-thinking-2025-05-14", "fine-tuning-2024-01-01"]}"#;
+        assert_eq!(
+            parse_beta_features(config),
+            Some("interleaved-thinking-2025-05-14,fine-tuning-2024-01-01".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_beta_features_absent_returns_none() {
+        assert_eq!(parse_beta_features(r#"{"temperature": 0.5}"#), None);
+        assert_eq!(parse_beta_features(r#"{}"#), None);
+        assert_eq!(parse_beta_features(r#"{"beta_features": ""}"#), None);
+        assert_eq!(parse_beta_features(r#"{"beta_features": []}"#), None);
+    }
+
+    #[test]
+    fn anthropic_streaming_text_response() {
+        let body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-4-6\",\"stop_reason\":null,\"stop_sequence\":null}}\n",
+            "\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "\n",
+            "event: ping\n",
+            "data: {\"type\":\"ping\"}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\n",
+            "\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n",
+            "\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":2}}\n",
+            "\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n",
+            "\n",
+        );
+
+        let mut emitted: Vec<String> = Vec::new();
+        let result =
+            parse_anthropic_sse_body(body, &mut |chunk| emitted.push(chunk.to_string()), &mut |_| {}).unwrap();
+
+        assert_eq!(emitted, vec!["Hello", " world"]);
+        assert_eq!(result["stop_reason"], "end_turn");
+        assert_eq!(result["content"][0]["type"], "text");
+        assert_eq!(result["content"][0]["text"], "Hello world");
+    }
+
+    #[test]
+    fn anthropic_streaming_tool_use() {
+        let body = concat!(
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01\",\"name\":\"bash\",\"input\":{}}}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"cmd\\\":\"}}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"ls\\\"}\"} }\n",
+            "\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n",
+            "\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null}}\n",
+            "\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n",
+            "\n",
+        );
+
+        let mut emitted: Vec<String> = Vec::new();
+        let result =
+            parse_anthropic_sse_body(body, &mut |chunk| emitted.push(chunk.to_string()), &mut |_| {}).unwrap();
+
+        assert!(emitted.is_empty(), "no text chunks expected for tool use");
+        assert_eq!(result["stop_reason"], "tool_call");
+        assert_eq!(result["content"][0]["type"], "tool_call");
+        assert_eq!(result["content"][0]["id"], "toolu_01");
+        assert_eq!(result["content"][0]["name"], "bash");
+        assert_eq!(result["content"][0]["input"], json!({"cmd": "ls"}));
+    }
+
+    // ── Extended thinking ─────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_thinking_config_reads_enabled_and_budget() {
+        let cfg = parse_thinking_config(r#"{"thinking":"enabled","thinking_budget_tokens":4096}"#);
+        assert!(cfg.enabled);
+        assert_eq!(cfg.budget_tokens, 4096);
+
+        let default_budget = parse_thinking_config(r#"{"thinking":"enabled"}"#);
+        assert!(default_budget.enabled);
+        assert_eq!(default_budget.budget_tokens, 1024);
+
+        let off = parse_thinking_config(r#"{"thinking":"disabled"}"#);
+        assert!(!off.enabled);
+        assert!(!parse_thinking_config("{}").enabled);
+        assert!(!parse_thinking_config("not json").enabled);
+    }
+
+    #[test]
+    fn thinking_enabled_injects_block_and_strips_sampling_params() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "claude-opus-4-6",
+            "max_tokens": 8192,
+            "messages": [],
+            "params": {"temperature": 0.7, "top_p": 0.9, "top_k": 40}
+        }))
+        .unwrap();
+
+        let cfg = ThinkingConfig { enabled: true, budget_tokens: 2048 };
+        let translated =
+            translate_murmur_request_to_anthropic(
+                &request,
+                ModelFamily::Claude4Plus,
+                &cfg,
+                &cache_default(),
+            )
+            .unwrap();
+
+        assert_eq!(translated["thinking"]["type"], "enabled");
+        assert_eq!(translated["thinking"]["budget_tokens"], 2048);
+        assert!(translated.get("temperature").is_none(), "temperature must be stripped");
+        assert!(translated.get("top_p").is_none(), "top_p must be stripped");
+        assert!(translated.get("top_k").is_none(), "top_k must be stripped");
+    }
+
+    #[test]
+    fn thinking_budget_capped_below_max_tokens() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "claude-opus-4-6",
+            "max_tokens": 1000,
+            "messages": [],
+        }))
+        .unwrap();
+
+        let cfg = ThinkingConfig { enabled: true, budget_tokens: 4096 };
+        let translated =
+            translate_murmur_request_to_anthropic(
+                &request,
+                ModelFamily::Claude4Plus,
+                &cfg,
+                &cache_default(),
+            )
+            .unwrap();
+
+        assert_eq!(translated["thinking"]["budget_tokens"], 999);
+    }
+
+    #[test]
+    fn thinking_block_replayed_only_when_enabled_and_signed() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "claude-opus-4-6",
+            "max_tokens": 4096,
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "text": "step by step", "signature": "sig-abc"},
+                    {"type": "text", "text": "the answer"}
+                ]
+            }]
+        }))
+        .unwrap();
+
+        // Enabled → thinking block replayed first, verbatim, with signature.
+        let on = ThinkingConfig { enabled: true, budget_tokens: 2048 };
+        let with_thinking =
+            translate_murmur_request_to_anthropic(
+                &request,
+                ModelFamily::Claude4Plus,
+                &on,
+                &cache_default(),
+            )
+            .unwrap();
+        let content = &with_thinking["messages"][0]["content"];
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[0]["thinking"], "step by step");
+        assert_eq!(content[0]["signature"], "sig-abc");
+        assert_eq!(content[1]["type"], "text");
+
+        // Disabled → thinking block dropped (sending it would 400).
+        let without =
+            translate_murmur_request_to_anthropic(
+                &request,
+                ModelFamily::Claude4Plus,
+                &thinking_off(),
+                &cache_default(),
+            )
+            .unwrap();
+        assert_eq!(without["messages"][0]["content"][0]["type"], "text");
+    }
+
+    #[test]
+    fn anthropic_streaming_thinking_then_text() {
+        let body = concat!(
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Let me \"}}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"reason.\"}}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig123\"}}\n",
+            "\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n",
+            "\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"The answer is 42.\"}}\n",
+            "\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n",
+            "\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n",
+            "\n",
+        );
+
+        let mut text: Vec<String> = Vec::new();
+        let mut think: Vec<String> = Vec::new();
+        let result = parse_anthropic_sse_body(
+            body,
+            &mut |c| text.push(c.to_string()),
+            &mut |c| think.push(c.to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(think.join(""), "Let me reason.");
+        assert_eq!(text, vec!["The answer is 42."]);
+        assert_eq!(result["content"][0]["type"], "thinking");
+        assert_eq!(result["content"][0]["text"], "Let me reason.");
+        assert_eq!(result["content"][0]["signature"], "sig123");
+        assert_eq!(result["content"][1]["type"], "text");
+        assert_eq!(result["content"][1]["text"], "The answer is 42.");
+        assert_eq!(result["stop_reason"], "end_turn");
+    }
+
+    // ── prompt_cache_key (never forwarded) ────────────────────────────────────
+
+    #[test]
+    fn prompt_cache_key_never_reaches_the_anthropic_body() {
+        // The Messages API 400s on any body member it does not define, so the reserved
+        // top-level hint must not survive translation at any nesting depth.
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "claude-opus-4-6",
+            "max_tokens": 1024,
+            "prompt_cache_key": "demo-capsule:1.0.0:ctx-7",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            "params": {"temperature": 0.2}
+        }))
+        .unwrap();
+
+        let translated = translate_murmur_request_to_anthropic(
+            &request,
+            ModelFamily::Claude4Plus,
+            &thinking_off(),
+            &cache_default(),
+        )
+        .unwrap();
+
+        let serialized = serde_json::to_string(&translated).unwrap();
+        assert!(
+            !serialized.contains("prompt_cache_key"),
+            "prompt_cache_key leaked into the Anthropic body: {serialized}"
+        );
+        assert!(!serialized.contains("demo-capsule:1.0.0:ctx-7"));
+        // Unrelated params still pass through.
+        assert_eq!(translated["temperature"], json!(0.2));
+    }
+
+    // ── usage ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn non_streaming_usage_round_trip() {
+        let response = json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "Hello"}],
+            "usage": {
+                "input_tokens": 12043,
+                "output_tokens": 218,
+                "cache_read_input_tokens": 11780,
+                "cache_creation_input_tokens": 7
+            }
+        });
+
+        let translated = translate_anthropic_response_to_murmur(&response).unwrap();
+
+        assert_eq!(translated["stop_reason"], "end_turn");
+        assert_eq!(translated["content"][0]["text"], "Hello");
+        assert_eq!(
+            translated["usage"],
+            json!({
+                "input_tokens": 12043,
+                "output_tokens": 218,
+                "cached_tokens": 11780,
+                "cache_write_tokens": 7
+            })
+        );
+    }
+
+    #[test]
+    fn streaming_usage_seeded_by_message_start_and_finished_by_message_delta() {
+        let body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"usage\":{\"input_tokens\":100,\"output_tokens\":1,\"cache_read_input_tokens\":90,\"cache_creation_input_tokens\":10}}}\n",
+            "\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n",
+            "\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":55}}\n",
+            "\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n",
+            "\n",
+        );
+
+        let result = parse_anthropic_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap();
+
+        assert_eq!(result["stop_reason"], "end_turn");
+        assert_eq!(result["content"][0]["text"], "Hello");
+        assert_eq!(result["usage"]["input_tokens"], 100);
+        // The cumulative delta count wins over the message_start placeholder.
+        assert_eq!(result["usage"]["output_tokens"], 55);
+        assert_eq!(result["usage"]["cached_tokens"], 90);
+        assert_eq!(result["usage"]["cache_write_tokens"], 10);
+    }
+
+    #[test]
+    fn missing_or_malformed_usage_omits_the_member() {
+        for usage in [
+            None,
+            Some(json!("12043")),
+            Some(json!({"input_tokens": "12043", "output_tokens": -4, "cached_tokens": 1.5})),
+            Some(json!({})),
+            Some(Value::Null),
+        ] {
+            let mut response = json!({
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "Hello"}]
+            });
+            if let Some(usage) = usage.clone() {
+                response["usage"] = usage;
+            }
+
+            let translated = translate_anthropic_response_to_murmur(&response).unwrap();
+            assert!(
+                translated.get("usage").is_none(),
+                "expected no usage key for {usage:?}, got {translated}"
+            );
+        }
+    }
+
+    #[test]
+    fn reported_zero_is_kept_and_unreported_siblings_are_omitted() {
+        let response = json!({
+            "stop_reason": "end_turn",
+            "content": [],
+            "usage": {"input_tokens": 40, "cache_read_input_tokens": 0}
+        });
+
+        let translated = translate_anthropic_response_to_murmur(&response).unwrap();
+
+        assert_eq!(
+            translated["usage"],
+            json!({"input_tokens": 40, "cached_tokens": 0})
+        );
+    }
+
+    #[test]
+    fn streaming_flags_carry_no_stream_options() {
+        let mut body = json!({"model": "claude-opus-4-6", "stream": false});
+        stamp_streaming_flags(&mut body);
+        assert_eq!(body["stream"], json!(true));
+        assert!(body.get("stream_options").is_none());
+    }
+
+    // ── prompt caching ────────────────────────────────────────────────────────
+
+    fn cache_request(system: Value, tools: Value, messages: Value) -> MurmurRequest {
+        serde_json::from_value(json!({
+            "model": "claude-opus-4-6",
+            "max_tokens": 2048,
+            "system": system,
+            "tools": tools,
+            "messages": messages,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn marks_the_stable_prefix_with_cache_breakpoints() {
+        let request = cache_request(
+            json!("You are helpful"),
+            json!([
+                {"name": "calc", "description": "calculate", "parameters": {"type": "object"}},
+                {"name": "grep", "description": "search", "parameters": {"type": "object"}}
+            ]),
+            json!([{"role": "user", "content": [{"type": "text", "text": "hi"}]}]),
+        );
+
+        let translated = translate_murmur_request_to_anthropic(
+            &request,
+            ModelFamily::Claude4Plus,
+            &thinking_off(),
+            &cache_default(),
+        )
+        .unwrap();
+
+        // The marker sits on the last tool only — tools render at position 0, so this is a read
+        // point any later request with the same inventory can hit.
+        assert!(translated["tools"][0].get("cache_control").is_none());
+        assert_eq!(
+            translated["tools"][1]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(translated["tools"][0]["name"], "calc");
+        assert_eq!(translated["tools"][1]["name"], "grep");
+        assert_eq!(translated["tools"][1]["description"], "search");
+        assert_eq!(translated["tools"][1]["input_schema"], json!({"type": "object"}));
+
+        // `system` becomes a one-element array of text blocks so a marker has a block to sit on.
+        assert_eq!(
+            translated["system"],
+            json!([{
+                "type": "text",
+                "text": "You are helpful",
+                "cache_control": {"type": "ephemeral"}
+            }])
+        );
+    }
+
+    #[test]
+    fn marks_the_settled_conversation_tail() {
+        let request = cache_request(
+            json!("You are helpful"),
+            json!([]),
+            json!([
+                {"role": "user", "content": [{"type": "text", "text": "add 1 and 1"}]},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "calling calc"},
+                        {"type": "tool_call", "id": "tc-1", "name": "calc", "input": {"x": 1}}
+                    ]
+                },
+                {"role": "tool", "tool_call_id": "tc-1", "content": [{"type": "text", "text": "2"}]}
+            ]),
+        );
+
+        let translated = translate_murmur_request_to_anthropic(
+            &request,
+            ModelFamily::Claude4Plus,
+            &thinking_off(),
+            &cache_default(),
+        )
+        .unwrap();
+
+        let messages = translated["messages"].as_array().unwrap();
+        assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+        assert_eq!(
+            messages[2]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        for earlier in &messages[..2] {
+            for block in earlier["content"].as_array().unwrap() {
+                assert!(
+                    block.get("cache_control").is_none(),
+                    "marker leaked onto an earlier message block: {block}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn never_exceeds_the_breakpoint_budget() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "claude-opus-4-6",
+            "max_tokens": 8192,
+            "system": "You are helpful",
+            "tools": [
+                {"name": "calc", "parameters": {"type": "object"}},
+                {"name": "grep", "parameters": {"type": "object"}},
+                {"name": "edit", "parameters": {"type": "object"}}
+            ],
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "one"}]},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "text": "hmm", "signature": "sig-1"},
+                        {"type": "text", "text": "two"},
+                        {"type": "tool_call", "id": "tc-1", "name": "calc", "input": {}}
+                    ]
+                },
+                {"role": "tool", "tool_call_id": "tc-1", "content": [{"type": "text", "text": "3"}]},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "source": {"media_type": "image/png", "data": "aGk="}},
+                        {"type": "text", "text": "four"}
+                    ]
+                }
+            ],
+            "params": {"metadata": {"user_id": "u-1"}, "stop_sequences": ["END"]}
+        }))
+        .unwrap();
+
+        let thinking_on = ThinkingConfig { enabled: true, budget_tokens: 2048 };
+
+        for (config, expects_ttl) in [(cache_default(), false), (
+            PromptCacheConfig { enabled: true, ttl: CacheTtl::OneHour },
+            true,
+        )] {
+            let translated = translate_murmur_request_to_anthropic(
+                &request,
+                ModelFamily::Claude4Plus,
+                &thinking_on,
+                &config,
+            )
+            .unwrap();
+
+            let markers = count_cache_markers(&translated);
+            assert_eq!(
+                markers, DRIVER_CACHE_BREAKPOINTS,
+                "expected tools + system + messages markers"
+            );
+            assert!(markers <= MAX_CACHE_BREAKPOINTS);
+
+            // Every marker in one request carries the same TTL, so longer-TTL entries can never
+            // follow shorter-TTL ones.
+            let expected = if expects_ttl {
+                json!({"type": "ephemeral", "ttl": "1h"})
+            } else {
+                json!({"type": "ephemeral"})
+            };
+            assert_eq!(translated["tools"][2]["cache_control"], expected);
+            assert_eq!(translated["system"][0]["cache_control"], expected);
+            assert_eq!(
+                translated["messages"][3]["content"][1]["cache_control"],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn empty_tools_system_and_messages_emit_no_markers() {
+        let empty = cache_request(json!(null), json!([]), json!([]));
+        let translated = translate_murmur_request_to_anthropic(
+            &empty,
+            ModelFamily::Claude4Plus,
+            &thinking_off(),
+            &cache_default(),
+        )
+        .unwrap();
+        assert!(translated.get("tools").is_none());
+        assert!(translated.get("system").is_none());
+        assert_eq!(translated["messages"], json!([]));
+        assert_eq!(count_cache_markers(&translated), 0);
+
+        // A whitespace-only system prompt drops the key entirely rather than emitting an empty
+        // block that could never cache.
+        let blank_system = cache_request(json!("   "), json!([]), json!([]));
+        let translated = translate_murmur_request_to_anthropic(
+            &blank_system,
+            ModelFamily::Claude4Plus,
+            &thinking_off(),
+            &cache_default(),
+        )
+        .unwrap();
+        assert!(translated.get("system").is_none());
+        assert_eq!(count_cache_markers(&translated), 0);
+    }
+
+    #[test]
+    fn thinking_blocks_are_never_marked() {
+        // A `thinking` block cannot carry a marker, so the search steps back to the text block.
+        let trailing_thinking = cache_request(
+            json!(null),
+            json!([]),
+            json!([{
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "the answer"},
+                    {"type": "thinking", "text": "step by step", "signature": "sig-abc"}
+                ]
+            }]),
+        );
+        let thinking_on = ThinkingConfig { enabled: true, budget_tokens: 2048 };
+        let translated = translate_murmur_request_to_anthropic(
+            &trailing_thinking,
+            ModelFamily::Claude4Plus,
+            &thinking_on,
+            &cache_default(),
+        )
+        .unwrap();
+        let content = translated["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(content[1]["type"], "thinking");
+        assert!(content[1].get("cache_control").is_none());
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["cache_control"], json!({"type": "ephemeral"}));
+        assert_eq!(count_cache_markers(&translated), 1);
+
+        // With thinking off the last message translates to an empty content array, so the search
+        // crosses the message boundary into the preceding user turn.
+        let dropped_thinking = cache_request(
+            json!(null),
+            json!([]),
+            json!([
+                {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                {
+                    "role": "assistant",
+                    "content": [{"type": "thinking", "text": "unsigned", "signature": ""}]
+                }
+            ]),
+        );
+        let translated = translate_murmur_request_to_anthropic(
+            &dropped_thinking,
+            ModelFamily::Claude4Plus,
+            &thinking_off(),
+            &cache_default(),
+        )
+        .unwrap();
+        assert_eq!(translated["messages"][1]["content"], json!([]));
+        assert_eq!(
+            translated["messages"][0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(count_cache_markers(&translated), 1);
+    }
+
+    #[test]
+    fn disabled_prompt_cache_restores_the_uncached_body() {
+        let request = cache_request(
+            json!("You are helpful"),
+            json!([{"name": "calc", "description": "calculate", "parameters": {"type": "object"}}]),
+            json!([{"role": "user", "content": [{"type": "text", "text": "hi"}]}]),
+        );
+
+        let translated = translate_murmur_request_to_anthropic(
+            &request,
+            ModelFamily::Claude4Plus,
+            &thinking_off(),
+            &cache_off(),
+        )
+        .unwrap();
+
+        // `system` is back to a bare JSON string and no marker appears at any depth.
+        assert_eq!(translated["system"], json!("You are helpful"));
+        assert_eq!(count_cache_markers(&translated), 0);
+        assert!(!serde_json::to_string(&translated)
+            .unwrap()
+            .contains("cache_control"));
+        assert_eq!(
+            translated["tools"],
+            json!([{
+                "name": "calc",
+                "description": "calculate",
+                "input_schema": {"type": "object"}
+            }])
+        );
+        assert_eq!(
+            translated["messages"],
+            json!([{"role": "user", "content": [{"type": "text", "text": "hi"}]}])
+        );
+    }
+
+    #[test]
+    fn parse_prompt_cache_config_falls_back_to_enabled_five_minutes() {
+        let default = PromptCacheConfig::default();
+        for input in [
+            "{}",
+            r#"{"prompt_cache":"enabled"}"#,
+            r#"{"prompt_cache":true}"#,
+            r#"{"prompt_cache":7}"#,
+            r#"{"prompt_cache":"garbage"}"#,
+            r#"{"prompt_cache_ttl":"30m"}"#,
+            r#"{"prompt_cache_ttl":5}"#,
+            "not json",
+            "",
+        ] {
+            assert_eq!(
+                parse_prompt_cache_config(input),
+                default,
+                "unexpected config for {input}"
+            );
+        }
+
+        for input in [r#"{"prompt_cache":"disabled"}"#, r#"{"prompt_cache":false}"#] {
+            let config = parse_prompt_cache_config(input);
+            assert!(!config.enabled, "expected disabled for {input}");
+        }
+
+        let hourly = parse_prompt_cache_config(r#"{"prompt_cache_ttl":"1h"}"#);
+        assert!(hourly.enabled);
+        assert_eq!(hourly.ttl, CacheTtl::OneHour);
+        assert_eq!(hourly.marker(), json!({"type": "ephemeral", "ttl": "1h"}));
+    }
+
+    #[test]
+    fn no_provider_url_is_hardcoded_anywhere_in_the_crate() {
+        // Where inference goes is the host's fact. A literal provider URL in a driver is a
+        // value that would become silently effective the moment the host stopped supplying
+        // one, and it would carry the capsule's credentials with it. The needle is assembled
+        // rather than written out so that this assertion does not itself become the only
+        // occurrence of what it forbids.
+        let provider_url = concat!("https://", "api.");
+        assert!(
+            !include_str!("lib.rs").contains(provider_url),
+            "the driver must not name a provider URL; the endpoint comes from the host"
+        );
+    }
+
+    #[test]
+    fn run_inner_resolves_the_endpoint_through_the_shared_contract() {
+        // One implementation of "a missing endpoint is a refusal" exists, in
+        // murmur-driver-env. An inline `std::env::var` read here would be a second one, free
+        // to disagree with it again. `run_inner` is wasm-only, so this is asserted from the
+        // source; the needle is assembled so that this test is not its own evidence.
+        let source = include_str!("lib.rs");
+        let run_inner = &source[source
+            .find("fn run_inner(")
+            .expect("run_inner must exist")..];
+        assert!(
+            run_inner.contains(concat!("require_", "endpoint(")),
+            "run_inner must resolve the endpoint through murmur_driver_env::require_endpoint"
+        );
+    }
+
+    #[test]
+    fn manifest_declares_the_upstream_auth_scheme_the_gateway_will_read() {
+        // The runtime builds the auth header from these two fields, so a dropped quote pair
+        // (`value: {key}` is a YAML flow mapping, not a string) or a renamed key leaves the
+        // gateway with no scheme to apply and every request unauthenticated.
+        const BLOCK: &str = "upstream_auth:\n  header: x-api-key\n  value: \"{key}\"\n";
+        assert!(
+            include_str!("../murmur.yaml").contains(BLOCK),
+            "drivers/driver-anthropic/murmur.yaml must contain verbatim:\n{BLOCK}"
+        );
+    }
+
+    #[test]
+    fn the_driver_neither_reads_a_credential_nor_builds_an_auth_header() {
+        // The runtime attaches the header declared under `upstream_auth:`, so a driver-side
+        // credential read would put the key back in the guest.
+        let source = include_str!("lib.rs");
+        let non_test = source[..source.find("\nmod tests {").expect("mod tests must exist")]
+            .to_lowercase();
+        for needle in [
+            concat!("murmur_inference_", "api_key"),
+            concat!("\"author", "ization\""),
+            concat!("\"x-api", "-key\""),
+            concat!("bear", "er "),
+        ] {
+            assert!(
+                !non_test.contains(needle),
+                "driver-anthropic: non-test source must not contain {needle}"
+            );
+        }
+    }
+
+    // ── Tool-call signals ─────────────────────────────────────────────────────
+
+    use super::{parse_anthropic_sse_body_with_signals, RecordedSignal};
+
+    fn started(id: &str, name: &str) -> RecordedSignal {
+        RecordedSignal::Started {
+            id: id.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    fn input_bytes(id: &str, bytes: u64) -> RecordedSignal {
+        RecordedSignal::InputBytes {
+            id: id.to_string(),
+            bytes,
+        }
+    }
+
+    fn parse_stream_with_signals(body: &str) -> (Value, Vec<RecordedSignal>) {
+        let (result, signals) =
+            parse_anthropic_sse_body_with_signals(body, &mut |_| {}, &mut |_| {});
+        (result.unwrap(), signals)
+    }
+
+    /// `marker` sits only inside a call's arguments, so no signal may carry it.
+    fn assert_no_signal_carries(signals: &[RecordedSignal], marker: &str) {
+        for signal in signals {
+            assert!(
+                !format!("{signal:?}").contains(marker),
+                "a tool-call signal carries argument text: {signal:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_call_signals_its_start_then_rising_input_byte_totals() {
+        let body = sse(&[
+            ("content_block_start", TOOL_START_0),
+            ("content_block_delta", &input_delta(0, "")),
+            ("content_block_delta", &input_delta(0, r#"{"cmd":"#)),
+            ("content_block_delta", &input_delta(0, r#""héllo"}"#)),
+            ("message_delta", TOOL_USE_STOP),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+
+        let (result, signals) = parse_stream_with_signals(&body);
+
+        assert_eq!(
+            signals,
+            vec![
+                started("toolu_01", "bash"),
+                input_bytes("toolu_01", 7),
+                input_bytes("toolu_01", 16),
+            ]
+        );
+        let call = &result["content"][0];
+        assert_eq!(call["type"], "tool_call");
+        assert_eq!(call["id"], "toolu_01");
+        assert_eq!(call["name"], "bash");
+        assert_eq!(call["input"], json!({"cmd": "héllo"}));
+        // The last total is the byte length of the text the input was parsed from.
+        assert_eq!(r#"{"cmd":"héllo"}"#.len(), 16);
+        assert_eq!(serde_json::to_string(&call["input"]).unwrap().len(), 16);
+        assert_no_signal_carries(&signals, "héllo");
+    }
+
+    #[test]
+    fn tool_call_signals_leave_text_and_thinking_chunks_unchanged() {
+        let body = sse(&[
+            ("content_block_start", THINKING_START_0),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Plan it."}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}"#,
+            ),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            ),
+            ("content_block_delta", &text_delta(1, "Running ")),
+            ("content_block_delta", &text_delta(1, "it.")),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_02","name":"bash","input":{}}}"#,
+            ),
+            ("content_block_delta", &input_delta(2, r#"{"cmd":"ZQXJ"}"#)),
+            ("message_delta", TOOL_USE_STOP),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+
+        let mut text: Vec<String> = Vec::new();
+        let mut thinking: Vec<String> = Vec::new();
+        let (result, signals) = parse_anthropic_sse_body_with_signals(
+            &body,
+            &mut |c| text.push(c.to_string()),
+            &mut |c| thinking.push(c.to_string()),
+        );
+
+        assert_eq!(text, vec!["Running ", "it."]);
+        assert_eq!(thinking, vec!["Plan it."]);
+        assert_eq!(
+            result.unwrap()["content"],
+            json!([
+                {"type": "thinking", "text": "Plan it.", "signature": "sig"},
+                {"type": "text", "text": "Running it."},
+                {"type": "tool_call", "id": "toolu_02", "name": "bash", "input": {"cmd": "ZQXJ"}}
+            ])
+        );
+        assert_eq!(
+            signals,
+            vec![started("toolu_02", "bash"), input_bytes("toolu_02", 14)]
+        );
+        assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    #[test]
+    fn tool_call_with_no_arguments_signals_only_its_start() {
+        let body = sse(&[
+            ("content_block_start", TOOL_START_0),
+            ("content_block_delta", &input_delta(0, "")),
+            ("message_delta", TOOL_USE_STOP),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+
+        let (result, signals) = parse_stream_with_signals(&body);
+
+        assert_eq!(signals, vec![started("toolu_01", "bash")]);
+        assert_eq!(result["content"][0]["input"], json!({}));
+    }
+
+    #[test]
+    fn tool_call_with_an_empty_id_signals_nothing_and_is_returned_as_before() {
+        let body = sse(&[
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"bash","input":{}}}"#,
+            ),
+            ("content_block_delta", &input_delta(0, r#"{"cmd":"ZQXJ"}"#)),
+            ("message_delta", TOOL_USE_STOP),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+
+        let (result, signals) = parse_stream_with_signals(&body);
+
+        assert_eq!(signals, vec![]);
+        assert_eq!(
+            result["content"],
+            json!([{"type": "tool_call", "id": "", "name": "bash", "input": {"cmd": "ZQXJ"}}])
+        );
+    }
+
+    #[test]
+    fn tool_calls_at_two_indexes_keep_separate_totals() {
+        let body = sse(&[
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_a","name":"read","input":{}}}"#,
+            ),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_b","name":"bash","input":{}}}"#,
+            ),
+            ("content_block_delta", &input_delta(1, r#"{"path":"#)),
+            ("content_block_delta", &input_delta(2, r#"{"cmd":"#)),
+            ("content_block_delta", &input_delta(1, r#""ZQXJ.md"}"#)),
+            ("content_block_delta", &input_delta(2, r#""ls ZQXJ"}"#)),
+            ("message_delta", TOOL_USE_STOP),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+
+        let (result, signals) = parse_stream_with_signals(&body);
+
+        assert_eq!(
+            signals,
+            vec![
+                started("toolu_a", "read"),
+                started("toolu_b", "bash"),
+                input_bytes("toolu_a", 8),
+                input_bytes("toolu_b", 7),
+                input_bytes("toolu_a", 18),
+                input_bytes("toolu_b", 17),
+            ]
+        );
+        assert_eq!(result["content"][0]["id"], "toolu_a");
+        assert_eq!(result["content"][0]["input"], json!({"path": "ZQXJ.md"}));
+        assert_eq!(result["content"][1]["id"], "toolu_b");
+        assert_eq!(result["content"][1]["input"], json!({"cmd": "ls ZQXJ"}));
+        assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    #[test]
+    fn ignored_server_tool_use_block_signals_nothing() {
+        let body = sse(&[
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_01","name":"web_search","input":{}}}"#,
+            ),
+            (
+                "content_block_delta",
+                &input_delta(0, r#"{"query":"ZQXJ"}"#),
+            ),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            ),
+            ("content_block_delta", &text_delta(1, "Found it.")),
+            ("message_delta", END_TURN),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+
+        let (result, signals) = parse_stream_with_signals(&body);
+
+        assert_eq!(signals, vec![]);
+        assert_eq!(
+            result["content"],
+            json!([{"type": "text", "text": "Found it."}])
+        );
+    }
+
+    #[test]
+    fn wasm_driver_reports_tool_calls_on_murmur_stream_events_only() {
+        let source = include_str!("lib.rs");
+        // Ends at `mod tests` so the needles below cannot match themselves.
+        let start = source
+            .find("\nmod wasm_driver {")
+            .expect("mod wasm_driver must exist");
+        let end = source.find("\nmod tests {").expect("mod tests must exist");
+        let wasm = &source[start..end];
+        for call in [
+            "murmur::stream::events::tool_call_started(",
+            "murmur::stream::events::tool_call_input_bytes(",
+        ] {
+            assert!(wasm.contains(call), "mod wasm_driver must call {call}");
+        }
+        for retired in [concat!("murmur::", "text"), concat!("murmur:", "text")] {
+            assert!(!source.contains(retired), "lib.rs must not name {retired}");
+        }
+    }
+}

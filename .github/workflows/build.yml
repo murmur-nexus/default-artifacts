@@ -14,116 +14,179 @@ concurrency:
   group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
-# Publish a GitHub Release for every version tag.
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  # The murmur commit `mur` is built from, to pack and index the release. Always a literal
+  # SHA: `mur build` decides the zip bytes and `mur index` the index bytes, so a floating
+  # murmur could change either between two runs over one commit, and the bytes gate would
+  # then refuse a republish that changed nothing here. Move it deliberately, in its own
+  # commit, and only to a murmur whose `mur install` reads what this one writes.
+  MURMUR_REV: 5da0fdda017f5ddd99606c17d2e69beb25aca9d1
+
+# Publish a GitHub Release for every version tag: every artifact packed by `mur build`,
+# and the schema 2 artifacts-index.json `mur install murmur/<name>@<version>` reads from
+# the latest release.
+#
+# No artifact is named here. scripts/list-artifacts.sh enumerates them from their own
+# murmur.yaml files, and scripts/classify-crates.sh says which crates are native.
 #
 # Pipeline:
-#   1. verify-versions  — runs apply-versions.sh; fails if any version surface
-#                         is out of sync with artifacts.toml.
-#   2. build-wasm       — matrix over all WASM artifacts (drivers, hooks, and the
-#                         wasm tools: request-input, create, editor, corpus,
-#                         report).
-#   3. build-native     — matrix over the remaining native tool artifacts
-#                         (git, registry-search).
-#   4. build-skills     — matrix over skill artifacts (zip-only; no Rust compile).
-#   5. release          — collects all .mur.zip outputs and creates the release.
+#   1. verify   — the tag is the workspace version and the newest v* tag, and no
+#                 artifact changed its payload at an unchanged version.
+#   2. native   — builds the native tools once per platform runner.
+#   3. release  — builds the wasm artifacts, packs everything, indexes it against the
+#                 previous release's index, installs every new version through a
+#                 real `mur`, and only then uploads.
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Step 1: verify all version surfaces match artifacts.toml
+  # Step 1: refuse a tag that would publish the wrong thing
   # ---------------------------------------------------------------------------
-  verify-versions:
-    name: Verify version surfaces
+  verify:
+    name: Verify the tag
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
-          # Full history and tags: check-version-drift.sh below compares this
-          # tag against the release before it.
+          ref: ${{ env.TAG }}
+          # Full history and tags: the newest-tag check and check-version-drift.sh
+          # below both read every v* tag.
           fetch-depth: 0
 
-      # apply-versions.sh re-resolves Cargo.lock, so it needs the pinned
-      # toolchain rather than whatever cargo the runner image ships. Keep in
-      # sync with rust-toolchain.toml's `channel`, as ci.yml does.
+      - name: Check the tag is the workspace version
+        run: |
+          version=$(awk '
+            /^\[workspace\.package\]/ { inside = 1; next }
+            /^\[/                     { inside = 0 }
+            inside && /^version[[:space:]]*=/ { gsub(/"/, "", $3); print $3; exit }
+          ' Cargo.toml)
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::tag $TAG is not v + [workspace.package] version ($version) in Cargo.toml"
+            exit 1
+          fi
+          echo "Tag $TAG matches [workspace.package] version $version."
+
+      # `mur install` reads the index of the latest release only, and the release job
+      # marks this one latest. Republishing an older tag would replace the newest index
+      # with one that lacks every version released since.
+      - name: Check the tag is the newest release tag
+        run: |
+          newest=$(git tag --list 'v*' --sort=-version:refname | head -1)
+          if [ "$TAG" != "$newest" ]; then
+            echo "::error::$TAG is not the newest v* tag ($newest); only the newest tag may publish, because its index becomes the one every install reads"
+            exit 1
+          fi
+
+      # A version that ships bytes differing from the ones already published under it
+      # cannot be corrected afterwards: consumers pin the payload's sha256 in
+      # murmur.lock, and a store that already holds <name>/<version> never
+      # re-downloads it. ci.yml runs this on every PR; here it guards the tag itself.
+      # The release job's bytes gate checks the built zips against the published
+      # index too; this one names the input that moved.
+      - name: Check no artifact changed its payload at an unchanged version
+        run: ./scripts/check-version-drift.sh
+
+      - name: List the artifacts to publish
+        run: ./scripts/list-artifacts.sh
+
+  # ---------------------------------------------------------------------------
+  # Step 2: build the native tools, one runner per platform
+  # ---------------------------------------------------------------------------
+  # The `platform:` rows are the one statement of which platforms a release ships a
+  # native payload for. `mur index` refuses an untagged native zip, so a platform is
+  # added by adding its row here and nothing else.
+  native:
+    name: Build native tools (${{ matrix.platform.name }})
+    needs: verify
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { name: linux-x86_64,   runner: ubuntu-latest }
+          - { name: darwin-aarch64, runner: macos-latest  }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      # Pinned toolchain (source of truth: rust-toolchain.toml). Keep the
+      # `toolchain:` input in sync with that file's `channel`.
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: "1.95.0"
 
-      # The last gate before assets are published. A version that ships bytes
-      # differing from the ones already published under it cannot be corrected
-      # afterwards: consumers pin the payload's sha256 in murmur.lock, and a
-      # store that already holds <name>/<version> never re-downloads it.
-      # ci.yml runs this on every PR; here it guards the tag itself.
-      #
-      # Runs before the step below, which rewrites Cargo.lock and
-      # artifacts-index.json: the check compares the working tree whenever one
-      # differs from HEAD, and on a dirty tree at tag time that would resolve
-      # the base to the tag being built and compare it against itself.
-      - name: Check no artifact changed its payload at an unchanged version
-        run: ./scripts/check-version-drift.sh
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Apply versions and check for drift
+      # The crates are the `native-artifact` rows of classify-crates.sh, which reads
+      # `implementation: native` from each murmur.yaml. Each binary is named after its
+      # crate, which is the artifact's name.
+      - name: Build
         run: |
-          chmod +x scripts/apply-versions.sh
-          ./scripts/apply-versions.sh
-          # artifacts-index.json excluded: its updated_at timestamp is always regenerated
-          # with the current time, so it produces a spurious diff on every CI run.
-          if ! git diff --exit-code -- ':!artifacts-index.json'; then
-            echo ""
-            echo "error: one or more version surfaces are out of sync with artifacts.toml." >&2
-            echo "Run ./scripts/apply-versions.sh locally, commit the changes, then re-push the tag." >&2
-            exit 1
-          fi
-          echo "All version surfaces match artifacts.toml."
+          crates=$(bash scripts/classify-crates.sh | awk -F'\t' '$1 == "native-artifact" { print $2 }')
+          args=""
+          for crate in $crates; do args="$args -p $crate"; done
+          # shellcheck disable=SC2086 # one word per -p flag
+          cargo build --release --locked $args
+          mkdir -p native-out
+          for crate in $crates; do cp "target/release/$crate" native-out/; done
+          ls -l native-out
 
-      - name: Validate artifacts-index.json
-        run: |
-          python3 -c "
-          import json
-          with open('artifacts-index.json') as f:
-              idx = json.load(f)
-          assert idx.get('schema_version') == '1', f\"schema_version must be '1', got {idx.get('schema_version')!r}\"
-          assert isinstance(idx.get('artifacts'), list) and len(idx['artifacts']) > 0
-          for a in idx['artifacts']:
-              for field in ('name', 'version', 'runtime', 'description'):
-                  assert field in a, f\"entry missing required field '{field}': {a}\"
-          print(f\"OK: {len(idx['artifacts'])} artifacts, schema_version={idx['schema_version']!r}\")
-          "
-
-  # ---------------------------------------------------------------------------
-  # Step 2: build WASM artifacts (drivers/ and hooks/)
-  # ---------------------------------------------------------------------------
-  build-wasm:
-    name: Build WASM — ${{ matrix.artifact.name }}
-    needs: verify-versions
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        artifact:
-          - { name: murmur-driver-anthropic,    path: drivers/murmur-driver-anthropic    }
-          - { name: murmur-driver-claude-code,  path: drivers/murmur-driver-claude-code  }
-          - { name: murmur-driver-deepseek,     path: drivers/murmur-driver-deepseek     }
-          - { name: murmur-driver-moonshotai,   path: drivers/murmur-driver-moonshotai   }
-          - { name: murmur-driver-openai,       path: drivers/murmur-driver-openai       }
-          - { name: murmur-hook-compact,        path: hooks/murmur-hook-compact          }
-          - { name: murmur-hook-debug,          path: hooks/murmur-hook-debug            }
-          - { name: murmur-hook-diff-summary,   path: hooks/murmur-hook-diff-summary     }
-          - { name: murmur-hook-eval,           path: hooks/murmur-hook-eval             }
-          - { name: murmur-hook-grafana,        path: hooks/murmur-hook-grafana          }
-          - { name: murmur-hook-memory,         path: hooks/murmur-hook-memory           }
-          - { name: murmur-hook-regression-verifier, path: hooks/murmur-hook-regression-verifier }
-          - { name: murmur-hook-shell-desc,     path: hooks/murmur-hook-shell-desc       }
-          - { name: murmur-tool-request-input,  path: tools/murmur-tool-request-input    }
-          - { name: murmur-tool-report,         path: tools/murmur-tool-report           }
-          - { name: murmur-tool-corpus,         path: tools/murmur-tool-corpus           }
-          - { name: murmur-tool-create,         path: tools/murmur-tool-create           }
-          - { name: murmur-tool-editor,         path: tools/murmur-tool-editor           }
-          - { name: murmur-tool-tavily,         path: tools/murmur-tool-tavily           }
-    steps:
-      - uses: actions/checkout@v4
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          name: native-${{ matrix.platform.name }}
+          path: native-out/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Step 3: pack, index, prove and publish
+  # ---------------------------------------------------------------------------
+  # Every step before the upload must pass, so a release whose index breaks a
+  # published version's bytes, or whose new versions do not install, uploads nothing.
+  release:
+    name: Create GitHub Release
+    needs: [verify, native]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      MUR_BIN: ${{ github.workspace }}/murmur/target/debug/mur
+    steps:
+      # Both repositories nest under $GITHUB_WORKSPACE: actions/checkout rejects a path
+      # that escapes it, so this is the sibling layout that passes its validation.
+      - name: Check out default-artifacts
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          path: default-artifacts
+
+      - name: Check out murmur at MURMUR_REV
+        uses: actions/checkout@v4
+        with:
+          repository: murmur-nexus/murmur
+          ref: ${{ env.MURMUR_REV }}
+          path: murmur
+
+      - name: Install libseccomp
+        # murmur-cli links against it. Bounded separately from the job: a runner whose
+        # Azure mirror is unreachable leaves `apt-get update` failing over for tens of
+        # minutes.
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libseccomp-dev
+
+      - name: Install murmur's pinned toolchain
+        working-directory: murmur
+        run: rustup show
+
+      - name: Build mur
+        # Debug, not release: packing and indexing are cheap, so the compile is what costs.
+        working-directory: murmur
+        run: |
+          cargo build -p murmur-cli
+          "$MUR_BIN" version
 
       # Pinned toolchain (source of truth: rust-toolchain.toml). Keep the
       # `toolchain:` input in sync with that file's `channel`.
@@ -135,6 +198,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: wasm32-wasip2
+          workspaces: |
+            default-artifacts
+            murmur
 
       # Pinned wasm-tools for component validation below.
       - name: Install wasm-tools
@@ -142,144 +208,83 @@ jobs:
         with:
           tool: wasm-tools@1.247.0
 
-      - name: Build
-        run: cargo build -p ${{ matrix.artifact.name }} --target wasm32-wasip2 --release
+      - name: Build wasm artifacts
+        working-directory: default-artifacts
+        run: bash scripts/build-wasm.sh --locked
 
-      # Validate the freshly-built component against its category's expected world
-      # (drivers/tools export murmur:tool/run; hooks export murmur:hook/lifecycle)
-      # and report its file size (visibility only — no size gate). A malformed or
-      # mis-bound component fails the release job here instead of shipping.
-      - name: Validate component and report size
-        run: |
-          wasm="target/wasm32-wasip2/release/$(echo '${{ matrix.artifact.name }}' | tr '-' '_').wasm"
-          ls -lh "$wasm"
-          du -h "$wasm"
-          bash scripts/validate-component.sh "$wasm"
+      # Every built component against its category's expected world, at the exact
+      # interface version the vendored WIT declares. A malformed or mis-bound
+      # component fails the release here instead of shipping.
+      - name: Validate components
+        working-directory: default-artifacts
+        run: bash scripts/validate-component.sh
 
-      - name: Package
-        run: |
-          name="${{ matrix.artifact.name }}"
-          path="${{ matrix.artifact.path }}"
-          version=$(grep '^version:' "$path/murmur.yaml" | awk '{print $2}')
-          wasm="$(echo "$name" | tr '-' '_').wasm"
-          cp "target/wasm32-wasip2/release/$wasm" "$path/"
-          zip_name="${name}-${version}.mur.zip"
-          (cd "$path" && zip -j "$GITHUB_WORKSPACE/$zip_name" murmur.yaml "$wasm")
-          echo "Packaged: $zip_name"
-
-      - name: Upload zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: zip-${{ matrix.artifact.name }}
-          path: "*.mur.zip"
-
-  # ---------------------------------------------------------------------------
-  # Step 3: build native tool artifacts (tools/) — one runner per platform
-  # ---------------------------------------------------------------------------
-  build-native:
-    name: Build native — ${{ matrix.artifact.name }} (${{ matrix.platform.name }})
-    needs: verify-versions
-    runs-on: ${{ matrix.platform.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { name: linux-x86_64,   runner: ubuntu-latest  }
-          - { name: darwin-aarch64, runner: macos-latest   }
-        artifact:
-          - { name: murmur-tool-git,              path: tools/murmur-tool-git              }
-          - { name: murmur-tool-registry-search,  path: tools/murmur-tool-registry-search  }
-          - { name: murmur-tool-code-graph,       path: tools/murmur-tool-code-graph       }
-          - { name: murmur-tool-code-coverage,    path: tools/murmur-tool-code-coverage    }
-          - { name: murmur-tool-test-report,      path: tools/murmur-tool-test-report      }
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref }}
-
-      # Pinned toolchain (source of truth: rust-toolchain.toml). Native tools are
-      # built with the same pin as the wasm artifacts for build consistency; no
-      # wasm-tools step here since this job produces native binaries, not .wasm.
-      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
-        with:
-          toolchain: "1.95.0"
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build and package
-        run: |
-          chmod +x "${{ matrix.artifact.path }}/package.sh"
-          (cd "${{ matrix.artifact.path }}" && ./package.sh "${{ matrix.platform.name }}")
-          zip_file=$(find "${{ matrix.artifact.path }}" -maxdepth 1 -name "*.mur.zip" | head -1)
-          if [ -z "$zip_file" ]; then
-            echo "error: package.sh produced no .mur.zip in ${{ matrix.artifact.path }}" >&2
-            exit 1
-          fi
-          cp "$zip_file" "$GITHUB_WORKSPACE/"
-          echo "Packaged: $(basename "$zip_file")"
-
-      - name: Upload zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: zip-${{ matrix.artifact.name }}-${{ matrix.platform.name }}
-          path: "*.mur.zip"
-
-  # ---------------------------------------------------------------------------
-  # Step 4: build skill artifacts (zip-only — no Rust compile required)
-  # ---------------------------------------------------------------------------
-  build-skills:
-    name: Build skill — ${{ matrix.artifact.name }}
-    needs: verify-versions
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        artifact:
-          - { name: murmur-skill-create-manifest,          path: skills/murmur-skill-create-manifest          }
-          - { name: murmur-skill-investigation-checkpoint, path: skills/murmur-skill-investigation-checkpoint }
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref }}
-
-      - name: Package
-        run: |
-          name="${{ matrix.artifact.name }}"
-          path="${{ matrix.artifact.path }}"
-          version=$(grep '^version:' "$path/murmur.yaml" | awk '{print $2}')
-          zip_name="${name}-${version}.mur.zip"
-          (cd "$path" && zip -j "$GITHUB_WORKSPACE/$zip_name" murmur.yaml skill.md)
-          echo "Packaged: $zip_name"
-
-      - name: Upload zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: zip-${{ matrix.artifact.name }}
-          path: "*.mur.zip"
-
-  # ---------------------------------------------------------------------------
-  # Step 5: collect all zips and publish the GitHub Release
-  # ---------------------------------------------------------------------------
-  release:
-    name: Create GitHub Release
-    needs: [build-wasm, build-native, build-skills]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download all build zips
+      - name: Download native binaries
         uses: actions/download-artifact@v4
         with:
-          pattern: zip-*
-          merge-multiple: true
+          pattern: native-*
+          path: native
+
+      # download-artifact puts each one in native/<artifact name>/; package-release.sh
+      # reads native/<platform>/<name>.
+      - name: Arrange native binaries by platform
+        run: |
+          for dir in native/native-*; do mv "$dir" "native/${dir#native/native-}"; done
+          ls -lR native
+
+      - name: Pack every artifact
+        working-directory: default-artifacts
+        run: ./scripts/package-release.sh "$GITHUB_WORKSPACE/release" --native-dir "$GITHUB_WORKSPACE/native"
+
+      # The latest release's index carries every version published so far; the new
+      # index merges it, and the bytes gate holds every version in both to the same
+      # assets. Three outcomes:
+      #   - no release exists yet, or the latest one has no artifacts-index.json (true
+      #     once, for the first release after the rename): index without --previous,
+      #     and say which;
+      #   - the asset exists: it is the previous index;
+      #   - any other gh failure fails the job, rather than publishing an index that
+      #     silently drops every earlier version.
+      - name: Fetch the previous index
+        id: previous
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! latest=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName,assets 2> gh-error.txt); then
+            if grep -q 'release not found' gh-error.txt; then
+              echo "::notice::$GITHUB_REPOSITORY has no release yet; indexing $TAG without a previous index"
+              exit 0
+            fi
+            cat gh-error.txt >&2
+            exit 1
+          fi
+          latest_tag=$(jq -r '.tagName' <<< "$latest")
+          if ! jq -e '.assets | any(.name == "artifacts-index.json")' <<< "$latest" > /dev/null; then
+            echo "::notice::the latest release $latest_tag has no artifacts-index.json; indexing $TAG without a previous index"
+            exit 0
+          fi
+          gh release download "$latest_tag" --repo "$GITHUB_REPOSITORY" --pattern artifacts-index.json --dir previous
+          echo "Previous index: artifacts-index.json from $latest_tag"
+          echo "path=$GITHUB_WORKSPACE/previous/artifacts-index.json" >> "$GITHUB_OUTPUT"
+
+      - name: Index the release and apply the bytes gate
+        working-directory: default-artifacts
+        env:
+          PREVIOUS: ${{ steps.previous.outputs.path }}
+        run: ./scripts/index-release.sh "$GITHUB_WORKSPACE/release" --release "$TAG" ${PREVIOUS:+--previous "$PREVIOUS"}
+
+      - name: Install every new version through mur
+        working-directory: default-artifacts
+        run: ./scripts/check-release-installs.sh "$GITHUB_WORKSPACE/release" --release "$TAG"
 
       - name: List release assets
-        run: ls -lh ./*.mur.zip
+        run: ls -l release
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
-          files: "*.mur.zip"
+          tag_name: ${{ env.TAG }}
+          files: release/*
           fail_on_unmatched_files: true
           overwrite_files: true
+          make_latest: true

@@ -1,6 +1,0 @@
-name: murmur-hook-eval
-version: 0.8.0
-runtime: hook
-description: Structured evaluation hook — scores capsule sessions against configured scorers and writes eval.jsonl.
-requires_files:
-  - murmur_hook_eval.wasm

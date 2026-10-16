@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Check that no artifact's published bytes changed while its version in
-# artifacts.toml stayed put.
+# Check that no artifact's published bytes changed while the `version:` in its
+# murmur.yaml stayed put.
 #
 # A `.mur.zip` is served by name and version alone. `mur install` writes the
 # payload's sha256 into the consumer's murmur.lock, so re-publishing different
@@ -10,22 +10,21 @@
 # re-downloads at all. The fix is always a version bump, and it has to happen
 # before the release, not after.
 #
-# So the rule this enforces is the one BUILD.md states for a WIT bump, applied
-# to every input rather than just that one: if a change alters what an artifact
-# ships, its version in artifacts.toml moves in the same commit.
+# So the rule this enforces is the one BUILD.md states as "a version is a
+# promise about bytes", applied to every input: if a change alters what an artifact
+# ships, the `version:` in its murmur.yaml moves in the same commit.
 #
 # What counts as an input to an artifact's bytes:
 #
 #   own tree        Everything under the artifact's path that is packaged or
-#                   compiled — murmur.yaml, src/, package.sh, skill.md.
+#                   compiled — murmur.yaml, src/, skill.md.
 #                   README.md, tests/, benches/, examples/ and nested crates are
 #                   excluded: none of them reach the zip. A nested crate that is
 #                   genuinely linked in comes back through `path deps` below.
 #
 #   path deps       Each `path = "../../libs/x"` dependency, transitively. These
 #                   are compiled into the dependent component, so changing one
-#                   changes every artifact that links it (BUILD.md, "the crates
-#                   under libs/").
+#                   changes every artifact that links it (BUILD.md, "Layout").
 #
 #   wit mirror      The `wit/<subtree>` each crate names in its bindgen
 #                   `path:`, read out of the crate's own source rather than
@@ -38,7 +37,7 @@
 #                   third-party versions walked out of Cargo.lock, and
 #                   rust-toolchain.toml. Narrowed to the one artifact on
 #                   purpose: adding an unrelated crate to the workspace, or
-#                   bumping workspace_version, changes neither its dependencies
+#                   bumping [workspace.package] version, changes neither its dependencies
 #                   nor its bytes. The workspace crates' own version strings are
 #                   dropped for the same reason — a built component does not
 #                   embed them. Applies to crate artifacts only; a skill is docs
@@ -175,25 +174,30 @@ def show(ref, path):
 
 
 # --------------------------------------------------------------------------
-# artifacts.toml — name, path and version, as apply-versions.sh reads them.
+# The artifacts at a ref: every <category>/<dir>/murmur.yaml, with its name and
+# version as list-artifacts.sh reads them. Tags from before the rename carry the
+# same manifests, with the versions their release shipped, so one reader serves
+# every ref.
 # --------------------------------------------------------------------------
+MANIFEST_PATH = re.compile(r"^(drivers|hooks|tools|skills)/[^/]+/murmur\.yaml$")
+TOP_LEVEL = re.compile(r"""^(name|version):\s*["']?([^"'#\s]+)""")
+
+
 def read_artifacts(ref):
-    text = show(ref, "artifacts.toml")
-    if text is None:
+    out = git("ls-tree", "-r", "--name-only", ref)
+    if out.returncode != 0:
         return {}
-    artifacts, current = {}, {}
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("[[artifact]]"):
-            if current.get("name"):
-                artifacts[current["name"]] = current
-            current = {}
+    artifacts = {}
+    for path in out.stdout.splitlines():
+        if not MANIFEST_PATH.match(path):
             continue
-        match = re.match(r'^(name|path|version)\s*=\s*"([^"]*)"', line)
-        if match:
-            current[match.group(1)] = match.group(2)
-    if current.get("name"):
-        artifacts[current["name"]] = current
+        entry = {"path": path.rsplit("/", 1)[0]}
+        for line in (show(ref, path) or "").splitlines():
+            match = TOP_LEVEL.match(line)
+            if match and match.group(1) not in entry:
+                entry[match.group(1)] = match.group(2)
+        if entry.get("name") and entry.get("version"):
+            artifacts[entry["name"]] = entry
     return artifacts
 
 
@@ -280,7 +284,7 @@ def workspace_state(ref):
     `[workspace.package] version` are all dropped: they name crates, not code,
     and `wasm-tools metadata show` on a built artifact carries no workspace
     version string. Without that reduction, adding a crate or bumping
-    workspace_version would demand a bump of every artifact.
+    [workspace.package] version would demand a bump of every artifact.
     """
     if ref in _workspace_cache:
         return _workspace_cache[ref]
@@ -449,7 +453,7 @@ def compare(base, head):
     base_artifacts = read_artifacts(base)
     head_artifacts = read_artifacts(head)
     if not head_artifacts:
-        print(f"error: no [[artifact]] entries at {head}", file=sys.stderr)
+        print(f"error: no <category>/<name>/murmur.yaml at {head}", file=sys.stderr)
         return 2
 
     drifted, checked = [], 0
@@ -477,7 +481,9 @@ def compare(base, head):
     for name, version, changed in drifted:
         print(f"  {name}@{version} — changed: {', '.join(changed)}")
     print("")
-    print("Bump each one's version in artifacts.toml, run ./scripts/apply-versions.sh,")
+    print("Bump `version:` (minor, below 1.0) in each one's murmur.yaml:")
+    for name, _version, _changed in drifted:
+        print(f"  {head_artifacts[name]['path']}/murmur.yaml")
     print("and commit the result before tagging. Re-publishing different bytes at a")
     print("version consumers already resolved breaks their murmur.lock sha256 pin.")
     return 1

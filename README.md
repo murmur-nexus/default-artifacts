@@ -4,18 +4,36 @@
 
 Default Murmur artifacts shipped with the runtime.
 
+Every artifact here is published under scope `murmur`: the artifact in `tools/tool-editor/` is
+`murmur/tool-editor`, which is how a capsule's `artifacts:` names it and how it installs:
+
+```bash
+mur install -g murmur/tool-editor@0.6.0
+```
+
+```yaml
+artifacts:
+  - name: murmur/tool-editor
+    version: "0.6.0"
+```
+
+The tables below give each artifact's bare name, which is also the tool name the model calls.
+Each one's version is the `version:` in its own `murmur.yaml`; `./scripts/list-artifacts.sh`
+lists them all. A release publishes every artifact and the `artifacts-index.json` that
+`mur install` resolves them from — see [BUILD.md](./BUILD.md).
+
 ## Inference drivers
 
 WASM components (`runtime: driver`). Export `murmur:tool/run` (`world driver`) and translate between the Murmur canonical inference format and each provider's native API. These are the drivers a `transport: http` capsule uses; a process driver is also `runtime: driver` but exports a different interface — see [Process drivers](#process-drivers).
 
 | Artifact | Location | Description |
 |---|---|---|
-| `murmur-driver-anthropic` | `drivers/murmur-driver-anthropic/` | Anthropic Messages API, with extended thinking and prompt-cache breakpoints; caching is tuned by a `config:` block on its manifest entry |
-| `murmur-driver-deepseek` | `drivers/murmur-driver-deepseek/` | DeepSeek API — `deepseek-v4-flash` and `deepseek-v4-pro`, with thinking mode |
-| `murmur-driver-moonshotai` | `drivers/murmur-driver-moonshotai/` | Moonshot AI Chat Completions API — `kimi-k3` only, which always reasons; reasoning effort and `json_schema` structured output are tuned by `inference.driver.config`, which rejects any key it does not read |
-| `murmur-driver-openai` | `drivers/murmur-driver-openai/` | OpenAI-compatible Chat Completions API, with Responses API for `gpt-5` and later models; reasoning summaries, effort and verbosity are tuned by `inference.driver.config`, which rejects any key it does not read |
+| `driver-anthropic` | `drivers/driver-anthropic/` | Anthropic Messages API, with extended thinking and prompt-cache breakpoints; caching is tuned by a `config:` block on its manifest entry |
+| `driver-deepseek` | `drivers/driver-deepseek/` | DeepSeek API — `deepseek-v4-flash` and `deepseek-v4-pro`, with thinking mode |
+| `driver-moonshotai` | `drivers/driver-moonshotai/` | Moonshot AI Chat Completions API — `kimi-k3` only, which always reasons; reasoning effort and `json_schema` structured output are tuned by `inference.driver.config`, which rejects any key it does not read |
+| `driver-openai` | `drivers/driver-openai/` | OpenAI-compatible Chat Completions API, with Responses API for `gpt-5` and later models; reasoning summaries, effort and verbosity are tuned by `inference.driver.config`, which rejects any key it does not read |
 
-All four report the provider's own token counts on an optional top-level `usage` object of the response — `input_tokens`, `output_tokens`, `cached_tokens`, `cache_write_tokens` — which Murmur carries onto the `inference` trace event. Each member is independently optional and is omitted, never zero-filled, when the provider did not report it. `murmur-driver-openai` also forwards Murmur's `prompt_cache_key` routing hint into the provider body; the other three drop it, because none of those provider APIs defines a cache-key field. See each driver's own README for the per-provider field mapping.
+All four report the provider's own token counts on an optional top-level `usage` object of the response — `input_tokens`, `output_tokens`, `cached_tokens`, `cache_write_tokens` — which Murmur carries onto the `inference` trace event. Each member is independently optional and is omitted, never zero-filled, when the provider did not report it. `driver-openai` also forwards Murmur's `prompt_cache_key` routing hint into the provider body; the other three drop it, because none of those provider APIs defines a cache-key field. See each driver's own README for the per-provider field mapping.
 
 All four also take the endpoint they talk to from the host, in
 `MURMUR_INFERENCE_ENDPOINT`, and none of them carries a provider URL of its own.
@@ -32,10 +50,10 @@ murmur release after v0.5.0, which refuses the releases built before it with `E-
 
 | Artifact | First release on `murmur:stream/events` |
 |---|---|
-| `murmur-driver-anthropic` | 0.10.0 |
-| `murmur-driver-deepseek` | 0.8.0 |
-| `murmur-driver-moonshotai` | 0.7.0 |
-| `murmur-driver-openai` | 0.9.0 |
+| `driver-anthropic` | 0.10.0 |
+| `driver-deepseek` | 0.8.0 |
+| `driver-moonshotai` | 0.7.0 |
+| `driver-openai` | 0.9.0 |
 
 See each driver's "Tool-call progress" section for the provider event each report is taken from.
 
@@ -45,13 +63,13 @@ WASM components (`runtime: hook`) that attach to lifecycle events. Each hook dec
 
 | Artifact | Location | Binding | Mode | Commit policy | Description |
 |---|---|---|---|---|---|
-| `murmur-hook-debug` | `hooks/murmur-hook-debug/` | *(all events)* | async | none | Writes a JSONL event log to `workdir/hook-debug.jsonl` |
-| `murmur-hook-compact` | `hooks/murmur-hook-compact/` | `on-compaction` | blocking | replace-context | Compacts conversation history when the session token threshold is reached |
-| `murmur-hook-diff-summary` | `hooks/murmur-hook-diff-summary/` | *(all events)* | blocking | none | Snapshots files before each editor tool call and emits a structured unified-diff summary at end of turn; requires `murmur-tool-editor` 0.3.0 or later |
-| `murmur-hook-memory` | `hooks/murmur-hook-memory/` | `on-task-start` | blocking | seed-context | Seeds a task with the relevant part of the conversation that came before it, read from the runtime's durable conversation record |
-| `murmur-hook-shell-desc` | `hooks/murmur-hook-shell-desc/` | `on-stage` | blocking | write-manifests | Returns enriched tool manifests for common shell binaries at staging time |
-| `murmur-hook-eval` | `hooks/murmur-hook-eval/` | *(all events)* | async | none | Scores sessions against configured scorers and writes `eval.jsonl` |
-| `murmur-hook-grafana` | `hooks/murmur-hook-grafana/` | *(all events)* | async | none | Exports OTel spans to a Grafana Tempo OTLP/HTTP endpoint |
+| `hook-debug` | `hooks/hook-debug/` | *(all events)* | async | none | Writes a JSONL event log to `workdir/hook-debug.jsonl` |
+| `hook-compact` | `hooks/hook-compact/` | `on-compaction` | blocking | replace-context | Compacts conversation history when the session token threshold is reached |
+| `hook-diff-summary` | `hooks/hook-diff-summary/` | *(all events)* | blocking | none | Snapshots files before each editor tool call and emits a structured unified-diff summary at end of turn; requires `tool-editor` 0.3.0 or later |
+| `hook-memory` | `hooks/hook-memory/` | `on-task-start` | blocking | seed-context | Seeds a task with the relevant part of the conversation that came before it, read from the runtime's durable conversation record |
+| `hook-shell-desc` | `hooks/hook-shell-desc/` | `on-stage` | blocking | write-manifests | Returns enriched tool manifests for common shell binaries at staging time |
+| `hook-eval` | `hooks/hook-eval/` | *(all events)* | async | none | Scores sessions against configured scorers and writes `eval.jsonl` |
+| `hook-grafana` | `hooks/hook-grafana/` | *(all events)* | async | none | Exports OTel spans to a Grafana Tempo OTLP/HTTP endpoint |
 
 ## Process drivers
 
@@ -67,29 +85,29 @@ driver.
 
 | Artifact | Location | Description |
 |---|---|---|
-| `murmur-driver-claude-code` | `drivers/murmur-driver-claude-code/` | Drives the `claude` CLI (Claude Code): the argv for a turn, the task as one JSON line on stdin, the MCP config pointing the harness at the capsule's tool bridge, and the interrupt control request. Reads the harness's stdout back into events — streamed text and thinking, tool calls and results, retries, and a turn that ended or failed, with a failure read from `is_error` and `api_error_status` rather than `subtype`. Reports the input, output, cache-read, cache-creation and thinking token counts Claude Code prints for a turn, as totals for the run the interface asks for. Reports a tool call as soon as the model starts writing it, then the running byte count of its input, never the input itself. Exports `murmur:driver/process@0.3.0`, so it needs a murmur built from `e8bf7c2` or later |
+| `driver-claude-code` | `drivers/driver-claude-code/` | Drives the `claude` CLI (Claude Code): the argv for a turn, the task as one JSON line on stdin, the MCP config pointing the harness at the capsule's tool bridge, and the interrupt control request. Reads the harness's stdout back into events — streamed text and thinking, tool calls and results, retries, and a turn that ended or failed, with a failure read from `is_error` and `api_error_status` rather than `subtype`. Reports the input, output, cache-read, cache-creation and thinking token counts Claude Code prints for a turn, as totals for the run the interface asks for. Reports a tool call as soon as the model starts writing it, then the running byte count of its input, never the input itself. Exports `murmur:driver/process@0.3.0`, so it needs a murmur built from `e8bf7c2` or later |
 
 ## Tools
 
-Tool artifacts (`runtime: tool`) exposed to the agent as callable functions. `murmur-tool-corpus`,
-`murmur-tool-create`, `murmur-tool-editor`, `murmur-tool-report`, `murmur-tool-request-input`, and
-`murmur-tool-tavily` are WASM components (`wasm32-wasip2`, exporting `murmur:tool/run`); the
+Tool artifacts (`runtime: tool`) exposed to the agent as callable functions. `tool-corpus`,
+`tool-create`, `tool-editor`, `tool-report`, `tool-request-input`, and
+`tool-tavily` are WASM components (`wasm32-wasip2`, exporting `murmur:tool/run`); the
 remaining five are native binaries whose C dependencies (SQLite, tree-sitter, TLS) do not
 cross-compile to wasm32-wasip2 (see [BUILD.md](./BUILD.md)).
 
 | Artifact | Location | Implementation | Description |
 |---|---|---|---|
-| `murmur-tool-corpus` | `tools/murmur-tool-corpus/` | WASM | Append-only record store (`append`, `get`, `read_recent`, `search`, `verify`); requires a `capabilities.state` grant and a `config:` block on its manifest entry declaring the record types |
-| `murmur-tool-create` | `tools/murmur-tool-create/` | WASM | Scaffolds a new artifact directory (`murmur.yaml`, stub payload, README) for a `native` tool, a `wasm` tool, or a `hook` |
-| `murmur-tool-editor` | `tools/murmur-tool-editor/` | WASM | File read/write/patch operations (`read_file`, `write_file`, `replace_in_file`, `find_in_files`); the writing operations take their target as `dest_path`, declared `format: murmur-destination` so a `capabilities.filesystem.read_only` grant is enforced against the declaration rather than guessed from property names. Every path input is workdir-relative: an absolute `path`, `dest_path` or `dir` is refused with `error_kind: absolute_path` before any filesystem call |
-| `murmur-tool-report` | `tools/murmur-tool-report/` | WASM | The capsule states its own conclusion (`report`, `progress`) into `state/report.json`; requires a `capabilities.state` grant, and takes an optional `config:` block closing the deliverable-kind and note-stage vocabularies |
-| `murmur-tool-request-input` | `tools/murmur-tool-request-input/` | WASM | HITL pause gate — suspends the agent loop and waits for human input via `SendMessage` |
-| `murmur-tool-tavily` | `tools/murmur-tool-tavily/` | WASM | Web search through Tavily, returning a bounded plain-text result; the Tavily key is bound on the entry as `gateway.api_key` and attached by the runtime, never held by the tool, and every cost- and size-bearing lever is in the entry's `config:` block |
-| `murmur-tool-git` | `tools/murmur-tool-git/` | native | Git operations (clone, checkout, status, diff, commit, push, worktree, and more) |
-| `murmur-tool-code-graph` | `tools/murmur-tool-code-graph/` | native | Indexes a Rust and/or Python repo into a SQLite symbol/edge graph; structured queries over stable symbol identities |
-| `murmur-tool-code-coverage` | `tools/murmur-tool-code-coverage/` | native | Spectrum-based fault localization (Ochiai / Tarantula) over per-test LCOV reports |
-| `murmur-tool-test-report` | `tools/murmur-tool-test-report/` | native | Parses raw test-runner output (cargo, pytest, go, jest) into a structured failure list |
-| `murmur-tool-registry-search` | `tools/murmur-tool-registry-search/` | native | Searches the Murmur artifact registry for artifacts matching a keyword |
+| `tool-corpus` | `tools/tool-corpus/` | WASM | Append-only record store (`append`, `get`, `read_recent`, `search`, `verify`); requires a `capabilities.state` grant and a `config:` block on its manifest entry declaring the record types |
+| `tool-create` | `tools/tool-create/` | WASM | Scaffolds a new artifact directory (`murmur.yaml`, stub payload, README) for a `native` tool, a `wasm` tool, or a `hook` |
+| `tool-editor` | `tools/tool-editor/` | WASM | File read/write/patch operations (`read_file`, `write_file`, `replace_in_file`, `find_in_files`); the writing operations take their target as `dest_path`, declared `format: murmur-destination` so a `capabilities.filesystem.read_only` grant is enforced against the declaration rather than guessed from property names. Every path input is workdir-relative: an absolute `path`, `dest_path` or `dir` is refused with `error_kind: absolute_path` before any filesystem call |
+| `tool-report` | `tools/tool-report/` | WASM | The capsule states its own conclusion (`report`, `progress`) into `state/report.json`; requires a `capabilities.state` grant, and takes an optional `config:` block closing the deliverable-kind and note-stage vocabularies |
+| `tool-request-input` | `tools/tool-request-input/` | WASM | HITL pause gate — suspends the agent loop and waits for human input via `SendMessage` |
+| `tool-tavily` | `tools/tool-tavily/` | WASM | Web search through Tavily, returning a bounded plain-text result; the Tavily key is bound on the entry as `gateway.api_key` and attached by the runtime, never held by the tool, and every cost- and size-bearing lever is in the entry's `config:` block |
+| `tool-git` | `tools/tool-git/` | native | Git operations (clone, checkout, status, diff, commit, push, worktree, and more) |
+| `tool-code-graph` | `tools/tool-code-graph/` | native | Indexes a Rust and/or Python repo into a SQLite symbol/edge graph; structured queries over stable symbol identities |
+| `tool-code-coverage` | `tools/tool-code-coverage/` | native | Spectrum-based fault localization (Ochiai / Tarantula) over per-test LCOV reports |
+| `tool-test-report` | `tools/tool-test-report/` | native | Parses raw test-runner output (cargo, pytest, go, jest) into a structured failure list |
+| `tool-registry-search` | `tools/tool-registry-search/` | native | Searches the Murmur artifact registry for artifacts matching a keyword |
 
 ## Skills
 
@@ -100,8 +118,8 @@ system prompt.
 
 | Artifact | Location | Description |
 |---|---|---|
-| `murmur-skill-create-manifest` | `skills/murmur-skill-create-manifest/` | Complete `murmur.yaml` schema reference — enables an agent to generate valid capsule manifests from plain-language task descriptions |
-| `murmur-skill-investigation-checkpoint` | `skills/murmur-skill-investigation-checkpoint/` | The investigations convention for `checkpoints/decisions.json` — record and reuse investigative verdicts across a session |
+| `skill-create-manifest` | `skills/skill-create-manifest/` | Complete `murmur.yaml` schema reference — enables an agent to generate valid capsule manifests from plain-language task descriptions |
+| `skill-investigation-checkpoint` | `skills/skill-investigation-checkpoint/` | The investigations convention for `checkpoints/decisions.json` — record and reuse investigative verdicts across a session |
 
 ## WIT
 
@@ -138,7 +156,7 @@ any hook without a manifest change on the artifact side. What each one provides:
 ungranted hook still links and still runs, and its functions return
 `not-granted`. There is no staging-time check for either grant, so a hook that
 needs one has to detect the refusal itself and say so.
-[`murmur-hook-memory`](./hooks/murmur-hook-memory/) calls all three of
+[`hook-memory`](./hooks/hook-memory/) calls all three of
 `murmur:conversation/read`, `murmur:runtime/tokens` and `murmur:task-io/read`.
 
 The `wit-sync` CI job verifies the mirror stays byte-identical to the murmur commit pinned in

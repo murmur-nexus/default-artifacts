@@ -1,9 +1,9 @@
 name: corpus-state
 
-# murmur-tool-corpus reaching a durable store is a join between two repositories: the tool
+# murmur/tool-corpus reaching a durable store is a join between two repositories: the tool
 # and the inference driver are built here, and the `capabilities.state` grant that mounts
 # the store is the runtime's. Neither repository's own suite can see the join --
-# tools/murmur-tool-corpus/tests/ proves the corpus against directories and Wasmtime
+# tools/tool-corpus/tests/ proves the corpus against directories and Wasmtime
 # contexts it built itself, and murmur proves the grant against fixture capsules that
 # already know its conventions. This job is where the two meet, under a real `mur run`.
 
@@ -101,7 +101,7 @@ jobs:
           set -o pipefail
           # `--ignored` is what makes these four run at all: drop it and cargo filters them
           # out, the job goes green, and nothing ran.
-          cargo test -p murmur-tool-corpus --test mur_run_state -- --ignored --nocapture 2>&1 \
+          cargo test -p tool-corpus --test mur_run_state -- --ignored --nocapture 2>&1 \
             | tee corpus-state.log
           if ! grep -q '4 passed; 0 failed' corpus-state.log; then
             echo "::error::the corpus state suite did not report 4 passed; 0 failed"

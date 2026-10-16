@@ -1,34 +1,34 @@
 [workspace]
 members = [
-  "drivers/murmur-driver-anthropic",
-  "drivers/murmur-driver-claude-code",
-  "drivers/murmur-driver-deepseek",
-  "drivers/murmur-driver-moonshotai",
-  "drivers/murmur-driver-openai",
-  "hooks/murmur-hook-compact",
-  "hooks/murmur-hook-debug",
-  "hooks/murmur-hook-diff-summary",
-  "hooks/murmur-hook-eval",
-  "hooks/murmur-hook-grafana",
-  "hooks/murmur-hook-memory",
-  "hooks/murmur-hook-regression-verifier",
-  "hooks/murmur-hook-shell-desc",
+  "drivers/driver-anthropic",
+  "drivers/driver-claude-code",
+  "drivers/driver-deepseek",
+  "drivers/driver-moonshotai",
+  "drivers/driver-openai",
+  "hooks/hook-compact",
+  "hooks/hook-debug",
+  "hooks/hook-diff-summary",
+  "hooks/hook-eval",
+  "hooks/hook-grafana",
+  "hooks/hook-memory",
+  "hooks/hook-regression-verifier",
+  "hooks/hook-shell-desc",
   "libs/murmur-driver-env",
   "libs/murmur-hook-transcript",
   "libs/murmur-test-parse",
   "libs/murmur-time",
-  "tools/murmur-tool-corpus",
-  "tools/murmur-tool-create",
-  "tools/murmur-tool-editor",
-  "tools/murmur-tool-code-coverage",
-  "tools/murmur-tool-code-graph",
-  "tools/murmur-tool-git",
-  "tools/murmur-tool-test-report",
-  "tools/murmur-tool-registry-search",
-  "tools/murmur-tool-report",
-  "tools/murmur-tool-request-input",
-  "tools/murmur-tool-tavily",
-  "tools/murmur-tool-git/validate",
+  "tools/tool-corpus",
+  "tools/tool-create",
+  "tools/tool-editor",
+  "tools/tool-code-coverage",
+  "tools/tool-code-graph",
+  "tools/tool-git",
+  "tools/tool-test-report",
+  "tools/tool-registry-search",
+  "tools/tool-report",
+  "tools/tool-request-input",
+  "tools/tool-tavily",
+  "tools/tool-git/validate",
 ]
 resolver = "2"
 
@@ -43,9 +43,9 @@ rust-version = "1.95"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 wit-bindgen = "0.59"
-# Native-only dependencies for murmur-tool-code-graph. These pull in C sources
+# Native-only dependencies for tool-code-graph. These pull in C sources
 # (SQLite via `bundled`, and tree-sitter's C runtime + grammar), which do not
-# cross-compile to wasm32-wasip2 — hence the tool is native, like murmur-tool-git.
+# cross-compile to wasm32-wasip2 — hence the tool is native, like tool-git.
 rusqlite = { version = "0.31", features = ["bundled"] }
 tree-sitter = "0.22"
 tree-sitter-rust = "0.21"
