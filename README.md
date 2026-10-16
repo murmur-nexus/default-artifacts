@@ -49,8 +49,9 @@ All four stream text and thinking, and report each tool call while the model is 
 it, through `murmur:stream/events@0.1.0`: the call's start, with the id and name of the
 `tool_call` the driver will return, then a rising UTF-8 byte count of its arguments, never the
 arguments themselves. On `transport: http` these become `tool-call-started` and
-`tool-call-progress` frames ahead of the call's `artifact`. That interface is served by the first
-murmur release after v0.5.0, which refuses the releases built before it with `E-RUN-029`:
+`tool-call-progress` frames ahead of the call's `artifact`. murmur v0.6.0 is the first release to
+serve that interface. A `mur` that can install these artifacts by scoped name (one released after
+v0.6.0, see above) refuses a driver release built before it at launch, with `E-WIT-LEVEL-001`:
 
 | Artifact | First release on `murmur:stream/events` |
 |---|---|
@@ -89,7 +90,7 @@ driver.
 
 | Artifact | Location | Description |
 |---|---|---|
-| `driver-claude-code` | `drivers/driver-claude-code/` | Drives the `claude` CLI (Claude Code): the argv for a turn, the task as one JSON line on stdin, the MCP config pointing the harness at the capsule's tool bridge, and the interrupt control request. Reads the harness's stdout back into events — streamed text and thinking, tool calls and results, retries, and a turn that ended or failed, with a failure read from `is_error` and `api_error_status` rather than `subtype`. Reports the input, output, cache-read, cache-creation and thinking token counts Claude Code prints for a turn, as totals for the run the interface asks for. Reports a tool call as soon as the model starts writing it, then the running byte count of its input, never the input itself. Exports `murmur:driver/process@0.3.0`, so it needs a murmur built from `e8bf7c2` or later |
+| `driver-claude-code` | `drivers/driver-claude-code/` | Drives the `claude` CLI (Claude Code): the argv for a turn, the task as one JSON line on stdin, the MCP config pointing the harness at the capsule's tool bridge, and the interrupt control request. Reads the harness's stdout back into events — streamed text and thinking, tool calls and results, retries, and a turn that ended or failed, with a failure read from `is_error` and `api_error_status` rather than `subtype`. Reports the input, output, cache-read, cache-creation and thinking token counts Claude Code prints for a turn, as totals for the run the interface asks for. Reports a tool call as soon as the model starts writing it, then the running byte count of its input, never the input itself. Exports `murmur:driver/process@0.3.0`, so it needs murmur v0.6.0 or later |
 
 ## Tools
 

@@ -22,35 +22,20 @@ rather than an API key.
 
 ## Which murmur this needs
 
-This artifact exports `murmur:driver/process@0.3.0`, and **the host accepts exactly one version
-of that interface and carries no fallback for an earlier one.** So it needs a murmur whose
-process-driver runner is at `@0.3.0` — murmur commit `e8bf7c2` or later. A murmur at `@0.3.0`
-refuses a driver built against any other version at load, naming both versions and telling you
-to rebuild:
+This artifact exports `murmur:driver/process@0.3.0`, which murmur serves from v0.6.0, and **the
+host accepts exactly one version of that interface and carries no fallback for an earlier one.**
+Installing `murmur/driver-claude-code` by scoped name needs a `mur` released after v0.6.0.
 
-```
-error[E-RUN-029]: artifact 'driver-claude-code@0.3.0' is the transport: process driver but does not export murmur:driver/process@0.3.0; it exports murmur:driver/process@0.2.0, built against another version — rebuild it
-  hint: pin a release of driver-claude-code built against murmur:driver/process@0.3.0 in murmur.yaml, then run `mur install` — or rebuild driver-claude-code against murmur:driver/process@0.3.0
-```
-
-That is what `driver-claude-code@0.3.0` and every earlier release get from a murmur at
-`@0.3.0`: they no longer load. Install `0.4.0` or later — a rebuild is the intended cost of the
-bump. The refusal runs the other way too: a murmur still at `@0.2.0` refuses this release.
-
-**No published murmur release carries the `@0.3.0` runner yet.** Pick the driver by the murmur
-you run:
+A current `mur` refuses `0.3.0` and earlier at launch with `E-WIT-LEVEL-001`, with the clause
+`it exports murmur:driver/process@0.2.0, and level 1 has murmur:driver@0.3.0`. Install `0.4.0` or
+later — a rebuild is the intended cost of the bump. The refusal runs the other way too: a murmur
+at `@0.2.0` refuses this release. Pick the driver by the murmur you run:
 
 | murmur | Its process-driver interface | Driver release to pin |
 |---|---|---|
 | `v0.3.0` and earlier | none | none: `transport: process` is not supported |
 | `v0.4.0`, `v0.5.0` | `murmur:driver/process@0.2.0` | `0.3.0` |
-| built from `main` at `e8bf7c2` or later | `murmur:driver/process@0.3.0` | `0.4.0` |
-
-`mur --version` does not tell the last two rows apart: a `mur` built from `e8bf7c2` reports
-`murmur-cli 0.5.0`, the same as the `v0.5.0` release, because the CLI version string was not
-bumped with the interface. If you see `E-RUN-029`, no setting in this artifact will change it.
-Either pin the driver release from the table, or build `mur` from a murmur that carries the
-`@0.3.0` runner, or wait for the first release after `v0.5.0`.
+| `v0.6.0` and later | `murmur:driver/process@0.3.0` | `0.4.0` |
 
 A murmur without the runner at all refuses the manifest before the driver is loaded, with
 `E-MAN-003` naming `inference.driver.artifact`.
