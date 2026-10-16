@@ -31,7 +31,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PLATFORMS="darwin-aarch64 darwin-x86_64 linux-aarch64 linux-x86_64"
+. "$SCRIPT_DIR/lib/common.sh"
 
 usage() {
     echo "usage: $0 <out-dir> [--native-dir <dir>]" >&2
@@ -53,12 +53,7 @@ if [ -e "$OUT_DIR" ] && { [ ! -d "$OUT_DIR" ] || [ -n "$(ls -A "$OUT_DIR")" ]; }
     exit 1
 fi
 
-MUR="${MUR_BIN:-$(command -v mur || true)}"
-if [ -z "$MUR" ] || ! "$MUR" index --help >/dev/null 2>&1; then
-    echo "error: need a 'mur' with the 'index' subcommand (tried: ${MUR:-<none on PATH>})." >&2
-    echo "       Build one from murmur at the MURMUR_REV in .github/workflows/build.yml and set MUR_BIN to it." >&2
-    exit 1
-fi
+require_mur
 export MUR_BIN="$MUR"
 
 rows="$(bash "$SCRIPT_DIR/list-artifacts.sh")"
@@ -98,7 +93,14 @@ fi
 
 mkdir -p "$OUT_DIR"
 # The directory was empty, so anything in it on failure is this run's partial output.
-trap 'status=$?; if [ "$status" -ne 0 ]; then find "$OUT_DIR" -mindepth 1 -delete; echo "error: packing failed; $OUT_DIR emptied" >&2; fi' EXIT
+empty_on_failure() {
+    local status=$?
+    if [ "$status" -ne 0 ]; then
+        find "$OUT_DIR" -mindepth 1 -delete
+        echo "error: packing failed; $OUT_DIR emptied" >&2
+    fi
+}
+trap empty_on_failure EXIT
 
 count=0
 while IFS=$'\t' read -r dir name _version _runtime impl; do

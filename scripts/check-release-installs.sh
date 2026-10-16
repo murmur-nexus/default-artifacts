@@ -38,6 +38,9 @@
 # Requires `jq` and `python3`.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/lib/common.sh"
+
 OWNER_ID=190196424
 REPO="murmur-nexus/default-artifacts"
 
@@ -56,12 +59,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$RELEASE_DIR" ] && [ -n "$TAG" ] || usage
 
-MUR="${MUR_BIN:-$(command -v mur || true)}"
-if [ -z "$MUR" ] || ! "$MUR" index --help >/dev/null 2>&1; then
-    echo "error: need a 'mur' with the 'index' subcommand (tried: ${MUR:-<none on PATH>})." >&2
-    echo "       Build one from murmur at the MURMUR_REV in .github/workflows/build.yml and set MUR_BIN to it." >&2
-    exit 1
-fi
+require_mur
 MUR="$(cd "$(dirname "$MUR")" && pwd)/$(basename "$MUR")"
 command -v jq >/dev/null || { echo "error: jq is required" >&2; exit 1; }
 command -v python3 >/dev/null || { echo "error: python3 is required" >&2; exit 1; }
@@ -143,7 +141,8 @@ done
 
 export HOME="$WORK/home"
 mkdir -p "$HOME"
-export MUR_GITHUB_API_BASE="http://127.0.0.1:$(cat "$WORK/port")"
+port="$(cat "$WORK/port")"
+export MUR_GITHUB_API_BASE="http://127.0.0.1:$port"
 unset GITHUB_TOKEN GH_TOKEN
 
 # What to install: <name>\t<version>\t<native 0|1>\t<file> per asset of each version

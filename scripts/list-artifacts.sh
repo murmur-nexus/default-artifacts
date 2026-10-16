@@ -35,14 +35,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-
-# The value of a top-level `key:` in a murmur.yaml, unquoted, or nothing. Only
-# scalar keys are read, and only from column 0, so a `name:` inside a block
-# scalar or a nested mapping is never mistaken for the artifact's own.
-yaml_scalar() {
-    sed -n "s/^$2:[[:space:]]*//p" "$1" | head -1 \
-        | sed 's/[[:space:]]#.*$//; s/[[:space:]]*$//; s/^"\(.*\)"$/\1/; s/^'"'"'\(.*\)'"'"'$/\1/'
-}
+. "$SCRIPT_DIR/lib/common.sh"
 
 cd "$REPO_ROOT"
 

@@ -28,13 +28,9 @@ NAME="${1:?artifact name, e.g. hook-compact}"
 CAPSULE_DIR="${2:?target capsule dir (the folder whose .murmur/ receives the install)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+. "$SCRIPT_DIR/lib/common.sh"
 
-MUR="${MUR_BIN:-$(command -v mur || true)}"
-if [ -z "$MUR" ] || ! "$MUR" index --help >/dev/null 2>&1; then
-  echo "error: need a 'mur' with the 'index' subcommand (tried: ${MUR:-<none on PATH>})." >&2
-  echo "       Build one from murmur at the MURMUR_REV in .github/workflows/build.yml and set MUR_BIN to it." >&2
-  exit 1
-fi
+require_mur
 export MUR_BIN="$MUR"
 
 ROW="$(bash "$SCRIPT_DIR/list-artifacts.sh" | awk -F'\t' -v n="$NAME" '$2 == n')"

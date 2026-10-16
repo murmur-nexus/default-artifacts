@@ -40,7 +40,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PLATFORMS="darwin-aarch64 darwin-x86_64 linux-aarch64 linux-x86_64"
+. "$SCRIPT_DIR/lib/common.sh"
 
 usage() {
     echo "usage: $0 <artifact-dir> <out-dir> [--platform <p>] [--payload <file>]" >&2
@@ -63,24 +63,13 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$ARTIFACT_DIR" ] && [ -n "$OUT_DIR" ] || usage
 
-MUR="${MUR_BIN:-$(command -v mur || true)}"
-if [ -z "$MUR" ] || ! "$MUR" index --help >/dev/null 2>&1; then
-    echo "error: need a 'mur' with the 'index' subcommand (tried: ${MUR:-<none on PATH>})." >&2
-    echo "       Build one from murmur at the MURMUR_REV in .github/workflows/build.yml and set MUR_BIN to it." >&2
-    exit 1
-fi
+require_mur
 
 MANIFEST="$ARTIFACT_DIR/murmur.yaml"
 if [ ! -f "$MANIFEST" ]; then
     echo "error: $MANIFEST not found" >&2
     exit 1
 fi
-
-# Same reader as list-artifacts.sh: a top-level scalar key, unquoted.
-yaml_scalar() {
-    sed -n "s/^$2:[[:space:]]*//p" "$1" | head -1 \
-        | sed 's/[[:space:]]#.*$//; s/[[:space:]]*$//; s/^"\(.*\)"$/\1/; s/^'"'"'\(.*\)'"'"'$/\1/'
-}
 
 NAME="$(yaml_scalar "$MANIFEST" name)"
 VERSION="$(yaml_scalar "$MANIFEST" version)"

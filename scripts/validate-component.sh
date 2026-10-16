@@ -166,7 +166,7 @@ validate_one() {
   # the world-level `import`/`export` lines from that first block. The block has no
   # nested braces (each import/export is a single `... ;` line), so the first `}`
   # after `world root {` closes it.
-  local wit world imports exports exports_versioned murmur_imports murmur_exports
+  local wit world imports exports_versioned murmur_imports murmur_exports
   wit="$(wasm-tools component wit "$wasm")"
   world="$(printf '%s\n' "$wit" | awk '/^world root \{/{f=1;next} f&&/^\}/{f=0} f')"
 
@@ -179,7 +179,6 @@ validate_one() {
   # extraction silently matches nothing on macOS.
   imports="$(printf '%s\n' "$world" | awk '$1=="import"{sub(/;$/,"",$2); sub(/@.*/,"",$2); gsub(/:%/,":",$2); gsub(/\/%/,"/",$2); print $2}')"
   exports_versioned="$(printf '%s\n' "$world" | awk '$1=="export"{sub(/;$/,"",$2); gsub(/:%/,":",$2); gsub(/\/%/,"/",$2); print $2}')"
-  exports="$(printf '%s\n' "$exports_versioned" | awk '{sub(/@.*/,""); print}')"
 
   murmur_imports="$(printf '%s\n' "$imports" | grep '^murmur:' || true)"
   murmur_exports="$(printf '%s\n' "$exports_versioned" | grep '^murmur:' || true)"

@@ -43,6 +43,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/lib/common.sh"
 REPO="murmur-nexus/default-artifacts"
 
 usage() {
@@ -61,12 +62,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$RELEASE_DIR" ] && [ -n "$TAG" ] || usage
 
-MUR="${MUR_BIN:-$(command -v mur || true)}"
-if [ -z "$MUR" ] || ! "$MUR" index --help >/dev/null 2>&1; then
-    echo "error: need a 'mur' with the 'index' subcommand (tried: ${MUR:-<none on PATH>})." >&2
-    echo "       Build one from murmur at the MURMUR_REV in .github/workflows/build.yml and set MUR_BIN to it." >&2
-    exit 1
-fi
+require_mur
 command -v jq >/dev/null || { echo "error: jq is required" >&2; exit 1; }
 
 if [ ! -d "$RELEASE_DIR" ]; then

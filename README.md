@@ -17,6 +17,10 @@ artifacts:
     version: "0.6.0"
 ```
 
+Installing by scoped name needs a `mur` released after v0.6.0. `mur` v0.6.0 and earlier have
+no `murmur/<name>` form and do not read the release's `artifacts-index.json`; until the next
+release ships, build `mur` from murmur's `main`.
+
 The tables below give each artifact's bare name, which is also the tool name the model calls.
 Each one's version is the `version:` in its own `murmur.yaml`; `./scripts/list-artifacts.sh`
 lists them all. A release publishes every artifact and the `artifacts-index.json` that
