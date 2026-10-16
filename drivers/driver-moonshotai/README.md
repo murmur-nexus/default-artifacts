@@ -199,9 +199,9 @@ size so far go out together. A call that never gets an id is not reported at all
 as before.
 
 The driver imports `murmur:stream/events@0.1.0`, which murmur serves from v0.6.0; an older murmur
-cannot load it. A current `mur` refuses a release of this driver built before that interface
-(0.6.0 and earlier) at launch with `E-WIT-LEVEL-001`: it imports `murmur:text/chunks@0.1.0`, and
-WIT level 1 has no version of `murmur:text`.
+cannot load it. A `mur` released after v0.6.0 refuses a release of this driver built before that
+interface (0.6.0 and earlier) at launch with `E-WIT-LEVEL-001`: it imports
+`murmur:text/chunks@0.1.0`, and WIT level 1 has no version of `murmur:text`.
 
 ## Stop reasons
 

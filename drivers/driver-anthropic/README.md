@@ -126,9 +126,9 @@ its first byte. A `tool_use` block with an empty `id` or `name` is not reported,
 as before. Blocks the driver drops, such as `server_tool_use`, are not reported.
 
 The driver imports `murmur:stream/events@0.1.0`, which murmur serves from v0.6.0; an older murmur
-cannot load it. A current `mur` refuses a release of this driver built before that interface
-(0.9.0 and earlier) at launch with `E-WIT-LEVEL-001`: it imports `murmur:text/chunks@0.1.0`, and
-WIT level 1 has no version of `murmur:text`.
+cannot load it. A `mur` released after v0.6.0 refuses a release of this driver built before that
+interface (0.9.0 and earlier) at launch with `E-WIT-LEVEL-001`: it imports
+`murmur:text/chunks@0.1.0`, and WIT level 1 has no version of `murmur:text`.
 
 ## Token usage
 

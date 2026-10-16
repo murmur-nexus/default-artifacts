@@ -29,3 +29,13 @@ require_mur() {
         exit 1
     fi
 }
+
+# The sha256 of a file, as bare hex. GNU coreutils has sha256sum and macOS has
+# shasum; fails when neither can read the file.
+#
+#   sha256_of <file>
+sha256_of() {
+    local sum
+    sum="$(sha256sum "$1" 2>/dev/null || shasum -a 256 "$1")" || return 1
+    echo "${sum%% *}"
+}

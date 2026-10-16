@@ -74,7 +74,7 @@ echo "→ [3/4] install into $CAPSULE_DIR"
 # native tool (lock_version 3 refuses an entry carrying both). No lock is written
 # outside a project directory; the next `mur run` writes one.
 echo "→ [4/4] check lock local/$NAME@$VERSION"
-SHA="$(sha256sum "$ZIP" 2>/dev/null || shasum -a 256 "$ZIP")"; SHA="${SHA%% *}"
+SHA="$(sha256_of "$ZIP")"
 PLATFORM=""
 if [ "$KIND" = "native" ]; then
   PLATFORM="$(basename "$ZIP" .mur.zip)"; PLATFORM="${PLATFORM#"$NAME-$VERSION-"}"

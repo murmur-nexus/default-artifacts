@@ -43,7 +43,7 @@ referenced by `data_path`.
 
 ## What the capsule must grant
 
-On Linux the tool runs in the capsule's own sandbox, with the capsule-wide grants ([Native tools](https://docs.murmur.nexus/reference/containment/#native-tools)). A `capabilities:` block on the tool's entry in the capsule's `artifacts:` does not narrow them and prints `W-SEC-008`.
+On Linux, from the first `mur` released after v0.6.0, the tool runs in the capsule's own sandbox, with the capsule-wide grants ([Native tools](https://docs.murmur.nexus/reference/containment/#native-tools)). A `capabilities:` block on the tool's entry in the capsule's `artifacts:` does not narrow them and prints `W-SEC-008`.
 
 | Need | Capsule grant |
 |---|---|

@@ -26,7 +26,7 @@ This artifact exports `murmur:driver/process@0.3.0`, which murmur serves from v0
 host accepts exactly one version of that interface and carries no fallback for an earlier one.**
 Installing `murmur/driver-claude-code` by scoped name needs a `mur` released after v0.6.0.
 
-A current `mur` refuses `0.3.0` and earlier at launch with `E-WIT-LEVEL-001`, with the clause
+That `mur` refuses `0.3.0` and earlier at launch with `E-WIT-LEVEL-001`, with the clause
 `it exports murmur:driver/process@0.2.0, and level 1 has murmur:driver@0.3.0`. Install `0.4.0` or
 later — a rebuild is the intended cost of the bump. The refusal runs the other way too: a murmur
 at `@0.2.0` refuses this release. Pick the driver by the murmur you run:

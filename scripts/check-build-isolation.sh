@@ -103,12 +103,6 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/release" "$TMP/alone"
 
-sha256() {
-    local sum
-    sum="$(sha256sum "$1" 2>/dev/null || shasum -a 256 "$1")"
-    echo "${sum%% *}"
-}
-
 payload() {
     case "$2" in
         wasm)   echo "$TARGET_DIR/wasm32-wasip2/release/$(printf '%s' "$1" | tr - _).wasm" ;;
@@ -140,13 +134,15 @@ if ! bash "$SCRIPT_DIR/build-native.sh" --locked >&2; then
     exit 1
 fi
 
-while IFS=$'\t' read -r path name _version _runtime kind; do
+# The rows are read on fd 3: cargo and mur inherit stdin, and one that read it
+# would swallow the rows still to be checked.
+while IFS=$'\t' read -r path name _version _runtime kind <&3; do
     [ -n "$path" ] || continue
     pack "$path" "$name" "$kind" release > /dev/null
-done <<< "$selected"
+done 3<<< "$selected"
 
 mismatches=""
-while IFS=$'\t' read -r path name _version _runtime kind; do
+while IFS=$'\t' read -r path name _version _runtime kind <&3; do
     [ -n "$path" ] || continue
     echo "Built alone: $name" >&2
     case "$kind" in
@@ -159,8 +155,8 @@ while IFS=$'\t' read -r path name _version _runtime kind; do
     fi
     alone_zip="$(pack "$path" "$name" "$kind" alone)"
     zip_file="$(basename "$alone_zip")"
-    release_sha="$(sha256 "$TMP/release/$zip_file")"
-    alone_sha="$(sha256 "$alone_zip")"
+    release_sha="$(sha256_of "$TMP/release/$zip_file")"
+    alone_sha="$(sha256_of "$alone_zip")"
     if [ "$release_sha" = "$alone_sha" ]; then
         echo "ok    $name  $zip_file  $alone_sha"
     else
@@ -169,7 +165,7 @@ while IFS=$'\t' read -r path name _version _runtime kind; do
     built alone   sha256 $alone_sha
 "
     fi
-done <<< "$selected"
+done 3<<< "$selected"
 
 if [ -n "$mismatches" ]; then
     {
