@@ -111,7 +111,7 @@ cross-compile to wasm32-wasip2 (see [BUILD.md](./BUILD.md)).
 | `tool-code-graph` | `tools/tool-code-graph/` | native | Indexes a Rust and/or Python repo into a SQLite symbol/edge graph; structured queries over stable symbol identities |
 | `tool-code-coverage` | `tools/tool-code-coverage/` | native | Spectrum-based fault localization (Ochiai / Tarantula) over per-test LCOV reports |
 | `tool-test-report` | `tools/tool-test-report/` | native | Parses raw test-runner output (cargo, pytest, go, jest) into a structured failure list |
-| `tool-registry-search` | `tools/tool-registry-search/` | native | Searches the Murmur artifact registry for artifacts matching a keyword |
+| `tool-registry-search` | `tools/tool-registry-search/` | native | Searches a Murmur artifact index for artifacts, listing every published version of each `scope/name` |
 
 ## Skills
 
