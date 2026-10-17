@@ -668,9 +668,7 @@ mod wasm_hook {
                 ts,
             );
             if let Err(e) = write_eval_jsonl(&lines) {
-                return Err(format!(
-                    "[hook-eval] failed to write eval.jsonl: {e}"
-                ));
+                return Err(format!("[hook-eval] failed to write eval.jsonl: {e}"));
             }
 
             // Export OTel log records if endpoint is set.
