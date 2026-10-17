@@ -41,8 +41,11 @@ use serde_json::{json, Value};
 /// The bare name the runtime knows this hook by: its manifest `name:`.
 pub const HOOK_NAME: &str = "hook-eval";
 
-/// The file this hook appends its warnings to. The runtime routes a hook's own log output to
-/// `logs/hook-<name>.log` under the bare name, so writing there keeps both in one file.
+/// The file this hook appends its own warnings to, relative to the directory the runtime
+/// preopens for it. Under `capabilities.filesystem.records: true` that directory is the session
+/// records directory's `hooks/`, so the file is the records directory's
+/// `hooks/logs/hook-hook-eval.log`. Errors the runtime catches from the hook go to a different
+/// file, the records directory's `logs/hook-hook-eval.log`.
 pub fn log_path() -> PathBuf {
     Path::new("./logs").join(format!("hook-{HOOK_NAME}.log"))
 }
@@ -79,8 +82,8 @@ pub struct Scorer {
 ///
 /// `key` is either the literal `MURMUR_EVAL_CONFIG` (the whole value is unusable), the
 /// literal `scorers`, or `scorers[<i>].<field>` with `i` the zero-based index in the
-/// `scorers` array. It is carried verbatim onto the `dataset_run` record and into
-/// `logs/hook-hook-eval.log`, so an operator reading either one sees the same
+/// `scorers` array. It is carried verbatim onto the `dataset_run` record and into the
+/// hook's own warning log at [`log_path`], so an operator reading either one sees the same
 /// offending key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigError {
@@ -665,9 +668,7 @@ mod wasm_hook {
                 ts,
             );
             if let Err(e) = write_eval_jsonl(&lines) {
-                return Err(format!(
-                    "[hook-eval] failed to write eval.jsonl: {e}"
-                ));
+                return Err(format!("[hook-eval] failed to write eval.jsonl: {e}"));
             }
 
             // Export OTel log records if endpoint is set.
@@ -800,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn the_warning_log_is_the_one_the_runtime_names_after_the_bare_hook_name() {
+    fn the_warning_log_is_logs_hook_hook_eval_log_under_the_hooks_own_directory() {
         assert_eq!(log_path(), Path::new("./logs/hook-hook-eval.log"));
     }
 

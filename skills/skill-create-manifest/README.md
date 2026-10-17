@@ -21,3 +21,4 @@ which is the layout 0.1.0 of this skill describes.
 | The session's records directory, `~/.murmur/records/<workdir root>/<session-id>/` (`$MURMUR_RECORDS_DIR`): `trace.jsonl`, `blobs/`, `logs/`, `completion.json`, `hooks/` | §4.3a |
 | The `E-MAN-003` refusals of a misplaced `records: true` | §4.3a |
 | `mur run --task <file>` for a one-shot task | §5, §9 |
+| Catalog rows for `murmur/hook-regression-verifier` (`filesystem.records: true`, reopen budget `lifecycle.max_task_reopens`), `murmur/hook-memory` (`conversation.read: true`, optional `task_io.read: true`) and `murmur/hook-diff-summary` (`filesystem.scope: "."`) | §10 |

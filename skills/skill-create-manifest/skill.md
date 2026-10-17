@@ -97,7 +97,7 @@ artifacts:
         records: true          # hook-debug.jsonl goes in the records directory (§4.3a)
 
   - name: murmur/skill-create-manifest
-    version: "0.1.0"
+    version: "0.2.0"
     runtime: skill
 ```
 
@@ -204,7 +204,7 @@ ignored.
 ```yaml
 artifacts:
   - name: murmur/hook-eval
-    version: "0.8.0"
+    version: "0.9.0"
     runtime: hook
     capabilities:
       filesystem:
@@ -626,6 +626,9 @@ name its `artifacts:` entry uses. For live discovery, use `mur search <keyword>`
 | `murmur/hook-debug` | hook | Debug event logger. Writes every lifecycle event (session start, inference, tool call, shell, session end) to `hooks/hook-debug.jsonl` in the session records directory. Needs `filesystem.records: true`. |
 | `murmur/hook-grafana` | hook | OTel span emitter. Sends structured telemetry to Grafana Tempo. Requires `observability.otel_endpoint` in the capsule manifest. |
 | `murmur/hook-eval` | hook | Evaluation scorer. Runs configured scorers (exit_ok, max_turns, tool_sequence, llm_judge) and writes results to `hooks/eval.jsonl` in the session records directory, where `mur eval` reads them. Needs `filesystem.records: true`. |
+| `murmur/hook-regression-verifier` | hook | Regression gate. Reopens a task whose edits broke previously-passing tests, judged from the test runs it sees in `on-shell` (`pytest`, `cargo test`, `go test`, jest). Appends each verdict to `hooks/regression-verifier.jsonl` in the session records directory. Needs `filesystem.records: true`. The reopen budget is `lifecycle.max_task_reopens`. |
+| `murmur/hook-memory` | hook | Conversation memory. At `on-task-start`, seeds the task with a budget-bounded slice of the earlier conversation. Needs `conversation.read: true` and `context.max_tokens`. `task_io.read: true` is optional and selects by relevance instead of recency. |
+| `murmur/hook-diff-summary` | hook | Edit summary. Snapshots each file `murmur/tool-editor` writes and emits a unified-diff summary at end of turn. Needs `filesystem.scope: "."`. Pairs with `murmur/tool-editor` 0.3.0 or later. |
 | `murmur/skill-create-manifest` | skill | This artifact. Provides complete manifest generation guidance. |
 
 **Using artifacts in a capsule manifest:**

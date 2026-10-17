@@ -75,25 +75,26 @@ access.
 
 ### Reopen budget
 
-Because this hook returns `reopen-task`, the runtime consults two fields on
-**your** capsule manifest (not on any hook's `murmur.yaml`):
+Because this hook returns `reopen-task`, the runtime reads its reopen budget
+from **your** capsule manifest (not from any hook's `murmur.yaml`):
 
 ```yaml
-inference:
+lifecycle:
   max_task_reopens: 1   # default 1; 0 disables reopening; never exceeds max_turns
 ```
 
-`max_task_reopens` bounds how many times a single task may be reopened before it
-is finalized regardless; it is never allowed past the existing
-`inference.max_turns` ceiling.
+`lifecycle.max_task_reopens` bounds how many times a single task may be
+reopened before it is finalized regardless; it is never allowed past the
+`inference.max_turns` ceiling. `inference.max_task_reopens` is refused at launch
+with `E-MAN-003`.
 
-## Compatibility note
+## Compatibility
 
-`commit_policy: reopen-task` and the `reopen-task(string)` case of
-`murmur:hook/lifecycle` are the `@0.4.0` hook interface. Until the murmur
-runtime that introduces them (branch `ac1e1848`) merges to `main`, a live
-capsule cannot honor this hook's reopen decision — the runtime on `main` is
-still at the `@0.3.0` lifecycle package and does not recognize
-`commit_policy: reopen-task`.
+The hook exports `murmur:hook/lifecycle` from `murmur:hook@0.9.0`. Every murmur
+release that runs a `murmur:hook@0.9.0` hook honours `commit_policy: reopen-task`
+and the `reopen-task` case, budgeted by `lifecycle.max_task_reopens`. The verdict
+log's `records: true` grant and installing the hook as
+`murmur/hook-regression-verifier` need a `mur` released after v0.6.0; see
+[Configuration](#configuration).
 
 See [murmur.yaml](./murmur.yaml) for the full manifest.
