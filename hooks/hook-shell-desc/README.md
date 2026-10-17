@@ -14,7 +14,7 @@ Declare in your capsule `murmur.yaml`:
 ```yaml
 artifacts:
   - name: murmur/hook-shell-desc
-    version: 0.4.0
+    version: 0.6.0
     runtime: hook
 ```
 

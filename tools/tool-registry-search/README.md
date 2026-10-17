@@ -44,7 +44,7 @@ description or a tag. Within a rank they keep the index's name order.
  "results": [{"name": "murmur/tool-editor", "runtime": "tool",
               "description": "Structured file editing interface for Murmur capsules.",
               "tags": ["tool", "editor"],
-              "versions": [{"version": "0.7.0", "release": "v0.26.0", "built_at_level": 1,
+              "versions": [{"version": "0.6.0", "release": "v0.25.0", "built_at_level": 1,
                             "platforms": ["any"]}]}]}
 ```
 
