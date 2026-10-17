@@ -1,8 +1,8 @@
 name: hook-debug
-version: 0.7.0
+version: 0.8.0
 runtime: hook
 execution_mode: async
 commit_policy: none
-description: Writes hook lifecycle events to hook-debug.jsonl in the capsule workdir.
+description: Writes hook lifecycle events to hook-debug.jsonl in the session's records directory.
 requires_files:
   - hook_debug.wasm

@@ -87,7 +87,9 @@ calls and computes the budget the hook receives. The hook never parses them. The
 Both capability keys are booleans and are never inferred: a `conversation:` block
 that omits `read` fails staging with `E-MAN-003`.
 
-No network capability is required — the hook makes no outbound calls.
+No network capability is required — the hook makes no outbound calls. The hook
+writes no file either, so it needs no filesystem grant: only
+`capabilities.conversation.read: true`.
 
 **The grant belongs on your capsule manifest, on this hook's own `artifacts:`
 entry.** Hook capabilities are per-hook and default-deny. A `capabilities:` block
@@ -129,14 +131,15 @@ default.
 | `system` in the list | `system` messages are never seeded. |
 | Any other role not in the table above, such as `critic` or `User` | Names the role and lists the roles that can be seeded. |
 
-Every error names `hook-memory` and lands in the session's
-`logs/hook-hook-memory.log`, under `.murmur/<session-id>/` in the
-workdir; the session continues unseeded.
+Every error names `hook-memory` and lands in `logs/hook-hook-memory.log` in the
+session's records directory (`$MURMUR_RECORDS_DIR/logs/hook-hook-memory.log`);
+the session continues unseeded.
 
 ## When the hook seeds nothing
 
 Three of these are ordinary and silent: the hook returns no output, and the
-runtime writes no `context_seed` line to `trace.jsonl` at all.
+runtime writes no `context_seed` line to the session's `trace.jsonl`, in its
+records directory, at all.
 
 | Situation | Why |
 |---|---|
@@ -150,15 +153,19 @@ Two cases are loud. The first is a `config:` block the hook cannot honour — se
 `read-messages` returns `not-granted` — which, left unhandled, would be
 indistinguishable from an empty record. So the hook fails instead, with an error
 naming itself, the missing key, and where the key belongs. Hook errors are
-non-fatal: the session continues and the message is written to the session's
-`logs/hook-hook-memory.log`, under `.murmur/<session-id>/` in the workdir.
+non-fatal: the session continues and the message is written to
+`logs/hook-hook-memory.log` in the session's records directory —
+`$MURMUR_RECORDS_DIR/logs/hook-hook-memory.log`, or
+`~/.murmur/records/<workdir root>/<session-id>/logs/hook-hook-memory.log` on
+disk.
 
 ## Confirming it worked
 
-The runtime writes one `context_seed` line to the session's `trace.jsonl` for
-every seed it is offered, carrying `hook_name`, `tokens`, `proposed_tokens`,
-`budget_tokens`, `message_ids`, and an `outcome` of `seeded`, `trimmed`,
-`compacted` or `rejected` (with a `reason` on a rejection). A healthy run records
+The runtime writes one `context_seed` line to `trace.jsonl` in the session's
+records directory (`$MURMUR_RECORDS_DIR/trace.jsonl`) for every seed it is
+offered, carrying `hook_name`, `tokens`, `proposed_tokens`, `budget_tokens`,
+`message_ids`, and an `outcome` of `seeded`, `trimmed`, `compacted` or
+`rejected` (with a `reason` on a rejection). A healthy run records
 `seeded`: the hook measures its proposal against the same token counter the host
 does and holds back a margin, so trimming is a backstop rather than the routine
 path.

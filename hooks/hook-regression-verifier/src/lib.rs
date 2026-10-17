@@ -16,7 +16,9 @@
 //!     collapse of the baseline-passing set — the "0/644" collection-failure
 //!     class) is a regression: the hook returns `ReopenTask(reason)`. Otherwise
 //!     it returns `None`. Every verdict, reopen or clean, is appended as one JSON
-//!     line to `regression-verifier.jsonl` at the workdir root.
+//!     line to `regression-verifier.jsonl` at the root of the hook's preopened
+//!     directory — the session records directory's `hooks/` under
+//!     `capabilities.filesystem.records: true`.
 //!
 //! The verdict-derivation and observation logic lives at the crate root as pure
 //! functions/structs so it is testable under `cargo test` without WASI or
@@ -545,7 +547,9 @@ mod wasm_hook {
         static STATE: RefCell<RegressionState> = RefCell::new(RegressionState::new());
     }
 
-    /// Append one JSON line to `regression-verifier.jsonl` at the workdir root.
+    /// Append one JSON line to `regression-verifier.jsonl` at the root of the hook's
+    /// preopened directory, which is the session records directory's `hooks/` under
+    /// `capabilities.filesystem.records: true`.
     /// Best-effort: a write failure is logged to stderr but never fails the hook
     /// (the reopen/clean decision has already been made).
     fn append_verdict_line(line: &str) {

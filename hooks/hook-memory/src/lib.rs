@@ -65,9 +65,9 @@ pub mod recall {
     /// declare `capabilities.conversation.read: true`.
     pub const NOT_GRANTED: &str = "not-granted";
 
-    /// The artifact name every error this hook raises names, so a line in
-    /// `workdir/logs/hook-hook-memory.log` is attributable without cross-referencing
-    /// the capsule manifest.
+    /// The artifact name every error this hook raises names, so a line in the session
+    /// records directory's `logs/hook-hook-memory.log` is attributable without
+    /// cross-referencing the capsule manifest.
     pub const ARTIFACT_NAME: &str = "hook-memory";
 
     /// The environment variable the runtime sets, in this hook's WASI context only, to the
@@ -366,7 +366,7 @@ pub mod recall {
     /// `not-granted` gets the full remedy, because there is no staging-time check for the
     /// grant: an ungranted hook links, runs, and reads nothing, which is byte-identical to
     /// a capsule whose record is genuinely empty. Failing loudly here is what tells those
-    /// two apart, in `workdir/logs/hook-hook-memory.log`.
+    /// two apart, in the session records directory's `logs/hook-hook-memory.log`.
     pub fn read_failure(error: String) -> String {
         if error.trim() == NOT_GRANTED {
             return format!(
