@@ -117,9 +117,11 @@ cross-compile to wasm32-wasip2 (see [BUILD.md](./BUILD.md)).
 ## Skills
 
 Documentation artifacts (`runtime: skill`). No binary or WASM component — each contains a
-`skill.md` guidance file the runtime installs to `workdir/tools/<name>/skill.md` before the
-agent loop starts. The agent reads the file voluntarily; content is never injected into the
-system prompt.
+`skill.md` guidance file the runtime installs to `tools/<name>/skill.md` in the session's
+runtime directory (`$MURMUR_RUNTIME_DIR`, read-only to the capsule) before the agent loop
+starts. The agent reads the file voluntarily; content is never injected into the system prompt.
+That is the layout of a `mur` released after v0.6.0; `mur` v0.6.0 and earlier install the
+file into the capsule workdir instead.
 
 | Artifact | Location | Description |
 |---|---|---|

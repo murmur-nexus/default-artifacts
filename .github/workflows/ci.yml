@@ -123,3 +123,95 @@ jobs:
       - name: Check artifact-facing WIT files are in sync with murmur
         working-directory: default-artifacts
         run: ./scripts/check-wit-sync.sh
+
+  # Prove that every compiled artifact (wasm and native) packs the same bytes built
+  # alone as it does in the release build. A crate's bytes can depend on which other
+  # crates share its cargo invocation (feature unification), so an artifact rebuilt
+  # alone could ship different bytes at the same version; check-build-isolation.sh
+  # runs the release's builds, rebuilds each artifact by itself, and fails on any
+  # zip that differs.
+  #
+  # Packing needs the `mur` the release packs with, so this job builds it the way
+  # build.yml's release job does. MURMUR_REV is read out of build.yml rather than
+  # written here, so the release and this check cannot pin two different murmurs:
+  # moving the pin means editing build.yml only.
+  build-isolation:
+    runs-on: ubuntu-latest
+    env:
+      MUR_BIN: ${{ github.workspace }}/murmur/target/debug/mur
+    steps:
+      # Both repositories nest under $GITHUB_WORKSPACE: actions/checkout rejects a path
+      # that escapes it, so this is the sibling layout that passes its validation.
+      - name: Check out default-artifacts
+        uses: actions/checkout@v4
+        with:
+          path: default-artifacts
+
+      # Exactly one `  MURMUR_REV: <40-hex SHA>` line under build.yml's top-level
+      # `env:`. None, or more than one, fails here rather than building some other mur.
+      - name: Read MURMUR_REV from build.yml
+        id: murmur-rev
+        working-directory: default-artifacts
+        run: |
+          workflow=.github/workflows/build.yml
+          revs=$(sed -n 's/^  MURMUR_REV: *\([0-9a-f]\{40\}\)[[:space:]]*$/\1/p' "$workflow")
+          count=$(printf '%s' "$revs" | grep -c . || true)
+          if [ "$count" -eq 0 ]; then
+            echo "::error::$workflow has no '  MURMUR_REV: <40-hex SHA>' line; build-isolation builds mur from it"
+            exit 1
+          fi
+          if [ "$count" -ne 1 ]; then
+            echo "::error::$workflow has $count '  MURMUR_REV: <40-hex SHA>' lines ($(printf '%s' "$revs" | paste -sd ' ' -)); expected exactly one"
+            exit 1
+          fi
+          echo "rev=$revs" >> "$GITHUB_OUTPUT"
+          echo "$revs"
+
+      - name: Check out murmur at build.yml's MURMUR_REV
+        uses: actions/checkout@v4
+        with:
+          repository: murmur-nexus/murmur
+          ref: ${{ steps.murmur-rev.outputs.rev }}
+          path: murmur
+
+      # This step through the cache step mirror build.yml's release job in order: mur
+      # is built before this repo's toolchain step, so it compiles with the same
+      # toolchain the release builds it with.
+      - name: Install libseccomp
+        # murmur-cli links against it. Bounded separately from the job: a runner whose
+        # Azure mirror is unreachable leaves `apt-get update` failing over for tens of
+        # minutes.
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libseccomp-dev
+
+      - name: Install murmur's pinned toolchain
+        working-directory: murmur
+        run: rustup show
+
+      - name: Build mur
+        # Debug, not release: packing is cheap, so the compile is what costs.
+        working-directory: murmur
+        run: |
+          cargo build -p murmur-cli
+          "$MUR_BIN" version
+
+      # Pinned toolchain. rust-toolchain.toml is the source of truth; this
+      # `toolchain:` input pre-installs/caches the matching version and adds the
+      # wasm target. Keep it in sync with rust-toolchain.toml's `channel`.
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.95.0"
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-isolation
+          workspaces: |
+            default-artifacts
+            murmur
+
+      - name: Check every artifact packs the same bytes alone as in the release build
+        working-directory: default-artifacts
+        run: ./scripts/check-build-isolation.sh

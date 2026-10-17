@@ -216,9 +216,11 @@ runtime reads this file's JSON structure at all.
 
 **Read this before relying on anything you write here surviving.** No murmur-side component reads or
 writes `checkpoints/decisions.json`: nothing merges it, and nothing carries it across a compaction on
-your behalf. The `MURMUR.md` the runtime generates in your workdir points the other way from
-durability — it lists `decisions.json` as *"key decisions (overwritten on each compaction)"* and tells
-you to read the checkpoint files at the start of a new context window to reconstruct state.
+your behalf. The `MURMUR.md` the runtime generates in the session's runtime directory
+(`$MURMUR_RUNTIME_DIR/MURMUR.md` in a shell command, `murmur-runtime/MURMUR.md` in a file tool)
+points the other way from durability — it lists `decisions.json` as *"key decisions (overwritten on
+each compaction)"* and tells you to read the checkpoint files at the start of a new context window
+to reconstruct state.
 
 So nothing guarantees that an `investigations` entry you wrote before a compaction is still there
 after one. Treat this convention as **within-a-session working memory**: right after any compaction,
