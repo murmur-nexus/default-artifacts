@@ -68,13 +68,16 @@ WASM components (`runtime: hook`) that attach to lifecycle events. Each hook dec
 
 | Artifact | Location | Binding | Mode | Commit policy | Description |
 |---|---|---|---|---|---|
-| `hook-debug` | `hooks/hook-debug/` | *(all events)* | async | none | Writes a JSONL event log to `workdir/hook-debug.jsonl` |
+| `hook-debug` | `hooks/hook-debug/` | *(all events)* | async | none | Writes a JSONL event log to `hook-debug.jsonl` in the session records directory's `hooks/` |
 | `hook-compact` | `hooks/hook-compact/` | `on-compaction` | blocking | replace-context | Compacts conversation history when the session token threshold is reached |
 | `hook-diff-summary` | `hooks/hook-diff-summary/` | *(all events)* | blocking | none | Snapshots files before each editor tool call and emits a structured unified-diff summary at end of turn; requires `tool-editor` 0.3.0 or later |
 | `hook-memory` | `hooks/hook-memory/` | `on-task-start` | blocking | seed-context | Seeds a task with the relevant part of the conversation that came before it, read from the runtime's durable conversation record |
 | `hook-shell-desc` | `hooks/hook-shell-desc/` | `on-stage` | blocking | write-manifests | Returns enriched tool manifests for common shell binaries at staging time |
-| `hook-eval` | `hooks/hook-eval/` | *(all events)* | async | none | Scores sessions against configured scorers and writes `eval.jsonl` |
+| `hook-eval` | `hooks/hook-eval/` | *(all events)* | async | none | Scores sessions against configured scorers and writes `eval.jsonl` in the session records directory's `hooks/`, where `mur eval` reads it |
 | `hook-grafana` | `hooks/hook-grafana/` | *(all events)* | async | none | Exports OTel spans to a Grafana Tempo OTLP/HTTP endpoint |
+| `hook-regression-verifier` | `hooks/hook-regression-verifier/` | *(all events)* | blocking | reopen-task | Reopens a task whose edits broke previously-passing tests; appends each verdict to `regression-verifier.jsonl` |
+
+Hooks have no filesystem by default. A hook that writes a record — `hook-debug`, `hook-eval`, `hook-regression-verifier` — is granted `capabilities.filesystem.records: true` on its own `artifacts:` entry, and writes into the `hooks/` directory of the session's records directory (`$MURMUR_RECORDS_DIR/hooks/`, or `~/.murmur/records/<workdir root>/<session-id>/hooks/` on disk), beside the session's `trace.jsonl`. `hook-diff-summary` reads files in the work folder, so it is granted `capabilities.filesystem.scope` instead. The records directory and `records: true` need a `mur` released after v0.6.0; v0.6.0 and earlier ignore `records` with a `W-SEC-019` warning and preopen nothing for the hook.
 
 ## Process drivers
 

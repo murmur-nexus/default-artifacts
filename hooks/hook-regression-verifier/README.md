@@ -31,8 +31,8 @@ Binding: all events · mode: blocking · commit policy: reopen-task.
 
 Every verdict — reopen or clean, on every `on-task-end` dispatch including those
 after an earlier reopen — is appended as one JSON line to
-`regression-verifier.jsonl` at the workdir root, so a run's regression state is
-inspectable after the fact.
+`regression-verifier.jsonl` in the `hooks/` directory of the session's records
+directory, so a run's regression state is inspectable after the fact.
 
 ## Configuration
 
@@ -41,19 +41,29 @@ Declare in your capsule `murmur.yaml`:
 ```yaml
 artifacts:
   - name: murmur/hook-regression-verifier
-    version: 0.4.0
+    version: 0.7.0
     runtime: hook
     capabilities:
       filesystem:
-        scope: "."
+        records: true
 ```
 
-`capabilities.filesystem.scope: "."` is required. The hook opens
-`regression-verifier.jsonl` with a relative path, i.e. at the root of whatever
-directory the runtime preopens for it, and appends one JSON line per
-`on-task-end` verdict. Without a filesystem grant the hook has no preopened
-directory at all, the open fails, and no verdict log is written (the reopen
-decision itself still works).
+`capabilities.filesystem.records: true` is required for the verdict log. The
+hook opens `regression-verifier.jsonl` with a relative path, i.e. at the root of
+whatever directory the runtime preopens for it, and appends one JSON line per
+`on-task-end` verdict. `records: true` preopens the `hooks/` directory of the
+session's records directory, so the file lands at
+`$MURMUR_RECORDS_DIR/hooks/regression-verifier.jsonl` —
+`~/.murmur/records/<workdir root>/<session-id>/hooks/regression-verifier.jsonl`
+on disk, beside the session's `trace.jsonl`. Without a filesystem grant the hook
+has no preopened directory at all, the open fails, and no verdict log is written
+(the reopen decision itself still works). A `filesystem.scope` grant would put
+the file in the work folder instead, where the capsule's own commands can edit
+it.
+
+`records: true` needs a `mur` released after v0.6.0. `mur` v0.6.0 and earlier
+warn `W-SEC-019` on the unrecognized `records` key, ignore it, and preopen
+nothing for the hook, so no verdict log is written.
 
 No network capability is required — the hook makes no outbound calls.
 

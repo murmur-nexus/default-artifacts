@@ -90,8 +90,11 @@ artifacts:
     runtime: driver
 
   - name: murmur/hook-debug
-    version: "0.7.0"
+    version: "0.8.0"
     runtime: hook
+    capabilities:
+      filesystem:
+        records: true          # hook-debug.jsonl goes in the records directory (§4.3a)
 
   - name: murmur/skill-create-manifest
     version: "0.1.0"
@@ -182,6 +185,66 @@ capabilities:
 ```
 
 Omit `filesystem:` to use the default workdir scope. Use `.` to allow the full workdir.
+This block does not reach hooks — see §4.3a.
+
+### 4.3a Hook Capabilities
+
+A hook gets no filesystem and no network by default, and the capsule-wide `capabilities:` block
+does not reach it. Grant each hook what it needs under `capabilities:` on **that hook's own
+`artifacts:` entry**. A `capabilities:` key inside a hook artifact's bundled `murmur.yaml` is
+ignored.
+
+| Grant | For | Default artifacts |
+|---|---|---|
+| `filesystem.records: true` | A hook that writes a score or log. Its current directory becomes the session records directory's `hooks/`, read-write. | `murmur/hook-eval`, `murmur/hook-debug`, `murmur/hook-regression-verifier` |
+| `filesystem.scope` | A hook that reads project files. The named workdir directory becomes its current directory. | `murmur/hook-diff-summary` |
+| `conversation.read: true` | A hook that reads the capsule's conversation record. | `murmur/hook-memory` |
+| `network.allow` | A hook that exports to an endpoint. List the same host as `observability.otel_endpoint`. | `murmur/hook-grafana`, `murmur/hook-eval`'s OTel export |
+
+```yaml
+artifacts:
+  - name: murmur/hook-eval
+    version: "0.8.0"
+    runtime: hook
+    capabilities:
+      filesystem:
+        records: true          # eval.jsonl goes beside the session's trace
+      network:
+        allow:
+          - http://localhost:4318   # only for OTel export
+
+  - name: murmur/hook-debug
+    version: "0.8.0"
+    runtime: hook
+    capabilities:
+      filesystem:
+        records: true
+```
+
+`murmur/hook-diff-summary` snapshots every file the editor touches, so its entry is granted
+`filesystem.scope: "."`. Do not give a scoring or logging hook `scope` instead of `records`: it
+would write into the work folder, where the capsule's commands can edit the file and `mur eval`
+does not look.
+
+`filesystem.records: true` fails with `E-MAN-003` when it is declared beside `filesystem.scope`
+on the same entry, on an entry that is not `runtime: hook`, or in the capsule-wide
+`capabilities:` block.
+
+**The records directory.** Every record the runtime keeps about a session is in
+`~/.murmur/records/<workdir root>/<session-id>/`, where `<workdir root>` is the `--workdir`
+directory, otherwise `<manifest-dir>/workdir`. A shell command sees it as `$MURMUR_RECORDS_DIR`.
+This is the layout of a `mur` released after v0.6.0. The directory is read-only to the capsule's
+own commands and kept after the session ends.
+
+| Path | Holds |
+|---|---|
+| `trace.jsonl` | The session's trace |
+| `blobs/` | Large trace payloads, by content hash |
+| `logs/` | `bootstrap.log`, `otel.log`, and `hook-<name>.log` for errors the runtime catches from a hook |
+| `completion.json` | A delegated child's outcome |
+| `hooks/` | The current directory of every hook granted `filesystem.records: true` |
+
+`mur eval` reads `hooks/eval.jsonl` from each session's records directory.
 
 ### 4.4 Mur Capabilities (planned — post-MVP)
 
@@ -243,7 +306,7 @@ lifecycle:
 ```
 
 **Match `task_acceptance` to the actual usage pattern:**
-- `single` for one-shot CLI-driven tasks (`mur run --input task.md`)
+- `single` for one-shot CLI-driven tasks (`mur run --task task.md`)
 - `queue` for long-running agents that receive tasks from an orchestrator or API
 
 ---
@@ -362,6 +425,8 @@ observability:
 |---|---|---|---|
 | `otel_endpoint` | string | no | OTLP/HTTP endpoint for span emission. Required when using `hook-grafana`. |
 | `eval.scorers` | list | no | Evaluation scorers run by `hook-eval` at session end. |
+
+`murmur/hook-eval`'s `artifacts:` entry needs `capabilities.filesystem.records: true` (§4.3a).
 
 **Eval scorer types:**
 
@@ -531,7 +596,7 @@ For capsules that call external APIs, list only the specific hostnames needed �
 capsule needs to spawn. An empty list or absent block means no spawning is allowed.
 
 **Match `task_acceptance` to the actual usage pattern.**
-- `single` (default): one-shot task; capsule exits when done. Correct for `mur run --input task.md`.
+- `single` (default): one-shot task; capsule exits when done. Correct for `mur run --task task.md`.
 - `queue`: persistent agent that accepts tasks from an orchestrator. Requires `after_task: sleep`.
   Do not use `queue` for one-shot tasks — the capsule will not exit and will block the caller.
 
@@ -558,9 +623,9 @@ name its `artifacts:` entry uses. For live discovery, use `mur search <keyword>`
 | `murmur/tool-editor` | tool | File read/write/patch operations: read_file, write_file, replace_in_file, find_in_files. Prefer over shell-based file editing. |
 | `murmur/tool-request-input` | tool | HITL pause gate. Emits an `input-required` signal; the capsule waits for a human reply before continuing. Use with `lifecycle.input_timeout_secs` to avoid indefinite waits. |
 | `murmur/hook-compact` | hook | Context compaction hook. Fires when token usage crosses the compaction threshold; replaces conversation history with a summary. Declared as a `runtime: hook` entry; it binds `on-compaction`. |
-| `murmur/hook-debug` | hook | Debug event logger. Writes every lifecycle event (session start, inference, tool call, shell, session end) to `hook-debug.jsonl` in the capsule workdir. |
+| `murmur/hook-debug` | hook | Debug event logger. Writes every lifecycle event (session start, inference, tool call, shell, session end) to `hooks/hook-debug.jsonl` in the session records directory. Needs `filesystem.records: true`. |
 | `murmur/hook-grafana` | hook | OTel span emitter. Sends structured telemetry to Grafana Tempo. Requires `observability.otel_endpoint` in the capsule manifest. |
-| `murmur/hook-eval` | hook | Evaluation scorer. Runs configured scorers (exit_ok, max_turns, tool_sequence, llm_judge) and writes results to `eval.jsonl`. |
+| `murmur/hook-eval` | hook | Evaluation scorer. Runs configured scorers (exit_ok, max_turns, tool_sequence, llm_judge) and writes results to `hooks/eval.jsonl` in the session records directory, where `mur eval` reads them. Needs `filesystem.records: true`. |
 | `murmur/skill-create-manifest` | skill | This artifact. Provides complete manifest generation guidance. |
 
 **Using artifacts in a capsule manifest:**
@@ -571,8 +636,11 @@ artifacts:
     version: "0.2.0"
     runtime: tool
   - name: murmur/hook-debug
-    version: "0.7.0"
+    version: "0.8.0"
     runtime: hook
+    capabilities:
+      filesystem:
+        records: true
 ```
 
 Always specify an exact `version`. Run `mur list` to see which versions are installed locally, or

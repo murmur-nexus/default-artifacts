@@ -4,7 +4,8 @@
 //! `tavily_ops.rs` and `wasm_component.rs` prove the tool sends no key. Only a launch proves
 //! the other half: that the runtime attaches the operator's key to the tool's one request,
 //! that the key reaches the upstream exactly once, and that it appears nowhere the tool, the
-//! model or the session could see it — the workdir, the trace, or the launch's own output.
+//! model or the session could see it — the workdir, the records directory, or the launch's own
+//! output.
 //!
 //! Every test drives the real `mur` binary as a subprocess with `HOME` pointed at a scratch
 //! directory, so the key is stored with `mur config set -g credentials.<NAME>` exactly as an
@@ -17,6 +18,7 @@
 //! `MUR_BIN=… cargo test -p tool-tavily --test mur_run_gateway -- --ignored` runs them.
 
 use std::{
+    collections::BTreeSet,
     fs,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
@@ -283,8 +285,25 @@ fn stage() -> Staging {
     staging
 }
 
-/// Run one task to completion; return its output and the session workdir it reported.
-fn run_session(staging: &Staging) -> (Output, PathBuf) {
+/// One finished `mur run`, and the directories its `--verbose` startup lines named.
+struct Session {
+    output: Output,
+    workdir: PathBuf,
+    /// The session's records directory, holding its `trace.jsonl`.
+    records: PathBuf,
+}
+
+/// The path a `--verbose` startup line `<label><path>` names, if stdout has that line.
+fn startup_path(stdout: &str, label: &str) -> Option<PathBuf> {
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(label))
+        .map(|path| PathBuf::from(path.trim()))
+}
+
+/// Run one task to completion; return its output and the session workdir and records
+/// directory it reported.
+fn run_session(staging: &Staging) -> Session {
     let mut command = mur(&staging.home);
     command.args([
         "run",
@@ -296,18 +315,19 @@ fn run_session(staging: &Staging) -> (Output, PathBuf) {
     ]);
     let output = run_to_success(command, "the session");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let marker = "workdir: ";
-    let start = stdout
-        .find(marker)
-        .unwrap_or_else(|| panic!("no '{marker}' in stdout:\n{stdout}"));
-    let workdir = PathBuf::from(
-        stdout[start + marker.len()..]
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .trim(),
-    );
-    (output, workdir)
+    let workdir = startup_path(&stdout, "workdir: ")
+        .unwrap_or_else(|| panic!("no 'workdir: ' line in stdout:\n{stdout}"));
+    let records = startup_path(&stdout, "records: ").unwrap_or_else(|| {
+        panic!(
+            "no 'records: ' line in stdout. These tests need a `mur` that prints the session's \
+             records directory under --verbose: murmur #312 or later.\n{stdout}"
+        )
+    });
+    Session {
+        output,
+        workdir,
+        records,
+    }
 }
 
 // ── the scripted LLM ─────────────────────────────────────────────────────────
@@ -544,7 +564,11 @@ fn the_runtime_attaches_the_key_the_tool_never_holds() {
     ]);
     staging.write_manifest(&llm.endpoint, Some(&tavily.endpoint));
 
-    let (output, workdir) = run_session(&staging);
+    let Session {
+        output,
+        workdir,
+        records,
+    } = run_session(&staging);
 
     let searches = tavily.requests();
     assert_eq!(
@@ -593,38 +617,54 @@ fn the_runtime_attaches_the_key_the_tool_never_holds() {
         workdir.display()
     );
 
-    // The only file allowed to hold the key is the operator's own global config.
+    assert!(
+        records.is_dir(),
+        "{} must be the session records directory",
+        records.display()
+    );
+    let trace = records.join("trace.jsonl");
+    assert!(
+        trace.is_file(),
+        "{} must be the session trace",
+        trace.display()
+    );
+
+    // The only file allowed to hold the key is the operator's own global config. The records
+    // directory sits under the scratch HOME, so a set keeps each file to one scan.
     let config_file = staging.home.path().join(".murmur/config.yaml");
-    let mut traces = 0;
-    let mut scanned = 0;
-    for root in [
+    let files: BTreeSet<PathBuf> = [
         staging.project.path(),
         staging.home.path(),
         workdir.as_path(),
-    ] {
-        for file in files_under(root) {
-            if file == config_file {
-                continue;
-            }
-            scanned += 1;
-            traces += usize::from(file.file_name().is_some_and(|name| name == "trace.jsonl"));
-            let bytes = fs::read(&file).unwrap_or_default();
-            assert!(
-                !contains(&bytes, marker),
-                "the key leaked into {}",
-                file.display()
-            );
-        }
+        records.as_path(),
+    ]
+    .into_iter()
+    .flat_map(files_under)
+    .filter(|file| *file != config_file)
+    .collect();
+    for file in &files {
+        let bytes = fs::read(file).unwrap_or_default();
+        assert!(
+            !contains(&bytes, marker),
+            "the key leaked into {}",
+            file.display()
+        );
     }
     assert!(
-        traces >= 1,
-        "the scan must include the session trace ({scanned} files scanned)"
+        files.contains(&trace),
+        "the scan must include the session's own {} ({} files scanned)",
+        trace.display(),
+        files.len()
     );
     assert!(
         contains(&fs::read(&config_file).unwrap(), marker),
         "non-vacuity: the key is in the operator's config, where the scan skips it"
     );
-    println!("marker grep: 0 hits in {scanned} files ({traces} trace.jsonl), stdout and stderr");
+    println!(
+        "marker grep: 0 hits in {} files, including {}, stdout and stderr",
+        files.len(),
+        trace.display()
+    );
 
     let stderr = String::from_utf8_lossy(stderr);
     let warning = stderr
@@ -646,7 +686,7 @@ fn without_a_gateway_the_tool_fails_closed() {
     ]);
     staging.write_manifest(&llm.endpoint, None);
 
-    let (output, _workdir) = run_session(&staging);
+    let Session { output, .. } = run_session(&staging);
 
     let text = tool_result_text(&llm, "toolu_nogw");
     let data: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"));

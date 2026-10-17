@@ -1,6 +1,6 @@
 # hook-eval
 
-Structured evaluation hook for Murmur capsule sessions. Scores each session against configured scorers and writes results to `workdir/eval.jsonl`.
+Structured evaluation hook for Murmur capsule sessions. Scores each session against configured scorers and writes results to `eval.jsonl` in the `hooks/` directory of the session's records directory.
 
 ## Configuration
 
@@ -9,11 +9,11 @@ Declare in your capsule `murmur.yaml`:
 ```yaml
 artifacts:
   - name: murmur/hook-eval
-    version: 0.6.0
+    version: 0.8.0
     runtime: hook
     capabilities:
       filesystem:
-        scope: "."                    # always required — eval.jsonl is written every session
+        records: true                 # always required — eval.jsonl is written every session
       network:
         allow:
           - http://localhost:4318     # only for OTel export; match your observability.otel_endpoint host
@@ -37,11 +37,29 @@ observability:
 
 ### Capabilities
 
-`capabilities.filesystem.scope: "."` is **always required**. The hook writes
-`./eval.jsonl` at the workdir root on every `session_end`, and writes its own
-warning log to `./logs/hook-hook-eval.log`, creating `./logs/` if
-needed. Without a filesystem grant the hook has no preopened directory, the
-write fails, and `on_session_end` returns an error.
+`capabilities.filesystem.records: true` is **always required**. It makes the
+hook's current directory the `hooks/` directory of the session's records
+directory — `$MURMUR_RECORDS_DIR/hooks/` to a shell command,
+`~/.murmur/records/<workdir root>/<session-id>/hooks/` on disk. This is the
+records layout of a `mur` released after v0.6.0. `mur` v0.6.0 and earlier warn
+`W-SEC-019` on the unrecognized `records` key, ignore it, and preopen nothing for
+the hook.
+
+| File | Written by | When |
+|---|---|---|
+| `hooks/eval.jsonl` | this hook | every `session_end` |
+| `hooks/logs/hook-hook-eval.log` | this hook, creating `hooks/logs/` if needed | `MURMUR_EVAL_CONFIG` is unset, invalid, or scores nothing |
+| `logs/hook-hook-eval.log` | the runtime | an error the runtime catches from the hook |
+
+`mur eval` reads `hooks/eval.jsonl` in each session's records directory. A hook
+granted the work folder through `filesystem.scope` instead writes `eval.jsonl`
+there, where `mur eval` does not look: the case reports `no_scores`, with a
+warning naming the grant. Without any filesystem grant the hook has no
+preopened directory, the write fails, and `on_session_end` returns an error.
+
+`records: true` fails the capsule with `E-MAN-003` when it is declared beside
+`filesystem.scope` on the same entry, on an entry that is not `runtime: hook`,
+or in the capsule-wide `capabilities:` block.
 
 `capabilities.network.allow` is **only required if you want OTel export**, and
 must list the same host you set in `observability.otel_endpoint` — the example
@@ -106,7 +124,7 @@ conditional key, present only when `overall` is `config_error`:
 `key` names the offending config path — the literal `MURMUR_EVAL_CONFIG`, the
 literal `scorers`, or `scorers[<i>].<field>` with `i` the zero-based index in the
 `scorers` array. The same key and message are appended to
-`./logs/hook-hook-eval.log`, so an operator reading the log and one reading
+`hooks/logs/hook-hook-eval.log` in the records directory, so an operator reading the log and one reading
 `eval.jsonl` see the same offending key.
 
 ## Scorer types

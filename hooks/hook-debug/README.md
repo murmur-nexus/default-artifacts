@@ -1,6 +1,7 @@
 # hook-debug
 
-Writes hook lifecycle events to `hook-debug.jsonl` in the capsule workdir.
+Writes hook lifecycle events to `hook-debug.jsonl` in the `hooks/` directory of
+the session's records directory.
 
 WASM hook component (`runtime: hook`, exports `murmur:hook/lifecycle`).
 Binding: all events · mode: async · commit policy: none. Useful for inspecting
@@ -13,18 +14,27 @@ Declare in your capsule `murmur.yaml`:
 ```yaml
 artifacts:
   - name: murmur/hook-debug
-    version: 0.5.0
+    version: 0.8.0
     runtime: hook
     capabilities:
       filesystem:
-        scope: "."
+        records: true
 ```
 
-`capabilities.filesystem.scope: "."` is required. The hook opens
+`capabilities.filesystem.records: true` is required. The hook opens
 `hook-debug.jsonl` with a relative path, i.e. at the root of whatever directory
 the runtime preopens for it, and appends one JSON line per lifecycle event.
-Without a filesystem grant the hook has no preopened directory at all, the open
-fails, and the hook logs nothing.
+`records: true` preopens the `hooks/` directory of the session's records
+directory, so the file lands at `$MURMUR_RECORDS_DIR/hooks/hook-debug.jsonl` —
+`~/.murmur/records/<workdir root>/<session-id>/hooks/hook-debug.jsonl` on disk,
+beside the session's `trace.jsonl`. Without a filesystem grant the hook has no
+preopened directory at all, the open fails, and the hook logs nothing. A
+`filesystem.scope` grant would put the file in the work folder instead, where
+the capsule's own commands can edit it.
+
+`records: true` needs a `mur` released after v0.6.0. `mur` v0.6.0 and earlier
+warn `W-SEC-019` on the unrecognized `records` key, ignore it, and preopen
+nothing for the hook, so it logs nothing.
 
 ## Emitted lines
 
