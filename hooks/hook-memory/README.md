@@ -61,7 +61,7 @@ context:
 
 artifacts:
   - name: murmur/hook-memory
-    version: 0.8.0
+    version: 0.10.0
     runtime: hook
     config:
       seed_roles: [user, assistant]
@@ -133,7 +133,8 @@ default.
 
 Every error names `hook-memory` and lands in `logs/hook-hook-memory.log` in the
 session's records directory (`$MURMUR_RECORDS_DIR/logs/hook-hook-memory.log`);
-the session continues unseeded.
+the session continues unseeded. The records directory is the layout of a `mur`
+released after v0.6.0.
 
 ## When the hook seeds nothing
 

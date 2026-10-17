@@ -92,6 +92,9 @@ artifacts:
   - name: murmur/hook-debug
     version: "0.8.0"
     runtime: hook
+    capabilities:
+      filesystem:
+        records: true          # hook-debug.jsonl goes in the records directory (§4.3a)
 
   - name: murmur/skill-create-manifest
     version: "0.1.0"

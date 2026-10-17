@@ -41,7 +41,9 @@ observability:
 hook's current directory the `hooks/` directory of the session's records
 directory — `$MURMUR_RECORDS_DIR/hooks/` to a shell command,
 `~/.murmur/records/<workdir root>/<session-id>/hooks/` on disk. This is the
-records layout of a `mur` released after v0.6.0.
+records layout of a `mur` released after v0.6.0. `mur` v0.6.0 and earlier warn
+`W-SEC-019` on the unrecognized `records` key, ignore it, and preopen nothing for
+the hook.
 
 | File | Written by | When |
 |---|---|---|

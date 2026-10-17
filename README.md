@@ -77,7 +77,7 @@ WASM components (`runtime: hook`) that attach to lifecycle events. Each hook dec
 | `hook-grafana` | `hooks/hook-grafana/` | *(all events)* | async | none | Exports OTel spans to a Grafana Tempo OTLP/HTTP endpoint |
 | `hook-regression-verifier` | `hooks/hook-regression-verifier/` | *(all events)* | blocking | reopen-task | Reopens a task whose edits broke previously-passing tests; appends each verdict to `regression-verifier.jsonl` |
 
-Hooks have no filesystem by default. A hook that writes a record — `hook-debug`, `hook-eval`, `hook-regression-verifier` — is granted `capabilities.filesystem.records: true` on its own `artifacts:` entry, and writes into the `hooks/` directory of the session's records directory (`$MURMUR_RECORDS_DIR/hooks/`, or `~/.murmur/records/<workdir root>/<session-id>/hooks/` on disk), beside the session's `trace.jsonl`. `hook-diff-summary` reads files in the work folder, so it is granted `capabilities.filesystem.scope` instead.
+Hooks have no filesystem by default. A hook that writes a record — `hook-debug`, `hook-eval`, `hook-regression-verifier` — is granted `capabilities.filesystem.records: true` on its own `artifacts:` entry, and writes into the `hooks/` directory of the session's records directory (`$MURMUR_RECORDS_DIR/hooks/`, or `~/.murmur/records/<workdir root>/<session-id>/hooks/` on disk), beside the session's `trace.jsonl`. `hook-diff-summary` reads files in the work folder, so it is granted `capabilities.filesystem.scope` instead. The records directory and `records: true` need a `mur` released after v0.6.0; v0.6.0 and earlier ignore `records` with a `W-SEC-019` warning and preopen nothing for the hook.
 
 ## Process drivers
 

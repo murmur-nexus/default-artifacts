@@ -61,6 +61,10 @@ has no preopened directory at all, the open fails, and no verdict log is written
 the file in the work folder instead, where the capsule's own commands can edit
 it.
 
+`records: true` needs a `mur` released after v0.6.0. `mur` v0.6.0 and earlier
+warn `W-SEC-019` on the unrecognized `records` key, ignore it, and preopen
+nothing for the hook, so no verdict log is written.
+
 No network capability is required — the hook makes no outbound calls.
 
 The `capabilities:` block belongs on **your** capsule manifest's `artifacts:`
