@@ -62,11 +62,14 @@ the agent. Declared in the capsule `artifacts:` block with `runtime: hook`.
 
 ### `skill`
 
-Documentation artifact — no binary or WASM component. Contains a `skill.md` file that the
-runtime installs to `tools/<name>/skill.md` in the capsule workdir before the agent loop starts.
-Skills are listed in MURMUR.md `## Installed Skills` with their install path. The runtime does
-**not** inject skill content into the system prompt; the agent reads the file voluntarily via the
-editor tool or filesystem access.
+Documentation artifact — no binary or WASM component. Its `skill.md` is installed to
+`tools/<name>/skill.md` in the session's runtime directory before the agent loop starts:
+`$MURMUR_RUNTIME_DIR/tools/<name>/skill.md` in a shell command,
+`murmur-runtime/tools/<name>/skill.md` in a file tool. The agent can read it there and cannot
+change it. Skills are listed in MURMUR.md `## Installed Skills` with their path in that
+directory, and MURMUR.md is in the same directory (`$MURMUR_RUNTIME_DIR/MURMUR.md`). The runtime
+does **not** inject skill content into the system prompt; the agent reads the file voluntarily
+via the editor tool or filesystem access.
 
 ---
 

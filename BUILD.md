@@ -11,7 +11,7 @@ this page covers what is particular to this repository.
 |---|---|---|
 | Rust | the `channel` in `rust-toolchain.toml`, with `wasm32-wasip2` | `rustup` reads the file at every cargo call; never `rustup target add` by hand |
 | `wasm-tools` | `1.247.0` | the `Install wasm-tools` steps in `.github/workflows/` |
-| `mur` with the `index` subcommand | murmur at `MURMUR_REV` | `env:` in `.github/workflows/build.yml` |
+| `mur` with the `index` subcommand | murmur at `MURMUR_REV` | `env:` in `.github/workflows/build.yml`; `ci.yml`'s `build-isolation` job reads it from there |
 
 Build `mur` from a murmur checkout, from inside it so this repository's toolchain file is not
 picked up, and point `MUR_BIN` at it. Every script below reads `MUR_BIN`, else `mur` on `PATH`,
@@ -66,7 +66,8 @@ give each artifact its own invocation. `cargo build -p <name>`, `local-install.s
 nothing needs rebuilding between testing and packing. `./scripts/check-build-isolation.sh
 [<name>...]` proves it: it runs the release's build, rebuilds each artifact alone, and fails on any
 zip that differs. It needs `MUR_BIN`; run it after changing a build script or a dependency's
-features.
+features. CI runs it on every push and pull request, in `ci.yml`'s `build-isolation` job, with a
+`mur` built at `build.yml`'s `MURMUR_REV`.
 
 ## Add one
 
