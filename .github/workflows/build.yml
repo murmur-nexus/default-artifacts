@@ -21,7 +21,7 @@ env:
   # murmur could change either between two runs over one commit, and the bytes gate would
   # then refuse a republish that changed nothing here. Move it deliberately, in its own
   # commit, and only to a murmur whose `mur install` reads what this one writes.
-  MURMUR_REV: 97154b6afb3cbcbccf2b1edb3e617ebfd0e8d273
+  MURMUR_REV: 57012159bc0b8d981f58105181197f8d4d184eb3
 
 # Publish a GitHub Release for every version tag: every artifact packed by `mur build`,
 # and the schema 2 artifacts-index.json `mur install murmur/<name>@<version>` reads from
