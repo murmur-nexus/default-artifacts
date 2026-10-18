@@ -36,12 +36,15 @@
 #                   feature list is not in the lockfile), its own resolved
 #                   third-party versions walked out of Cargo.lock, and
 #                   rust-toolchain.toml. Narrowed to the one artifact on
-#                   purpose: adding an unrelated crate to the workspace, or
-#                   bumping [workspace.package] version, changes neither its dependencies
-#                   nor its bytes. The workspace crates' own version strings are
-#                   dropped for the same reason — a built component does not
-#                   embed them. Applies to crate artifacts only; a skill is docs
-#                   and compiles nothing.
+#                   purpose: adding an unrelated crate to the workspace changes
+#                   neither its dependencies nor its bytes. A crate's version
+#                   does change its bytes — rustc hashes it into every symbol —
+#                   so each crate pins a literal `version = "0.0.0"` in its own
+#                   Cargo.toml (an own-tree input) and the release version stays
+#                   out of the build. A crate that inherits `version.workspace =
+#                   true` brings [workspace.package] version back in as an input.
+#                   Applies to crate artifacts only; a skill is docs and
+#                   compiles nothing.
 #
 # Usage:
 #   ./scripts/check-version-drift.sh [--base <ref>]   compare the working tree
@@ -280,11 +283,11 @@ def workspace_state(ref):
 
     Everything here is reduced to the parts that reach a built component, and
     then narrowed per artifact by `workspace_inputs` below. `[workspace]
-    members`, a workspace crate's own Cargo.lock block and
-    `[workspace.package] version` are all dropped: they name crates, not code,
-    and `wasm-tools metadata show` on a built artifact carries no workspace
-    version string. Without that reduction, adding a crate or bumping
-    [workspace.package] version would demand a bump of every artifact.
+    members` and a workspace crate's own Cargo.lock block are dropped: they
+    name crates, not code, and the crate's version is read from its own
+    Cargo.toml. `[workspace.package] version` is kept apart, as `version`, for
+    the crates that inherit it: rustc hashes a crate's version into its symbols,
+    so for them it changes the bytes.
     """
     if ref in _workspace_cache:
         return _workspace_cache[ref]
@@ -292,7 +295,7 @@ def workspace_state(ref):
     # [workspace.package] without its version, plus any [profile.*]: edition,
     # MSRV and codegen settings all change the emitted code.
     cargo_toml = show(ref, "Cargo.toml") or ""
-    shared, workspace_deps = [], {}
+    shared, workspace_deps, workspace_version = [], {}, ""
     section = ""
     for line in cargo_toml.splitlines():
         if line.startswith("["):
@@ -301,7 +304,9 @@ def workspace_state(ref):
                 shared.append(line)
             continue
         if section == "[workspace.package]":
-            if not re.match(r"^version\s*=", line):
+            if re.match(r"^version\s*=", line):
+                workspace_version = line.strip()
+            else:
                 shared.append(line)
         elif section == "[workspace.dependencies]":
             match = re.match(r"^([A-Za-z0-9_-]+)\s*=", line)
@@ -345,6 +350,7 @@ def workspace_state(ref):
 
     state = {
         "shared": "\n".join(shared),
+        "version": workspace_version,
         "workspace_deps": workspace_deps,
         "packages": packages,
         "by_name": by_name,
@@ -377,13 +383,16 @@ def locked_closure(state, crate):
     return external
 
 
-def workspace_inputs(ref, crate, declared):
+def workspace_inputs(ref, crate, declared, inherits_version):
     """The workspace inputs that reach this one artifact: the shared manifest
-    settings, the `[workspace.dependencies]` entries it actually declares (their
-    feature lists are not in the lockfile), its resolved third-party versions,
-    and the toolchain that compiles it."""
+    settings, `[workspace.package] version` when one of its crates inherits it,
+    the `[workspace.dependencies]` entries it actually declares (their feature
+    lists are not in the lockfile), its resolved third-party versions, and the
+    toolchain that compiles it."""
     state = workspace_state(ref)
     parts = [state["shared"]]
+    if inherits_version:
+        parts.append(state["version"])
     parts.append(
         "\n".join(state["workspace_deps"][d] for d in sorted(declared) if d in state["workspace_deps"])
     )
@@ -396,6 +405,7 @@ def workspace_inputs(ref, crate, declared):
 
 
 WORKSPACE_DEP = re.compile(r"^([A-Za-z0-9_-]+)\s*\.\s*workspace\s*=\s*true")
+INHERITED_VERSION = re.compile(r"^version\s*\.\s*workspace\s*=\s*true")
 
 
 def declared_workspace_deps(entries):
@@ -408,6 +418,16 @@ def declared_workspace_deps(entries):
                 if match:
                     names.add(match.group(1))
     return names
+
+
+def inherits_workspace_version(entries):
+    """Whether any collected crate takes `version.workspace = true`."""
+    return any(
+        INHERITED_VERSION.match(line.strip())
+        for name, sha in entries.items()
+        if name.endswith("/Cargo.toml")
+        for line in blob(sha).splitlines()
+    )
 
 
 def fingerprint(ref, artifact):
@@ -435,7 +455,12 @@ def fingerprint(ref, artifact):
     if is_crate:
         all_entries = {**own, **deps}
         joined = "\0".join(
-            workspace_inputs(ref, artifact["name"], declared_workspace_deps(all_entries))
+            workspace_inputs(
+                ref,
+                artifact["name"],
+                declared_workspace_deps(all_entries),
+                inherits_workspace_version(all_entries),
+            )
         )
         digests["workspace"] = hashlib.sha256(joined.encode()).hexdigest()
     return digests

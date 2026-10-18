@@ -8,7 +8,7 @@ Every artifact here is published under scope `murmur`: the artifact in `tools/to
 `murmur/tool-editor`, which is how a capsule's `artifacts:` names it and how it installs:
 
 ```bash
-mur install -g murmur/tool-editor@0.6.0
+mur install -g murmur/tool-editor@0.7.0
 ```
 
 ```yaml

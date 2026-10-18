@@ -1,5 +1,5 @@
 name: hook-shell-desc
-version: 0.6.0
+version: 0.7.0
 runtime: hook
 binding: on-stage
 execution_mode: blocking

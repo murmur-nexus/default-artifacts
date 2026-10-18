@@ -40,8 +40,8 @@ jobs:
         run: ./scripts/list-artifacts.sh
 
       # --locked: a Cargo.lock that no longer matches the workspace (a member renamed,
-      # added, or [workspace.package] version bumped without `cargo update --workspace
-      # --offline`) fails here instead of being rewritten in place and passing.
+      # added, or its version changed without `cargo update --workspace --offline`)
+      # fails here instead of being rewritten in place and passing.
       - name: Cargo test
         run: cargo test --workspace --locked
 

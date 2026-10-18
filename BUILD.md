@@ -51,7 +51,7 @@ own manifest, and is what excludes native and internal crates from the wasm buil
 cargo build -p tool-editor --target wasm32-wasip2 --release   # wasm
 cargo build --release -p tool-git                              # native
 ./scripts/validate-component.sh target/wasm32-wasip2/release/tool_editor.wasm
-./scripts/package-artifact.sh tools/tool-editor release/       # → release/tool-editor-0.6.0.mur.zip
+./scripts/package-artifact.sh tools/tool-editor release/       # → release/tool-editor-0.7.0.mur.zip
 ./scripts/local-install.sh tool-editor /path/to/capsule
 ```
 
@@ -75,6 +75,9 @@ features. CI runs it on every push and pull request, in `ci.yml`'s `build-isolat
    a hook with the `runtime:`, `implementation:` and `requires_files:` this layout needs — see
    [tools/tool-create/README.md](./tools/tool-create/README.md).
 2. Add the crate to `[workspace] members` in `Cargo.toml` and run `cargo update --workspace --offline`.
+   Give it `version = "0.0.0"` in its own `[package]`, never `version.workspace = true`: rustc
+   hashes a crate's version into its symbols, so an inherited version would change every
+   artifact's bytes on each release.
 3. A wasm tool also needs an arm in `scripts/validate-component.sh`'s category map; `hook-*` and
    `driver-*` names are covered by their wildcards. A process driver gets its own arm ahead of
    `driver-*`, because it exports a different interface under the same prefix.
@@ -95,8 +98,9 @@ block, see murmur's [manifest reference](https://docs.murmur.nexus/reference/man
 1. Bump `version:` in the `murmur.yaml` of every artifact whose payload changed — a minor bump
    below 1.0, `0.5.0` → `0.6.0`. `./scripts/check-version-drift.sh` names any you missed; CI runs
    it on every push.
-2. Bump `[workspace.package] version` in `Cargo.toml` to the next minor, then run
-   `cargo update --workspace --offline`. CI tests with `--locked`, so a stale `Cargo.lock` fails.
+2. Bump `[workspace.package] version` in `Cargo.toml` to the next minor. It names the release
+   only: every crate pins `version = "0.0.0"`, so neither `Cargo.lock` nor any artifact's bytes
+   change with it.
 3. Merge, then tag the merge commit `v<workspace version>` and push the tag.
 4. The `build` workflow runs. `verify` checks that the tag is `v` + the workspace version and the
    newest `v*` tag, and that no artifact drifted. `native` runs `./scripts/build-native.sh` on each
@@ -129,10 +133,10 @@ packs identical bytes, and a re-run over one commit writes the same index.
 
 | Class | Inputs |
 |---|---|
-| `own tree` | the artifact's `murmur.yaml`, `src/`, `skill.md` |
+| `own tree` | the artifact's `murmur.yaml`, `Cargo.toml`, `src/`, `skill.md` |
 | `path deps` | each `libs/*` it links, transitively |
 | `wit mirror` | the `wit/` subtree its bindgen `path:` names |
-| `workspace` | `[workspace.package]` minus its version, the `[workspace.dependencies]` it declares, its resolved third-party versions in `Cargo.lock`, `rust-toolchain.toml` |
+| `workspace` | `[workspace.package]` minus its version (with it, for a crate that inherits `version.workspace = true`), the `[workspace.dependencies]` it declares, its resolved third-party versions in `Cargo.lock`, `rust-toolchain.toml` |
 
 ## WIT mirror
 
