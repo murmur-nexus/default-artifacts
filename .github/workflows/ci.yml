@@ -117,7 +117,7 @@ jobs:
           # run ./scripts/check-wit-sync.sh until it exits 0, then set `ref:` to
           # that same commit. The mirror and the pin must always move together —
           # moving one without the other is what turns this job red.
-          ref: 251fbe600c34651f15602a2f4e1c6dda0502c708
+          ref: d0e36fdfc26b1d12fe9167b4da6763d2f1ce9190
           path: murmur
 
       - name: Check artifact-facing WIT files are in sync with murmur
