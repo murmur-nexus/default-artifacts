@@ -67,9 +67,12 @@ Documentation artifact — no binary or WASM component. Its `skill.md` is instal
 `$MURMUR_RUNTIME_DIR/tools/<name>/skill.md` in a shell command,
 `murmur-runtime/tools/<name>/skill.md` in a file tool. The agent can read it there and cannot
 change it. Skills are listed in MURMUR.md `## Installed Skills` with their path in that
-directory, and MURMUR.md is in the same directory (`$MURMUR_RUNTIME_DIR/MURMUR.md`). The runtime
-does **not** inject skill content into the system prompt; the agent reads the file voluntarily
-via the editor tool or filesystem access.
+directory, and MURMUR.md is in the same directory (`$MURMUR_RUNTIME_DIR/MURMUR.md`).
+
+Every skill is also offered to the model as a tool with no input parameters: calling it by name
+returns its `skill.md`. The one exception is the skill named in `inference.system_prompt_artifact`
+(§7): its content is read once at launch, bound as the system prompt, and not offered as a tool.
+No other skill content enters the system prompt.
 
 ---
 
@@ -82,11 +85,11 @@ entry into the project store.
 ```yaml
 artifacts:
   - name: murmur/tool-editor
-    version: "0.6.0"
+    version: "0.8.0"
     runtime: tool
 
   - name: murmur/driver-anthropic
-    version: "0.10.0"
+    version: "0.12.0"
     runtime: driver
 
   - name: murmur/hook-debug
@@ -97,7 +100,7 @@ artifacts:
         records: true          # hook-debug.jsonl goes in the records directory (§4.3a)
 
   - name: murmur/skill-create-manifest
-    version: "0.2.0"
+    version: "0.3.0"
     runtime: skill
 ```
 
@@ -199,6 +202,7 @@ ignored.
 | `filesystem.records: true` | A hook that writes a score or log. Its current directory becomes the session records directory's `hooks/`, read-write. | `murmur/hook-eval`, `murmur/hook-debug`, `murmur/hook-regression-verifier` |
 | `filesystem.scope` | A hook that reads project files. The named workdir directory becomes its current directory. | `murmur/hook-diff-summary` |
 | `conversation.read: true` | A hook that reads the capsule's conversation record. | `murmur/hook-memory` |
+| `task_io.read: true` | A hook that reads the task's input text and the agent's result text. It grants a host import, `murmur:task-io/read`, not a directory. An ungranted hook still loads and runs, and every read returns `not-granted`. Recognized only on a `runtime: hook` entry. | `murmur/hook-memory`, optionally, for relevance selection instead of recency |
 | `network.allow` | A hook that exports to an endpoint. List the same host as `observability.otel_endpoint`. | `murmur/hook-grafana`, `murmur/hook-eval`'s OTel export |
 
 ```yaml
@@ -343,7 +347,7 @@ so the driver never sees it.
 ```yaml
 artifacts:
   - name: murmur/driver-anthropic
-    version: "0.10.0"
+    version: "0.12.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
@@ -360,10 +364,14 @@ inference:
 | `model` | string | yes | Model identifier string passed to the driver |
 | `driver.artifact` | string | yes | Full name, `<scope>/<name>`, of an `artifacts:` entry with `runtime: driver`, e.g. `murmur/driver-anthropic`. That entry must carry `gateway:` |
 | `driver.config` | mapping | no | Driver-specific configuration passed as JSON (e.g. `temperature`, custom headers) |
-| `system_prompt` | string | no | Inline system prompt. Mutually exclusive with `system_prompt_file`. |
-| `system_prompt_file` | string | no | Path to a `.md` file loaded as the system prompt. Mutually exclusive with `system_prompt`. |
+| `system_prompt` | string | no | Inline system prompt. |
+| `system_prompt_file` | string | no | Path to a `.md` file loaded as the system prompt. |
+| `system_prompt_artifact` | string | no | The `name`, as written, of a declared `artifacts:` entry whose content is read once at launch and bound as the system prompt. That entry is a skill by default; any other entry must declare `prompt_payload: true`, or the launch fails with `E-MAN-003`. The bound skill is not offered as a tool. |
 | `compaction.threshold` | float (0,1] | no | Fraction of `context.max_tokens` at which compaction fires. Default: 0.98. |
 | `compaction.model` | string | no | Model for compaction inference. Defaults to the primary model. |
+
+At most one of `system_prompt`, `system_prompt_file` and `system_prompt_artifact` may be set; a
+second one fails with `E-MAN-003`.
 
 The compaction hook is not named in this block: declare an `artifacts:` entry with
 `runtime: hook` whose artifact binds `on-compaction`, such as `murmur/hook-compact`.
@@ -384,7 +392,7 @@ cannot.
 ```yaml
 artifacts:
   - name: murmur/driver-openai
-    version: "0.9.0"
+    version: "0.12.0"
     runtime: driver
     gateway:
       endpoint: https://api.openai.com/v1
@@ -472,10 +480,10 @@ description: "Simple file editing capsule — reads and writes files, exits on c
 
 artifacts:
   - name: murmur/tool-editor
-    version: "0.6.0"
+    version: "0.8.0"
     runtime: tool
   - name: murmur/driver-anthropic
-    version: "0.10.0"
+    version: "0.12.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
@@ -506,13 +514,13 @@ description: "Coding agent with shell, git operations, and file editing"
 
 artifacts:
   - name: murmur/tool-git
-    version: "0.2.0"
+    version: "0.4.0"
     runtime: tool
   - name: murmur/tool-editor
-    version: "0.6.0"
+    version: "0.8.0"
     runtime: tool
   - name: murmur/driver-anthropic
-    version: "0.10.0"
+    version: "0.12.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
@@ -522,6 +530,7 @@ capabilities:
   shell:
     allow:
       - bash
+      - git                    # tool-git runs git itself
   network:
     allow:
       - https://github.com
@@ -552,10 +561,10 @@ description: "Orchestrator that spawns sub-capsules for parallel task execution"
 
 artifacts:
   - name: murmur/tool-editor
-    version: "0.6.0"
+    version: "0.8.0"
     runtime: tool
   - name: murmur/driver-anthropic
-    version: "0.10.0"
+    version: "0.12.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
@@ -582,7 +591,7 @@ lifecycle:
 ## 9. Least-Privilege Guidance
 
 **Do not grant `bash` when only `git` or `editor` is needed.**
-`tool-git` covers all git operations as typed tool calls without shell access.
+`tool-git` covers git operations as typed tool calls; it needs `git` in `shell.allow`, not `bash`.
 `tool-editor` covers file read/write/patch without shell access.
 Add `capabilities.shell.allow: [bash]` only when the task genuinely requires arbitrary shell
 commands that no structured tool can handle.
@@ -618,25 +627,42 @@ name its `artifacts:` entry uses. For live discovery, use `mur search <keyword>`
 | Artifact | Runtime | Description |
 |---|---|---|
 | `murmur/driver-anthropic` | driver | Anthropic Messages API inference driver. Use with `gateway.endpoint: https://api.anthropic.com` |
+| `murmur/driver-claude-code` | driver | Process driver for the `claude` CLI (Claude Code). The harness authenticates itself, so a turn spends a Claude subscription rather than an API key; the driver holds no credential and is granted nothing. Use with `inference.transport: process` and `capabilities.env.allow: [HOME, PATH]`; its entry takes no `gateway:`. |
+| `murmur/driver-deepseek` | driver | DeepSeek inference driver: `deepseek-v4-flash` and `deepseek-v4-pro`, with thinking mode. Use with `gateway.endpoint` set to DeepSeek's API base URL; it appends `/chat/completions`. |
+| `murmur/driver-moonshotai` | driver | Moonshot AI inference driver: `kimi-k3` only, on the Chat Completions surface, with `reasoning_effort` and `response_format` config keys. Use with `gateway.endpoint: https://api.moonshot.ai/v1` |
 | `murmur/driver-openai` | driver | OpenAI Chat Completions inference driver (also works with OpenAI-compatible providers). Use with `gateway.endpoint: https://api.openai.com/v1` |
-| `murmur/tool-git` | tool | Structured git interface: status, add, commit, push, pull, branch, clone, worktree, and more. Prefer over granting `git` in `shell.allow`. |
-| `murmur/tool-editor` | tool | File read/write/patch operations: read_file, write_file, replace_in_file, find_in_files. Prefer over shell-based file editing. |
-| `murmur/tool-request-input` | tool | HITL pause gate. Emits an `input-required` signal; the capsule waits for a human reply before continuing. Use with `lifecycle.input_timeout_secs` to avoid indefinite waits. |
+| `murmur/driver-zai` | driver | Z.ai inference driver: `glm-5.3` only, on the Chat Completions surface, with `reasoning_effort` and `thinking` config keys; its reasoning goes back to Z.ai on every later turn. Use with `gateway.endpoint: https://api.z.ai/api/paas/v4` |
 | `murmur/hook-compact` | hook | Context compaction hook. Fires when token usage crosses the compaction threshold; replaces conversation history with a summary. Declared as a `runtime: hook` entry; it binds `on-compaction`. |
 | `murmur/hook-debug` | hook | Debug event logger. Writes every lifecycle event (session start, inference, tool call, shell, session end) to `hooks/hook-debug.jsonl` in the session records directory. Needs `filesystem.records: true`. |
-| `murmur/hook-grafana` | hook | OTel span emitter. Sends structured telemetry to Grafana Tempo. Requires `observability.otel_endpoint` in the capsule manifest. |
-| `murmur/hook-eval` | hook | Evaluation scorer. Runs configured scorers (exit_ok, max_turns, tool_sequence, llm_judge) and writes results to `hooks/eval.jsonl` in the session records directory, where `mur eval` reads them. Needs `filesystem.records: true`. |
-| `murmur/hook-regression-verifier` | hook | Regression gate. Reopens a task whose edits broke previously-passing tests, judged from the test runs it sees in `on-shell` (`pytest`, `cargo test`, `go test`, jest). Appends each verdict to `hooks/regression-verifier.jsonl` in the session records directory. Needs `filesystem.records: true`. The reopen budget is `lifecycle.max_task_reopens`. |
-| `murmur/hook-memory` | hook | Conversation memory. At `on-task-start`, seeds the task with a budget-bounded slice of the earlier conversation. Needs `conversation.read: true` and `context.max_tokens`. `task_io.read: true` is optional and selects by relevance instead of recency. |
 | `murmur/hook-diff-summary` | hook | Edit summary. Snapshots each file `murmur/tool-editor` writes and emits a unified-diff summary at end of turn. Needs `filesystem.scope: "."`. Pairs with `murmur/tool-editor` 0.3.0 or later. |
+| `murmur/hook-eval` | hook | Evaluation scorer. Runs configured scorers (exit_ok, max_turns, tool_sequence, llm_judge) and writes results to `hooks/eval.jsonl` in the session records directory, where `mur eval` reads them. Needs `filesystem.records: true`. |
+| `murmur/hook-grafana` | hook | OTel span emitter. Sends structured telemetry to Grafana Tempo. Requires `observability.otel_endpoint` in the capsule manifest. |
+| `murmur/hook-memory` | hook | Conversation memory. At `on-task-start`, seeds the task with a budget-bounded slice of the earlier conversation. Needs `conversation.read: true` and `context.max_tokens`. `task_io.read: true` is optional and selects by relevance instead of recency. |
+| `murmur/hook-regression-verifier` | hook | Regression gate. Reopens a task whose edits broke previously-passing tests, judged from the test runs it sees in `on-shell` (`pytest`, `cargo test`, `go test`, jest). Appends each verdict to `hooks/regression-verifier.jsonl` in the session records directory. Needs `filesystem.records: true`. The reopen budget is `lifecycle.max_task_reopens`. |
+| `murmur/hook-shell-desc` | hook | Shell tool descriptions. At staging (`on-stage`), returns a tool manifest for each of `cargo`, `curl`, `find`, `git`, `grep`, `jq`, `node`, `python3` and `rustc`, stating what it takes and returns; shell interpreters keep the runtime's own description. Needs no `capabilities:` block. |
+| `murmur/tool-code-coverage` | tool | Native binary. Spectrum-based fault localization (Ochiai, Tarantula) over a Rust repository already indexed by `murmur/tool-code-graph`, from per-test LCOV reports the agent produced; writes suspicion scores onto the code-graph database. Never runs tests or coverage itself. Needs no grant beyond the session workdir, which must hold `repo_path` and `coverage_dir`. |
+| `murmur/tool-code-graph` | tool | Native binary. Indexes a Rust and/or Python repository into a SQLite symbol and call graph at `<repo_path>/.murmur/code-graph.db`, and answers `find_symbol`, `get_symbol`, `slice_symbol`, `explain_path` and `impact_analysis` by stable symbol identity. Needs no grant beyond the session workdir, which must hold `repo_path`. |
+| `murmur/tool-corpus` | tool | Append-only record store at `state/corpus.jsonl`: `append`, `get`, `read_recent`, `search`, `verify`. Needs `capabilities.state: {}` on its entry, and a `config:` block (`config_version: 1`) declaring each record type and the JSON Schema its body must satisfy. |
+| `murmur/tool-create` | tool | Scaffolds a new tool or hook artifact directory with `murmur.yaml`, a stub implementation and a README, under `tools/<name>/` in the capsule workdir. |
+| `murmur/tool-editor` | tool | File read/write/patch operations: read_file, write_file, replace_in_file, find_in_files. Prefer over shell-based file editing. |
+| `murmur/tool-git` | tool | Native binary. Structured git interface: status, add, diff, commit, branch, checkout, fetch, pull, push, clone, worktree, and more. Needs `git` in `capabilities.shell.allow`; `fetch`, `pull`, `push` and `clone` also need the remote's host in `capabilities.network.allow` and a `capabilities.shell.interpreter_runtime` grant for `git` naming its remote-helper directory. Prefer over granting `bash` for git work. |
+| `murmur/tool-registry-search` | tool | Native binary. Searches a Murmur artifact index for artifacts matching a keyword; each result is a full `<scope>/<name>` with every published version, newest first. The default index, on the latest default-artifacts release, needs `https://github.com` and `https://release-assets.githubusercontent.com` in `capabilities.network.allow`. |
+| `murmur/tool-report` | tool | States the capsule's own conclusion in `state/report.json`: `progress` notes, then one terminal `report` whose outcome is `success`, `rejected`, `blocked` or `failed`. Needs `capabilities.state: {}` on its entry; an optional `config:` block closes the deliverable kinds and note stages. |
+| `murmur/tool-request-input` | tool | HITL pause gate. Emits an `input-required` signal; the capsule waits for a human reply before continuing. Use with `lifecycle.input_timeout_secs` to avoid indefinite waits. |
+| `murmur/tool-tavily` | tool | Web search through Tavily, returning bounded plain text: a header, an optional answer, then numbered results with title, URL and snippet. Needs `gateway: {endpoint: https://api.tavily.com, api_key: ${TAVILY_API_KEY}}` on its entry; the runtime attaches the key, and without the gateway every call returns `gateway_missing`. |
+| `murmur/tool-test-report` | tool | Native binary. Parses a test-runner output file the agent already captured (`cargo_test`, `pytest`, `go_test`, `jest`, or `auto`) into a structured failure list; never runs tests. Needs no grant beyond the session workdir, which must hold `input_path`. |
 | `murmur/skill-create-manifest` | skill | This artifact. Provides complete manifest generation guidance. |
+| `murmur/skill-investigation-checkpoint` | skill | The investigations convention for `checkpoints/decisions.json`: record and reuse investigative verdicts (ruled-out, confirmed, uncertain) across a session instead of re-deriving them. |
+
+A native tool runs with the capsule-wide grants; a `capabilities:` block on its entry does not
+narrow them and warns `W-SEC-008`.
 
 **Using artifacts in a capsule manifest:**
 
 ```yaml
 artifacts:
   - name: murmur/tool-git
-    version: "0.2.0"
+    version: "0.4.0"
     runtime: tool
   - name: murmur/hook-debug
     version: "0.8.0"
