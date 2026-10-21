@@ -1705,6 +1705,12 @@ mod tests {
             None,
             Some(json!("12043")),
             Some(json!({"input_tokens": "12043", "output_tokens": -4, "cached_tokens": 1.5})),
+            Some(json!({
+                "prompt_cache_miss_tokens": "52",
+                "completion_tokens": -4,
+                "prompt_cache_hit_tokens": 1.5
+            })),
+            Some(json!({"prompt_cache_miss_tokens": -52, "prompt_cache_hit_tokens": "448"})),
             Some(json!({})),
             Some(Value::Null),
         ] {
