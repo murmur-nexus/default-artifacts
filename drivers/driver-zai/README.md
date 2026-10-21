@@ -73,9 +73,12 @@ unsupported model costs no HTTP call.
 
 The limits live in one table, `SUPPORTED_MODELS` in `src/lib.rs`, and
 `murmur.yaml` declares the same numbers under `models:`. A test fails if the two
-disagree. A `mur` that predates the driver `models:` block keeps the key without
-reading it, so on such a `mur` the capsule sets `inference.max_tokens` and
-`context.max_tokens` itself.
+disagree. Whether the runtime reads that block depends on the murmur release:
+
+| murmur | What it does with `models:` | What the capsule sets |
+|---|---|---|
+| v0.7.0 and earlier | ignores it; an unknown manifest key is a `W-SEC-019` warning, never a refusal | `inference.max_tokens` and `context.max_tokens`; left unset, the runtime's own defaults apply, not `glm-5.3`'s limits |
+| the first release after v0.7.0 | defaults the output cap and context window from it when the capsule leaves them unset, and caps a hook's `run-inference` (e.g. `hook-compact`) at its `max_output_tokens` | nothing, unless it wants tighter limits than the table |
 
 ## Config keys
 
@@ -140,6 +143,10 @@ beside its calls ("I'll check the weather for both cities."); the driver keeps
 that text as a `text` block and sends it back as the assistant message's
 `content`, so the turn goes back as Z.ai returned it. `content` is `null` only
 on a tool-call turn with no text.
+
+`glm-5.3` does not reason on every turn. On a trivial step, such as reading
+one file, Z.ai sends no `reasoning_content` and reports `reasoning_tokens: 0`, so
+that turn has no `thinking` block and nothing is replayed for it.
 
 A committed compaction replaces the live context with a summary that crosses the
 hook boundary as a single `text` block, so historical assistant messages carry
@@ -239,6 +246,20 @@ it. Z.ai reports no cache-write count and bills no cache write, so
 | `cached_tokens` greater than `prompt_tokens` | `input_tokens` left out; the other members are still reported |
 | a reported `0` | kept as `0` |
 | no member survives | no `usage` key at all |
+
+## Compaction with `hook-compact`
+
+`hook-compact`'s summary call has no tools and runs with thinking on, like
+every request. At `reasoning_effort: high` or `max` a summary call can take
+longer than the 30-second default hook deadline. The task then fails with
+`E-RUN-040` "hook 'hook-compact' on-compaction exceeded its 30s execution
+deadline". A capsule that compacts on `glm-5.3` raises the deadline:
+
+```yaml
+capabilities:
+  limits:
+    deadline_seconds: 300
+```
 
 ## Prompt cache key
 
