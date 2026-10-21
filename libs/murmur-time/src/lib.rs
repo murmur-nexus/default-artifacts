@@ -59,13 +59,22 @@ mod tests {
     fn timestamps_render_as_rfc_3339_utc() {
         assert_eq!(format_rfc3339_millis(0), "1970-01-01T00:00:00.000Z");
         assert_eq!(format_rfc3339_millis(1_000), "1970-01-01T00:00:01.000Z");
-        assert_eq!(format_rfc3339_millis(1_774_000_000_123), "2026-03-20T09:46:40.123Z");
-        assert_eq!(format_rfc3339_millis(1_767_225_600_123), "2026-01-01T00:00:00.123Z");
+        assert_eq!(
+            format_rfc3339_millis(1_774_000_000_123),
+            "2026-03-20T09:46:40.123Z"
+        );
+        assert_eq!(
+            format_rfc3339_millis(1_767_225_600_123),
+            "2026-01-01T00:00:00.123Z"
+        );
     }
 
     #[test]
     fn a_leap_day_is_rendered_as_itself() {
-        assert_eq!(format_rfc3339_millis(1_709_164_800_000), "2024-02-29T00:00:00.000Z");
+        assert_eq!(
+            format_rfc3339_millis(1_709_164_800_000),
+            "2024-02-29T00:00:00.000Z"
+        );
     }
 
     #[test]

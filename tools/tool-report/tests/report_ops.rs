@@ -9,10 +9,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use serde_json::{json, Value};
 use tool_report::ops::{self, OpStatus, MAX_REFERENCE_CHARS};
 use tool_report::report::{RunIdentity, MAX_PROGRESS_NOTES};
 use tool_report::store::REPORT_FILE;
-use serde_json::{json, Value};
 
 static DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -94,7 +94,12 @@ fn report(state: &Path) -> Value {
 fn state_entries(state: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(state)
         .expect("read state dir")
-        .map(|e| e.expect("dir entry").file_name().to_string_lossy().into_owned())
+        .map(|e| {
+            e.expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect();
     names.sort();
     names
@@ -188,7 +193,10 @@ fn a_progress_note_does_not_conclude_the_task() {
     assert_eq!(doc["summary"], Value::Null);
     assert_eq!(doc["reported_at"], Value::Null);
     assert_eq!(doc["revision"], 0);
-    assert_eq!(doc["progress"].as_array().expect("a progress list").len(), 1);
+    assert_eq!(
+        doc["progress"].as_array().expect("a progress list").len(),
+        1
+    );
     assert_eq!(doc["progress"][0]["note"], "Indexed 4 of 9 crates.");
     assert!(doc["progress"][0]["at"].is_string());
     assert_eq!(doc["progress_count"], 1);
@@ -217,16 +225,25 @@ fn progress_notes_survive_a_later_terminal_report() {
         .iter()
         .map(|n| n["note"].as_str().expect("a note"))
         .collect();
-    assert_eq!(notes, vec!["one", "two", "three"], "notes stay in call order");
-    assert!(doc["progress"][0]["at"].is_string(), "timestamps stay intact");
+    assert_eq!(
+        notes,
+        vec!["one", "two", "three"],
+        "notes stay in call order"
+    );
+    assert!(
+        doc["progress"][0]["at"].is_string(),
+        "timestamps stay intact"
+    );
 }
 
 #[test]
 fn progress_is_capped_in_the_file_while_the_count_stays_true() {
     let f = fixture("progress-cap", true);
     for n in 0..MAX_PROGRESS_NOTES + 2 {
-        let (status, _e) =
-            call(&f.state, json!({ "operation": "progress", "note": format!("note {n}") }));
+        let (status, _e) = call(
+            &f.state,
+            json!({ "operation": "progress", "note": format!("note {n}") }),
+        );
         assert_eq!(status, OpStatus::Passed);
     }
     let doc = report(&f.state);
@@ -262,7 +279,10 @@ fn a_second_report_wins_and_the_first_is_kept_in_superseded() {
     let superseded = doc["superseded"].as_array().expect("a superseded list");
     assert_eq!(superseded.len(), 1);
     assert_eq!(superseded[0]["outcome"], "success");
-    assert_eq!(superseded[0]["summary"], "Ported the parser and all tests pass.");
+    assert_eq!(
+        superseded[0]["summary"],
+        "Ported the parser and all tests pass."
+    );
     assert_eq!(
         superseded[0]["deliverables"],
         json!([{ "name": "patch", "kind": "diff", "uri": "out/parser.patch" }])
@@ -327,8 +347,14 @@ fn a_deliverable_carrying_an_inline_payload_is_refused_and_nothing_is_written() 
     assert_eq!(status, OpStatus::Failed, "{envelope}");
     assert_eq!(envelope["error_kind"], "inline_payload_refused");
     let message = envelope["message"].as_str().expect("a message");
-    assert!(message.contains("rows"), "the message names the deliverable: {message}");
-    assert!(message.contains("content"), "the message names the key: {message}");
+    assert!(
+        message.contains("rows"),
+        "the message names the deliverable: {message}"
+    );
+    assert!(
+        message.contains("content"),
+        "the message names the key: {message}"
+    );
     assert_eq!(
         state_entries(&f.state),
         Vec::<String>::new(),
@@ -354,7 +380,10 @@ fn a_refused_report_leaves_the_previous_report_exactly_as_it_was() {
     assert_eq!(status, OpStatus::Failed, "{envelope}");
 
     let after = std::fs::read_to_string(f.state.join(REPORT_FILE)).expect("the first report");
-    assert_eq!(before, after, "a refused report must not touch the previous one");
+    assert_eq!(
+        before, after,
+        "a refused report must not touch the previous one"
+    );
     assert_eq!(state_entries(&f.state), vec![REPORT_FILE.to_string()]);
 }
 
@@ -362,11 +391,26 @@ fn a_refused_report_leaves_the_previous_report_exactly_as_it_was() {
 fn every_smuggled_payload_shape_is_refused_by_the_same_rule() {
     let long_uri = "a".repeat(MAX_REFERENCE_CHARS + 1);
     let cases: Vec<(&str, Value)> = vec![
-        ("an unknown key", json!({ "name": "d", "kind": "diff", "uri": "a", "payload": "x" })),
-        ("a data: URI", json!({ "name": "d", "kind": "diff", "uri": "data:text/plain,hello" })),
-        ("an upper-case data: URI", json!({ "name": "d", "kind": "diff", "uri": "DATA:text/plain,hi" })),
-        ("a newline", json!({ "name": "d", "kind": "diff", "uri": "out/a\nout/b" })),
-        ("an over-long reference", json!({ "name": "d", "kind": "diff", "uri": long_uri })),
+        (
+            "an unknown key",
+            json!({ "name": "d", "kind": "diff", "uri": "a", "payload": "x" }),
+        ),
+        (
+            "a data: URI",
+            json!({ "name": "d", "kind": "diff", "uri": "data:text/plain,hello" }),
+        ),
+        (
+            "an upper-case data: URI",
+            json!({ "name": "d", "kind": "diff", "uri": "DATA:text/plain,hi" }),
+        ),
+        (
+            "a newline",
+            json!({ "name": "d", "kind": "diff", "uri": "out/a\nout/b" }),
+        ),
+        (
+            "an over-long reference",
+            json!({ "name": "d", "kind": "diff", "uri": long_uri }),
+        ),
     ];
 
     for (what, deliverable) in cases {
@@ -383,10 +427,17 @@ fn every_smuggled_payload_shape_is_refused_by_the_same_rule() {
         assert_eq!(status, OpStatus::Failed, "{what}: {envelope}");
         assert_eq!(envelope["error_kind"], "inline_payload_refused", "{what}");
         assert!(
-            envelope["message"].as_str().expect("a message").contains('d'),
+            envelope["message"]
+                .as_str()
+                .expect("a message")
+                .contains('d'),
             "{what}: the message names the deliverable"
         );
-        assert_eq!(state_entries(&f.state), Vec::<String>::new(), "{what}: nothing written");
+        assert_eq!(
+            state_entries(&f.state),
+            Vec::<String>::new(),
+            "{what}: nothing written"
+        );
     }
 }
 
@@ -433,7 +484,10 @@ fn an_unknown_outcome_is_refused_and_the_message_lists_the_four() {
     assert_eq!(envelope["error_kind"], "unknown_outcome");
     let message = envelope["message"].as_str().expect("a message");
     for outcome in ["success", "rejected", "blocked", "failed"] {
-        assert!(message.contains(outcome), "the message lists {outcome}: {message}");
+        assert!(
+            message.contains(outcome),
+            "the message lists {outcome}: {message}"
+        );
     }
     assert_eq!(state_entries(&f.state), Vec::<String>::new());
 }
@@ -492,7 +546,10 @@ fn without_the_state_grant_a_valid_report_fails_closed_and_creates_nothing() {
             .contains("capabilities.state"),
         "the message names the grant: {envelope}"
     );
-    assert!(!f.state.exists(), "the tool must never create the state directory");
+    assert!(
+        !f.state.exists(),
+        "the tool must never create the state directory"
+    );
     assert_eq!(
         std::fs::read_dir(&f.root).expect("read root").count(),
         0,
@@ -662,7 +719,10 @@ fn the_report_says_which_run_produced_it() {
     );
     let doc = report(&f.state);
     assert_eq!(doc["session_id"], "sess-2");
-    assert_eq!(doc["outcome"], "success", "the previous verdict is still there");
+    assert_eq!(
+        doc["outcome"], "success",
+        "the previous verdict is still there"
+    );
 }
 
 #[test]
@@ -693,7 +753,10 @@ fn an_unknown_operation_names_the_two_that_exist() {
         assert_eq!(status, OpStatus::Failed, "{envelope}");
         assert_eq!(envelope["error_kind"], "unknown_operation");
         let message = envelope["message"].as_str().expect("a message");
-        assert!(message.contains("report") && message.contains("progress"), "{message}");
+        assert!(
+            message.contains("report") && message.contains("progress"),
+            "{message}"
+        );
     }
     assert_eq!(state_entries(&f.state), Vec::<String>::new());
 }

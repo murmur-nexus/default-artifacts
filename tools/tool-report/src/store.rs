@@ -37,7 +37,9 @@ impl Store {
     /// repaired.
     pub fn open(state_dir: &Path) -> Result<Self, OpError> {
         match fs::metadata(state_dir) {
-            Ok(meta) if meta.is_dir() => Ok(Self { root: state_dir.to_path_buf() }),
+            Ok(meta) if meta.is_dir() => Ok(Self {
+                root: state_dir.to_path_buf(),
+            }),
             Ok(_) => Err(OpError::new(
                 kind::STATE_UNAVAILABLE,
                 format!(

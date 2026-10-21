@@ -58,7 +58,13 @@ fn init_git_repo(repo: &Path) {
         "main",
         repo.to_str().expect("repo path utf-8"),
     ]);
-    run_git(["-C", repo.to_str().unwrap(), "config", "user.email", "test@example.com"]);
+    run_git([
+        "-C",
+        repo.to_str().unwrap(),
+        "config",
+        "user.email",
+        "test@example.com",
+    ]);
     run_git(["-C", repo.to_str().unwrap(), "config", "user.name", "Test"]);
     fs::write(repo.join("README.md"), "hello\n").unwrap();
     run_git(["-C", repo.to_str().unwrap(), "add", "README.md"]);
@@ -154,10 +160,12 @@ fn slice1_status_dirty_repo() {
     assert!(!entries.is_empty(), "dirty repo should have entries");
 
     let found = entries.iter().any(|e| {
-        e["path"].as_str() == Some("new_file.txt")
-            && e["status_code"].as_str() == Some("??")
+        e["path"].as_str() == Some("new_file.txt") && e["status_code"].as_str() == Some("??")
     });
-    assert!(found, "untracked file should have status_code '??'; entries: {entries:?}");
+    assert!(
+        found,
+        "untracked file should have status_code '??'; entries: {entries:?}"
+    );
 }
 
 // ── ADD ───────────────────────────────────────────────────────────────────────
@@ -234,7 +242,10 @@ fn slice1_add_all() {
         .iter()
         .filter(|e| e["status_code"].as_str() == Some("A "))
         .count();
-    assert_eq!(staged_count, 2, "both files should be staged-added; entries: {entries:?}");
+    assert_eq!(
+        staged_count, 2,
+        "both files should be staged-added; entries: {entries:?}"
+    );
 }
 
 // ── DIFF ──────────────────────────────────────────────────────────────────────
@@ -271,12 +282,7 @@ fn slice1_diff_staged() {
 
     // Create and stage a new file
     fs::write(repo.join("staged_file.txt"), "staged content\n").unwrap();
-    run_git([
-        "-C",
-        repo.to_str().unwrap(),
-        "add",
-        "staged_file.txt",
-    ]);
+    run_git(["-C", repo.to_str().unwrap(), "add", "staged_file.txt"]);
 
     let res = run_tool_in(
         &repo,
@@ -290,7 +296,10 @@ fn slice1_diff_staged() {
     assert_eq!(res["ok"], true, "diff --staged failed: {}", res["message"]);
     let diff = res["diff"].as_str().expect("diff string");
     assert!(!diff.is_empty(), "staged diff should not be empty");
-    assert!(diff.contains("staged_file.txt"), "diff should mention the staged file");
+    assert!(
+        diff.contains("staged_file.txt"),
+        "diff should mention the staged file"
+    );
 }
 
 // ── RESTORE ───────────────────────────────────────────────────────────────────
@@ -357,7 +366,11 @@ fn slice1_stash_push_pop() {
             "message": "test stash",
         }),
     );
-    assert_eq!(push_res["ok"], true, "stash push failed: {}", push_res["message"]);
+    assert_eq!(
+        push_res["ok"], true,
+        "stash push failed: {}",
+        push_res["message"]
+    );
     assert_eq!(push_res["stash_ref"], "stash@{0}");
 
     // Working tree should be clean
@@ -376,7 +389,11 @@ fn slice1_stash_push_pop() {
             "subcommand": "pop",
         }),
     );
-    assert_eq!(pop_res["ok"], true, "stash pop failed: {}", pop_res["message"]);
+    assert_eq!(
+        pop_res["ok"], true,
+        "stash pop failed: {}",
+        pop_res["message"]
+    );
 
     // File should be back
     let content = fs::read_to_string(repo.join("README.md")).unwrap();
@@ -422,9 +439,17 @@ fn slice1_stash_list() {
         }),
     );
 
-    assert_eq!(list_res["ok"], true, "stash list failed: {}", list_res["message"]);
+    assert_eq!(
+        list_res["ok"], true,
+        "stash list failed: {}",
+        list_res["message"]
+    );
     let entries = list_res["entries"].as_array().expect("entries array");
-    assert_eq!(entries.len(), 2, "should have 2 stash entries; got: {entries:?}");
+    assert_eq!(
+        entries.len(),
+        2,
+        "should have 2 stash entries; got: {entries:?}"
+    );
 
     // Each entry should have index, message, branch
     for e in entries {
@@ -465,7 +490,13 @@ fn slice1_log_returns_commits() {
     // Commit 2
     fs::write(repo.join("file1.txt"), "one\n").unwrap();
     run_git(["-C", repo.to_str().unwrap(), "add", "file1.txt"]);
-    run_git(["-C", repo.to_str().unwrap(), "commit", "-m", "second commit"]);
+    run_git([
+        "-C",
+        repo.to_str().unwrap(),
+        "commit",
+        "-m",
+        "second commit",
+    ]);
 
     // Commit 3
     fs::write(repo.join("file2.txt"), "two\n").unwrap();
@@ -498,7 +529,10 @@ fn slice1_log_returns_commits() {
         "hash should be 40 hex chars"
     );
     assert!(
-        c["short_hash"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        c["short_hash"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
         "short_hash should be non-empty"
     );
     assert_eq!(c["author"].as_str(), Some("Test"));
@@ -579,7 +613,10 @@ fn slice1_show_head() {
     assert_eq!(commit["subject"].as_str(), Some("initial"));
 
     let diff = res["diff"].as_str().expect("diff string");
-    assert!(!diff.is_empty(), "diff for the initial commit should not be empty");
+    assert!(
+        !diff.is_empty(),
+        "diff for the initial commit should not be empty"
+    );
     assert!(
         diff.contains("README.md"),
         "diff should mention README.md; got: {diff}"
@@ -631,8 +668,22 @@ fn setup_remote_pair(td: &TestDir) -> (PathBuf, PathBuf) {
     // that `init_git_repo` pins the source repo to.
     run_git_dyn(&["init", "--bare", "-b", "main", bare.to_str().unwrap()]);
     init_git_repo(&source);
-    run_git_dyn(&["-C", source.to_str().unwrap(), "remote", "add", "origin", bare.to_str().unwrap()]);
-    run_git_dyn(&["-C", source.to_str().unwrap(), "push", "-u", "origin", "HEAD"]);
+    run_git_dyn(&[
+        "-C",
+        source.to_str().unwrap(),
+        "remote",
+        "add",
+        "origin",
+        bare.to_str().unwrap(),
+    ]);
+    run_git_dyn(&[
+        "-C",
+        source.to_str().unwrap(),
+        "push",
+        "-u",
+        "origin",
+        "HEAD",
+    ]);
 
     (bare, source)
 }
@@ -640,7 +691,13 @@ fn setup_remote_pair(td: &TestDir) -> (PathBuf, PathBuf) {
 /// Clone `bare` to `dest`, then configure user identity.
 fn clone_from(bare: &Path, dest: &Path) {
     run_git_dyn(&["clone", bare.to_str().unwrap(), dest.to_str().unwrap()]);
-    run_git_dyn(&["-C", dest.to_str().unwrap(), "config", "user.email", "test@example.com"]);
+    run_git_dyn(&[
+        "-C",
+        dest.to_str().unwrap(),
+        "config",
+        "user.email",
+        "test@example.com",
+    ]);
     run_git_dyn(&["-C", dest.to_str().unwrap(), "config", "user.name", "Test"]);
 }
 
@@ -649,7 +706,13 @@ fn push_new_commit(repo: &Path, filename: &str) {
     let file = repo.join(filename);
     fs::write(&file, "content\n").expect("write file");
     run_git_dyn(&["-C", repo.to_str().unwrap(), "add", filename]);
-    run_git_dyn(&["-C", repo.to_str().unwrap(), "commit", "-m", &format!("add {filename}")]);
+    run_git_dyn(&[
+        "-C",
+        repo.to_str().unwrap(),
+        "commit",
+        "-m",
+        &format!("add {filename}"),
+    ]);
     run_git_dyn(&["-C", repo.to_str().unwrap(), "push"]);
 }
 
@@ -669,7 +732,10 @@ fn slice3_remote_list() {
     assert_eq!(remotes.len(), 1, "expected 1 remote; got {remotes:?}");
     assert_eq!(remotes[0]["name"], "origin");
     assert!(
-        remotes[0]["fetch_url"].as_str().map(|s| s.contains(bare.file_name().unwrap().to_str().unwrap())).unwrap_or(false),
+        remotes[0]["fetch_url"]
+            .as_str()
+            .map(|s| s.contains(bare.file_name().unwrap().to_str().unwrap()))
+            .unwrap_or(false),
         "fetch_url should reference bare path; got: {:?}",
         remotes[0]["fetch_url"]
     );
@@ -714,7 +780,14 @@ fn slice3_remote_remove() {
     init_git_repo(&repo);
 
     // Add then remove
-    run_git_dyn(&["-C", repo.to_str().unwrap(), "remote", "add", "to_remove", "https://example.com/r.git"]);
+    run_git_dyn(&[
+        "-C",
+        repo.to_str().unwrap(),
+        "remote",
+        "add",
+        "to_remove",
+        "https://example.com/r.git",
+    ]);
     let res = run_tool_in(
         &repo,
         json!({
@@ -745,7 +818,14 @@ fn slice3_remote_add_duplicate() {
     let repo = td.path().join("repo");
     init_git_repo(&repo);
 
-    run_git_dyn(&["-C", repo.to_str().unwrap(), "remote", "add", "dup", "https://example.com/r.git"]);
+    run_git_dyn(&[
+        "-C",
+        repo.to_str().unwrap(),
+        "remote",
+        "add",
+        "dup",
+        "https://example.com/r.git",
+    ]);
     let res = run_tool_in(
         &repo,
         json!({
@@ -757,7 +837,10 @@ fn slice3_remote_add_duplicate() {
         }),
     );
     assert_eq!(res["ok"], false);
-    assert_eq!(res["error_kind"], "already_exists", "expected already_exists; got {res:?}");
+    assert_eq!(
+        res["error_kind"], "already_exists",
+        "expected already_exists; got {res:?}"
+    );
 }
 
 // ── FETCH ─────────────────────────────────────────────────────────────────────
@@ -823,8 +906,14 @@ fn slice3_pull_fast_forward() {
     );
     assert_eq!(res["ok"], true, "pull failed: {}", res["message"]);
     assert_eq!(res["remote"], "origin");
-    assert_eq!(res["fast_forward"], true, "expected fast_forward=true; got {res:?}");
-    assert_eq!(res["commits_pulled"], 1, "expected 1 commit pulled; got {res:?}");
+    assert_eq!(
+        res["fast_forward"], true,
+        "expected fast_forward=true; got {res:?}"
+    );
+    assert_eq!(
+        res["commits_pulled"], 1,
+        "expected 1 commit pulled; got {res:?}"
+    );
     assert!(
         clone1.join("pulled_file.txt").exists(),
         "pulled_file.txt should exist in clone after pull"
@@ -842,7 +931,13 @@ fn slice3_push_success() {
     // Make another local commit and push it via the tool
     fs::write(source.join("new.txt"), "data\n").unwrap();
     run_git_dyn(&["-C", source.to_str().unwrap(), "add", "new.txt"]);
-    run_git_dyn(&["-C", source.to_str().unwrap(), "commit", "-m", "add new.txt"]);
+    run_git_dyn(&[
+        "-C",
+        source.to_str().unwrap(),
+        "commit",
+        "-m",
+        "add new.txt",
+    ]);
 
     let res = run_tool_in(
         &source,
@@ -873,7 +968,13 @@ fn slice3_push_non_fast_forward() {
     // Make a diverging commit in clone_b (not pulling first)
     fs::write(clone_b.join("from_b.txt"), "b\n").unwrap();
     run_git_dyn(&["-C", clone_b.to_str().unwrap(), "add", "from_b.txt"]);
-    run_git_dyn(&["-C", clone_b.to_str().unwrap(), "commit", "-m", "diverging commit"]);
+    run_git_dyn(&[
+        "-C",
+        clone_b.to_str().unwrap(),
+        "commit",
+        "-m",
+        "diverging commit",
+    ]);
 
     let res = run_tool_in(
         &clone_b,
@@ -902,7 +1003,13 @@ fn slice3_push_force() {
     // Make a diverging commit in clone_b and force-push
     fs::write(clone_b.join("from_b.txt"), "b\n").unwrap();
     run_git_dyn(&["-C", clone_b.to_str().unwrap(), "add", "from_b.txt"]);
-    run_git_dyn(&["-C", clone_b.to_str().unwrap(), "commit", "-m", "force push commit"]);
+    run_git_dyn(&[
+        "-C",
+        clone_b.to_str().unwrap(),
+        "commit",
+        "-m",
+        "force push commit",
+    ]);
 
     let res = run_tool_in(
         &clone_b,
@@ -935,9 +1042,17 @@ fn slice3_clone_success() {
     );
     assert_eq!(res["ok"], true, "clone failed: {}", res["message"]);
     assert_eq!(res["dest"], dest.to_str().unwrap());
-    let default_branch = res["default_branch"].as_str().expect("default_branch string");
-    assert!(!default_branch.is_empty(), "default_branch should not be empty");
-    assert!(dest.join("README.md").exists(), "cloned repo should contain README.md");
+    let default_branch = res["default_branch"]
+        .as_str()
+        .expect("default_branch string");
+    assert!(
+        !default_branch.is_empty(),
+        "default_branch should not be empty"
+    );
+    assert!(
+        dest.join("README.md").exists(),
+        "cloned repo should contain README.md"
+    );
 }
 
 #[test]
@@ -956,7 +1071,10 @@ fn slice3_clone_dest_exists() {
         }),
     );
     assert_eq!(res["ok"], false);
-    assert_eq!(res["error_kind"], "dest_exists", "expected dest_exists; got {res:?}");
+    assert_eq!(
+        res["error_kind"], "dest_exists",
+        "expected dest_exists; got {res:?}"
+    );
 }
 
 // ── TAG ───────────────────────────────────────────────────────────────────────
@@ -978,7 +1096,10 @@ fn slice4_tag_list_empty() {
 
     assert_eq!(res["ok"], true, "tag list failed: {}", res["message"]);
     let tags = res["tags"].as_array().expect("tags array");
-    assert!(tags.is_empty(), "fresh repo should have no tags; got: {tags:?}");
+    assert!(
+        tags.is_empty(),
+        "fresh repo should have no tags; got: {tags:?}"
+    );
 }
 
 #[test]
@@ -1033,7 +1154,11 @@ fn slice4_tag_create_annotated() {
         }),
     );
 
-    assert_eq!(res["ok"], true, "annotated tag create failed: {}", res["message"]);
+    assert_eq!(
+        res["ok"], true,
+        "annotated tag create failed: {}",
+        res["message"]
+    );
     assert_eq!(res["name"], "v2.0");
 
     // Must appear in list
@@ -1077,7 +1202,10 @@ fn slice4_tag_create_duplicate() {
     );
 
     assert_eq!(res["ok"], false);
-    assert_eq!(res["error_kind"], "already_exists", "expected already_exists; got {res:?}");
+    assert_eq!(
+        res["error_kind"], "already_exists",
+        "expected already_exists; got {res:?}"
+    );
 }
 
 // ── MERGE ─────────────────────────────────────────────────────────────────────
@@ -1092,7 +1220,13 @@ fn slice4_merge_fast_forward() {
     run_git_dyn(&["-C", repo.to_str().unwrap(), "checkout", "-b", "feature"]);
     fs::write(repo.join("feat.txt"), "feature\n").unwrap();
     run_git_dyn(&["-C", repo.to_str().unwrap(), "add", "feat.txt"]);
-    run_git_dyn(&["-C", repo.to_str().unwrap(), "commit", "-m", "feature commit"]);
+    run_git_dyn(&[
+        "-C",
+        repo.to_str().unwrap(),
+        "commit",
+        "-m",
+        "feature commit",
+    ]);
 
     // Switch back to main (previous branch)
     run_git_dyn(&["-C", repo.to_str().unwrap(), "checkout", "-"]);
@@ -1107,7 +1241,10 @@ fn slice4_merge_fast_forward() {
     );
 
     assert_eq!(res["ok"], true, "merge failed: {}", res["message"]);
-    assert_eq!(res["fast_forward"], true, "expected fast_forward=true; got {res:?}");
+    assert_eq!(
+        res["fast_forward"], true,
+        "expected fast_forward=true; got {res:?}"
+    );
     assert!(
         res["merged_commit"].is_null(),
         "merged_commit should be null for fast-forward; got {res:?}"
@@ -1124,13 +1261,25 @@ fn slice4_merge_no_ff() {
     run_git_dyn(&["-C", repo.to_str().unwrap(), "checkout", "-b", "feature"]);
     fs::write(repo.join("feat.txt"), "feature content\n").unwrap();
     run_git_dyn(&["-C", repo.to_str().unwrap(), "add", "feat.txt"]);
-    run_git_dyn(&["-C", repo.to_str().unwrap(), "commit", "-m", "feature commit"]);
+    run_git_dyn(&[
+        "-C",
+        repo.to_str().unwrap(),
+        "commit",
+        "-m",
+        "feature commit",
+    ]);
 
     // Switch back to main and add a diverging commit
     run_git_dyn(&["-C", repo.to_str().unwrap(), "checkout", "-"]);
     fs::write(repo.join("main_extra.txt"), "main extra\n").unwrap();
     run_git_dyn(&["-C", repo.to_str().unwrap(), "add", "main_extra.txt"]);
-    run_git_dyn(&["-C", repo.to_str().unwrap(), "commit", "-m", "main diverges"]);
+    run_git_dyn(&[
+        "-C",
+        repo.to_str().unwrap(),
+        "commit",
+        "-m",
+        "main diverges",
+    ]);
 
     let res = run_tool_in(
         &repo,
@@ -1143,7 +1292,10 @@ fn slice4_merge_no_ff() {
     );
 
     assert_eq!(res["ok"], true, "merge failed: {}", res["message"]);
-    assert_eq!(res["fast_forward"], false, "expected fast_forward=false; got {res:?}");
+    assert_eq!(
+        res["fast_forward"], false,
+        "expected fast_forward=false; got {res:?}"
+    );
     let merged_commit = res["merged_commit"].as_str();
     assert!(
         merged_commit.map(|s| !s.is_empty()).unwrap_or(false),
@@ -1161,13 +1313,25 @@ fn slice4_merge_conflict() {
     run_git_dyn(&["-C", repo.to_str().unwrap(), "checkout", "-b", "feature"]);
     fs::write(repo.join("README.md"), "feature content\n").unwrap();
     run_git_dyn(&["-C", repo.to_str().unwrap(), "add", "README.md"]);
-    run_git_dyn(&["-C", repo.to_str().unwrap(), "commit", "-m", "feature changes README"]);
+    run_git_dyn(&[
+        "-C",
+        repo.to_str().unwrap(),
+        "commit",
+        "-m",
+        "feature changes README",
+    ]);
 
     // Switch back to main, make a conflicting change to README
     run_git_dyn(&["-C", repo.to_str().unwrap(), "checkout", "-"]);
     fs::write(repo.join("README.md"), "main content\n").unwrap();
     run_git_dyn(&["-C", repo.to_str().unwrap(), "add", "README.md"]);
-    run_git_dyn(&["-C", repo.to_str().unwrap(), "commit", "-m", "main changes README"]);
+    run_git_dyn(&[
+        "-C",
+        repo.to_str().unwrap(),
+        "commit",
+        "-m",
+        "main changes README",
+    ]);
 
     let res = run_tool_in(
         &repo,
@@ -1178,8 +1342,14 @@ fn slice4_merge_conflict() {
         }),
     );
 
-    assert_eq!(res["ok"], false, "conflicting merge should fail; got {res:?}");
-    assert_eq!(res["error_kind"], "conflict", "expected conflict error_kind; got {res:?}");
+    assert_eq!(
+        res["ok"], false,
+        "conflicting merge should fail; got {res:?}"
+    );
+    assert_eq!(
+        res["error_kind"], "conflict",
+        "expected conflict error_kind; got {res:?}"
+    );
 
     // Repo must be left in conflict state (not aborted)
     let status = run_tool_in(
@@ -1189,9 +1359,15 @@ fn slice4_merge_conflict() {
     let entries = status["entries"].as_array().expect("entries array");
     let has_unmerged = entries.iter().any(|e| {
         e["status"].as_str() == Some("unmerged")
-            || e["status_code"].as_str().map(|c| c.contains('U')).unwrap_or(false)
+            || e["status_code"]
+                .as_str()
+                .map(|c| c.contains('U'))
+                .unwrap_or(false)
     });
-    assert!(has_unmerged, "repo should be in conflict state; entries: {entries:?}");
+    assert!(
+        has_unmerged,
+        "repo should be in conflict state; entries: {entries:?}"
+    );
 }
 
 #[test]
@@ -1204,13 +1380,25 @@ fn slice4_merge_ff_only_fails() {
     run_git_dyn(&["-C", repo.to_str().unwrap(), "checkout", "-b", "feature"]);
     fs::write(repo.join("feat.txt"), "feature\n").unwrap();
     run_git_dyn(&["-C", repo.to_str().unwrap(), "add", "feat.txt"]);
-    run_git_dyn(&["-C", repo.to_str().unwrap(), "commit", "-m", "feature commit"]);
+    run_git_dyn(&[
+        "-C",
+        repo.to_str().unwrap(),
+        "commit",
+        "-m",
+        "feature commit",
+    ]);
 
     // Switch to main and add a diverging commit (making fast-forward impossible)
     run_git_dyn(&["-C", repo.to_str().unwrap(), "checkout", "-"]);
     fs::write(repo.join("extra.txt"), "extra\n").unwrap();
     run_git_dyn(&["-C", repo.to_str().unwrap(), "add", "extra.txt"]);
-    run_git_dyn(&["-C", repo.to_str().unwrap(), "commit", "-m", "diverging main commit"]);
+    run_git_dyn(&[
+        "-C",
+        repo.to_str().unwrap(),
+        "commit",
+        "-m",
+        "diverging main commit",
+    ]);
 
     let res = run_tool_in(
         &repo,
@@ -1222,10 +1410,12 @@ fn slice4_merge_ff_only_fails() {
         }),
     );
 
-    assert_eq!(res["ok"], false, "ff_only merge should fail on diverged branches; got {res:?}");
     assert_eq!(
-        res["error_kind"],
-        "ff_only_failed",
+        res["ok"], false,
+        "ff_only merge should fail on diverged branches; got {res:?}"
+    );
+    assert_eq!(
+        res["error_kind"], "ff_only_failed",
         "expected ff_only_failed; got {res:?}"
     );
 }
@@ -1255,7 +1445,10 @@ fn slice4_worktree_add_success() {
 
     assert_eq!(res["ok"], true, "worktree add failed: {}", res["message"]);
     assert_eq!(res["branch"], "wt-branch");
-    assert!(wt_path.exists(), "worktree path should exist on disk after add");
+    assert!(
+        wt_path.exists(),
+        "worktree path should exist on disk after add"
+    );
 }
 
 #[test]
@@ -1304,10 +1497,16 @@ fn slice4_worktree_list() {
     let worktrees = res["worktrees"].as_array().expect("worktrees array");
 
     let has_wt_a = worktrees.iter().any(|w| {
-        w["path"].as_str().map(|p| p.contains("wt-a")).unwrap_or(false)
+        w["path"]
+            .as_str()
+            .map(|p| p.contains("wt-a"))
+            .unwrap_or(false)
     });
     let has_wt_b = worktrees.iter().any(|w| {
-        w["path"].as_str().map(|p| p.contains("wt-b")).unwrap_or(false)
+        w["path"]
+            .as_str()
+            .map(|p| p.contains("wt-b"))
+            .unwrap_or(false)
     });
     assert!(has_wt_a, "wt-a should appear in list; got: {worktrees:?}");
     assert!(has_wt_b, "wt-b should appear in list; got: {worktrees:?}");
@@ -1351,8 +1550,15 @@ fn slice4_worktree_remove() {
         }),
     );
 
-    assert_eq!(res["ok"], true, "worktree remove failed: {}", res["message"]);
-    assert!(!wt_path.exists(), "worktree path should be gone after remove");
+    assert_eq!(
+        res["ok"], true,
+        "worktree remove failed: {}",
+        res["message"]
+    );
+    assert!(
+        !wt_path.exists(),
+        "worktree path should be gone after remove"
+    );
 }
 
 #[test]
@@ -1366,7 +1572,9 @@ fn slice4_worktree_branch_conflict() {
         .args(["-C", repo.to_str().unwrap(), "branch", "--show-current"])
         .output()
         .expect("git branch --show-current");
-    let current_branch = String::from_utf8_lossy(&branch_out.stdout).trim().to_string();
+    let current_branch = String::from_utf8_lossy(&branch_out.stdout)
+        .trim()
+        .to_string();
 
     let wt_path = td.path().join("wt-conflict");
     let res = run_tool_in(
@@ -1380,13 +1588,18 @@ fn slice4_worktree_branch_conflict() {
         }),
     );
 
-    assert_eq!(res["ok"], false, "should fail for branch already checked out; got {res:?}");
     assert_eq!(
-        res["error_kind"],
-        "branch_conflict",
+        res["ok"], false,
+        "should fail for branch already checked out; got {res:?}"
+    );
+    assert_eq!(
+        res["error_kind"], "branch_conflict",
         "expected branch_conflict; got {res:?}"
     );
-    assert!(!wt_path.exists(), "worktree path should not be created on conflict");
+    assert!(
+        !wt_path.exists(),
+        "worktree path should not be created on conflict"
+    );
 }
 
 #[test]
@@ -1408,7 +1621,11 @@ fn slice4_create_worktree_compat() {
         }),
     );
 
-    assert_eq!(res["ok"], true, "create_worktree (compat) failed: {}", res["message"]);
+    assert_eq!(
+        res["ok"], true,
+        "create_worktree (compat) failed: {}",
+        res["message"]
+    );
     assert_eq!(res["branch"], "compat-branch");
     assert!(wt_path.exists(), "compat worktree should exist on disk");
 }
@@ -1437,7 +1654,12 @@ fn make_commit(repo: &Path, filename: &str, content: &str, message: &str) -> Str
 /// Return `git status --porcelain=v1` output for `repo`.
 fn git_status_porcelain(repo: &Path) -> String {
     let out = Command::new("git")
-        .args(["-C", repo.to_str().expect("repo path utf-8"), "status", "--porcelain=v1"])
+        .args([
+            "-C",
+            repo.to_str().expect("repo path utf-8"),
+            "status",
+            "--porcelain=v1",
+        ])
         .output()
         .expect("git should run");
     assert!(
@@ -1451,7 +1673,12 @@ fn git_status_porcelain(repo: &Path) -> String {
 /// Return the current HEAD hash for `repo`.
 fn head_hash(repo: &Path) -> String {
     let out = Command::new("git")
-        .args(["-C", repo.to_str().expect("repo path utf-8"), "rev-parse", "HEAD"])
+        .args([
+            "-C",
+            repo.to_str().expect("repo path utf-8"),
+            "rev-parse",
+            "HEAD",
+        ])
         .output()
         .expect("git should run");
     assert!(
@@ -1492,7 +1719,10 @@ fn slice2_commit_success() {
         !res["short_hash"].as_str().unwrap_or("").is_empty(),
         "short_hash must be populated"
     );
-    assert_eq!(res["subject"], "add new.txt", "subject must match commit message");
+    assert_eq!(
+        res["subject"], "add new.txt",
+        "subject must match commit message"
+    );
 }
 
 #[test]
@@ -1598,7 +1828,10 @@ fn slice2_cherry_pick_conflict() {
         }),
     );
 
-    assert_eq!(res["ok"], false, "conflicting cherry-pick should fail; got: {res:?}");
+    assert_eq!(
+        res["ok"], false,
+        "conflicting cherry-pick should fail; got: {res:?}"
+    );
     assert_eq!(res["error_kind"], "conflict");
 
     // Repo must still be in conflict state (not auto-aborted).
@@ -1627,11 +1860,16 @@ fn slice2_branch_list() {
     );
 
     assert_eq!(res["ok"], true, "branch list should succeed; got: {res:?}");
-    let branches = res["branches"].as_array().expect("branches must be an array");
+    let branches = res["branches"]
+        .as_array()
+        .expect("branches must be an array");
     let current = branches.iter().find(|b| b["current"] == true);
     assert!(current.is_some(), "one branch should be flagged as current");
     let current_name = current.unwrap()["name"].as_str().unwrap_or("");
-    assert!(!current_name.is_empty(), "current branch name must not be empty");
+    assert!(
+        !current_name.is_empty(),
+        "current branch name must not be empty"
+    );
 }
 
 #[test]
@@ -1650,7 +1888,10 @@ fn slice2_branch_create() {
             "name": "new-feature",
         }),
     );
-    assert_eq!(res["ok"], true, "branch create should succeed; got: {res:?}");
+    assert_eq!(
+        res["ok"], true,
+        "branch create should succeed; got: {res:?}"
+    );
     assert_eq!(res["name"], "new-feature");
 
     // Verify branch appears in list.
@@ -1696,7 +1937,10 @@ fn slice2_branch_delete() {
             "name": "to-delete",
         }),
     );
-    assert_eq!(res["ok"], true, "branch delete should succeed; got: {res:?}");
+    assert_eq!(
+        res["ok"], true,
+        "branch delete should succeed; got: {res:?}"
+    );
     assert_eq!(res["name"], "to-delete");
 
     // Verify branch is gone.
@@ -1811,7 +2055,10 @@ fn slice2_checkout_dirty() {
         }),
     );
 
-    assert_eq!(res["ok"], false, "checkout with conflicting dirty tree should fail");
+    assert_eq!(
+        res["ok"], false,
+        "checkout with conflicting dirty tree should fail"
+    );
     assert_eq!(res["error_kind"], "dirty_working_tree");
 }
 
@@ -1987,9 +2234,15 @@ fn worktree_add_with_the_old_path_spelling_is_rejected_and_creates_nothing() {
         }),
     );
 
-    assert_eq!(res["ok"], false, "`path` must not be honoured by worktree/add");
+    assert_eq!(
+        res["ok"], false,
+        "`path` must not be honoured by worktree/add"
+    );
     assert_eq!(res["message"], "missing required field: dest");
-    assert!(!wt_path.exists(), "a rejected worktree/add must create nothing");
+    assert!(
+        !wt_path.exists(),
+        "a rejected worktree/add must create nothing"
+    );
 }
 
 #[test]
@@ -2023,9 +2276,15 @@ fn worktree_remove_with_the_old_path_spelling_is_rejected_and_deletes_nothing() 
         }),
     );
 
-    assert_eq!(res["ok"], false, "`path` must not be honoured by worktree/remove");
+    assert_eq!(
+        res["ok"], false,
+        "`path` must not be honoured by worktree/remove"
+    );
     assert_eq!(res["message"], "missing required field: dest");
-    assert!(wt_path.exists(), "a rejected worktree/remove must delete nothing");
+    assert!(
+        wt_path.exists(),
+        "a rejected worktree/remove must delete nothing"
+    );
 }
 
 #[test]
@@ -2051,5 +2310,8 @@ fn create_worktree_with_the_old_path_spelling_is_rejected_and_creates_nothing() 
         "the alias delegates to worktree_add, so it requires `dest` too"
     );
     assert_eq!(res["message"], "missing required field: dest");
-    assert!(!wt_path.exists(), "a rejected create_worktree must create nothing");
+    assert!(
+        !wt_path.exists(),
+        "a rejected create_worktree must create nothing"
+    );
 }

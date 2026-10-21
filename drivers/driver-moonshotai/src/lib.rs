@@ -279,14 +279,24 @@ struct MurmurTool {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum MurmurContentBlock {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     // Reasoning persisted from a prior driver response. The runtime stores and replays whatever
     // content blocks a driver emits without inspecting them, so this block — emitted by this
     // driver and read back by it — is where preserved reasoning lives. No runtime concept and no
     // interface widening is involved.
-    Thinking { text: String },
-    Image { source: MurmurImageSource },
-    ToolCall { id: String, name: String, input: Value },
+    Thinking {
+        text: String,
+    },
+    Image {
+        source: MurmurImageSource,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        input: Value,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -326,10 +336,7 @@ fn preflight_request(request: &MurmurRequest) -> Result<(), String> {
 
 /// The body `run_inner` puts on the wire: pre-flight, translate, stamp the streaming flags.
 /// Tests assert on this rather than on a bare translation.
-fn build_provider_request(
-    request: &MurmurRequest,
-    config: &DriverConfig,
-) -> Result<Value, String> {
+fn build_provider_request(request: &MurmurRequest, config: &DriverConfig) -> Result<Value, String> {
     preflight_request(request)?;
     let mut body = translate_murmur_request_to_moonshot(request, config)?;
     stamp_streaming_flags(&mut body);
@@ -1480,11 +1487,14 @@ mod tests {
         assert!(validate_model("kimi-k3").is_ok());
 
         for rejected in ["kimi-k2.6", "gpt-5", "kimi-k2.7-code"] {
-            let err = validate_model(rejected)
-                .expect_err("only kimi-k3 is implemented by this driver");
+            let err =
+                validate_model(rejected).expect_err("only kimi-k3 is implemented by this driver");
             assert!(err.starts_with("driver: "), "got {err}");
             assert!(err.contains(rejected), "the model must be named: {err}");
-            assert!(err.contains("kimi-k3"), "the supported set must be listed: {err}");
+            assert!(
+                err.contains("kimi-k3"),
+                "the supported set must be listed: {err}"
+            );
         }
 
         // The rejection reaches an operator through the ordinary request path too, with no
@@ -1530,9 +1540,18 @@ mod tests {
              got \"medium\""
         );
 
-        assert_eq!(config(r#"{"reasoning_effort":"low"}"#).reasoning_effort, "low");
-        assert_eq!(config(r#"{"reasoning_effort":"HIGH"}"#).reasoning_effort, "high");
-        assert_eq!(config(r#"{"reasoning_effort":" max "}"#).reasoning_effort, "max");
+        assert_eq!(
+            config(r#"{"reasoning_effort":"low"}"#).reasoning_effort,
+            "low"
+        );
+        assert_eq!(
+            config(r#"{"reasoning_effort":"HIGH"}"#).reasoning_effort,
+            "high"
+        );
+        assert_eq!(
+            config(r#"{"reasoning_effort":" max "}"#).reasoning_effort,
+            "max"
+        );
 
         let err = parse_driver_config(Some(r#"{"reasoning_effort":3}"#))
             .expect_err("a non-string effort must be refused");
@@ -1558,8 +1577,14 @@ mod tests {
     #[test]
     fn absent_empty_and_whitespace_configs_all_parse_to_the_default() {
         assert_eq!(parse_driver_config(None).unwrap(), DriverConfig::default());
-        assert_eq!(parse_driver_config(Some("{}")).unwrap(), DriverConfig::default());
-        assert_eq!(parse_driver_config(Some("   ")).unwrap(), DriverConfig::default());
+        assert_eq!(
+            parse_driver_config(Some("{}")).unwrap(),
+            DriverConfig::default()
+        );
+        assert_eq!(
+            parse_driver_config(Some("   ")).unwrap(),
+            DriverConfig::default()
+        );
         assert_eq!(DriverConfig::default().reasoning_effort, "max");
         assert!(DriverConfig::default().response_format.is_none());
 
@@ -1617,7 +1642,11 @@ mod tests {
                 "'{fixed}' is fixed server-side and must not appear at any nesting level: {body}"
             );
         }
-        assert_eq!(body["seed"], json!(7), "an unfixed param still passes through");
+        assert_eq!(
+            body["seed"],
+            json!(7),
+            "an unfixed param still passes through"
+        );
     }
 
     // ── Scenario 9 — the output cap ───────────────────────────────────────────
@@ -1759,14 +1788,14 @@ mod tests {
         let parse_at = run_inner
             .find("parse_driver_config(")
             .expect("run_inner must parse the driver config");
-        for later in [
-            "INFERENCE_ENDPOINT_VAR",
-            "dispatch_request(",
-        ] {
+        for later in ["INFERENCE_ENDPOINT_VAR", "dispatch_request("] {
             let at = run_inner
                 .find(later)
                 .unwrap_or_else(|| panic!("run_inner must reference {later}"));
-            assert!(parse_at < at, "the driver config must be parsed before {later}");
+            assert!(
+                parse_at < at,
+                "the driver config must be parsed before {later}"
+            );
         }
     }
 
@@ -1826,7 +1855,9 @@ mod tests {
             ]
         }));
         let body = body_for(&follow_up, &DriverConfig::default());
-        let messages = body["messages"].as_array().expect("messages must be an array");
+        let messages = body["messages"]
+            .as_array()
+            .expect("messages must be an array");
 
         let assistant = &messages[1];
         assert_eq!(assistant["role"], json!("assistant"));
@@ -1923,7 +1954,10 @@ mod tests {
     fn json_schema_constrains_final_content_only() {
         let body = body_for(&simple_request(), &config(PLAN_SCHEMA));
         assert_eq!(body["response_format"]["type"], json!("json_schema"));
-        assert_eq!(body["response_format"]["json_schema"]["name"], json!("plan"));
+        assert_eq!(
+            body["response_format"]["json_schema"]["name"],
+            json!("plan")
+        );
         assert_eq!(
             body["response_format"]["json_schema"]["strict"],
             json!(true),
@@ -1941,9 +1975,8 @@ mod tests {
              provider does not enforce is not the guarantee this key offers"
         );
 
-        let wrong_type =
-            parse_driver_config(Some(r#"{"response_format":{"type":"text"}}"#))
-                .expect_err("only json_schema is offered by this key");
+        let wrong_type = parse_driver_config(Some(r#"{"response_format":{"type":"text"}}"#))
+            .expect_err("only json_schema is offered by this key");
         assert_eq!(
             wrong_type,
             "driver: inference.driver.config 'response_format.type' must be \"json_schema\", \
@@ -2224,7 +2257,10 @@ mod tests {
             "messages": [],
             "params": {"stream": false}
         }));
-        assert_eq!(body_for(&request, &DriverConfig::default())["stream"], json!(true));
+        assert_eq!(
+            body_for(&request, &DriverConfig::default())["stream"],
+            json!(true)
+        );
     }
 
     // ── Scenario 16 — failure paths ───────────────────────────────────────────
@@ -2326,7 +2362,10 @@ mod tests {
             body["messages"][0],
             json!({"role": "system", "content": "Be brief."})
         );
-        assert_eq!(body["messages"][1], json!({"role": "user", "content": "hi"}));
+        assert_eq!(
+            body["messages"][1],
+            json!({"role": "user", "content": "hi"})
+        );
         assert_eq!(body["tools"][0]["type"], json!("function"));
         assert_eq!(body["tools"][0]["function"]["name"], json!("read_file"));
         assert_eq!(
@@ -2421,9 +2460,7 @@ mod tests {
         // to disagree with it again. `run_inner` is wasm-only, so this is asserted from the
         // source; the needle is assembled so that this test is not its own evidence.
         let source = include_str!("lib.rs");
-        let run_inner = &source[source
-            .find("fn run_inner(")
-            .expect("run_inner must exist")..];
+        let run_inner = &source[source.find("fn run_inner(").expect("run_inner must exist")..];
         assert!(
             run_inner.contains(concat!("require_", "endpoint(")),
             "run_inner must resolve the endpoint through murmur_driver_env::require_endpoint"
@@ -2447,8 +2484,8 @@ mod tests {
         // The runtime attaches the header declared under `upstream_auth:`, so a driver-side
         // credential read would put the key back in the guest.
         let source = include_str!("lib.rs");
-        let non_test = source[..source.find("\nmod tests {").expect("mod tests must exist")]
-            .to_lowercase();
+        let non_test =
+            source[..source.find("\nmod tests {").expect("mod tests must exist")].to_lowercase();
         for needle in [
             concat!("murmur_inference_", "api_key"),
             concat!("\"author", "ization\""),

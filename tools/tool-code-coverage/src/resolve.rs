@@ -27,13 +27,19 @@ pub fn resolve_failing_ids(conn: &Connection, names: &[String]) -> Vec<(String, 
         .iter()
         .map(|name| {
             let (module, qualified) = split_test_path(name);
-            let rows = stmt.query_map(rusqlite::params![module, qualified], |r| r.get::<_, String>(0));
+            let rows = stmt.query_map(rusqlite::params![module, qualified], |r| {
+                r.get::<_, String>(0)
+            });
             let ids: Vec<String> = match rows {
                 Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
                 Err(_) => Vec::new(),
             };
             // Unique match only — zero or ambiguous stays null.
-            let stable_id = if ids.len() == 1 { Some(ids[0].clone()) } else { None };
+            let stable_id = if ids.len() == 1 {
+                Some(ids[0].clone())
+            } else {
+                None
+            };
             (name.clone(), stable_id)
         })
         .collect()

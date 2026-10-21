@@ -21,7 +21,9 @@ use crate::parse_python;
 // ── Input helpers ─────────────────────────────────────────────────────────────
 
 fn str_field<'a>(op: &'a Value, key: &str) -> Option<&'a str> {
-    op.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+    op.get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
 }
 
 fn req_str<'a>(op: &'a Value, key: &str, operation: &str) -> Result<&'a str, Value> {
@@ -33,9 +35,11 @@ fn opt_i64(op: &Value, key: &str, default: i64) -> i64 {
 }
 
 fn req_i64(op: &Value, key: &str, operation: &str) -> Result<i64, Value> {
-    op.get(key)
-        .and_then(|v| v.as_i64())
-        .ok_or_else(|| failed(format!("{operation}: missing or non-integer required field '{key}'")))
+    op.get(key).and_then(|v| v.as_i64()).ok_or_else(|| {
+        failed(format!(
+            "{operation}: missing or non-integer required field '{key}'"
+        ))
+    })
 }
 
 /// Resolve and validate `repo_path`; defaults to the current directory. Returns
@@ -46,10 +50,16 @@ fn resolve_repo(op: &Value, operation: &str) -> Result<PathBuf, Value> {
         .or_else(|| std::env::current_dir().ok())
         .ok_or_else(|| failed(format!("{operation}: could not determine repo_path")))?;
     if !raw.exists() {
-        return Err(failed(format!("{operation}: repo_path does not exist: {}", raw.display())));
+        return Err(failed(format!(
+            "{operation}: repo_path does not exist: {}",
+            raw.display()
+        )));
     }
     if !raw.is_dir() {
-        return Err(failed(format!("{operation}: repo_path is not a directory: {}", raw.display())));
+        return Err(failed(format!(
+            "{operation}: repo_path is not a directory: {}",
+            raw.display()
+        )));
     }
     Ok(raw.canonicalize().unwrap_or(raw))
 }
@@ -73,7 +83,11 @@ pub fn op_index_repository(op: &Value) -> Value {
         Ok(stats) => {
             let summary = format!(
                 "{} changed, {} unchanged, {} removed ({} symbols, {} edges)",
-                stats.changed, stats.unchanged, stats.removed, stats.total_symbols, stats.total_edges
+                stats.changed,
+                stats.unchanged,
+                stats.removed,
+                stats.total_symbols,
+                stats.total_edges
             );
             let data = json!({
                 "repo_path": repo.display().to_string(),
@@ -128,7 +142,11 @@ fn index_repo(conn: &mut Connection, repo: &Path) -> Result<IndexStats, String> 
         let hash = sha256_hex(&bytes);
 
         let existing: Option<String> = tx
-            .query_row("SELECT content_hash FROM files WHERE path = ?1", params![rel], |r| r.get(0))
+            .query_row(
+                "SELECT content_hash FROM files WHERE path = ?1",
+                params![rel],
+                |r| r.get(0),
+            )
             .optional()
             .map_err(|e| e.to_string())?;
 
@@ -164,14 +182,22 @@ fn index_repo(conn: &mut Connection, repo: &Path) -> Result<IndexStats, String> 
 
     db::resolve_edges(&tx).map_err(|e| e.to_string())?;
 
-    let total_symbols: i64 =
-        tx.query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0)).map_err(|e| e.to_string())?;
-    let total_edges: i64 =
-        tx.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    let total_symbols: i64 = tx
+        .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    let total_edges: i64 = tx
+        .query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
 
     tx.commit().map_err(|e| e.to_string())?;
 
-    Ok(IndexStats { changed, unchanged, removed, total_symbols, total_edges })
+    Ok(IndexStats {
+        changed,
+        unchanged,
+        removed,
+        total_symbols,
+        total_edges,
+    })
 }
 
 fn delete_file_rows(conn: &Connection, rel: &str) -> rusqlite::Result<()> {
@@ -202,7 +228,9 @@ fn upsert_file(conn: &Connection, rel: &str, hash: &str, language: &str) -> rusq
                                             language = excluded.language",
         params![rel, hash, language],
     )?;
-    conn.query_row("SELECT id FROM files WHERE path = ?1", params![rel], |r| r.get(0))
+    conn.query_row("SELECT id FROM files WHERE path = ?1", params![rel], |r| {
+        r.get(0)
+    })
 }
 
 fn insert_parsed(conn: &Connection, file_id: i64, parsed: &parse::Parsed) -> rusqlite::Result<()> {
@@ -231,7 +259,11 @@ fn insert_parsed(conn: &Connection, file_id: i64, parsed: &parse::Parsed) -> rus
         // `contains` edges are structurally exact → definite at insert time.
         // `calls` edges get a placeholder recomputed by db::resolve_edges after
         // dst_symbol_id resolution completes for the whole repo.
-        let confidence = if e.edge_kind == "contains" { "definite" } else { "unresolved" };
+        let confidence = if e.edge_kind == "contains" {
+            "definite"
+        } else {
+            "unresolved"
+        };
         conn.execute(
             "INSERT OR IGNORE INTO edges (src_symbol_id, dst_symbol_id, dst_name, edge_kind, call_style, confidence)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -242,12 +274,11 @@ fn insert_parsed(conn: &Connection, file_id: i64, parsed: &parse::Parsed) -> rus
 }
 
 fn delete_missing_files(conn: &Connection, on_disk: &[String]) -> rusqlite::Result<usize> {
-    let known: Vec<String> =
-        {
-            let mut stmt = conn.prepare("SELECT path FROM files")?;
-            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        };
+    let known: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT path FROM files")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
     let mut removed = 0;
     for path in known {
         if !on_disk.contains(&path) {
@@ -408,7 +439,11 @@ pub fn op_get_symbol(op: &Value) -> Value {
     )
 }
 
-fn neighbor_names(conn: &Connection, symbol_id: &str, which: &str) -> rusqlite::Result<Vec<String>> {
+fn neighbor_names(
+    conn: &Connection,
+    symbol_id: &str,
+    which: &str,
+) -> rusqlite::Result<Vec<String>> {
     let sql = if which == "callees" {
         "SELECT DISTINCT dst_symbol_id FROM edges
           WHERE src_symbol_id = ?1 AND edge_kind = 'calls' AND dst_symbol_id IS NOT NULL"
@@ -500,15 +535,27 @@ pub fn op_slice_symbol(op: &Value) -> Value {
                 params![sid],
                 |r| {
                     Ok((
-                        r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, i64>(5)?,
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, i64>(5)?,
                     ))
                 },
             )
             .optional()
             .unwrap_or(None);
-        let (qn, kind, sig, module, file, line) =
-            d.unwrap_or_else(|| ("<unresolved>".into(), "".into(), "".into(), "".into(), "".into(), 0));
+        let (qn, kind, sig, module, file, line) = d.unwrap_or_else(|| {
+            (
+                "<unresolved>".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                0,
+            )
+        });
         nodes_brief.push(json!({ "symbol_id": sid, "qualified_name": qn, "depth": depth }));
         nodes_full.push(json!({
             "symbol_id": sid, "qualified_name": qn, "kind": kind, "signature": sig,
@@ -554,7 +601,11 @@ pub fn op_slice_symbol(op: &Value) -> Value {
         nodes_brief.len(),
         slice_edges.len(),
         max_depth,
-        if truncated { format!(", truncated at {max_nodes}") } else { String::new() },
+        if truncated {
+            format!(", truncated at {max_nodes}")
+        } else {
+            String::new()
+        },
         direction
     );
     let inline = json!({
@@ -634,14 +685,19 @@ pub fn op_explain_path(op: &Value) -> Value {
                )
                SELECT trail, depth FROM paths WHERE sid = ?3 ORDER BY depth LIMIT 1";
     let found: Option<(String, i64)> = conn
-        .query_row(sql, params![from, max_depth, to], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .query_row(sql, params![from, max_depth, to], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })
         .optional()
         .unwrap_or(None);
 
     match found {
         Some((trail, depth)) => {
-            let path: Vec<String> =
-                trail.split('\n').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+            let path: Vec<String> = trail
+                .split('\n')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
             passed(
                 format!("explain_path: path found in {depth} hop(s)"),
                 json!({ "from": from, "to": to, "found": true, "depth": depth, "path": path }),
@@ -659,11 +715,15 @@ pub fn op_explain_path(op: &Value) -> Value {
 }
 
 fn symbol_exists(conn: &Connection, symbol_id: &str) -> bool {
-    conn.query_row("SELECT 1 FROM symbols WHERE symbol_id = ?1", params![symbol_id], |_| Ok(()))
-        .optional()
-        .ok()
-        .flatten()
-        .is_some()
+    conn.query_row(
+        "SELECT 1 FROM symbols WHERE symbol_id = ?1",
+        params![symbol_id],
+        |_| Ok(()),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .is_some()
 }
 
 // ── op: impact_analysis ───────────────────────────────────────────────────────
@@ -675,8 +735,15 @@ fn symbol_exists(conn: &Connection, symbol_id: &str) -> bool {
 /// miss ORM abstractions that never call these specific names. Documented as
 /// best-effort, not authoritative.
 const PERSISTENCE_VOCAB: [&str; 9] = [
-    "execute", "execute_batch", "query", "query_row", "query_map", "prepare", "transaction",
-    "commit", "rollback",
+    "execute",
+    "execute_batch",
+    "query",
+    "query_row",
+    "query_map",
+    "prepare",
+    "transaction",
+    "commit",
+    "rollback",
 ];
 
 /// Routing-attribute substrings (common Rust web frameworks: axum/actix/rocket
@@ -721,7 +788,9 @@ pub fn op_impact_analysis(op: &Value) -> Value {
     // a hard failure (distinct from a valid file whose range overlaps nothing,
     // which is a passed-but-empty result below).
     let file_id: Option<i64> = conn
-        .query_row("SELECT id FROM files WHERE path = ?1", params![rel], |r| r.get(0))
+        .query_row("SELECT id FROM files WHERE path = ?1", params![rel], |r| {
+            r.get(0)
+        })
         .optional()
         .unwrap_or(None);
     let Some(file_id) = file_id else {
@@ -737,9 +806,9 @@ pub fn op_impact_analysis(op: &Value) -> Value {
                     WHERE file_id = ?1 AND start_line <= ?2 AND end_line >= ?3
                     ORDER BY symbol_id";
         match conn.prepare(sql) {
-            Ok(mut stmt) => match stmt
-                .query_map(params![file_id, end_line, start_line], |r| r.get::<_, String>(0))
-            {
+            Ok(mut stmt) => match stmt.query_map(params![file_id, end_line, start_line], |r| {
+                r.get::<_, String>(0)
+            }) {
                 Ok(iter) => match iter.collect::<rusqlite::Result<Vec<_>>>() {
                     Ok(v) => v,
                     Err(e) => return errored(format!("impact_analysis: {e}")),
@@ -773,7 +842,11 @@ pub fn op_impact_analysis(op: &Value) -> Value {
     // reached it; the final MIN(minconf) is the conservative worst case across
     // ALL discovered paths within max_depth. UNION (not UNION ALL) dedups
     // (sid,depth,minconf) triples so the walk terminates and stays bounded.
-    let seed = root_ids.iter().map(|_| "SELECT ?, 0, 2").collect::<Vec<_>>().join(" UNION ");
+    let seed = root_ids
+        .iter()
+        .map(|_| "SELECT ?, 0, 2")
+        .collect::<Vec<_>>()
+        .join(" UNION ");
     let cte = format!(
         "WITH RECURSIVE reach(sid, depth, minconf) AS (
              {seed}
@@ -800,7 +873,11 @@ pub fn op_impact_analysis(op: &Value) -> Value {
         Err(e) => return errored(format!("impact_analysis: {e}")),
     };
     let rows = stmt.query_map(rusqlite::params_from_iter(cte_params.iter()), |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
     });
     let mut node_rows: Vec<(String, i64, i64)> = match rows {
         Ok(iter) => match iter.collect::<rusqlite::Result<Vec<_>>>() {
@@ -828,8 +905,11 @@ pub fn op_impact_analysis(op: &Value) -> Value {
         // Roots are exactly what was named — not inferred — so they always report
         // depth 0 and definite confidence, regardless of any reverse edge that
         // also happens to reach them.
-        let (out_depth, confidence) =
-            if is_root { (0, "definite") } else { (*depth, rank_label(*minconf)) };
+        let (out_depth, confidence) = if is_root {
+            (0, "definite")
+        } else {
+            (*depth, rank_label(*minconf))
+        };
 
         let detail = conn
             .query_row(
@@ -839,8 +919,12 @@ pub fn op_impact_analysis(op: &Value) -> Value {
                 params![sid],
                 |r| {
                     Ok((
-                        r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
-                        r.get::<_, i64>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?,
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, String>(5)?,
                         r.get::<_, String>(6)?,
                     ))
                 },
@@ -848,7 +932,15 @@ pub fn op_impact_analysis(op: &Value) -> Value {
             .optional()
             .unwrap_or(None);
         let (qn, kind, fpath, sline, vis, attrs, module) = detail.unwrap_or_else(|| {
-            ("<unresolved>".into(), "".into(), "".into(), 0, "".into(), "".into(), "".into())
+            (
+                "<unresolved>".into(),
+                "".into(),
+                "".into(),
+                0,
+                "".into(),
+                "".into(),
+                "".into(),
+            )
         });
 
         let entry = json!({
@@ -903,17 +995,23 @@ pub fn op_impact_analysis(op: &Value) -> Value {
 /// Symbols whose own outgoing `calls` edges hit a persistence vocabulary name.
 fn persistence_sources(conn: &Connection) -> std::collections::HashSet<String> {
     let mut set = std::collections::HashSet::new();
-    let placeholders = PERSISTENCE_VOCAB.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let placeholders = PERSISTENCE_VOCAB
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
     let sql = format!(
         "SELECT DISTINCT src_symbol_id FROM edges
           WHERE edge_kind = 'calls' AND dst_name IN ({placeholders})"
     );
-    let params: Vec<rusqlite::types::Value> =
-        PERSISTENCE_VOCAB.iter().map(|s| rusqlite::types::Value::Text((*s).to_string())).collect();
+    let params: Vec<rusqlite::types::Value> = PERSISTENCE_VOCAB
+        .iter()
+        .map(|s| rusqlite::types::Value::Text((*s).to_string()))
+        .collect();
     if let Ok(mut stmt) = conn.prepare(&sql) {
-        if let Ok(iter) =
-            stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| r.get::<_, String>(0))
-        {
+        if let Ok(iter) = stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
+            r.get::<_, String>(0)
+        }) {
             for v in iter.flatten() {
                 set.insert(v);
             }
@@ -951,7 +1049,10 @@ fn is_test(attributes: &str, module: &str, file: &str, simple_name: &str) -> boo
     {
         return true;
     }
-    if module.split([':', '.']).any(|seg| seg == "tests" || seg == "test") {
+    if module
+        .split([':', '.'])
+        .any(|seg| seg == "tests" || seg == "test")
+    {
         return true;
     }
     let last = file.rsplit('/').next().unwrap_or(file);
@@ -1044,7 +1145,9 @@ fn collect_source_files(repo: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![repo.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -1053,7 +1156,10 @@ fn collect_source_files(repo: &Path) -> Vec<PathBuf> {
                     continue;
                 }
                 stack.push(path);
-            } else if matches!(path.extension().and_then(|e| e.to_str()), Some("rs") | Some("py")) {
+            } else if matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("rs") | Some("py")
+            ) {
                 out.push(path);
             }
         }
@@ -1124,7 +1230,9 @@ fn nearest_crate(
         }
     }
     let fallback = (
-        repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "crate".into()),
+        repo.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "crate".into()),
         repo.to_path_buf(),
     );
     cache.insert(start.to_path_buf(), fallback.clone());
@@ -1161,8 +1269,10 @@ fn module_path(crate_root: &Path, file: &Path) -> String {
         Ok(r) => r,
         Err(_) => return String::new(),
     };
-    let mut comps: Vec<String> =
-        rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    let mut comps: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
     if comps.is_empty() {
         return String::new();
     }
@@ -1234,7 +1344,9 @@ fn python_nearest_package(
         }
     }
     let fallback = (
-        repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "package".into()),
+        repo.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "package".into()),
         repo.to_path_buf(),
     );
     cache.insert(start.to_path_buf(), fallback.clone());
@@ -1294,7 +1406,12 @@ fn setup_py_name(text: &str) -> Option<String> {
         if let Some(rest) = t.strip_prefix("name") {
             let rest = rest.trim_start();
             if let Some(rest) = rest.strip_prefix('=') {
-                let v = rest.trim().trim_end_matches(',').trim().trim_matches('"').trim_matches('\'');
+                let v = rest
+                    .trim()
+                    .trim_end_matches(',')
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'');
                 if !v.is_empty() {
                     return Some(v.to_string());
                 }
@@ -1345,8 +1462,10 @@ fn python_module_path(root: &Path, file: &Path) -> String {
         Ok(r) => r,
         Err(_) => return String::new(),
     };
-    let mut comps: Vec<String> =
-        rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    let mut comps: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
     if comps.is_empty() {
         return String::new();
     }

@@ -43,7 +43,10 @@ struct HostState {
 
 impl WasiView for HostState {
     fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView { ctx: &mut self.wasi, table: &mut self.table }
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
     }
 }
 
@@ -106,7 +109,10 @@ fn store_for(engine: &Engine, workdir: &Path) -> Store<HostState> {
         .expect("preopen workdir");
     Store::new(
         engine,
-        HostState { table: ResourceTable::new(), wasi: builder.build() },
+        HostState {
+            table: ResourceTable::new(),
+            wasi: builder.build(),
+        },
     )
 }
 
@@ -167,7 +173,12 @@ fn run_editor_raw(
 fn dir_entries(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .expect("read workdir")
-        .map(|e| e.expect("dir entry").file_name().to_string_lossy().to_string())
+        .map(|e| {
+            e.expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .to_string()
+        })
         .collect();
     names.sort();
     names
@@ -235,7 +246,8 @@ fn component_loads_and_runs_write_file() {
     // write_file's `data` field is null in the old protocol, so ToolResult.data is None.
     assert!(payload.is_null(), "payload: {payload}");
     assert!(
-        meta.iter().any(|(k, v)| k == "state_effect" && v == "mutate"),
+        meta.iter()
+            .any(|(k, v)| k == "state_effect" && v == "mutate"),
         "expected state_effect=mutate, got {meta:?}"
     );
     assert_eq!(
@@ -264,7 +276,8 @@ fn component_loads_and_runs_replace_in_file() {
     assert!(matches!(status, Status::Passed), "status: {status:?}");
     assert_eq!(payload["count"], 2, "payload: {payload}");
     assert!(
-        meta.iter().any(|(k, v)| k == "state_effect" && v == "mutate"),
+        meta.iter()
+            .any(|(k, v)| k == "state_effect" && v == "mutate"),
         "expected state_effect=mutate, got {meta:?}"
     );
     assert_eq!(
@@ -373,7 +386,11 @@ fn component_refuses_an_absolute_read_path_even_when_the_file_exists() {
     // Created directly, not through the tool: the file an absolute write used to manufacture is
     // present, so the refusal cannot be a not-found in disguise.
     std::fs::create_dir_all(workdir.join("app")).unwrap();
-    std::fs::write(workdir.join("app/results.txt"), "content from the wrong place").unwrap();
+    std::fs::write(
+        workdir.join("app/results.txt"),
+        "content from the wrong place",
+    )
+    .unwrap();
 
     let (status, payload, summary, _meta) = run_editor_reporting(
         &eng,
@@ -576,8 +593,14 @@ fn component_loads_and_runs_find_with_context_lines() {
     );
     assert!(matches!(status2, Status::Passed), "status: {status2:?}");
     let m2 = &payload2["matches"][0];
-    assert!(m2.get("context_before").is_none(), "default must omit context_before");
-    assert!(m2.get("context_after").is_none(), "default must omit context_after");
+    assert!(
+        m2.get("context_before").is_none(),
+        "default must omit context_before"
+    );
+    assert!(
+        m2.get("context_after").is_none(),
+        "default must omit context_after"
+    );
 
     let _ = std::fs::remove_dir_all(&workdir);
 }
@@ -838,7 +861,8 @@ fn find_in_files_benchmark_no_orders_of_magnitude_regression() {
     let n_files = build_tree(&tree, 60, 50); // 3000 files
 
     // wasm: the walk uses a workdir-relative dir under the single preopen.
-    let rel_payload = r#"{"operation":"find_in_files","pattern":"NEEDLE","dir":"bench_tree","recursive":true}"#;
+    let rel_payload =
+        r#"{"operation":"find_in_files","pattern":"NEEDLE","dir":"bench_tree","recursive":true}"#;
 
     // Host-native baseline: the SAME logic, host-compiled, over the same tree. The dir is
     // workdir-relative like the wasm payload's — the tool refuses an absolute value — so both
@@ -860,16 +884,26 @@ fn find_in_files_benchmark_no_orders_of_magnitude_regression() {
 
     let mut store = store_for(&eng, &workdir);
     let tool = Tool::instantiate(&mut store, &component, &lnk).expect("instantiate");
-    let input = ToolInput { data: Some(rel_payload.to_string()), log_path: None };
+    let input = ToolInput {
+        data: Some(rel_payload.to_string()),
+        log_path: None,
+    };
     let _ = tool.murmur_tool_run().call_run(&mut store, &input).unwrap(); // warm
     let t = Instant::now();
     let wasm_res = tool.murmur_tool_run().call_run(&mut store, &input).unwrap();
     let wasm_walk = t.elapsed();
-    assert!(matches!(wasm_res.status, Status::Passed), "wasm find status: {:?}", wasm_res.status);
+    assert!(
+        matches!(wasm_res.status, Status::Passed),
+        "wasm find status: {:?}",
+        wasm_res.status
+    );
     // ToolResult.data for find is the `data` field: `{"matches":[...]}`.
     let wasm_payload: Value = serde_json::from_str(wasm_res.data.as_deref().unwrap()).unwrap();
     assert_eq!(wasm_payload["matches"].as_array().map(|a| a.len()), Some(1));
-    assert!(wasm_payload.get("capped").is_none(), "3000 files stay under every limit");
+    assert!(
+        wasm_payload.get("capped").is_none(),
+        "3000 files stay under every limit"
+    );
     assert!(!wasm_res.truncated);
 
     // Full instantiate+call, for the process-spawn analogue number.

@@ -51,14 +51,19 @@ impl TestDir {
             .as_nanos();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let mut path = std::env::temp_dir();
-        path.push(format!("tool-code-coverage-it-{}-{nanos}-{n}", std::process::id()));
+        path.push(format!(
+            "tool-code-coverage-it-{}-{nanos}-{n}",
+            std::process::id()
+        ));
         fs::create_dir_all(&path).expect("temp test directory should be created");
         Self { path }
     }
     /// The canonicalized path — matches what the tool computes internally and what
     /// LCOV `SF:` absolute paths must agree with.
     fn path(&self) -> PathBuf {
-        self.path.canonicalize().unwrap_or_else(|_| self.path.clone())
+        self.path
+            .canonicalize()
+            .unwrap_or_else(|_| self.path.clone())
     }
 }
 
@@ -151,7 +156,12 @@ fn run_tool(op: Value) -> Value {
         .stderr(Stdio::piped())
         .spawn()
         .expect("binary should start");
-    child.stdin.take().unwrap().write_all(envelope.as_bytes()).unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(envelope.as_bytes())
+        .unwrap();
     let output = child.wait_with_output().expect("tool should complete");
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Invariant: stdout is always exactly one JSON object, never partial output.
@@ -187,7 +197,10 @@ fn read_scores(
 }
 
 fn suspect<'a>(res: &'a Value, symbol_id: &str) -> Option<&'a Value> {
-    res["data"]["top_suspects"].as_array()?.iter().find(|s| s["symbol_id"] == symbol_id)
+    res["data"]["top_suspects"]
+        .as_array()?
+        .iter()
+        .find(|s| s["symbol_id"] == symbol_id)
 }
 
 // ── 1 & 4 & 15-ish. Happy path F=1/P=1, exact scores, db populated ─────────────
@@ -199,8 +212,18 @@ fn scenario_01_happy_path_exact_scores() {
     build_graph_db(&repo.path(), &standard_symbols());
     // Failing test_add covers add(5,6) + itself(20,21). Passing test_sub covers
     // sub(10,11) + itself(30,31).
-    write_info(&cov.path(), &repo.path(), "tests::test_add", &[5, 6, 20, 21]);
-    write_info(&cov.path(), &repo.path(), "tests::test_sub", &[10, 11, 30, 31]);
+    write_info(
+        &cov.path(),
+        &repo.path(),
+        "tests::test_add",
+        &[5, 6, 20, 21],
+    );
+    write_info(
+        &cov.path(),
+        &repo.path(),
+        "tests::test_sub",
+        &[10, 11, 30, 31],
+    );
 
     let res = run_tool(localize_op(&repo.path(), &cov.path(), &["tests::test_add"]));
     assert_eq!(res["status"], "passed", "res: {res}");
@@ -230,7 +253,11 @@ fn scenario_01_happy_path_exact_scores() {
     assert_eq!(oc, Some(1.0));
     assert_eq!(ta, Some(1.0));
     let (ef, ep, oc, ta) = read_scores(&repo.path(), S_UNUSED);
-    assert_eq!((ef, ep, oc, ta), (None, None, None, None), "untouched symbol stays NULL");
+    assert_eq!(
+        (ef, ep, oc, ta),
+        (None, None, None, None),
+        "untouched symbol stays NULL"
+    );
 }
 
 // ── 3. Passing coverage lowers a shared symbol below 1.0 ───────────────────────
@@ -250,7 +277,10 @@ fn scenario_03_shared_symbol_lower_suspicion() {
     assert_eq!(add["ef"], 1);
     assert_eq!(add["ep"], 1);
     let oc = add["suspicion_ochiai"].as_f64().unwrap();
-    assert!((oc - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-9, "ochiai was {oc}");
+    assert!(
+        (oc - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-9,
+        "ochiai was {oc}"
+    );
     assert_eq!(add["suspicion_tarantula"].as_f64().unwrap(), 0.5);
 }
 
@@ -264,18 +294,38 @@ fn scenario_05_reset_between_runs() {
     // Run 1: test_add covers `add`.
     let cov1 = TestDir::new();
     write_info(&cov1.path(), &repo.path(), "tests::test_add", &[5]);
-    let r1 = run_tool(localize_op(&repo.path(), &cov1.path(), &["tests::test_add"]));
+    let r1 = run_tool(localize_op(
+        &repo.path(),
+        &cov1.path(),
+        &["tests::test_add"],
+    ));
     assert_eq!(r1["status"], "passed");
-    assert_eq!(read_scores(&repo.path(), S_ADD).0, Some(1), "add scored after run 1");
+    assert_eq!(
+        read_scores(&repo.path(), S_ADD).0,
+        Some(1),
+        "add scored after run 1"
+    );
 
     // Run 2: a different failing test covers only `sub`.
     let cov2 = TestDir::new();
     write_info(&cov2.path(), &repo.path(), "tests::test_sub", &[10]);
-    let r2 = run_tool(localize_op(&repo.path(), &cov2.path(), &["tests::test_sub"]));
+    let r2 = run_tool(localize_op(
+        &repo.path(),
+        &cov2.path(),
+        &["tests::test_sub"],
+    ));
     assert_eq!(r2["status"], "passed");
     // `add` was reset to NULL (run 2's coverage never touched it).
-    assert_eq!(read_scores(&repo.path(), S_ADD), (None, None, None, None), "add reset after run 2");
-    assert_eq!(read_scores(&repo.path(), S_SUB).0, Some(1), "sub scored in run 2");
+    assert_eq!(
+        read_scores(&repo.path(), S_ADD),
+        (None, None, None, None),
+        "add reset after run 2"
+    );
+    assert_eq!(
+        read_scores(&repo.path(), S_SUB).0,
+        Some(1),
+        "sub scored in run 2"
+    );
 }
 
 // ── 6. Failing test with no coverage file ──────────────────────────────────────
@@ -287,10 +337,15 @@ fn scenario_06_failing_without_coverage() {
     build_graph_db(&repo.path(), &standard_symbols());
     write_info(&cov.path(), &repo.path(), "tests::test_add", &[5]);
     // test_missing has no .info file, but test_add does → still passes overall.
-    let res =
-        run_tool(localize_op(&repo.path(), &cov.path(), &["tests::test_add", "tests::test_missing"]));
+    let res = run_tool(localize_op(
+        &repo.path(),
+        &cov.path(),
+        &["tests::test_add", "tests::test_missing"],
+    ));
     assert_eq!(res["status"], "passed");
-    let without = res["data"]["failing_tests_without_coverage"].as_array().unwrap();
+    let without = res["data"]["failing_tests_without_coverage"]
+        .as_array()
+        .unwrap();
     assert_eq!(without.len(), 1);
     assert_eq!(without[0], "tests::test_missing");
     assert_eq!(res["data"]["failing_test_count"], 1);
@@ -305,13 +360,20 @@ fn scenario_07_unparseable_skipped() {
     build_graph_db(&repo.path(), &standard_symbols());
     write_info(&cov.path(), &repo.path(), "tests::test_add", &[5]);
     // A passing test's file is garbage → skipped, but does not sink the run.
-    fs::write(cov.path().join("tests::test_junk.info"), "not lcov at all\n").unwrap();
+    fs::write(
+        cov.path().join("tests::test_junk.info"),
+        "not lcov at all\n",
+    )
+    .unwrap();
     let res = run_tool(localize_op(&repo.path(), &cov.path(), &["tests::test_add"]));
     assert_eq!(res["status"], "passed");
     let skipped = res["data"]["skipped_files"].as_array().unwrap();
     assert_eq!(skipped.len(), 1);
     assert_eq!(skipped[0], "tests::test_junk.info");
-    assert_eq!(res["data"]["passing_test_count"], 0, "junk file is not a valid passing test");
+    assert_eq!(
+        res["data"]["passing_test_count"], 0,
+        "junk file is not a valid passing test"
+    );
 }
 
 // ── 8. F==0 → failed ───────────────────────────────────────────────────────────
@@ -325,7 +387,11 @@ fn scenario_08_zero_failing_coverage_fails() {
     write_info(&cov.path(), &repo.path(), "tests::test_sub", &[10]);
     let res = run_tool(localize_op(&repo.path(), &cov.path(), &["tests::test_add"]));
     assert_eq!(res["status"], "failed");
-    assert!(res["message"].as_str().unwrap().contains("F == 0"), "msg: {}", res["message"]);
+    assert!(
+        res["message"].as_str().unwrap().contains("F == 0"),
+        "msg: {}",
+        res["message"]
+    );
 }
 
 // ── 9. Missing db → failed naming index_repository ─────────────────────────────
@@ -340,7 +406,10 @@ fn scenario_09_missing_db_fails() {
     let msg = res["message"].as_str().unwrap();
     assert!(msg.contains("index_repository"), "msg: {msg}");
     // Must NOT have created the db.
-    assert!(!repo.path().join(".murmur").join("code-graph.db").exists(), "db must not be created");
+    assert!(
+        !repo.path().join(".murmur").join("code-graph.db").exists(),
+        "db must not be created"
+    );
 }
 
 // ── 10. coverage_dir missing / not a dir → failed ──────────────────────────────
@@ -370,7 +439,10 @@ fn scenario_10_coverage_dir_invalid() {
         "failing_tests": ["tests::test_add"],
     }));
     assert_eq!(res2["status"], "failed");
-    assert!(res2["message"].as_str().unwrap().contains("not a directory"));
+    assert!(res2["message"]
+        .as_str()
+        .unwrap()
+        .contains("not a directory"));
 }
 
 // ── 11. Malformed input ────────────────────────────────────────────────────────
@@ -382,14 +454,19 @@ fn scenario_11_malformed_input() {
     build_graph_db(&repo.path(), &standard_symbols());
 
     // Missing operation.
-    let res = run_tool(json!({ "coverage_dir": cov.path().display().to_string(), "failing_tests": ["t"] }));
+    let res = run_tool(
+        json!({ "coverage_dir": cov.path().display().to_string(), "failing_tests": ["t"] }),
+    );
     assert_eq!(res["status"], "failed");
     assert!(res["message"].as_str().unwrap().contains("operation"));
 
     // Unknown operation.
     let res = run_tool(json!({ "operation": "explode" }));
     assert_eq!(res["status"], "failed");
-    assert!(res["message"].as_str().unwrap().contains("unknown operation"));
+    assert!(res["message"]
+        .as_str()
+        .unwrap()
+        .contains("unknown operation"));
 
     // Missing coverage_dir.
     let res = run_tool(json!({
@@ -420,17 +497,38 @@ fn scenario_12_stable_id_resolution() {
     // test_add is unique; add a second row colliding on (module='tests', qn='dupe')
     // so `tests::dupe` resolves ambiguously to null.
     let mut syms = standard_symbols();
-    syms.push(("rust://fixture/tests#dupe(->())", "tests", "dupe", "function", 50, 55));
-    syms.push(("rust://fixture/tests#dupe(i64->())", "tests", "dupe", "function", 56, 60));
+    syms.push((
+        "rust://fixture/tests#dupe(->())",
+        "tests",
+        "dupe",
+        "function",
+        50,
+        55,
+    ));
+    syms.push((
+        "rust://fixture/tests#dupe(i64->())",
+        "tests",
+        "dupe",
+        "function",
+        56,
+        60,
+    ));
     build_graph_db(&repo.path(), &syms);
     write_info(&cov.path(), &repo.path(), "tests::test_add", &[5, 20]);
     write_info(&cov.path(), &repo.path(), "tests::dupe", &[50]);
 
-    let res = run_tool(localize_op(&repo.path(), &cov.path(), &["tests::test_add", "tests::dupe"]));
+    let res = run_tool(localize_op(
+        &repo.path(),
+        &cov.path(),
+        &["tests::test_add", "tests::dupe"],
+    ));
     let ids = res["data"]["failing_test_stable_ids"].as_array().unwrap();
     let by_name = |n: &str| ids.iter().find(|e| e["test_name"] == n).unwrap();
     assert_eq!(by_name("tests::test_add")["stable_id"], S_TEST_ADD);
-    assert!(by_name("tests::dupe")["stable_id"].is_null(), "ambiguous → null");
+    assert!(
+        by_name("tests::dupe")["stable_id"].is_null(),
+        "ambiguous → null"
+    );
 }
 
 // ── 13. Migration adds the four columns ────────────────────────────────────────
@@ -444,8 +542,16 @@ fn scenario_13_migration_adds_columns() {
     // Pre-condition: fixture db has none of the four columns.
     let db = repo.path().join(".murmur").join("code-graph.db");
     let cols_before = column_set(&db);
-    for c in ["suspicion_ef", "suspicion_ep", "suspicion_ochiai", "suspicion_tarantula"] {
-        assert!(!cols_before.contains(c), "{c} should be absent before migration");
+    for c in [
+        "suspicion_ef",
+        "suspicion_ep",
+        "suspicion_ochiai",
+        "suspicion_tarantula",
+    ] {
+        assert!(
+            !cols_before.contains(c),
+            "{c} should be absent before migration"
+        );
     }
 
     write_info(&cov.path(), &repo.path(), "tests::test_add", &[5]);
@@ -453,7 +559,12 @@ fn scenario_13_migration_adds_columns() {
     assert_eq!(res["status"], "passed");
 
     let cols_after = column_set(&db);
-    for c in ["suspicion_ef", "suspicion_ep", "suspicion_ochiai", "suspicion_tarantula"] {
+    for c in [
+        "suspicion_ef",
+        "suspicion_ep",
+        "suspicion_ochiai",
+        "suspicion_tarantula",
+    ] {
         assert!(cols_after.contains(c), "{c} should exist after migration");
     }
     // Existing columns/rows untouched: the files/symbols schema still present.
@@ -474,7 +585,9 @@ fn scenario_14_truncation_to_disk() {
     let repo = TestDir::new();
     let cov = TestDir::new();
     // Five symbols spanning distinct line ranges, all overlapped by coverage.
-    let ids: Vec<String> = (0..5).map(|i| format!("rust://fixture/#f{i}(->i64)")).collect();
+    let ids: Vec<String> = (0..5)
+        .map(|i| format!("rust://fixture/#f{i}(->i64)"))
+        .collect();
     let names: Vec<String> = (0..5).map(|i| format!("f{i}")).collect();
     let mut real: Vec<Sym> = Vec::new();
     for i in 0..5usize {
@@ -501,11 +614,21 @@ fn scenario_14_truncation_to_disk() {
     assert_eq!(res["status"], "passed");
     assert_eq!(res["data"]["scored_symbols"], 5);
     assert_eq!(res["data"]["truncated"], true);
-    assert_eq!(res["data"]["top_suspects"].as_array().unwrap().len(), 2, "inline capped at limit");
+    assert_eq!(
+        res["data"]["top_suspects"].as_array().unwrap().len(),
+        2,
+        "inline capped at limit"
+    );
 
-    let data_path = res["data"]["data_path"].as_str().expect("data_path set when truncated");
+    let data_path = res["data"]["data_path"]
+        .as_str()
+        .expect("data_path set when truncated");
     let disk: Value = serde_json::from_str(&fs::read_to_string(data_path).unwrap()).unwrap();
-    assert_eq!(disk["top_suspects"].as_array().unwrap().len(), 5, "full list on disk");
+    assert_eq!(
+        disk["top_suspects"].as_array().unwrap().len(),
+        5,
+        "full list on disk"
+    );
     assert_eq!(disk["truncated"], false);
     // Written under repo/.murmur/coverage/.
     assert_eq!(

@@ -50,7 +50,10 @@ impl TestDir {
             .as_nanos();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let mut path = std::env::temp_dir();
-        path.push(format!("tool-test-report-it-{}-{nanos}-{n}", std::process::id()));
+        path.push(format!(
+            "tool-test-report-it-{}-{nanos}-{n}",
+            std::process::id()
+        ));
         fs::create_dir_all(&path).expect("temp test directory should be created");
         Self { path }
     }
@@ -78,7 +81,12 @@ fn run_tool(op: Value) -> Value {
         .stderr(Stdio::piped())
         .spawn()
         .expect("binary should start");
-    child.stdin.take().unwrap().write_all(envelope.as_bytes()).unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(envelope.as_bytes())
+        .unwrap();
     let output = child.wait_with_output().expect("tool should complete");
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Invariant: stdout is always exactly one JSON object, never partial output.
@@ -133,7 +141,10 @@ fn failures(res: &Value) -> &Vec<Value> {
 
 #[test]
 fn scenario_01_cargo_test_parse() {
-    let res = run_tool(parse_op(&fixtures_dir().join("cargo_test.txt"), "cargo_test"));
+    let res = run_tool(parse_op(
+        &fixtures_dir().join("cargo_test.txt"),
+        "cargo_test",
+    ));
     assert_eq!(res["status"], "failed"); // tests failed → status mirrors outcome
     assert_eq!(res["data"]["format_used"], "cargo_test");
     assert_eq!(res["data"]["passed"], 3);
@@ -204,7 +215,10 @@ fn scenario_04_jest_parse() {
     assert_eq!(f[0]["line"], 10);
     assert_eq!(f[0]["exception"], "AssertionError");
     assert_eq!(f[1]["exception"], "TypeError");
-    assert!(f[1]["message"].as_str().unwrap().contains("Cannot read properties"));
+    assert!(f[1]["message"]
+        .as_str()
+        .unwrap()
+        .contains("Cannot read properties"));
 }
 
 // ── 5. auto detection ─────────────────────────────────────────────────────────
@@ -216,7 +230,10 @@ fn scenario_05_auto_matches_explicit() {
         let explicit = run_tool(parse_op(&path, fmt));
         let auto = run_tool(parse_op(&path, "auto"));
         assert_eq!(auto["data"]["format_used"], fmt, "auto should detect {fmt}");
-        assert_eq!(auto["data"], explicit["data"], "auto output must equal explicit for {fmt}");
+        assert_eq!(
+            auto["data"], explicit["data"],
+            "auto output must equal explicit for {fmt}"
+        );
     }
 }
 
@@ -226,13 +243,20 @@ fn scenario_05_auto_matches_explicit() {
 fn scenario_06_auto_unrecognized_fails() {
     let dir = TestDir::new();
     let path = dir.path().join("garbage.txt");
-    fs::write(&path, "this is not any known test runner output\njust prose\n").unwrap();
+    fs::write(
+        &path,
+        "this is not any known test runner output\njust prose\n",
+    )
+    .unwrap();
     let res = run_tool(parse_op(&path, "auto"));
     assert_eq!(res["status"], "failed");
     assert_eq!(res["ok"], false);
     assert!(res["data"].is_null());
     let msg = res["message"].as_str().unwrap();
-    assert!(msg.contains("auto-detect") && msg.contains("format"), "msg was: {msg}");
+    assert!(
+        msg.contains("auto-detect") && msg.contains("format"),
+        "msg was: {msg}"
+    );
 }
 
 // ── 7. stable_id unique match ─────────────────────────────────────────────────
@@ -280,8 +304,16 @@ fn scenario_09_stable_id_null_when_ambiguous() {
     build_graph_db(
         repo.path(),
         &[
-            ("tests", "test_add_wrong", "rust://fixture_crate/tests#test_add_wrong(->())"),
-            ("tests", "test_add_wrong", "rust://fixture_crate/tests#test_add_wrong(i64->())"),
+            (
+                "tests",
+                "test_add_wrong",
+                "rust://fixture_crate/tests#test_add_wrong(->())",
+            ),
+            (
+                "tests",
+                "test_add_wrong",
+                "rust://fixture_crate/tests#test_add_wrong(i64->())",
+            ),
         ],
     );
     let res = run_tool(json!({
@@ -320,9 +352,15 @@ fn scenario_10_large_list_truncated_to_disk() {
     assert_eq!(res["data"]["truncated"], true);
     assert_eq!(failures(&res).len(), 50, "inline list capped at 50");
 
-    let data_path = res["data"]["data_path"].as_str().expect("data_path set when truncated");
+    let data_path = res["data"]["data_path"]
+        .as_str()
+        .expect("data_path set when truncated");
     let disk: Value = serde_json::from_str(&fs::read_to_string(data_path).unwrap()).unwrap();
-    assert_eq!(disk["failures"].as_array().unwrap().len(), 60, "full list on disk");
+    assert_eq!(
+        disk["failures"].as_array().unwrap().len(),
+        60,
+        "full list on disk"
+    );
     assert_eq!(disk["truncated"], false);
     // written next to the input file
     assert_eq!(
@@ -336,7 +374,10 @@ fn scenario_10_large_list_truncated_to_disk() {
 
 #[test]
 fn scenario_11_below_cap_inline() {
-    let res = run_tool(parse_op(&fixtures_dir().join("cargo_test.txt"), "cargo_test"));
+    let res = run_tool(parse_op(
+        &fixtures_dir().join("cargo_test.txt"),
+        "cargo_test",
+    ));
     assert_eq!(res["data"]["truncated"], false);
     assert!(res["data"]["data_path"].is_null());
     assert_eq!(failures(&res).len(), 2);
@@ -346,11 +387,17 @@ fn scenario_11_below_cap_inline() {
 
 #[test]
 fn scenario_12_missing_input_file_fails() {
-    let res = run_tool(parse_op(Path::new("/nonexistent/definitely/missing.txt"), "cargo_test"));
+    let res = run_tool(parse_op(
+        Path::new("/nonexistent/definitely/missing.txt"),
+        "cargo_test",
+    ));
     assert_eq!(res["status"], "failed");
     assert_eq!(res["ok"], false);
     assert!(res["data"].is_null());
-    assert!(res["message"].as_str().unwrap().contains("could not read input_path"));
+    assert!(res["message"]
+        .as_str()
+        .unwrap()
+        .contains("could not read input_path"));
 }
 
 // ── 13. missing required field ────────────────────────────────────────────────
@@ -374,7 +421,10 @@ fn scenario_13_missing_required_field_fails() {
 fn scenario_14_malformed_operation_and_format_fails() {
     let res = run_tool(json!({ "operation": "explode", "input_path": "/tmp/x.txt" }));
     assert_eq!(res["status"], "failed");
-    assert!(res["message"].as_str().unwrap().contains("unknown operation"));
+    assert!(res["message"]
+        .as_str()
+        .unwrap()
+        .contains("unknown operation"));
 
     // Unknown explicit format.
     let dir = TestDir::new();

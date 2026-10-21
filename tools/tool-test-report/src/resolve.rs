@@ -36,7 +36,9 @@ pub fn resolve_stable_ids(repo_path: &str, failures: &mut [Failure]) {
 
     for f in failures.iter_mut() {
         let (module, qualified) = split_test_path(&f.test_name);
-        let rows = stmt.query_map(rusqlite::params![module, qualified], |r| r.get::<_, String>(0));
+        let rows = stmt.query_map(rusqlite::params![module, qualified], |r| {
+            r.get::<_, String>(0)
+        });
         let ids: Vec<String> = match rows {
             Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
             Err(_) => continue,

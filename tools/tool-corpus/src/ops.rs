@@ -90,7 +90,11 @@ pub struct OpError {
 
 impl OpError {
     pub fn new(kind: &'static str, message: impl Into<String>) -> Self {
-        Self { kind, message: message.into(), skipped_lines: Vec::new() }
+        Self {
+            kind,
+            message: message.into(),
+            skipped_lines: Vec::new(),
+        }
     }
 
     /// Attach the skip list of the scan this failure was raised after.
@@ -175,7 +179,10 @@ fn parse_call(data: &str) -> Result<(String, Map<String, Value>), OpError> {
         other => {
             return Err(OpError::new(
                 kind::INVALID_INPUT,
-                format!("input must be a JSON object, got {}", json_type_name(&other)),
+                format!(
+                    "input must be a JSON object, got {}",
+                    json_type_name(&other)
+                ),
             ))
         }
     };
@@ -374,16 +381,15 @@ fn op_append(
 fn op_get(store: &Store, args: &Map<String, Value>) -> Result<Response, OpError> {
     let id = required_str(args, "id")?;
     let scan = store.read_all()?;
-    let record = scan
-        .records
-        .iter()
-        .find(|r| r.id == id)
-        .ok_or_else(|| {
-            // A skip list here is the difference between "no such record" and "hidden
-            // behind a line I could not read".
-            OpError::new(kind::NOT_FOUND, format!("no record carries the id \"{id}\""))
-                .with_skipped(&scan.skipped_lines)
-        })?;
+    let record = scan.records.iter().find(|r| r.id == id).ok_or_else(|| {
+        // A skip list here is the difference between "no such record" and "hidden
+        // behind a line I could not read".
+        OpError::new(
+            kind::NOT_FOUND,
+            format!("no record carries the id \"{id}\""),
+        )
+        .with_skipped(&scan.skipped_lines)
+    })?;
 
     let withdrawn = withdrawal_index(&scan.records).get(id).cloned();
     let (view, summary) = match withdrawn {
@@ -392,11 +398,20 @@ fn op_get(store: &Store, args: &Map<String, Value>) -> Result<Response, OpError>
             // The record is still on disk untouched; what a withdrawal removes is the
             // caller's access to its body, not the line.
             view.insert("body".to_string(), Value::Null);
-            view.insert("withdrawn_by".to_string(), Value::String(withdrawal.by.clone()));
-            view.insert("withdrawn_at".to_string(), Value::String(withdrawal.at.clone()));
+            view.insert(
+                "withdrawn_by".to_string(),
+                Value::String(withdrawal.by.clone()),
+            );
+            view.insert(
+                "withdrawn_at".to_string(),
+                Value::String(withdrawal.at.clone()),
+            );
             (
                 view,
-                format!("{id} is withdrawn by {} at {}", withdrawal.by, withdrawal.at),
+                format!(
+                    "{id} is withdrawn by {} at {}",
+                    withdrawal.by, withdrawal.at
+                ),
             )
         }
         None => (
@@ -550,7 +565,9 @@ fn excerpt_for(query_terms: &BTreeSet<String>, record: &Record) -> String {
         .iter()
         .find(|segment| terms(segment).iter().any(|term| query_terms.contains(term)))
         .or_else(|| segments.first());
-    chosen.map(|segment| single_line_excerpt(segment)).unwrap_or_default()
+    chosen
+        .map(|segment| single_line_excerpt(segment))
+        .unwrap_or_default()
 }
 
 // ── verify ────────────────────────────────────────────────────────────────────
@@ -603,7 +620,10 @@ fn score_record(query_terms: &BTreeSet<String>, record: &Record) -> f64 {
         .iter()
         .flat_map(|segment| terms(segment))
         .collect();
-    let matched = query_terms.iter().filter(|t| record_terms.contains(*t)).count();
+    let matched = query_terms
+        .iter()
+        .filter(|t| record_terms.contains(*t))
+        .count();
     matched as f64 / query_terms.len() as f64
 }
 
@@ -642,7 +662,11 @@ pub(crate) fn single_line_excerpt(text: &str) -> String {
 
 /// The query as it appears in `resource_id`: lowercased, whitespace-normalised.
 fn normalise_query(query: &str) -> String {
-    query.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
+    query
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ── envelope helpers ──────────────────────────────────────────────────────────
@@ -699,10 +723,16 @@ fn add_skip_fields(envelope: &mut Value, summary: &mut String, skipped: &[u64]) 
         return;
     }
     if let Value::Object(map) = envelope {
-        let reported: Vec<Value> =
-            skipped.iter().take(MAX_REPORTED_LINES).map(|line| json!(line)).collect();
+        let reported: Vec<Value> = skipped
+            .iter()
+            .take(MAX_REPORTED_LINES)
+            .map(|line| json!(line))
+            .collect();
         map.insert("skipped_lines".to_string(), Value::Array(reported));
-        map.insert("skipped_line_count".to_string(), json!(skipped.len() as u64));
+        map.insert(
+            "skipped_line_count".to_string(),
+            json!(skipped.len() as u64),
+        );
     }
     summary.push_str(&format!("; skipped {} unparseable line(s)", skipped.len()));
 }
@@ -712,7 +742,10 @@ fn record_value(record: &Record) -> Result<Map<String, Value>, OpError> {
         Ok(Value::Object(map)) => Ok(map),
         Ok(_) | Err(_) => Err(OpError::new(
             kind::IO_ERROR,
-            format!("record {} could not be rendered as a JSON object", record.id),
+            format!(
+                "record {} could not be rendered as a JSON object",
+                record.id
+            ),
         )),
     }
 }
@@ -730,7 +763,10 @@ fn required_str<'a>(args: &'a Map<String, Value>, field: &str) -> Result<&'a str
         )),
         Some(other) => Err(OpError::new(
             kind::INVALID_INPUT,
-            format!("\"{field}\" must be a string, got {}", json_type_name(other)),
+            format!(
+                "\"{field}\" must be a string, got {}",
+                json_type_name(other)
+            ),
         )),
         None => Err(OpError::new(
             kind::INVALID_INPUT,
@@ -749,7 +785,10 @@ fn optional_str<'a>(args: &'a Map<String, Value>, field: &str) -> Result<Option<
         )),
         Some(other) => Err(OpError::new(
             kind::INVALID_INPUT,
-            format!("\"{field}\" must be a string, got {}", json_type_name(other)),
+            format!(
+                "\"{field}\" must be a string, got {}",
+                json_type_name(other)
+            ),
         )),
     }
 }

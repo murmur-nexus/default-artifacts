@@ -76,7 +76,10 @@ pub fn parse_file(source: &str, package: &str, module: &str) -> Parsed {
         .set_language(&tree_sitter_rust::language())
         .expect("tree-sitter-rust grammar loads");
 
-    let mut out = Parsed { symbols: Vec::new(), edges: Vec::new() };
+    let mut out = Parsed {
+        symbols: Vec::new(),
+        edges: Vec::new(),
+    };
 
     let tree = match parser.parse(source, None) {
         Some(t) => t,
@@ -85,7 +88,11 @@ pub fn parse_file(source: &str, package: &str, module: &str) -> Parsed {
     let bytes = source.as_bytes();
     let root = tree.root_node();
 
-    let mut ctx = Ctx { bytes, package, out: &mut out };
+    let mut ctx = Ctx {
+        bytes,
+        package,
+        out: &mut out,
+    };
     ctx.walk_items(root, module, None, None);
     out
 }
@@ -138,7 +145,10 @@ impl<'a> Ctx<'a> {
                 }
                 "trait_item" => {
                     let sym = self.emit_named(child, module, type_prefix, parent, "trait");
-                    if let (Some(name), Some(body)) = (self.field_text(child, "name"), child.child_by_field_name("body")) {
+                    if let (Some(name), Some(body)) = (
+                        self.field_text(child, "name"),
+                        child.child_by_field_name("body"),
+                    ) {
                         // Trait methods qualify under the trait name and are
                         // `contains`-children of the trait symbol.
                         self.walk_items(body, module, Some(&name), sym.as_deref());
@@ -146,8 +156,15 @@ impl<'a> Ctx<'a> {
                 }
                 "mod_item" => {
                     let sym = self.emit_named(child, module, type_prefix, parent, "mod");
-                    if let (Some(name), Some(body)) = (self.field_text(child, "name"), child.child_by_field_name("body")) {
-                        let inner = if module.is_empty() { name.clone() } else { format!("{module}::{name}") };
+                    if let (Some(name), Some(body)) = (
+                        self.field_text(child, "name"),
+                        child.child_by_field_name("body"),
+                    ) {
+                        let inner = if module.is_empty() {
+                            name.clone()
+                        } else {
+                            format!("{module}::{name}")
+                        };
                         self.walk_items(body, &inner, None, sym.as_deref());
                     }
                 }
@@ -196,7 +213,9 @@ impl<'a> Ctx<'a> {
         type_prefix: Option<&str>,
         parent: Option<&str>,
     ) {
-        let Some(name) = self.field_text(node, "name") else { return };
+        let Some(name) = self.field_text(node, "name") else {
+            return;
+        };
         let qualified = qualify(type_prefix, &name);
         let signature = self.signature_body(node);
         let symbol_id = make_symbol_id("rust", self.package, module, &qualified, &signature);
@@ -365,10 +384,12 @@ impl<'a> Ctx<'a> {
                 Some((name, "path".to_string()))
             }
             // x.foo() / x.foo::<T>() -> foo (receiver type unknown at Level 1).
-            "field_expression" => {
-                func.child_by_field_name("field").map(|n| (self.text(n), "method".to_string()))
-            }
-            "generic_function" => func.child_by_field_name("function").and_then(|f| self.callee_name(f)),
+            "field_expression" => func
+                .child_by_field_name("field")
+                .map(|n| (self.text(n), "method".to_string())),
+            "generic_function" => func
+                .child_by_field_name("function")
+                .and_then(|f| self.callee_name(f)),
             _ => None,
         }
     }
@@ -384,7 +405,10 @@ impl<'a> Ctx<'a> {
             }
             let raw = self.text(s);
             let t = raw.trim();
-            let is_doc = t.starts_with("///") || t.starts_with("//!") || t.starts_with("/**") || t.starts_with("/*!");
+            let is_doc = t.starts_with("///")
+                || t.starts_with("//!")
+                || t.starts_with("/**")
+                || t.starts_with("/*!");
             if !is_doc {
                 break;
             }

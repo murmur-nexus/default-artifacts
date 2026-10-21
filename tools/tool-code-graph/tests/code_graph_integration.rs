@@ -31,7 +31,10 @@ impl TestDir {
             .as_nanos();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let mut path = std::env::temp_dir();
-        path.push(format!("tool-code-graph-it-{}-{nanos}-{n}", std::process::id()));
+        path.push(format!(
+            "tool-code-graph-it-{}-{nanos}-{n}",
+            std::process::id()
+        ));
         fs::create_dir_all(&path).expect("temp test directory should be created");
         Self { path }
     }
@@ -123,7 +126,12 @@ fn run_tool(repo: &Path, op: Value) -> Value {
         .stderr(Stdio::piped())
         .spawn()
         .expect("binary should start");
-    child.stdin.take().unwrap().write_all(envelope.as_bytes()).unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(envelope.as_bytes())
+        .unwrap();
     let output = child.wait_with_output().expect("tool should complete");
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Invariant: stdout is always exactly one JSON object, never partial output.
@@ -132,7 +140,10 @@ fn run_tool(repo: &Path, op: Value) -> Value {
 }
 
 fn index(repo: &Path) -> Value {
-    run_tool(repo, json!({ "operation": "index_repository", "repo_path": repo.to_str().unwrap() }))
+    run_tool(
+        repo,
+        json!({ "operation": "index_repository", "repo_path": repo.to_str().unwrap() }),
+    )
 }
 
 // ── Scenario 1: index populates and reports a summary ─────────────────────────
@@ -146,7 +157,7 @@ fn scenario_01_index_populates_and_reports() {
     assert!(r["total_symbols"].as_i64().unwrap() >= 6, "symbols: {r}");
     assert!(r["total_edges"].as_i64().unwrap() >= 1, "edges: {r}");
     assert_eq!(r["changed_files"], 2); // lib.rs + util.rs
-    // The db file is really on disk.
+                                       // The db file is really on disk.
     assert!(td.path().join(".murmur/code-graph.db").exists());
 }
 
@@ -177,9 +188,16 @@ fn scenario_03_find_symbol_matches() {
         json!({ "operation": "find_symbol", "repo_path": td.path().to_str().unwrap(), "query": "widget" }),
     );
     assert_eq!(r["status"], "passed");
-    let ids: Vec<&str> =
-        r["matches"].as_array().unwrap().iter().map(|m| m["symbol_id"].as_str().unwrap()).collect();
-    assert!(ids.contains(&SYM_NEW) || ids.contains(&SYM_DOUBLED), "matches: {ids:?}");
+    let ids: Vec<&str> = r["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["symbol_id"].as_str().unwrap())
+        .collect();
+    assert!(
+        ids.contains(&SYM_NEW) || ids.contains(&SYM_DOUBLED),
+        "matches: {ids:?}"
+    );
 }
 
 // ── Scenario 4: find_symbol empty result is not an error ──────────────────────
@@ -214,8 +232,16 @@ fn scenario_05_get_symbol_detail() {
     assert_eq!(r["kind"], "function");
     assert_eq!(r["file"], "src/lib.rs");
     // top calls Widget::new and Widget::doubled.
-    let callees: Vec<&str> = r["callees"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
-    assert!(callees.contains(&SYM_NEW) && callees.contains(&SYM_DOUBLED), "callees: {callees:?}");
+    let callees: Vec<&str> = r["callees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(
+        callees.contains(&SYM_NEW) && callees.contains(&SYM_DOUBLED),
+        "callees: {callees:?}"
+    );
     // Declared resource_id is the symbol_id itself (no path field to sniff).
     assert_eq!(r["metadata"]["resource_id"], SYM_TOP);
     assert_eq!(r["metadata"]["state_effect"], "read");
@@ -287,10 +313,20 @@ fn scenario_08_slice_bounded_by_depth() {
                 "symbol_id": SYM_TOP, "max_depth": 1, "max_nodes": 50 }),
     );
     assert_eq!(r["status"], "passed");
-    let ids: Vec<&str> =
-        r["nodes"].as_array().unwrap().iter().map(|n| n["symbol_id"].as_str().unwrap()).collect();
-    assert!(ids.contains(&SYM_TOP) && ids.contains(&SYM_DOUBLED), "ids: {ids:?}");
-    assert!(!ids.contains(&SYM_ADD), "add is depth 2, excluded at max_depth 1: {ids:?}");
+    let ids: Vec<&str> = r["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["symbol_id"].as_str().unwrap())
+        .collect();
+    assert!(
+        ids.contains(&SYM_TOP) && ids.contains(&SYM_DOUBLED),
+        "ids: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&SYM_ADD),
+        "add is depth 2, excluded at max_depth 1: {ids:?}"
+    );
 }
 
 // ── Scenario 8b: slice terminates on a cyclic call graph ──────────────────────
@@ -308,7 +344,10 @@ fn scenario_08b_slice_terminates_on_cycle() {
     );
     assert_eq!(r["status"], "passed");
     // Only ping and pong exist in the cycle; no runaway.
-    assert_eq!(r["node_count"], 2, "cycle should yield exactly ping+pong: {r}");
+    assert_eq!(
+        r["node_count"], 2,
+        "cycle should yield exactly ping+pong: {r}"
+    );
 }
 
 // ── Scenario 9: slice bounded by max_nodes + summary/data_path ────────────────
@@ -347,7 +386,12 @@ fn scenario_10_explain_path_found() {
     );
     assert_eq!(r["status"], "passed");
     assert_eq!(r["found"], true);
-    let path: Vec<&str> = r["path"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    let path: Vec<&str> = r["path"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
     assert_eq!(path.first(), Some(&SYM_TOP));
     assert_eq!(path.last(), Some(&SYM_ADD));
 }
@@ -375,11 +419,17 @@ fn scenario_11_explain_path_no_path_is_passed() {
 #[test]
 fn scenario_12_missing_operation_failed() {
     let td = TestDir::new();
-    let missing = run_tool(td.path(), json!({ "repo_path": td.path().to_str().unwrap() }));
+    let missing = run_tool(
+        td.path(),
+        json!({ "repo_path": td.path().to_str().unwrap() }),
+    );
     assert_eq!(missing["status"], "failed");
     let bogus = run_tool(td.path(), json!({ "operation": "frobnicate" }));
     assert_eq!(bogus["status"], "failed");
-    assert!(bogus["message"].as_str().unwrap().contains("unknown operation"));
+    assert!(bogus["message"]
+        .as_str()
+        .unwrap()
+        .contains("unknown operation"));
 }
 
 // ── Scenario 13: missing required per-op field → failed ───────────────────────
@@ -523,8 +573,16 @@ mod unit_tests {
         "//! HTTP handlers.\n\n#[get(\"/core\")]\npub fn handler() -> i64 {\n    svc()\n}\n",
     )
     .unwrap();
-    fs::write(repo.join("src/ambig_a.rs"), "pub fn shared() -> i64 {\n    0\n}\n").unwrap();
-    fs::write(repo.join("src/ambig_b.rs"), "pub fn shared() -> i64 {\n    1\n}\n").unwrap();
+    fs::write(
+        repo.join("src/ambig_a.rs"),
+        "pub fn shared() -> i64 {\n    0\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/ambig_b.rs"),
+        "pub fn shared() -> i64 {\n    1\n}\n",
+    )
+    .unwrap();
 }
 
 fn ids(list: &Value) -> Vec<String> {
@@ -577,18 +635,36 @@ fn impact_01_full_shape_and_confidence() {
     // callers = the reverse call-graph closure (roots excluded).
     let callers = ids(&r["callers"]);
     for expect in [I_HELPER, I_SAVE, I_TEST_CORE, I_RUN, I_SERVICE, I_HANDLER] {
-        assert!(callers.contains(&expect.to_string()), "missing caller {expect}: {callers:?}");
+        assert!(
+            callers.contains(&expect.to_string()),
+            "missing caller {expect}: {callers:?}"
+        );
     }
-    assert!(!callers.contains(&I_CORE.to_string()), "root must not appear as its own caller");
+    assert!(
+        !callers.contains(&I_CORE.to_string()),
+        "root must not appear as its own caller"
+    );
 
     // Confidence: unique free/path calls are definite; the method hop to helper
     // makes run heuristic (weakest along the path).
-    assert_eq!(conf_of(&r["callers"], I_HELPER).as_deref(), Some("definite"));
+    assert_eq!(
+        conf_of(&r["callers"], I_HELPER).as_deref(),
+        Some("definite")
+    );
     assert_eq!(conf_of(&r["callers"], I_SAVE).as_deref(), Some("definite"));
-    assert_eq!(conf_of(&r["callers"], I_SERVICE).as_deref(), Some("definite"));
-    assert_eq!(conf_of(&r["callers"], I_HANDLER).as_deref(), Some("definite"));
-    assert_eq!(conf_of(&r["callers"], I_RUN).as_deref(), Some("heuristic"),
-        "run reaches core via a method hop → weakest confidence heuristic: {r}");
+    assert_eq!(
+        conf_of(&r["callers"], I_SERVICE).as_deref(),
+        Some("definite")
+    );
+    assert_eq!(
+        conf_of(&r["callers"], I_HANDLER).as_deref(),
+        Some("definite")
+    );
+    assert_eq!(
+        conf_of(&r["callers"], I_RUN).as_deref(),
+        Some("heuristic"),
+        "run reaches core via a method hop → weakest confidence heuristic: {r}"
+    );
 
     // Classification buckets (drawn from roots ∪ callers).
     let tests = ids(&r["tests"]);
@@ -596,14 +672,26 @@ fn impact_01_full_shape_and_confidence() {
     let routes = ids(&r["routes"]);
     assert_eq!(routes, vec![I_HANDLER.to_string()], "routes: {routes:?}");
     let persistence = ids(&r["persistence_operations"]);
-    assert!(persistence.contains(&I_SAVE.to_string()), "persistence: {persistence:?}");
+    assert!(
+        persistence.contains(&I_SAVE.to_string()),
+        "persistence: {persistence:?}"
+    );
     let public = ids(&r["public_apis"]);
     for expect in [I_CORE, I_SAVE, I_SERVICE, I_HANDLER, I_RUN] {
-        assert!(public.contains(&expect.to_string()), "public should contain {expect}: {public:?}");
+        assert!(
+            public.contains(&expect.to_string()),
+            "public should contain {expect}: {public:?}"
+        );
     }
     // private helper / non-pub test fn are not public APIs.
-    assert!(!public.contains(&I_HELPER.to_string()), "helper is private: {public:?}");
-    assert!(!public.contains(&I_TEST_CORE.to_string()), "test_core is not pub: {public:?}");
+    assert!(
+        !public.contains(&I_HELPER.to_string()),
+        "helper is private: {public:?}"
+    );
+    assert!(
+        !public.contains(&I_TEST_CORE.to_string()),
+        "test_core is not pub: {public:?}"
+    );
 
     assert_eq!(r["truncated"], false);
     // Full payload is on disk.
@@ -622,17 +710,32 @@ fn impact_02_root_classification() {
     // Editing the test fn itself: it is a root AND classified as a test.
     let rt = impact_over_symbol(td.path(), "src/lib.rs", I_TEST_CORE, 50);
     assert_eq!(rt["status"], "passed");
-    assert!(ids(&rt["tests"]).contains(&I_TEST_CORE.to_string()), "root test bucket: {rt}");
+    assert!(
+        ids(&rt["tests"]).contains(&I_TEST_CORE.to_string()),
+        "root test bucket: {rt}"
+    );
 
     // Editing the handler: root, and classified as a route + public api.
     let rh = impact_over_symbol(td.path(), "src/handlers.rs", I_HANDLER, 50);
-    assert!(ids(&rh["routes"]).contains(&I_HANDLER.to_string()), "root route bucket: {rh}");
-    assert!(ids(&rh["public_apis"]).contains(&I_HANDLER.to_string()), "root public bucket: {rh}");
+    assert!(
+        ids(&rh["routes"]).contains(&I_HANDLER.to_string()),
+        "root route bucket: {rh}"
+    );
+    assert!(
+        ids(&rh["public_apis"]).contains(&I_HANDLER.to_string()),
+        "root public bucket: {rh}"
+    );
 
     // Editing save: root, classified as a persistence op + public api.
     let rs = impact_over_symbol(td.path(), "src/repo.rs", I_SAVE, 50);
-    assert!(ids(&rs["persistence_operations"]).contains(&I_SAVE.to_string()), "root persist: {rs}");
-    assert!(ids(&rs["public_apis"]).contains(&I_SAVE.to_string()), "root public: {rs}");
+    assert!(
+        ids(&rs["persistence_operations"]).contains(&I_SAVE.to_string()),
+        "root persist: {rs}"
+    );
+    assert!(
+        ids(&rs["public_apis"]).contains(&I_SAVE.to_string()),
+        "root public: {rs}"
+    );
 }
 
 // ── impact 03: ambiguous free call surfaces as `possible` on the caller ───────
@@ -648,8 +751,11 @@ fn impact_03_ambiguous_name_is_possible() {
     // ambiguous name → possible.
     let r = impact_over_symbol(td.path(), "src/ambig_a.rs", I_SHARED_A, 50);
     assert_eq!(r["status"], "passed", "{r}");
-    assert_eq!(conf_of(&r["callers"], I_AMBIG_CALLER).as_deref(), Some("possible"),
-        "ambiguous free call must be possible: {r}");
+    assert_eq!(
+        conf_of(&r["callers"], I_AMBIG_CALLER).as_deref(),
+        Some("possible"),
+        "ambiguous free call must be possible: {r}"
+    );
 }
 
 // ── impact 04: edge-level confidence for all four cases (direct DB inspection) ─
@@ -684,7 +790,11 @@ fn impact_04_edge_confidence_in_db() {
 
     // contains edges are always definite.
     let contains_conf: String = conn
-        .query_row("SELECT confidence FROM edges WHERE edge_kind = 'contains' LIMIT 1", [], |r| r.get(0))
+        .query_row(
+            "SELECT confidence FROM edges WHERE edge_kind = 'contains' LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(contains_conf, "definite");
 }
@@ -756,14 +866,20 @@ fn impact_08_malformed_inputs_failed() {
         json!({ "operation": "impact_analysis", "repo_path": base, "file": "src/lib.rs", "end_line": 2 }),
     );
     assert_eq!(missing_start["status"], "failed");
-    assert!(missing_start["message"].as_str().unwrap().contains("start_line"));
+    assert!(missing_start["message"]
+        .as_str()
+        .unwrap()
+        .contains("start_line"));
 
     let missing_end = run_tool(
         td.path(),
         json!({ "operation": "impact_analysis", "repo_path": base, "file": "src/lib.rs", "start_line": 2 }),
     );
     assert_eq!(missing_end["status"], "failed");
-    assert!(missing_end["message"].as_str().unwrap().contains("end_line"));
+    assert!(missing_end["message"]
+        .as_str()
+        .unwrap()
+        .contains("end_line"));
 
     let inverted = run_tool(
         td.path(),
@@ -787,7 +903,10 @@ fn impact_09_file_not_indexed_failed() {
                 "file": "src/does_not_exist.rs", "start_line": 1, "end_line": 2 }),
     );
     assert_eq!(r["status"], "failed");
-    assert!(r["message"].as_str().unwrap().contains("not indexed"), "{r}");
+    assert!(
+        r["message"].as_str().unwrap().contains("not indexed"),
+        "{r}"
+    );
 }
 
 // ── impact 10: pre-slice database migrates + clears + repopulates ─────────────
@@ -878,7 +997,10 @@ fn impact_10_pre_slice_db_migrates_and_repopulates() {
         json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap(),
                 "symbol_id": "rust://impact_fixture/#stale()" }),
     );
-    assert_eq!(stale["status"], "failed", "stale symbol must be cleared: {stale}");
+    assert_eq!(
+        stale["status"], "failed",
+        "stale symbol must be cleared: {stale}"
+    );
 
     // core resolves with a *populated* visibility column — only possible if
     // lib.rs was re-parsed despite the matching content hash (i.e. the clear
@@ -887,14 +1009,20 @@ fn impact_10_pre_slice_db_migrates_and_repopulates() {
         td.path(),
         json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap(), "symbol_id": I_CORE }),
     );
-    assert_eq!(g["status"], "passed", "core must resolve post-migration: {g}");
+    assert_eq!(
+        g["status"], "passed",
+        "core must resolve post-migration: {g}"
+    );
     assert_eq!(g["visibility"], "pub", "visibility must be populated: {g}");
 
     // The new columns really exist on disk.
     let conn = Connection::open(&db_path).unwrap();
-    for (table, col) in
-        [("symbols", "visibility"), ("symbols", "attributes"), ("edges", "confidence"), ("edges", "call_style")]
-    {
+    for (table, col) in [
+        ("symbols", "visibility"),
+        ("symbols", "attributes"),
+        ("edges", "confidence"),
+        ("edges", "call_style"),
+    ] {
         let found: i64 = conn
             .query_row(
                 &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
@@ -908,7 +1036,11 @@ fn impact_10_pre_slice_db_migrates_and_repopulates() {
     // And impact_analysis now sees populated confidence data.
     let r = impact_over_symbol(td.path(), "src/lib.rs", I_CORE, 50);
     assert_eq!(r["status"], "passed", "{r}");
-    assert_eq!(conf_of(&r["callers"], I_RUN).as_deref(), Some("heuristic"), "{r}");
+    assert_eq!(
+        conf_of(&r["callers"], I_RUN).as_deref(),
+        Some("heuristic"),
+        "{r}"
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1026,16 +1158,31 @@ fn py_01_index_populates_python_rows() {
     let conn = Connection::open(td.path().join(".murmur/code-graph.db")).unwrap();
     // Every files row is language = 'python' (the upsert_file '\''rust'\'' literal fix).
     let non_python: i64 = conn
-        .query_row("SELECT COUNT(*) FROM files WHERE language != 'python'", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM files WHERE language != 'python'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
-    assert_eq!(non_python, 0, "no file row may read language != python for a pure-Python repo");
+    assert_eq!(
+        non_python, 0,
+        "no file row may read language != python for a pure-Python repo"
+    );
     // Symbols carry language = 'python' and python:// ids.
     let py_syms: i64 = conn
-        .query_row("SELECT COUNT(*) FROM symbols WHERE language = 'python'", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM symbols WHERE language = 'python'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert!(py_syms >= 8, "python symbols: {py_syms}");
     let bad_ids: i64 = conn
-        .query_row("SELECT COUNT(*) FROM symbols WHERE symbol_id NOT LIKE 'python://%'", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM symbols WHERE symbol_id NOT LIKE 'python://%'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(bad_ids, 0, "every symbol id must use the python:// scheme");
 }
@@ -1066,9 +1213,16 @@ fn py_03_find_symbol_matches() {
         json!({ "operation": "find_symbol", "repo_path": td.path().to_str().unwrap(), "query": "widget" }),
     );
     assert_eq!(r["status"], "passed");
-    let ids: Vec<&str> =
-        r["matches"].as_array().unwrap().iter().map(|m| m["symbol_id"].as_str().unwrap()).collect();
-    assert!(ids.contains(&PY_WIDGET) || ids.contains(&PY_DOUBLED), "matches: {ids:?}");
+    let ids: Vec<&str> = r["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["symbol_id"].as_str().unwrap())
+        .collect();
+    assert!(
+        ids.contains(&PY_WIDGET) || ids.contains(&PY_DOUBLED),
+        "matches: {ids:?}"
+    );
 }
 
 // ── py 04: get_symbol full detail (language, visibility, callees/callers) ──────
@@ -1088,8 +1242,16 @@ fn py_04_get_symbol_detail() {
     assert_eq!(r["language"], "python");
     assert_eq!(r["file"], "pyfixture/core.py");
     // top calls Widget (free) and doubled (method); both resolve.
-    let callees: Vec<&str> = r["callees"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
-    assert!(callees.contains(&PY_WIDGET) && callees.contains(&PY_DOUBLED), "callees: {callees:?}");
+    let callees: Vec<&str> = r["callees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(
+        callees.contains(&PY_WIDGET) && callees.contains(&PY_DOUBLED),
+        "callees: {callees:?}"
+    );
     assert_eq!(r["metadata"]["resource_id"], PY_TOP);
 }
 
@@ -1180,10 +1342,20 @@ fn py_08_slice_bounded_by_depth() {
                 "symbol_id": PY_TOP, "max_depth": 1, "max_nodes": 50 }),
     );
     assert_eq!(r["status"], "passed");
-    let ids: Vec<&str> =
-        r["nodes"].as_array().unwrap().iter().map(|n| n["symbol_id"].as_str().unwrap()).collect();
-    assert!(ids.contains(&PY_TOP) && ids.contains(&PY_DOUBLED), "ids: {ids:?}");
-    assert!(!ids.contains(&PY_ADD), "add is depth 2, excluded at max_depth 1: {ids:?}");
+    let ids: Vec<&str> = r["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["symbol_id"].as_str().unwrap())
+        .collect();
+    assert!(
+        ids.contains(&PY_TOP) && ids.contains(&PY_DOUBLED),
+        "ids: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&PY_ADD),
+        "add is depth 2, excluded at max_depth 1: {ids:?}"
+    );
 }
 
 // ── py 09: explain_path finds a path (through a method hop) ────────────────────
@@ -1200,7 +1372,12 @@ fn py_09_explain_path_found() {
     );
     assert_eq!(r["status"], "passed");
     assert_eq!(r["found"], true, "{r}");
-    let path: Vec<&str> = r["path"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    let path: Vec<&str> = r["path"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
     assert_eq!(path.first(), Some(&PY_TOP));
     assert_eq!(path.last(), Some(&PY_ADD));
 }
@@ -1223,24 +1400,48 @@ fn py_10_impact_full_shape() {
     // callers include doubled, _hidden, test_add, and (transitively) top.
     let callers = ids(&r["callers"]);
     for expect in [PY_DOUBLED, PY_HIDDEN, PY_TEST_ADD, PY_TOP] {
-        assert!(callers.contains(&expect.to_string()), "missing caller {expect}: {callers:?}");
+        assert!(
+            callers.contains(&expect.to_string()),
+            "missing caller {expect}: {callers:?}"
+        );
     }
-    assert!(!callers.contains(&PY_ADD.to_string()), "root must not be its own caller");
+    assert!(
+        !callers.contains(&PY_ADD.to_string()),
+        "root must not be its own caller"
+    );
 
     // top reaches add via a method hop (w.doubled()) → heuristic (weakest).
-    assert_eq!(conf_of(&r["callers"], PY_TOP).as_deref(), Some("heuristic"),
-        "top reaches add through a method call → heuristic: {r}");
+    assert_eq!(
+        conf_of(&r["callers"], PY_TOP).as_deref(),
+        Some("heuristic"),
+        "top reaches add through a method call → heuristic: {r}"
+    );
     // doubled -> add is a bare free call to a unique name → definite.
-    assert_eq!(conf_of(&r["callers"], PY_DOUBLED).as_deref(), Some("definite"));
+    assert_eq!(
+        conf_of(&r["callers"], PY_DOUBLED).as_deref(),
+        Some("definite")
+    );
 
     // tests bucket: test_add (test_ prefix + test_*.py file + tests/ dir).
-    assert!(ids(&r["tests"]).contains(&PY_TEST_ADD.to_string()), "tests: {r}");
+    assert!(
+        ids(&r["tests"]).contains(&PY_TEST_ADD.to_string()),
+        "tests: {r}"
+    );
 
     // public_apis: names not starting with _  (add, top, doubled); not _hidden.
     let public = ids(&r["public_apis"]);
-    assert!(public.contains(&PY_ADD.to_string()), "add public: {public:?}");
-    assert!(public.contains(&PY_DOUBLED.to_string()), "doubled public: {public:?}");
-    assert!(!public.contains(&PY_HIDDEN.to_string()), "_hidden is private: {public:?}");
+    assert!(
+        public.contains(&PY_ADD.to_string()),
+        "add public: {public:?}"
+    );
+    assert!(
+        public.contains(&PY_DOUBLED.to_string()),
+        "doubled public: {public:?}"
+    );
+    assert!(
+        !public.contains(&PY_HIDDEN.to_string()),
+        "_hidden is private: {public:?}"
+    );
 }
 
 // ── py 11: impact_analysis — route + persistence classification ───────────────
@@ -1254,11 +1455,17 @@ fn py_11_impact_route_and_persistence() {
     // handler carries @app.get("/core") → route; it is a root with no callers.
     let rh = impact_over_symbol(td.path(), "pyfixture/handlers.py", PY_HANDLER, 50);
     assert_eq!(rh["status"], "passed");
-    assert!(ids(&rh["routes"]).contains(&PY_HANDLER.to_string()), "route bucket: {rh}");
+    assert!(
+        ids(&rh["routes"]).contains(&PY_HANDLER.to_string()),
+        "route bucket: {rh}"
+    );
 
     // save calls execute() (a persistence marker) → persistence bucket.
     let rs = impact_over_symbol(td.path(), "pyfixture/handlers.py", PY_SAVE, 50);
-    assert!(ids(&rs["persistence_operations"]).contains(&PY_SAVE.to_string()), "persist: {rs}");
+    assert!(
+        ids(&rs["persistence_operations"]).contains(&PY_SAVE.to_string()),
+        "persist: {rs}"
+    );
 }
 
 // ── py 12: method call is always heuristic (edge-level DB inspection) ──────────
@@ -1320,7 +1527,11 @@ fn write_mixed_fixture(repo: &Path) {
     )
     .unwrap();
     fs::create_dir_all(repo.join("src")).unwrap();
-    fs::write(repo.join("src/lib.rs"), "pub fn rust_fn() -> i64 {\n    1\n}\n").unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn rust_fn() -> i64 {\n    1\n}\n",
+    )
+    .unwrap();
     // ...and a Python tree beside it.
     fs::create_dir_all(repo.join("py")).unwrap();
     fs::write(
@@ -1342,10 +1553,18 @@ fn py_14_mixed_repo_indexes_both_languages() {
     let conn = Connection::open(td.path().join(".murmur/code-graph.db")).unwrap();
     // Rust file/symbol...
     let rust_files: i64 = conn
-        .query_row("SELECT COUNT(*) FROM files WHERE language = 'rust'", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM files WHERE language = 'rust'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     let py_files: i64 = conn
-        .query_row("SELECT COUNT(*) FROM files WHERE language = 'python'", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM files WHERE language = 'python'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(rust_files, 1, "one rust file");
     assert_eq!(py_files, 1, "one python file");
@@ -1356,7 +1575,10 @@ fn py_14_mixed_repo_indexes_both_languages() {
         json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap(),
                 "symbol_id": "rust://mixcrate/#rust_fn(->i64)" }),
     );
-    assert_eq!(rust_fn["status"], "passed", "rust symbol resolves: {rust_fn}");
+    assert_eq!(
+        rust_fn["status"], "passed",
+        "rust symbol resolves: {rust_fn}"
+    );
     // The Python package name falls back to the repo directory name (an opaque
     // tempdir), so assert the Python symbol via find_symbol rather than a
     // hard-coded id, keeping the test independent of the tempdir name.
@@ -1370,6 +1592,9 @@ fn py_14_mixed_repo_indexes_both_languages() {
         .iter()
         .map(|m| m["symbol_id"].as_str().unwrap().to_string())
         .collect();
-    assert!(ids.iter().any(|s| s.starts_with("python://") && s.contains("py.app#py_fn")),
-        "python symbol indexed in mixed repo: {ids:?}");
+    assert!(
+        ids.iter()
+            .any(|s| s.starts_with("python://") && s.contains("py.app#py_fn")),
+        "python symbol indexed in mixed repo: {ids:?}"
+    );
 }

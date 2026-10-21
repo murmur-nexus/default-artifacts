@@ -27,7 +27,10 @@ pub fn parse_file(source: &str, package: &str, module: &str) -> Parsed {
         .set_language(&tree_sitter_python::language())
         .expect("tree-sitter-python grammar loads");
 
-    let mut out = Parsed { symbols: Vec::new(), edges: Vec::new() };
+    let mut out = Parsed {
+        symbols: Vec::new(),
+        edges: Vec::new(),
+    };
 
     let tree = match parser.parse(source, None) {
         Some(t) => t,
@@ -36,7 +39,11 @@ pub fn parse_file(source: &str, package: &str, module: &str) -> Parsed {
     let bytes = source.as_bytes();
     let root = tree.root_node();
 
-    let mut ctx = Ctx { bytes, package, out: &mut out };
+    let mut ctx = Ctx {
+        bytes,
+        package,
+        out: &mut out,
+    };
     ctx.walk_items(root, module, None, None);
     out
 }
@@ -115,10 +122,14 @@ impl Ctx<'_> {
         parent: Option<&str>,
         attributes: &str,
     ) {
-        let Some(name) = self.field_text(node, "name") else { return };
+        let Some(name) = self.field_text(node, "name") else {
+            return;
+        };
         let qualified = qualify(type_prefix, &name);
         let symbol_id = make_symbol_id("python", self.package, module, &qualified, "");
-        self.push_symbol(&symbol_id, module, &qualified, "", "class", node, attributes);
+        self.push_symbol(
+            &symbol_id, module, &qualified, "", "class", node, attributes,
+        );
         self.push_contains(parent, &symbol_id, &name);
         if let Some(body) = node.child_by_field_name("body") {
             self.walk_items(body, module, Some(&qualified), Some(&symbol_id));
@@ -133,11 +144,15 @@ impl Ctx<'_> {
         parent: Option<&str>,
         attributes: &str,
     ) {
-        let Some(name) = self.field_text(node, "name") else { return };
+        let Some(name) = self.field_text(node, "name") else {
+            return;
+        };
         let qualified = qualify(type_prefix, &name);
         let signature = self.signature_body(node);
         let symbol_id = make_symbol_id("python", self.package, module, &qualified, &signature);
-        self.push_symbol(&symbol_id, module, &qualified, &signature, "function", node, attributes);
+        self.push_symbol(
+            &symbol_id, module, &qualified, &signature, "function", node, attributes,
+        );
         self.push_contains(parent, &symbol_id, &name);
         if let Some(body) = node.child_by_field_name("body") {
             self.collect_calls(body, &symbol_id);
@@ -271,9 +286,9 @@ impl Ctx<'_> {
             "identifier" => Some((self.text(func), "free".to_string())),
             // x.foo() / a.b.foo() -> foo ; the receiver's type is unknown, so
             // every attribute call is conservatively a method call.
-            "attribute" => {
-                func.child_by_field_name("attribute").map(|n| (self.text(n), "method".to_string()))
-            }
+            "attribute" => func
+                .child_by_field_name("attribute")
+                .map(|n| (self.text(n), "method".to_string())),
             _ => None,
         }
     }
@@ -282,14 +297,20 @@ impl Ctx<'_> {
     /// its body, if present. Triple/single quotes and the `r`/`b`/`f` string
     /// prefixes are stripped; interior text is trimmed. `""` when absent.
     fn doc_comment(&self, node: Node) -> String {
-        let Some(body) = node.child_by_field_name("body") else { return String::new() };
+        let Some(body) = node.child_by_field_name("body") else {
+            return String::new();
+        };
         let mut cursor = body.walk();
-        let Some(first) = body.named_children(&mut cursor).next() else { return String::new() };
+        let Some(first) = body.named_children(&mut cursor).next() else {
+            return String::new();
+        };
         if first.kind() != "expression_statement" {
             return String::new();
         }
         let mut inner = first.walk();
-        let Some(expr) = first.named_children(&mut inner).next() else { return String::new() };
+        let Some(expr) = first.named_children(&mut inner).next() else {
+            return String::new();
+        };
         if expr.kind() != "string" {
             return String::new();
         }
@@ -304,7 +325,13 @@ fn clean_docstring(raw: &str) -> String {
     let after_prefix = {
         let bytes = t.as_bytes();
         let mut i = 0;
-        while i < bytes.len() && i < 2 && matches!(bytes[i], b'r' | b'R' | b'b' | b'B' | b'f' | b'F' | b'u' | b'U') {
+        while i < bytes.len()
+            && i < 2
+            && matches!(
+                bytes[i],
+                b'r' | b'R' | b'b' | b'B' | b'f' | b'F' | b'u' | b'U'
+            )
+        {
             i += 1;
         }
         &t[i..]
@@ -312,9 +339,21 @@ fn clean_docstring(raw: &str) -> String {
     let body = after_prefix
         .strip_prefix("\"\"\"")
         .and_then(|s| s.strip_suffix("\"\"\""))
-        .or_else(|| after_prefix.strip_prefix("'''").and_then(|s| s.strip_suffix("'''")))
-        .or_else(|| after_prefix.strip_prefix('"').and_then(|s| s.strip_suffix('"')))
-        .or_else(|| after_prefix.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+        .or_else(|| {
+            after_prefix
+                .strip_prefix("'''")
+                .and_then(|s| s.strip_suffix("'''"))
+        })
+        .or_else(|| {
+            after_prefix
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+        })
+        .or_else(|| {
+            after_prefix
+                .strip_prefix('\'')
+                .and_then(|s| s.strip_suffix('\''))
+        })
         .unwrap_or(after_prefix);
     body.trim().to_string()
 }

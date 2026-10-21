@@ -22,8 +22,8 @@
 
 use std::{env, process::Command};
 
-use tool_create::logic::scaffold_tool_in;
 use tempfile::TempDir;
+use tool_create::logic::scaffold_tool_in;
 
 /// The unit-test result line the child must print. Matched in full rather than on
 /// `"1 passed"` alone, because `cargo test` also runs a doc-test binary whose own line

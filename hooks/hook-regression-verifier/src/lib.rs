@@ -362,7 +362,10 @@ mod tests {
             let tool = tool.as_str();
             let mut st = RegressionState::new();
             st.observe_tool(tool);
-            assert!(!st.first_edit_seen, "{tool} should not count as a source edit");
+            assert!(
+                !st.first_edit_seen,
+                "{tool} should not count as a source edit"
+            );
         }
     }
 

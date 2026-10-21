@@ -85,13 +85,22 @@ struct Call {
 
 impl Call {
     fn kind(&self) -> String {
-        self.envelope["error_kind"].as_str().unwrap_or_default().to_string()
+        self.envelope["error_kind"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
     }
     fn message(&self) -> String {
-        self.envelope["message"].as_str().unwrap_or_default().to_string()
+        self.envelope["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
     }
     fn meta(&self, key: &str) -> Option<&str> {
-        self.metadata.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+        self.metadata
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -105,7 +114,10 @@ fn call_with_config(state: &Path, config: Option<String>, payload: Value) -> Cal
     let response = ops::run(state, config.as_deref(), &payload.to_string());
     let envelope: Value =
         serde_json::from_str(&response.data).expect("the envelope is always valid JSON");
-    assert!(!response.summary.is_empty(), "every response carries a summary");
+    assert!(
+        !response.summary.is_empty(),
+        "every response carries a summary"
+    );
     Call {
         status: response.status,
         summary: response.summary,
@@ -115,13 +127,19 @@ fn call_with_config(state: &Path, config: Option<String>, payload: Value) -> Cal
 }
 
 fn append(state: &Path, type_tag: &str, body: Value) -> Call {
-    call(state, json!({ "operation": "append", "type": type_tag, "body": body }))
+    call(
+        state,
+        json!({ "operation": "append", "type": type_tag, "body": body }),
+    )
 }
 
 fn append_note(state: &Path, text: &str) -> String {
     let c = append(state, "note", json!({ "text": text }));
     assert_eq!(c.status, OpStatus::Passed, "append failed: {}", c.envelope);
-    c.envelope["id"].as_str().expect("append returns an id").to_string()
+    c.envelope["id"]
+        .as_str()
+        .expect("append returns an id")
+        .to_string()
 }
 
 fn corpus_bytes(state: &Path) -> Vec<u8> {
@@ -150,7 +168,12 @@ fn damage_line(state: &Path, line: usize, replacement: &str) {
 fn skipped(call: &Call) -> Vec<u64> {
     call.envelope["skipped_lines"]
         .as_array()
-        .map(|lines| lines.iter().map(|n| n.as_u64().expect("a line number")).collect())
+        .map(|lines| {
+            lines
+                .iter()
+                .map(|n| n.as_u64().expect("a line number"))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -166,7 +189,10 @@ fn append_happy_path() {
     assert_eq!(c.envelope["operation"], "append");
     assert_eq!(c.envelope["deduped"], false);
     let id = c.envelope["id"].as_str().expect("an id");
-    assert!(id.starts_with("not_"), "id must carry the derived prefix: {id}");
+    assert!(
+        id.starts_with("not_"),
+        "id must carry the derived prefix: {id}"
+    );
     assert_eq!(c.meta("state_effect"), Some("mutate"));
     assert_eq!(c.meta("resource_id"), Some(format!("corpus:{id}").as_str()));
 
@@ -177,8 +203,14 @@ fn append_happy_path() {
     assert_eq!(line["type"], "note");
     assert_eq!(line["schema_version"], 1);
     assert!(line["created_at"].as_str().unwrap().ends_with('Z'));
-    assert!(line.get("external_id").is_none(), "absent optional is an absent key");
-    assert!(line.get("withdraws").is_none(), "absent optional is an absent key");
+    assert!(
+        line.get("external_id").is_none(),
+        "absent optional is an absent key"
+    );
+    assert!(
+        line.get("withdraws").is_none(),
+        "absent optional is an absent key"
+    );
 }
 
 #[test]
@@ -230,7 +262,10 @@ fn earlier_bytes_stay_a_byte_exact_prefix_across_three_appends() {
         after_third.starts_with(&after_second),
         "the withdrawal rewrote earlier bytes"
     );
-    assert!(after_third.len() > after_second.len(), "the withdrawal appended nothing");
+    assert!(
+        after_third.len() > after_second.len(),
+        "the withdrawal appended nothing"
+    );
 }
 
 #[test]
@@ -254,9 +289,20 @@ fn a_repeated_external_id_returns_the_first_id_and_changes_nothing() {
     assert_eq!(second.status, OpStatus::Passed, "{}", second.envelope);
     assert_eq!(second.envelope["deduped"], true);
     assert_eq!(second.envelope["id"], id);
-    assert_eq!(corpus_bytes(&state), before, "a deduped append must not write");
-    assert_eq!(second.meta("state_effect"), Some("read"), "a deduped append changed nothing");
-    assert_eq!(second.meta("resource_id"), Some(format!("corpus:{id}").as_str()));
+    assert_eq!(
+        corpus_bytes(&state),
+        before,
+        "a deduped append must not write"
+    );
+    assert_eq!(
+        second.meta("state_effect"),
+        Some("read"),
+        "a deduped append changed nothing"
+    );
+    assert_eq!(
+        second.meta("resource_id"),
+        Some(format!("corpus:{id}").as_str())
+    );
 }
 
 #[test]
@@ -275,7 +321,10 @@ fn the_same_external_id_under_a_different_type_is_not_a_duplicate() {
     assert_eq!(b.status, OpStatus::Passed, "{}", b.envelope);
     assert_eq!(b.envelope["deduped"], false);
     assert_ne!(a.envelope["id"], b.envelope["id"]);
-    assert_eq!(corpus_bytes(&state).iter().filter(|b| **b == b'\n').count(), 2);
+    assert_eq!(
+        corpus_bytes(&state).iter().filter(|b| **b == b'\n').count(),
+        2
+    );
 }
 
 #[test]
@@ -287,12 +336,20 @@ fn a_schema_violation_writes_nothing() {
     let c = append(&state, "note", json!({ "text": 42 }));
     assert_eq!(c.status, OpStatus::Failed, "{}", c.envelope);
     assert_eq!(c.kind(), "schema_violation");
-    assert!(c.message().contains("body.text"), "must name the field: {}", c.message());
+    assert!(
+        c.message().contains("body.text"),
+        "must name the field: {}",
+        c.message()
+    );
     assert_eq!(corpus_bytes(&state), before);
 
     let missing = append(&state, "note", json!({}));
     assert_eq!(missing.kind(), "schema_violation");
-    assert!(missing.message().contains("required"), "{}", missing.message());
+    assert!(
+        missing.message().contains("required"),
+        "{}",
+        missing.message()
+    );
 
     let extra = append(&state, "note", json!({ "text": "x", "sneak": 1 }));
     assert_eq!(extra.kind(), "schema_violation");
@@ -318,7 +375,10 @@ fn append_requires_a_type_and_a_body_even_for_a_withdrawal() {
     let state = state_with_config("append_required");
     let id = append_note(&state, "target");
 
-    let no_type = call(&state, json!({ "operation": "append", "body": { "text": "x" } }));
+    let no_type = call(
+        &state,
+        json!({ "operation": "append", "body": { "text": "x" } }),
+    );
     assert_eq!(no_type.kind(), "invalid_input");
 
     let no_body = call(
@@ -346,7 +406,10 @@ fn withdrawing_a_missing_target_fails() {
     let c = withdraw(&state, "not_00000000000000000000000000000000");
     assert_eq!(c.status, OpStatus::Failed, "{}", c.envelope);
     assert_eq!(c.kind(), "withdraw_target_not_found");
-    assert!(corpus_bytes(&state).is_empty(), "a rejected withdrawal writes nothing");
+    assert!(
+        corpus_bytes(&state).is_empty(),
+        "a rejected withdrawal writes nothing"
+    );
 }
 
 #[test]
@@ -378,7 +441,10 @@ fn withdrawing_a_withdrawal_never_restores_its_target() {
     assert_eq!(got.envelope["record"]["body"], Value::Null);
     assert_eq!(got.envelope["record"]["withdrawn_by"], w1_id);
 
-    let recent = call(&state, json!({ "operation": "read_recent", "type": "note", "n": 3 }));
+    let recent = call(
+        &state,
+        json!({ "operation": "read_recent", "type": "note", "n": 3 }),
+    );
     assert_eq!(recent.envelope["returned"], 0, "{}", recent.envelope);
 }
 
@@ -406,7 +472,10 @@ fn get_resolves_a_live_record_in_full() {
 #[test]
 fn get_on_an_unknown_id_is_not_found() {
     let state = state_with_config("get_missing");
-    let c = call(&state, json!({ "operation": "get", "id": "not_ffffffffffffffffffffffffffffffff" }));
+    let c = call(
+        &state,
+        json!({ "operation": "get", "id": "not_ffffffffffffffffffffffffffffffff" }),
+    );
     assert_eq!(c.status, OpStatus::Failed, "{}", c.envelope);
     assert_eq!(c.kind(), "not_found");
 }
@@ -449,7 +518,10 @@ fn read_recent_is_newest_first_type_filtered_and_withdrawn_excluding() {
     let c_id = append_note(&state, "charlie");
     withdraw(&state, &b);
 
-    let c = call(&state, json!({ "operation": "read_recent", "type": "note", "n": 3 }));
+    let c = call(
+        &state,
+        json!({ "operation": "read_recent", "type": "note", "n": 3 }),
+    );
     assert_eq!(c.status, OpStatus::Passed, "{}", c.envelope);
     let ids: Vec<&str> = c.envelope["records"]
         .as_array()
@@ -470,10 +542,19 @@ fn read_recent_clamps_an_oversized_n_and_reports_both_counts() {
     for i in 0..6 {
         append_note(&state, &format!("entry {i}"));
     }
-    let c = call(&state, json!({ "operation": "read_recent", "type": "note", "n": 100 }));
+    let c = call(
+        &state,
+        json!({ "operation": "read_recent", "type": "note", "n": 100 }),
+    );
     assert_eq!(c.status, OpStatus::Passed, "{}", c.envelope);
-    assert_eq!(c.envelope["requested"], 100, "requested is what was asked for");
-    assert_eq!(c.envelope["returned"], 3, "returned is clamped to read_recent.max");
+    assert_eq!(
+        c.envelope["requested"], 100,
+        "requested is what was asked for"
+    );
+    assert_eq!(
+        c.envelope["returned"], 3,
+        "returned is clamped to read_recent.max"
+    );
     assert_eq!(c.envelope["records"].as_array().unwrap().len(), 3);
 }
 
@@ -483,8 +564,14 @@ fn read_recent_defaults_n_when_it_is_omitted() {
     for i in 0..5 {
         append_note(&state, &format!("entry {i}"));
     }
-    let c = call(&state, json!({ "operation": "read_recent", "type": "note" }));
-    assert_eq!(c.envelope["requested"], 2, "read_recent.default is 2 in this config");
+    let c = call(
+        &state,
+        json!({ "operation": "read_recent", "type": "note" }),
+    );
+    assert_eq!(
+        c.envelope["requested"], 2,
+        "read_recent.default is 2 in this config"
+    );
     assert_eq!(c.envelope["returned"], 2);
 }
 
@@ -516,7 +603,10 @@ fn search_ranks_by_the_fraction_of_distinct_query_terms_matched() {
     let partial = append_note(&state, "rollback only, nothing else");
     let full = append_note(&state, "the rollback plan for the release");
 
-    let c = call(&state, json!({ "operation": "search", "query": "rollback plan", "k": 3 }));
+    let c = call(
+        &state,
+        json!({ "operation": "search", "query": "rollback plan", "k": 3 }),
+    );
     assert_eq!(c.status, OpStatus::Passed, "{}", c.envelope);
     let hits = c.envelope["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 2, "{}", c.envelope);
@@ -524,7 +614,11 @@ fn search_ranks_by_the_fraction_of_distinct_query_terms_matched() {
     assert_eq!(hits[0]["score"], 1.0);
     assert_eq!(hits[0]["type"], "note");
     assert_eq!(hits[0]["excerpt"], "the rollback plan for the release");
-    assert!(hits[0].get("body").is_none(), "a hit is not a record: {}", hits[0]);
+    assert!(
+        hits[0].get("body").is_none(),
+        "a hit is not a record: {}",
+        hits[0]
+    );
     assert!(hits[0]["created_at"].as_str().unwrap().ends_with('Z'));
     assert_eq!(hits[1]["id"], partial);
     assert_eq!(hits[1]["score"], 0.5);
@@ -576,25 +670,38 @@ fn a_same_millisecond_score_tie_orders_newest_first_in_both_retrieval_paths() {
     let file: String = lines.iter().map(|l| format!("{l}\n")).collect();
     std::fs::write(state.join(CORPUS_FILE), file).expect("seed the corpus");
 
-    let hits = call(&state, json!({ "operation": "search", "query": "rollback plan", "k": 3 }));
+    let hits = call(
+        &state,
+        json!({ "operation": "search", "query": "rollback plan", "k": 3 }),
+    );
     let hit_ids: Vec<&str> = hits.envelope["hits"]
         .as_array()
         .unwrap()
         .iter()
         .map(|h| h["id"].as_str().unwrap())
         .collect();
-    assert_eq!(hit_ids, vec![newer, older], "search must be newest-first on a tie");
+    assert_eq!(
+        hit_ids,
+        vec![newer, older],
+        "search must be newest-first on a tie"
+    );
 
     // Both scores are 1.0, so this is purely the tie-break — and it must agree with the
     // other retrieval path, which orders the same two records by the same rule.
-    let recent = call(&state, json!({ "operation": "read_recent", "type": "note", "n": 3 }));
+    let recent = call(
+        &state,
+        json!({ "operation": "read_recent", "type": "note", "n": 3 }),
+    );
     let recent_ids: Vec<&str> = recent.envelope["records"]
         .as_array()
         .unwrap()
         .iter()
         .map(|r| r["id"].as_str().unwrap())
         .collect();
-    assert_eq!(recent_ids, hit_ids, "search and read_recent must agree on a tie");
+    assert_eq!(
+        recent_ids, hit_ids,
+        "search and read_recent must agree on a tie"
+    );
 }
 
 #[test]
@@ -613,7 +720,10 @@ fn search_honours_the_type_filter_and_excludes_withdrawn_records() {
     assert_eq!(hits.len(), 1, "{}", c.envelope);
     assert_eq!(hits[0]["id"], note);
 
-    let unfiltered = call(&state, json!({ "operation": "search", "query": "rollback plan", "k": 3 }));
+    let unfiltered = call(
+        &state,
+        json!({ "operation": "search", "query": "rollback plan", "k": 3 }),
+    );
     assert_eq!(unfiltered.envelope["hits"].as_array().unwrap().len(), 2);
 }
 
@@ -623,10 +733,20 @@ fn search_clamps_k_and_defaults_it() {
     for i in 0..6 {
         append_note(&state, &format!("rollback plan {i}"));
     }
-    let clamped = call(&state, json!({ "operation": "search", "query": "rollback plan", "k": 99 }));
-    assert_eq!(clamped.envelope["hits"].as_array().unwrap().len(), 3, "search.max_k is 3");
+    let clamped = call(
+        &state,
+        json!({ "operation": "search", "query": "rollback plan", "k": 99 }),
+    );
+    assert_eq!(
+        clamped.envelope["hits"].as_array().unwrap().len(),
+        3,
+        "search.max_k is 3"
+    );
 
-    let defaulted = call(&state, json!({ "operation": "search", "query": "rollback plan" }));
+    let defaulted = call(
+        &state,
+        json!({ "operation": "search", "query": "rollback plan" }),
+    );
     assert_eq!(
         defaulted.envelope["hits"].as_array().unwrap().len(),
         2,
@@ -638,7 +758,10 @@ fn search_clamps_k_and_defaults_it() {
 fn search_matching_nothing_succeeds_with_an_empty_hit_list() {
     let state = state_with_config("search_empty");
     append_note(&state, "rollback plan");
-    let c = call(&state, json!({ "operation": "search", "query": "unrelated vocabulary" }));
+    let c = call(
+        &state,
+        json!({ "operation": "search", "query": "unrelated vocabulary" }),
+    );
     assert_eq!(c.status, OpStatus::Passed, "{}", c.envelope);
     assert_eq!(c.envelope["ok"], true);
     assert_eq!(c.envelope["hits"], json!([]));
@@ -658,16 +781,28 @@ fn search_matches_the_type_tag_and_the_external_id() {
     let id = id.envelope["id"].as_str().unwrap().to_string();
 
     let tag_hit = call(&state, json!({ "operation": "search", "query": "note" }));
-    assert_eq!(tag_hit.envelope["hits"][0]["id"], id, "the type tag is searchable");
+    assert_eq!(
+        tag_hit.envelope["hits"][0]["id"], id,
+        "the type tag is searchable"
+    );
 
-    let ext_hit = call(&state, json!({ "operation": "search", "query": "ticket 4711" }));
-    assert_eq!(ext_hit.envelope["hits"][0]["id"], id, "external_id is searchable");
+    let ext_hit = call(
+        &state,
+        json!({ "operation": "search", "query": "ticket 4711" }),
+    );
+    assert_eq!(
+        ext_hit.envelope["hits"][0]["id"], id,
+        "external_id is searchable"
+    );
 }
 
 #[test]
 fn search_normalises_the_query_in_its_resource_id() {
     let state = state_with_config("search_resource");
-    let c = call(&state, json!({ "operation": "search", "query": "  Rollback\t  PLAN \n" }));
+    let c = call(
+        &state,
+        json!({ "operation": "search", "query": "  Rollback\t  PLAN \n" }),
+    );
     assert_eq!(c.meta("resource_id"), Some("corpus:search:rollback plan"));
 }
 
@@ -679,23 +814,44 @@ fn a_search_hit_carries_an_excerpt_and_never_a_body() {
         append_note(&state, &long);
     }
 
-    let c = call(&state, json!({ "operation": "search", "query": "widget", "k": 3 }));
+    let c = call(
+        &state,
+        json!({ "operation": "search", "query": "widget", "k": 3 }),
+    );
     assert_eq!(c.status, OpStatus::Passed, "{}", c.envelope);
     let hits = c.envelope["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 3, "{}", c.envelope);
-    assert!(c.envelope.get("skipped_lines").is_none(), "a clean scan says nothing");
+    assert!(
+        c.envelope.get("skipped_lines").is_none(),
+        "a clean scan says nothing"
+    );
 
     for hit in hits {
-        let keys: Vec<&str> = hit.as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(keys, vec!["created_at", "excerpt", "id", "score", "type"], "{hit}");
+        let keys: Vec<&str> = hit
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["created_at", "excerpt", "id", "score", "type"],
+            "{hit}"
+        );
         let excerpt = hit["excerpt"].as_str().expect("an excerpt");
         assert!(excerpt.starts_with("the widget report"), "{excerpt}");
-        assert!(!excerpt.contains(['\n', '\r', '\t']), "an excerpt is one line: {excerpt}");
+        assert!(
+            !excerpt.contains(['\n', '\r', '\t']),
+            "an excerpt is one line: {excerpt}"
+        );
         assert!(
             excerpt.chars().count() <= 121,
             "at most 120 characters plus the truncation mark: {excerpt}"
         );
-        assert!(excerpt.ends_with('…'), "this source text is past the cap: {excerpt}");
+        assert!(
+            excerpt.ends_with('…'),
+            "this source text is past the cap: {excerpt}"
+        );
     }
 
     // The split is only worth having because the body is still one call away.
@@ -716,7 +872,10 @@ fn an_excerpt_is_drawn_from_the_first_searchable_segment_that_matches() {
     );
 
     let on_leaf = call(&state, json!({ "operation": "search", "query": "widget" }));
-    assert_eq!(on_leaf.envelope["hits"][0]["excerpt"], "the widget is on fire");
+    assert_eq!(
+        on_leaf.envelope["hits"][0]["excerpt"],
+        "the widget is on fire"
+    );
 
     let on_tag = call(&state, json!({ "operation": "search", "query": "open" }));
     assert_eq!(on_tag.envelope["hits"][0]["excerpt"], "open");
@@ -728,7 +887,9 @@ fn an_excerpt_truncates_multi_byte_text_on_a_character_boundary() {
     append_note(&state, &format!("widget {}", "é".repeat(200)));
 
     let c = call(&state, json!({ "operation": "search", "query": "widget" }));
-    let excerpt = c.envelope["hits"][0]["excerpt"].as_str().expect("an excerpt");
+    let excerpt = c.envelope["hits"][0]["excerpt"]
+        .as_str()
+        .expect("an excerpt");
 
     // Counting characters, not bytes: 120 characters of source text plus the mark. A
     // byte-slicing implementation lands mid-`é` and fails here rather than somewhere
@@ -736,7 +897,11 @@ fn an_excerpt_truncates_multi_byte_text_on_a_character_boundary() {
     assert_eq!(excerpt.chars().count(), 121, "{excerpt}");
     assert!(excerpt.ends_with('…'), "{excerpt}");
     assert!(excerpt.starts_with("widget "), "{excerpt}");
-    assert_eq!(excerpt.chars().filter(|c| *c == 'é').count(), 113, "{excerpt}");
+    assert_eq!(
+        excerpt.chars().filter(|c| *c == 'é').count(),
+        113,
+        "{excerpt}"
+    );
 }
 
 #[test]
@@ -763,7 +928,10 @@ fn all_four_operations_survive_a_bad_line_and_report_it() {
 
     // The record appended *after* the bad line is still readable; a bad line hides itself
     // and nothing else.
-    let recent = call(&state, json!({ "operation": "read_recent", "type": "note", "n": 3 }));
+    let recent = call(
+        &state,
+        json!({ "operation": "read_recent", "type": "note", "n": 3 }),
+    );
     let ids: Vec<&str> = recent.envelope["records"]
         .as_array()
         .unwrap()
@@ -780,8 +948,17 @@ fn all_four_operations_survive_a_bad_line_and_report_it() {
     ] {
         let c = call(&state, payload.clone());
         assert_eq!(c.status, OpStatus::Passed, "{}: {}", payload, c.envelope);
-        assert_eq!(c.envelope["skipped_lines"], json!([3]), "{payload}: {}", c.envelope);
-        assert_eq!(c.envelope["skipped_line_count"], 1, "{payload}: {}", c.envelope);
+        assert_eq!(
+            c.envelope["skipped_lines"],
+            json!([3]),
+            "{payload}: {}",
+            c.envelope
+        );
+        assert_eq!(
+            c.envelope["skipped_line_count"], 1,
+            "{payload}: {}",
+            c.envelope
+        );
         assert!(
             c.summary.ends_with("; skipped 1 unparseable line(s)"),
             "{payload}: the summary must carry the count: {}",
@@ -796,7 +973,10 @@ fn a_blank_line_is_reported_like_any_other_unreadable_line() {
     append_note(&state, "only entry");
     corrupt(&state, "");
 
-    let c = call(&state, json!({ "operation": "read_recent", "type": "note", "n": 3 }));
+    let c = call(
+        &state,
+        json!({ "operation": "read_recent", "type": "note", "n": 3 }),
+    );
     assert_eq!(c.status, OpStatus::Passed, "{}", c.envelope);
     assert_eq!(c.envelope["skipped_lines"], json!([2]), "{}", c.envelope);
     assert_eq!(c.envelope["skipped_line_count"], 1, "{}", c.envelope);
@@ -817,7 +997,12 @@ fn a_failure_envelope_carries_the_skip_fields_too() {
     let got = call(&state, json!({ "operation": "get", "id": hidden }));
     assert_eq!(got.status, OpStatus::Failed, "{}", got.envelope);
     assert_eq!(got.kind(), "not_found");
-    assert_eq!(got.envelope["skipped_lines"], json!([1]), "{}", got.envelope);
+    assert_eq!(
+        got.envelope["skipped_lines"],
+        json!([1]),
+        "{}",
+        got.envelope
+    );
     assert_eq!(got.envelope["skipped_line_count"], 1, "{}", got.envelope);
 
     let orphan = call(
@@ -825,8 +1010,18 @@ fn a_failure_envelope_carries_the_skip_fields_too() {
         json!({ "operation": "append", "type": "withdrawal",
                 "body": { "reason": "gone" }, "withdraws": hidden }),
     );
-    assert_eq!(orphan.kind(), "withdraw_target_not_found", "{}", orphan.envelope);
-    assert_eq!(orphan.envelope["skipped_lines"], json!([1]), "{}", orphan.envelope);
+    assert_eq!(
+        orphan.kind(),
+        "withdraw_target_not_found",
+        "{}",
+        orphan.envelope
+    );
+    assert_eq!(
+        orphan.envelope["skipped_lines"],
+        json!([1]),
+        "{}",
+        orphan.envelope
+    );
 
     let live = state_with_config("skip_on_already_withdrawn");
     let target = append_note(&live, "target");
@@ -842,7 +1037,12 @@ fn a_failure_envelope_carries_the_skip_fields_too() {
                 "body": { "reason": "again" }, "withdraws": target }),
     );
     assert_eq!(twice.kind(), "already_withdrawn", "{}", twice.envelope);
-    assert_eq!(twice.envelope["skipped_lines"], json!([3]), "{}", twice.envelope);
+    assert_eq!(
+        twice.envelope["skipped_lines"],
+        json!([3]),
+        "{}",
+        twice.envelope
+    );
 }
 
 #[test]
@@ -856,7 +1056,11 @@ fn append_writes_a_duplicate_rather_than_refusing_past_a_hidden_dedupe_target() 
                 "external_id": "ext-1" }),
     );
     let first_id = first.envelope["id"].as_str().unwrap().to_string();
-    damage_line(&state, 1, r#"{"id": "not_01a", "type": "note", "external_id": "ext-1""#);
+    damage_line(
+        &state,
+        1,
+        r#"{"id": "not_01a", "type": "note", "external_id": "ext-1""#,
+    );
 
     let second = call(
         &state,
@@ -866,7 +1070,12 @@ fn append_writes_a_duplicate_rather_than_refusing_past_a_hidden_dedupe_target() 
     assert_eq!(second.status, OpStatus::Passed, "{}", second.envelope);
     assert_eq!(second.envelope["deduped"], false, "{}", second.envelope);
     assert_ne!(second.envelope["id"], first_id.as_str());
-    assert_eq!(second.envelope["skipped_lines"], json!([1]), "{}", second.envelope);
+    assert_eq!(
+        second.envelope["skipped_lines"],
+        json!([1]),
+        "{}",
+        second.envelope
+    );
 }
 
 #[test]
@@ -877,15 +1086,35 @@ fn reported_line_lists_are_capped_while_the_counts_stay_true() {
         corrupt(&state, &format!("bad line {i}"));
     }
 
-    let recent = call(&state, json!({ "operation": "read_recent", "type": "note", "n": 3 }));
-    assert_eq!(skipped(&recent).len(), MAX_REPORTED_LINES, "{}", recent.envelope);
-    assert_eq!(recent.envelope["skipped_line_count"], 150, "{}", recent.envelope);
-    assert_eq!(skipped(&recent)[0], 2, "the list starts at the first bad line");
+    let recent = call(
+        &state,
+        json!({ "operation": "read_recent", "type": "note", "n": 3 }),
+    );
+    assert_eq!(
+        skipped(&recent).len(),
+        MAX_REPORTED_LINES,
+        "{}",
+        recent.envelope
+    );
+    assert_eq!(
+        recent.envelope["skipped_line_count"], 150,
+        "{}",
+        recent.envelope
+    );
+    assert_eq!(
+        skipped(&recent)[0],
+        2,
+        "the list starts at the first bad line"
+    );
 
     let verified = call(&state, json!({ "operation": "verify" }));
     let bad = verified.envelope["bad_lines"].as_array().unwrap();
     assert_eq!(bad.len(), MAX_REPORTED_LINES, "{}", verified.envelope);
-    assert_eq!(verified.envelope["bad_line_count"], 150, "{}", verified.envelope);
+    assert_eq!(
+        verified.envelope["bad_line_count"], 150,
+        "{}",
+        verified.envelope
+    );
     assert_eq!(verified.envelope["lines"], 151);
     assert_eq!(verified.envelope["records"], 1);
 }
@@ -906,7 +1135,7 @@ fn verify_reports_every_bad_line_with_its_number_and_error() {
         7,
         &json!({ "id": "not_01a", "type": "note", "schema_version": 1,
                  "created_at": "2026-08-25T12:00:00.000Z" })
-            .to_string(),
+        .to_string(),
     );
     let before = corpus_bytes(&state);
 
@@ -922,18 +1151,39 @@ fn verify_reports_every_bad_line_with_its_number_and_error() {
     let lines: Vec<u64> = bad.iter().map(|b| b["line"].as_u64().unwrap()).collect();
     assert_eq!(lines, vec![3, 7], "{}", c.envelope);
     let errors: Vec<&str> = bad.iter().map(|b| b["error"].as_str().unwrap()).collect();
-    assert_ne!(errors[0], errors[1], "distinct failures must read differently: {errors:?}");
-    assert!(errors[1].contains("body"), "the missing field is named: {}", errors[1]);
+    assert_ne!(
+        errors[0], errors[1],
+        "distinct failures must read differently: {errors:?}"
+    );
+    assert!(
+        errors[1].contains("body"),
+        "the missing field is named: {}",
+        errors[1]
+    );
     for entry in bad {
         let preview = entry["preview"].as_str().expect("a preview");
-        assert!(preview.chars().count() <= 121, "preview is bounded: {preview}");
-        assert!(!preview.contains(['\n', '\r', '\t']), "preview is one line: {preview}");
+        assert!(
+            preview.chars().count() <= 121,
+            "preview is bounded: {preview}"
+        );
+        assert!(
+            !preview.contains(['\n', '\r', '\t']),
+            "preview is one line: {preview}"
+        );
     }
-    assert!(c.summary.contains('2'), "the summary names the counts: {}", c.summary);
+    assert!(
+        c.summary.contains('2'),
+        "the summary names the counts: {}",
+        c.summary
+    );
     assert_eq!(c.meta("state_effect"), Some("read"));
     assert_eq!(c.meta("resource_id"), Some("corpus:file"));
 
-    assert_eq!(corpus_bytes(&state), before, "verify is a read; it must write nothing");
+    assert_eq!(
+        corpus_bytes(&state),
+        before,
+        "verify is a read; it must write nothing"
+    );
 }
 
 #[test]
@@ -946,7 +1196,11 @@ fn verify_succeeds_without_configuration_while_the_other_operations_do_not() {
 
     let verified = call_with_config(&state, None, json!({ "operation": "verify" }));
     assert_eq!(verified.status, OpStatus::Passed, "{}", verified.envelope);
-    assert_eq!(verified.envelope["bad_line_count"], 1, "{}", verified.envelope);
+    assert_eq!(
+        verified.envelope["bad_line_count"], 1,
+        "{}",
+        verified.envelope
+    );
     assert_eq!(verified.envelope["bad_lines"][0]["line"], 2);
 
     let recent = call_with_config(
@@ -968,8 +1222,15 @@ fn verify_on_an_absent_corpus_reports_an_empty_store_and_creates_nothing() {
     assert_eq!(c.envelope["records"], 0);
     assert_eq!(c.envelope["bad_line_count"], 0);
     assert_eq!(c.envelope["bad_lines"], json!([]));
-    assert!(c.envelope.get("skipped_lines").is_none(), "a clean scan says nothing: {}", c.envelope);
-    assert!(!state.join(CORPUS_FILE).exists(), "verify must not create the corpus");
+    assert!(
+        c.envelope.get("skipped_lines").is_none(),
+        "a clean scan says nothing: {}",
+        c.envelope
+    );
+    assert!(
+        !state.join(CORPUS_FILE).exists(),
+        "verify must not create the corpus"
+    );
 }
 
 #[test]
@@ -980,7 +1241,10 @@ fn verify_without_the_state_grant_fails_closed_and_creates_nothing() {
     let c = call(&state, json!({ "operation": "verify" }));
     assert_eq!(c.status, OpStatus::Error, "{}", c.envelope);
     assert_eq!(c.kind(), "state_unavailable");
-    assert!(!state.exists(), "verify must never create the state directory");
+    assert!(
+        !state.exists(),
+        "verify must never create the state directory"
+    );
     assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
 }
 
@@ -1015,23 +1279,40 @@ fn configuration_arrives_through_the_manifest_config_block() {
                               "body": { "text": format!("posting {i}") } }));
         assert_eq!(c.status, OpStatus::Passed, "{}", c.envelope);
         let id = c.envelope["id"].as_str().expect("an id").to_string();
-        assert!(id.starts_with("lgr_"), "the block's prefix_map decides the prefix: {id}");
+        assert!(
+            id.starts_with("lgr_"),
+            "the block's prefix_map decides the prefix: {id}"
+        );
         ids.push(id);
     }
 
     let text = String::from_utf8(corpus_bytes(&state)).unwrap();
     let line: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
-    assert_eq!(line["schema_version"], 7, "the block's schema_version is stamped");
+    assert_eq!(
+        line["schema_version"], 7,
+        "the block's schema_version is stamped"
+    );
 
     let defaulted = under(json!({ "operation": "read_recent", "type": "ledger" }));
-    assert_eq!(defaulted.envelope["returned"], 1, "read_recent.default is 1 here");
+    assert_eq!(
+        defaulted.envelope["returned"], 1,
+        "read_recent.default is 1 here"
+    );
     let clamped = under(json!({ "operation": "read_recent", "type": "ledger", "n": 99 }));
     assert_eq!(clamped.envelope["returned"], 2, "read_recent.max is 2 here");
 
     let hits = under(json!({ "operation": "search", "query": "posting" }));
-    assert_eq!(hits.envelope["hits"].as_array().unwrap().len(), 1, "search.default_k is 1");
+    assert_eq!(
+        hits.envelope["hits"].as_array().unwrap().len(),
+        1,
+        "search.default_k is 1"
+    );
     let more = under(json!({ "operation": "search", "query": "posting", "k": 99 }));
-    assert_eq!(more.envelope["hits"].as_array().unwrap().len(), 2, "search.max_k is 2");
+    assert_eq!(
+        more.envelope["hits"].as_array().unwrap().len(),
+        2,
+        "search.max_k is 2"
+    );
 
     // A type this block never declares stays undeclared, however the standard fixture
     // configures it.
@@ -1050,14 +1331,25 @@ fn no_config_block_is_config_missing_naming_the_manifest() {
     );
     assert_eq!(c.status, OpStatus::Error, "{}", c.envelope);
     assert_eq!(c.kind(), "config_missing");
-    assert!(c.message().contains("config:"), "must name the block: {}", c.message());
-    assert!(c.message().contains("murmur.yaml"), "must name the file: {}", c.message());
+    assert!(
+        c.message().contains("config:"),
+        "must name the block: {}",
+        c.message()
+    );
+    assert!(
+        c.message().contains("murmur.yaml"),
+        "must name the file: {}",
+        c.message()
+    );
     assert!(
         !c.message().contains("state/"),
         "must not point at a path under the state grant: {}",
         c.message()
     );
-    assert!(corpus_bytes(&state).is_empty(), "nothing is written without a configuration");
+    assert!(
+        corpus_bytes(&state).is_empty(),
+        "nothing is written without a configuration"
+    );
 }
 
 #[test]
@@ -1106,7 +1398,10 @@ fn a_missing_state_dir_fails_closed_and_creates_nothing() {
         );
     }
 
-    assert!(!state.exists(), "the tool must never create the state directory");
+    assert!(
+        !state.exists(),
+        "the tool must never create the state directory"
+    );
     assert_eq!(
         std::fs::read_dir(&root).unwrap().count(),
         0,
@@ -1119,7 +1414,10 @@ fn a_missing_state_dir_fails_closed_and_creates_nothing() {
 #[test]
 fn an_unrecognised_operation_is_rejected_before_state_is_touched() {
     let root = temp_root("unknown_op");
-    let c = call(&root.join("state"), json!({ "operation": "delete", "id": "x" }));
+    let c = call(
+        &root.join("state"),
+        json!({ "operation": "delete", "id": "x" }),
+    );
     assert_eq!(c.status, OpStatus::Failed, "{}", c.envelope);
     assert_eq!(c.kind(), "unknown_operation");
     assert_eq!(c.envelope["operation"], "delete");
@@ -1134,7 +1432,10 @@ fn malformed_input_is_invalid_input() {
         let response = ops::run(&state, Some(&config), raw);
         let envelope: Value = serde_json::from_str(&response.data).unwrap();
         assert_eq!(response.status, OpStatus::Failed, "{raw:?} -> {envelope}");
-        assert_eq!(envelope["error_kind"], "invalid_input", "{raw:?} -> {envelope}");
+        assert_eq!(
+            envelope["error_kind"], "invalid_input",
+            "{raw:?} -> {envelope}"
+        );
         assert_eq!(envelope["ok"], false);
     }
 }
@@ -1142,8 +1443,8 @@ fn malformed_input_is_invalid_input() {
 #[test]
 fn a_double_encoded_payload_is_re_parsed_once() {
     let state = state_with_config("double_encoded");
-    let inner = json!({ "operation": "append", "type": "note", "body": { "text": "wrapped" } })
-        .to_string();
+    let inner =
+        json!({ "operation": "append", "type": "note", "body": { "text": "wrapped" } }).to_string();
     let outer = Value::String(inner).to_string();
 
     let response = ops::run(&state, Some(&config_json().to_string()), &outer);
@@ -1164,4 +1465,3 @@ fn every_failure_envelope_carries_the_same_four_keys_and_no_metadata() {
     }
     assert!(c.metadata.is_empty(), "a failed call addressed nothing");
 }
-
