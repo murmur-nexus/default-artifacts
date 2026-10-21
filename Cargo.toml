@@ -5,6 +5,7 @@ members = [
   "drivers/driver-deepseek",
   "drivers/driver-moonshotai",
   "drivers/driver-openai",
+  "drivers/driver-zai",
   "hooks/hook-compact",
   "hooks/hook-debug",
   "hooks/hook-diff-summary",
