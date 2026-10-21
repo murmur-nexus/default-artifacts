@@ -27,8 +27,9 @@ fn main() {
         std::process::exit(1);
     }
     let result = run(&raw);
-    let json = serde_json::to_string(&result)
-        .unwrap_or_else(|_| r#"{"ok":false,"status":"error","message":"failed to serialize output"}"#.to_string());
+    let json = serde_json::to_string(&result).unwrap_or_else(|_| {
+        r#"{"ok":false,"status":"error","message":"failed to serialize output"}"#.to_string()
+    });
     println!("{json}");
 }
 

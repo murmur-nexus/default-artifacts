@@ -53,7 +53,10 @@ struct HostState {
 
 impl WasiView for HostState {
     fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView { ctx: &mut self.wasi, table: &mut self.table }
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
     }
 }
 
@@ -132,7 +135,10 @@ fn store_for(
     builder.env(tool_report::CAPSULE_NAME_ENV, CAPSULE_NAME);
     Store::new(
         engine,
-        HostState { table: ResourceTable::new(), wasi: builder.build() },
+        HostState {
+            table: ResourceTable::new(),
+            wasi: builder.build(),
+        },
     )
 }
 
@@ -152,7 +158,10 @@ fn run_report(
 ) -> (Status, Value, Vec<(String, String)>) {
     let mut store = store_for(engine, workdir, state, config);
     let tool = Tool::instantiate(&mut store, component, linker).expect("instantiate component");
-    let input = ToolInput { data: Some(payload.to_string()), log_path: None };
+    let input = ToolInput {
+        data: Some(payload.to_string()),
+        log_path: None,
+    };
     let result = tool
         .murmur_tool_run()
         .call_run(&mut store, &input)
@@ -192,13 +201,22 @@ fn fixture(tag: &str, with_state: bool) -> Fixture {
     if with_state {
         std::fs::create_dir_all(&state).expect("create state dir");
     }
-    Fixture { root, workdir, state }
+    Fixture {
+        root,
+        workdir,
+        state,
+    }
 }
 
 fn entries(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .expect("read dir")
-        .map(|e| e.expect("dir entry").file_name().to_string_lossy().into_owned())
+        .map(|e| {
+            e.expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect();
     names.sort();
     names
@@ -226,15 +244,20 @@ fn the_report_survives_independent_instantiations_and_the_verdict_is_revisable()
         None,
         json!({ "operation": "progress", "note": "Indexed 4 of 9 crates." }),
     );
-    assert!(matches!(status, Status::Passed), "progress status: {status:?} {envelope}");
+    assert!(
+        matches!(status, Status::Passed),
+        "progress status: {status:?} {envelope}"
+    );
     assert_eq!(envelope["concluded"], false);
     assert!(
-        meta.iter().any(|(k, v)| k == "state_effect" && v == "mutate"),
+        meta.iter()
+            .any(|(k, v)| k == "state_effect" && v == "mutate"),
         "expected state_effect=mutate, got {meta:?}"
     );
     let expected_resource = format!("report:{STATE_GUEST_PATH}/{REPORT_FILE}");
     assert!(
-        meta.iter().any(|(k, v)| k == "resource_id" && v == &expected_resource),
+        meta.iter()
+            .any(|(k, v)| k == "resource_id" && v == &expected_resource),
         "expected resource_id={expected_resource}, got {meta:?}"
     );
 
@@ -253,7 +276,10 @@ fn the_report_survives_independent_instantiations_and_the_verdict_is_revisable()
             "deliverables": [{ "name": "patch", "kind": "diff", "uri": "out/parser.patch" }]
         }),
     );
-    assert!(matches!(status, Status::Passed), "report status: {status:?} {envelope}");
+    assert!(
+        matches!(status, Status::Passed),
+        "report status: {status:?} {envelope}"
+    );
     assert_eq!(envelope["concluded"], true);
     assert_eq!(envelope["revision"], 1);
 
@@ -267,7 +293,10 @@ fn the_report_survives_independent_instantiations_and_the_verdict_is_revisable()
         None,
         json!({ "operation": "report", "outcome": "blocked", "summary": "The port regressed." }),
     );
-    assert!(matches!(status, Status::Passed), "revision status: {status:?} {envelope}");
+    assert!(
+        matches!(status, Status::Passed),
+        "revision status: {status:?} {envelope}"
+    );
     assert_eq!(envelope["revision"], 2);
 
     let doc = report(&f.state);
@@ -305,14 +334,20 @@ fn without_the_state_preopen_the_component_fails_closed() {
         json!({ "operation": "report", "outcome": "success", "summary": "done" }),
     );
 
-    assert!(matches!(status, Status::Error), "status: {status:?} {envelope}");
+    assert!(
+        matches!(status, Status::Error),
+        "status: {status:?} {envelope}"
+    );
     assert_eq!(envelope["error_kind"], "state_unavailable");
     assert_eq!(
         entries(&f.workdir),
         Vec::<String>::new(),
         "no state/ directory may appear inside the workdir"
     );
-    assert!(!f.state.exists(), "the tool must not create the state directory");
+    assert!(
+        !f.state.exists(),
+        "the tool must not create the state directory"
+    );
 }
 
 #[test]
@@ -343,9 +378,16 @@ fn the_operator_declaration_is_read_from_the_guest_environment() {
             "deliverables": [{ "name": "d", "kind": "screenshot", "uri": "out/a.png" }]
         }),
     );
-    assert!(matches!(status, Status::Failed), "status: {status:?} {envelope}");
+    assert!(
+        matches!(status, Status::Failed),
+        "status: {status:?} {envelope}"
+    );
     assert_eq!(envelope["error_kind"], "undeclared_kind");
-    assert_eq!(entries(&f.state), Vec::<String>::new(), "a refusal writes nothing");
+    assert_eq!(
+        entries(&f.state),
+        Vec::<String>::new(),
+        "a refusal writes nothing"
+    );
 
     // The same call with no block in the environment is accepted: adoption is incremental.
     let g = fixture("undeclared", true);
@@ -363,7 +405,10 @@ fn the_operator_declaration_is_read_from_the_guest_environment() {
             "deliverables": [{ "name": "d", "kind": "screenshot", "uri": "out/a.png" }]
         }),
     );
-    assert!(matches!(status, Status::Passed), "status: {status:?} {envelope}");
+    assert!(
+        matches!(status, Status::Passed),
+        "status: {status:?} {envelope}"
+    );
 }
 
 #[test]
@@ -390,7 +435,10 @@ fn a_deliverable_carrying_an_inline_payload_is_refused_by_the_component() {
             }]
         }),
     );
-    assert!(matches!(status, Status::Failed), "status: {status:?} {envelope}");
+    assert!(
+        matches!(status, Status::Failed),
+        "status: {status:?} {envelope}"
+    );
     assert_eq!(envelope["error_kind"], "inline_payload_refused");
     assert_eq!(entries(&f.state), Vec::<String>::new());
     assert_eq!(entries(&f.workdir), Vec::<String>::new());

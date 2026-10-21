@@ -23,10 +23,16 @@ pub struct Meta {
 
 impl Meta {
     pub fn read(resource_id: impl Into<String>) -> Self {
-        Meta { resource_id: resource_id.into(), state_effect: "read".into() }
+        Meta {
+            resource_id: resource_id.into(),
+            state_effect: "read".into(),
+        }
     }
     pub fn mutate(resource_id: impl Into<String>) -> Self {
-        Meta { resource_id: resource_id.into(), state_effect: "mutate".into() }
+        Meta {
+            resource_id: resource_id.into(),
+            state_effect: "mutate".into(),
+        }
     }
     fn to_json(&self) -> Value {
         json!({ "resource_id": self.resource_id, "state_effect": self.state_effect })
@@ -36,7 +42,12 @@ impl Meta {
 /// Successful result. `data` is an object whose keys are also flattened to the
 /// top level (new-protocol convention). `data_path`, when `Some`, points at the
 /// full payload on disk (used by `slice_symbol` for large slices).
-pub fn passed(summary: impl Into<String>, data: Value, data_path: Option<String>, meta: Option<Meta>) -> Value {
+pub fn passed(
+    summary: impl Into<String>,
+    data: Value,
+    data_path: Option<String>,
+    meta: Option<Meta>,
+) -> Value {
     let msg = summary.into();
     let mut obj = json!({
         "ok": true,

@@ -1,10 +1,23 @@
 # tool-tavily
 
-Web search for Murmur capsules through Tavily's `POST /search`. The agent sends a query and
-gets back a bounded plain-text result: an optional answer, then numbered results with title,
-URL and snippet. The operator controls every cost-bearing and size-bearing lever. The Tavily
-key is bound by the operator and attached by the runtime, so the tool never holds, reads or
-builds it.
+Web search for Murmur capsules through Tavily's `POST /search`. The operator controls every
+cost-bearing and size-bearing lever. The Tavily key is bound by the operator and attached by
+the runtime, so the tool never holds, reads or builds it.
+
+The agent sends `{"query": "...", "max_results"?: n}`, or a bare JSON string taken as the
+query. The query is at most 400 characters. `max_results` can only lower the result count
+within the operator's ceiling; every other search lever belongs to the operator.
+
+The agent gets back plain text, at most the operator's `max_output_bytes`:
+
+1. a header line naming the query, the result count, the search depth and the credits Tavily
+   charged
+2. the answer, when the operator enabled one
+3. numbered results, each with its title, URL and snippet
+
+When anything is cut, the result is marked truncated and the full Tavily response is written
+to `tavily-results/<request_id>.json` in the workdir, named by the result's `data_path`. The
+runtime fences the text as untrusted content; the tool passes it through unaltered.
 
 WASM component (`wasm32-wasip2`), exporting `murmur:tool/run`. It needs a murmur runtime that
 supports per-entry credential gateways: the first murmur release after v0.3.0 (murmur #191).
@@ -17,7 +30,7 @@ Bind the key on the tool's own entry in the capsule manifest, as `gateway.api_ke
 ```yaml
 artifacts:
   - name: murmur/tool-tavily
-    version: 0.2.0
+    version: 0.4.0
     runtime: tool
     gateway:
       endpoint: https://api.tavily.com

@@ -28,9 +28,9 @@ use std::{
     process::Command,
 };
 
-use tool_create::logic::scaffold_tool_in;
 use serde_json::Value;
 use tempfile::TempDir;
+use tool_create::logic::scaffold_tool_in;
 
 /// The version every scaffolded manifest declares, and so the version every artifact built here
 /// carries through `mur build` and into the store.
@@ -172,7 +172,10 @@ fn scaffold_build_publish(name: &str, runtime: &str, extra_payload: Option<&str>
         .unwrap_or_else(|| panic!("{} has no `meta` object: {document}", meta_path.display()))
         .clone();
 
-    Published { meta, entries: zip_entries(&zip) }
+    Published {
+        meta,
+        entries: zip_entries(&zip),
+    }
 }
 
 /// The entry names of a `.mur.zip`, read with `unzip -Z1`.
@@ -233,7 +236,8 @@ fn assert_published(published: &Published, runtime: &str, artifact_runtime: &str
 #[test]
 #[ignore = "drives the `mur` binary as a subprocess; see the module docs"]
 fn wasm_scaffold_publishes_as_a_wasm_tool() {
-    let published = scaffold_build_publish("shape-probe-wasm", "wasm", Some("shape_probe_wasm.wasm"));
+    let published =
+        scaffold_build_publish("shape-probe-wasm", "wasm", Some("shape_probe_wasm.wasm"));
     assert_published(&published, "wasm", "tool", "shape_probe_wasm.wasm");
 }
 
@@ -249,6 +253,7 @@ fn native_scaffold_publishes_as_a_native_tool() {
 #[test]
 #[ignore = "drives the `mur` binary as a subprocess; see the module docs"]
 fn hook_scaffold_publishes_as_a_wasm_hook() {
-    let published = scaffold_build_publish("shape-probe-hook", "hook", Some("shape_probe_hook.wasm"));
+    let published =
+        scaffold_build_publish("shape-probe-hook", "hook", Some("shape_probe_hook.wasm"));
     assert_published(&published, "wasm", "hook", "shape_probe_hook.wasm");
 }

@@ -146,13 +146,18 @@ job. The mirror and the pin move together. To re-pin after a WIT change in murmu
 out beside this repository, copy its `wit/{guest,hook,process-driver}` over this repository's
 `wit/`, run `./scripts/check-wit-sync.sh` until it exits 0, set `ref:` to that commit, and commit
 both. Every artifact rebuilt against a new interface version ships different bytes, so bump each
-one.
+one. The script looks for murmur beside the main checkout, from a worktree too; to compare
+against a murmur checkout elsewhere, set `MURMUR_DIR` to its root.
 
 ## Tests
 
 ```bash
+cargo fmt --all -- --check
 cargo test --workspace --locked
 ```
+
+CI runs both, formatting first. The workspace uses rustfmt's defaults (there is no `rustfmt.toml`);
+run `cargo fmt --all` before committing.
 
 Four suites are `#[ignore]`d because they need something the default run does not have. The three
 that drive a real `mur` read it from `MUR_BIN`, else `PATH`, and fail rather than skip without one:

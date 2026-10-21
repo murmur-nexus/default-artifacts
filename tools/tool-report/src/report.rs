@@ -212,7 +212,11 @@ mod tests {
     }
 
     fn deliverable(name: &str) -> Deliverable {
-        Deliverable { name: name.into(), kind: "diff".into(), uri: "out/a.patch".into() }
+        Deliverable {
+            name: name.into(),
+            kind: "diff".into(),
+            uri: "out/a.patch".into(),
+        }
     }
 
     #[test]
@@ -269,7 +273,10 @@ mod tests {
         assert_eq!(doc.superseded.len(), MAX_SUPERSEDED);
         assert_eq!(doc.superseded_count as usize, MAX_SUPERSEDED + 4);
         // The newest kept, the oldest dropped.
-        assert_eq!(doc.superseded.last().unwrap().summary, format!("verdict {}", MAX_SUPERSEDED + 3));
+        assert_eq!(
+            doc.superseded.last().unwrap().summary,
+            format!("verdict {}", MAX_SUPERSEDED + 3)
+        );
     }
 
     #[test]
@@ -301,5 +308,4 @@ mod tests {
         assert_eq!(doc.progress.len(), 1);
         assert_eq!(doc.progress[0].note, "one");
     }
-
 }

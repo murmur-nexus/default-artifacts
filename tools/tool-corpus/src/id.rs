@@ -72,7 +72,10 @@ pub fn mint_id(prefix: &str) -> String {
         .unwrap_or_default();
     let unix_ms = now.as_millis() as u64;
     let seq = MINT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    format!("{prefix}_{}", uuid_v7_simple(unix_ms, seq, entropy(now.subsec_nanos(), seq)))
+    format!(
+        "{prefix}_{}",
+        uuid_v7_simple(unix_ms, seq, entropy(now.subsec_nanos(), seq))
+    )
 }
 
 /// The 32-hex-character body of an id: 48-bit big-endian millisecond timestamp, version
@@ -129,7 +132,8 @@ mod tests {
         assert_eq!(prefix, "not");
         assert_eq!(hex.len(), 32, "id body must be 32 hex characters: {id}");
         assert!(
-            hex.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            hex.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
             "id body must be lowercase hex: {id}"
         );
     }
@@ -185,7 +189,10 @@ mod tests {
     #[test]
     fn derive_prefix_rejects_a_tag_that_filters_to_nothing() {
         let err = derive_prefix("---").expect_err("a tag with no [a-z0-9] must fail");
-        assert!(err.contains("prefix_map"), "message must point at prefix_map: {err}");
+        assert!(
+            err.contains("prefix_map"),
+            "message must point at prefix_map: {err}"
+        );
     }
 
     #[test]

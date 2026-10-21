@@ -79,7 +79,10 @@ pub struct OpError {
 
 impl OpError {
     pub fn new(kind: &'static str, message: impl Into<String>) -> Self {
-        Self { kind, message: message.into() }
+        Self {
+            kind,
+            message: message.into(),
+        }
     }
 }
 
@@ -164,7 +167,10 @@ fn parse_call(data: &str) -> Result<(String, Map<String, Value>), OpError> {
         other => {
             return Err(OpError::new(
                 kind::INVALID_INPUT,
-                format!("input must be a JSON object, got {}", json_type_name(&other)),
+                format!(
+                    "input must be a JSON object, got {}",
+                    json_type_name(&other)
+                ),
             ))
         }
     };
@@ -423,15 +429,16 @@ pub fn parse_deliverable(value: &Value, index: usize) -> Result<Deliverable, OpE
         ));
     }
 
-    Ok(Deliverable { name, kind: kind_tag, uri })
+    Ok(Deliverable {
+        name,
+        kind: kind_tag,
+        uri,
+    })
 }
 
 /// The `notes_for` list, validated against the operator's declared stages. Absent means an
 /// empty list.
-fn parse_notes(
-    args: &Map<String, Value>,
-    config: &ReportConfig,
-) -> Result<Vec<NoteFor>, OpError> {
+fn parse_notes(args: &Map<String, Value>, config: &ReportConfig) -> Result<Vec<NoteFor>, OpError> {
     let values = optional_array(args, "notes_for")?;
     let mut notes = Vec::with_capacity(values.len());
     for (index, value) in values.iter().enumerate() {
@@ -508,7 +515,10 @@ fn success(operation: &str, doc: &ReportDoc, store: &Store, summary: String) -> 
         status: OpStatus::Passed,
         summary,
         data: envelope.to_string(),
-        metadata: metadata(&format!("{RESOURCE_PREFIX}{}", store.report_path().display())),
+        metadata: metadata(&format!(
+            "{RESOURCE_PREFIX}{}",
+            store.report_path().display()
+        )),
     }
 }
 
@@ -548,7 +558,10 @@ fn required_str<'a>(args: &'a Map<String, Value>, field: &str) -> Result<&'a str
         )),
         Some(other) => Err(OpError::new(
             kind::INVALID_INPUT,
-            format!("\"{field}\" must be a string, got {}", json_type_name(other)),
+            format!(
+                "\"{field}\" must be a string, got {}",
+                json_type_name(other)
+            ),
         )),
         None => Err(OpError::new(
             kind::INVALID_INPUT,
@@ -559,10 +572,7 @@ fn required_str<'a>(args: &'a Map<String, Value>, field: &str) -> Result<&'a str
 
 /// An optional list argument. Absent and `null` are both the empty list; a non-list is a
 /// caller fault rather than a single value quietly wrapped into one.
-fn optional_array<'a>(
-    args: &'a Map<String, Value>,
-    field: &str,
-) -> Result<&'a [Value], OpError> {
+fn optional_array<'a>(args: &'a Map<String, Value>, field: &str) -> Result<&'a [Value], OpError> {
     match args.get(field) {
         None | Some(Value::Null) => Ok(&[]),
         Some(Value::Array(values)) => Ok(values),

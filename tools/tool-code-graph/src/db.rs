@@ -116,10 +116,26 @@ fn column_exists(conn: &Connection, table: &str, col: &str) -> rusqlite::Result<
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let mut altered = false;
     for (table, col, ddl) in [
-        ("symbols", "visibility", "ALTER TABLE symbols ADD COLUMN visibility TEXT NOT NULL DEFAULT ''"),
-        ("symbols", "attributes", "ALTER TABLE symbols ADD COLUMN attributes TEXT NOT NULL DEFAULT ''"),
-        ("edges", "confidence", "ALTER TABLE edges ADD COLUMN confidence TEXT NOT NULL DEFAULT 'definite'"),
-        ("edges", "call_style", "ALTER TABLE edges ADD COLUMN call_style TEXT NOT NULL DEFAULT ''"),
+        (
+            "symbols",
+            "visibility",
+            "ALTER TABLE symbols ADD COLUMN visibility TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "symbols",
+            "attributes",
+            "ALTER TABLE symbols ADD COLUMN attributes TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "edges",
+            "confidence",
+            "ALTER TABLE edges ADD COLUMN confidence TEXT NOT NULL DEFAULT 'definite'",
+        ),
+        (
+            "edges",
+            "call_style",
+            "ALTER TABLE edges ADD COLUMN call_style TEXT NOT NULL DEFAULT ''",
+        ),
     ] {
         if !column_exists(conn, table, col)? {
             conn.execute(ddl, [])?;
@@ -143,7 +159,10 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 /// lexicographically-first `symbol_id` — deterministic, documented as a known
 /// approximation of Rust's real name resolution.
 pub fn resolve_edges(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute("UPDATE edges SET dst_symbol_id = NULL WHERE edge_kind = 'calls'", [])?;
+    conn.execute(
+        "UPDATE edges SET dst_symbol_id = NULL WHERE edge_kind = 'calls'",
+        [],
+    )?;
     conn.execute(
         "UPDATE edges
             SET dst_symbol_id = (

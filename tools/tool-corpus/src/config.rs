@@ -44,7 +44,10 @@ pub struct ReadRecentCaps {
 
 impl Default for ReadRecentCaps {
     fn default() -> Self {
-        Self { default: DEFAULT_READ_RECENT_DEFAULT, max: DEFAULT_READ_RECENT_MAX }
+        Self {
+            default: DEFAULT_READ_RECENT_DEFAULT,
+            max: DEFAULT_READ_RECENT_MAX,
+        }
     }
 }
 
@@ -58,7 +61,10 @@ pub struct SearchCaps {
 
 impl Default for SearchCaps {
     fn default() -> Self {
-        Self { default_k: DEFAULT_SEARCH_DEFAULT_K, max_k: DEFAULT_SEARCH_MAX_K }
+        Self {
+            default_k: DEFAULT_SEARCH_DEFAULT_K,
+            max_k: DEFAULT_SEARCH_MAX_K,
+        }
     }
 }
 
@@ -135,7 +141,11 @@ pub fn parse_config(text: &str) -> Result<Config, String> {
                 "config_version must be {SUPPORTED_CONFIG_VERSION}, got {other}"
             ))
         }
-        None => return Err(format!("config_version is required and must be {SUPPORTED_CONFIG_VERSION}")),
+        None => {
+            return Err(format!(
+                "config_version is required and must be {SUPPORTED_CONFIG_VERSION}"
+            ))
+        }
     }
 
     for (type_name, prefix) in &raw.prefix_map {
@@ -163,14 +173,13 @@ pub fn parse_config(text: &str) -> Result<Config, String> {
 
     let mut types = BTreeMap::new();
     for (type_name, raw_type) in raw.types {
-        check_schema(&raw_type.schema)
-            .map_err(|e| format!("types.\"{type_name}\".{e}"))?;
+        check_schema(&raw_type.schema).map_err(|e| format!("types.\"{type_name}\".{e}"))?;
 
         let prefix = match raw.prefix_map.get(&type_name) {
             Some(explicit) => explicit.clone(),
             None => {
-                let derived = derive_prefix(&type_name)
-                    .map_err(|e| format!("types.\"{type_name}\": {e}"))?;
+                let derived =
+                    derive_prefix(&type_name).map_err(|e| format!("types.\"{type_name}\": {e}"))?;
                 if is_reserved(&derived) {
                     return Err(format!(
                         "types.\"{type_name}\" derives the reserved runtime id prefix \
@@ -183,7 +192,11 @@ pub fn parse_config(text: &str) -> Result<Config, String> {
 
         types.insert(
             type_name,
-            TypeConfig { schema_version: raw_type.schema_version, schema: raw_type.schema, prefix },
+            TypeConfig {
+                schema_version: raw_type.schema_version,
+                schema: raw_type.schema,
+                prefix,
+            },
         );
     }
 
@@ -238,7 +251,13 @@ mod tests {
 
         assert_eq!(cfg.config_version, 1);
         assert_eq!(cfg.read_recent, ReadRecentCaps { default: 3, max: 7 });
-        assert_eq!(cfg.search, SearchCaps { default_k: 2, max_k: 4 });
+        assert_eq!(
+            cfg.search,
+            SearchCaps {
+                default_k: 2,
+                max_k: 4
+            }
+        );
         assert_eq!(cfg.type_config("note").unwrap().schema_version, 2);
         assert_eq!(cfg.type_config("note").unwrap().prefix, "not");
         assert_eq!(cfg.type_config("request").unwrap().prefix, "rqt");
@@ -290,7 +309,10 @@ mod tests {
 
     #[test]
     fn absent_or_empty_types_is_rejected() {
-        for value in [json!({ "config_version": 1 }), json!({ "config_version": 1, "types": {} })] {
+        for value in [
+            json!({ "config_version": 1 }),
+            json!({ "config_version": 1, "types": {} }),
+        ] {
             let err = parse_config(&config_text(value)).expect_err("types must be non-empty");
             assert!(err.contains("types"), "{err}");
         }
@@ -304,7 +326,10 @@ mod tests {
         })))
         .expect_err("a reserved derived prefix must be rejected");
         assert!(err.contains("session"), "message must name the type: {err}");
-        assert!(err.contains("prefix_map"), "message must point at prefix_map: {err}");
+        assert!(
+            err.contains("prefix_map"),
+            "message must point at prefix_map: {err}"
+        );
         assert!(err.contains("ses"), "message must name the prefix: {err}");
     }
 
@@ -360,7 +385,10 @@ mod tests {
         })))
         .expect_err("an unsupported keyword must be rejected");
         assert!(err.contains("note"), "message must name the type: {err}");
-        assert!(err.contains("pattern"), "message must name the keyword: {err}");
+        assert!(
+            err.contains("pattern"),
+            "message must name the keyword: {err}"
+        );
     }
 
     #[test]

@@ -101,14 +101,24 @@ mod tests {
             line,
             r#"{"id":"not_0192a1b2c3d47000800000000000000a","type":"note","schema_version":1,"created_at":"2026-08-25T12:00:00.000Z","body":{"text":"hi"}}"#
         );
-        assert!(!line.contains("external_id"), "an absent optional is an absent key");
-        assert!(!line.contains("withdraws"), "an absent optional is an absent key");
+        assert!(
+            !line.contains("external_id"),
+            "an absent optional is an absent key"
+        );
+        assert!(
+            !line.contains("withdraws"),
+            "an absent optional is an absent key"
+        );
     }
 
     #[test]
     fn a_line_carries_all_seven_keys_in_order_when_the_optionals_are_present() {
-        let line = serde_json::to_string(&sample(Some("ext-1"), Some("not_aaa"), json!({ "text": "hi" })))
-            .expect("record serialises");
+        let line = serde_json::to_string(&sample(
+            Some("ext-1"),
+            Some("not_aaa"),
+            json!({ "text": "hi" }),
+        ))
+        .expect("record serialises");
         let mut cursor = 0;
         for key in [
             "\"id\":",
@@ -119,7 +129,9 @@ mod tests {
             "\"withdraws\":",
             "\"body\":",
         ] {
-            let at = line.find(key).unwrap_or_else(|| panic!("{key} missing from {line}"));
+            let at = line
+                .find(key)
+                .unwrap_or_else(|| panic!("{key} missing from {line}"));
             assert!(at >= cursor, "{key} is out of order in {line}");
             cursor = at;
         }
@@ -130,7 +142,11 @@ mod tests {
 
     #[test]
     fn a_line_round_trips() {
-        let record = sample(Some("ext-1"), Some("not_aaa"), json!({ "text": "hi", "n": 3 }));
+        let record = sample(
+            Some("ext-1"),
+            Some("not_aaa"),
+            json!({ "text": "hi", "n": 3 }),
+        );
         let line = serde_json::to_string(&record).expect("record serialises");
         let back: Record = serde_json::from_str(&line).expect("record deserialises");
         assert_eq!(back, record);
@@ -164,17 +180,35 @@ mod tests {
         );
         let text = searchable_text(&record);
         assert_eq!(text, vec!["note", "kept"]);
-        for absent in ["keyname", "flag", "nothing", "deep", "inner", "42", "true", "null"] {
-            assert!(!text.iter().any(|s| s == absent), "{absent} must not appear in {text:?}");
+        for absent in [
+            "keyname", "flag", "nothing", "deep", "inner", "42", "true", "null",
+        ] {
+            assert!(
+                !text.iter().any(|s| s == absent),
+                "{absent} must not appear in {text:?}"
+            );
         }
-        assert!(!text.iter().any(|s| s.contains("0192a1b2")), "the id must not appear");
-        assert!(!text.iter().any(|s| s.contains("2026-08-25")), "created_at must not appear");
-        assert!(!text.iter().any(|s| s == "not_aaa"), "withdraws must not appear");
+        assert!(
+            !text.iter().any(|s| s.contains("0192a1b2")),
+            "the id must not appear"
+        );
+        assert!(
+            !text.iter().any(|s| s.contains("2026-08-25")),
+            "created_at must not appear"
+        );
+        assert!(
+            !text.iter().any(|s| s == "not_aaa"),
+            "withdraws must not appear"
+        );
     }
 
     #[test]
     fn searchable_text_is_stable_across_calls() {
-        let record = sample(Some("ext"), None, json!({ "b": ["x", { "c": "y" }], "a": "z" }));
+        let record = sample(
+            Some("ext"),
+            None,
+            json!({ "b": ["x", { "c": "y" }], "a": "z" }),
+        );
         assert_eq!(searchable_text(&record), searchable_text(&record));
         assert_eq!(searchable_text(&record), vec!["note", "ext", "z", "x", "y"]);
     }
@@ -189,9 +223,15 @@ mod tests {
     fn timestamps_render_as_rfc_3339_utc_with_milliseconds() {
         assert_eq!(format_rfc3339_millis(0), "1970-01-01T00:00:00.000Z");
         assert_eq!(format_rfc3339_millis(1_000), "1970-01-01T00:00:01.000Z");
-        assert_eq!(format_rfc3339_millis(1_774_000_000_123), "2026-03-20T09:46:40.123Z");
+        assert_eq!(
+            format_rfc3339_millis(1_774_000_000_123),
+            "2026-03-20T09:46:40.123Z"
+        );
         // A leap day, to prove the civil-date conversion is not an approximation.
-        assert_eq!(format_rfc3339_millis(1_709_164_800_000), "2024-02-29T00:00:00.000Z");
+        assert_eq!(
+            format_rfc3339_millis(1_709_164_800_000),
+            "2024-02-29T00:00:00.000Z"
+        );
     }
 
     #[test]

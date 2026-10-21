@@ -43,7 +43,10 @@ pub enum ResolveError {
 /// Reference query is `tool-code-graph`'s own `op_get_symbol`
 /// (`src/ops.rs`): `SELECT ... f.path, s.start_line, s.end_line FROM symbols s
 /// JOIN files f ON f.id = s.file_id WHERE s.symbol_id = ?1`.
-pub fn resolve_symbol_location(repo: &str, symbol_id: &str) -> Result<SymbolLocation, ResolveError> {
+pub fn resolve_symbol_location(
+    repo: &str,
+    symbol_id: &str,
+) -> Result<SymbolLocation, ResolveError> {
     let db = Path::new(repo).join(".murmur").join("code-graph.db");
     if !db.exists() {
         return Err(ResolveError::NotIndexed);

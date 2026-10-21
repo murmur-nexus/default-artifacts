@@ -58,7 +58,13 @@ impl Drop for TestDir {
 
 fn init_git_repo(repo: &Path) {
     run_git(["init", repo.to_str().expect("repo path utf-8")]);
-    run_git(["-C", repo.to_str().unwrap(), "config", "user.email", "test@example.com"]);
+    run_git([
+        "-C",
+        repo.to_str().unwrap(),
+        "config",
+        "user.email",
+        "test@example.com",
+    ]);
     run_git(["-C", repo.to_str().unwrap(), "config", "user.name", "Test"]);
     fs::write(repo.join("README.md"), "hello\n").unwrap();
     run_git(["-C", repo.to_str().unwrap(), "add", "README.md"]);
@@ -240,7 +246,10 @@ fn status_shows_modified_file() {
     let entries = status_result.extra["entries"]
         .as_array()
         .expect("entries should be array");
-    assert!(!entries.is_empty(), "should have at least one modified entry");
+    assert!(
+        !entries.is_empty(),
+        "should have at least one modified entry"
+    );
 
     // Unstaged modification shows as " M" in porcelain v1
     let found = entries.iter().any(|e| {

@@ -62,7 +62,10 @@ fn check_at(schema: &Value, path: &str) -> Result<(), String> {
         match keyword.as_str() {
             "type" => {
                 let name = value.as_str().ok_or_else(|| {
-                    format!("{path}.type must be a string naming one of {}", SUPPORTED_TYPES.join(", "))
+                    format!(
+                        "{path}.type must be a string naming one of {}",
+                        SUPPORTED_TYPES.join(", ")
+                    )
                 })?;
                 if !SUPPORTED_TYPES.contains(&name) {
                     return Err(format!(
@@ -144,7 +147,10 @@ fn validate_at(schema: &Value, value: &Value, path: &str) -> Result<(), String> 
 
     if let Some(choices) = obj.get("enum").and_then(Value::as_array) {
         if !choices.contains(value) {
-            return Err(format!("{path}: value is not one of the {} enum choices", choices.len()));
+            return Err(format!(
+                "{path}: value is not one of the {} enum choices",
+                choices.len()
+            ));
         }
     }
 
@@ -153,12 +159,16 @@ fn validate_at(schema: &Value, value: &Value, path: &str) -> Result<(), String> 
             let len = s.chars().count() as u64;
             if let Some(min) = obj.get("minLength").and_then(Value::as_u64) {
                 if len < min {
-                    return Err(format!("{path}: minLength is {min}, got a string of length {len}"));
+                    return Err(format!(
+                        "{path}: minLength is {min}, got a string of length {len}"
+                    ));
                 }
             }
             if let Some(max) = obj.get("maxLength").and_then(Value::as_u64) {
                 if len > max {
-                    return Err(format!("{path}: maxLength is {max}, got a string of length {len}"));
+                    return Err(format!(
+                        "{path}: maxLength is {max}, got a string of length {len}"
+                    ));
                 }
             }
         }
@@ -287,7 +297,11 @@ mod tests {
     #[test]
     fn integer_rejects_a_fractional_number_that_number_accepts() {
         ok(&json!({ "type": "number" }), &json!(1.5));
-        reject(&json!({ "type": "integer" }), &json!(1.5), "expected type \"integer\"");
+        reject(
+            &json!({ "type": "integer" }),
+            &json!(1.5),
+            "expected type \"integer\"",
+        );
         ok(&json!({ "type": "integer" }), &json!(-4));
     }
 
@@ -358,9 +372,21 @@ mod tests {
             }
         });
         ok(&schema, &json!({ "tags": ["a", "b"], "meta": { "n": 2 } }));
-        reject(&schema, &json!({ "tags": ["a", 2], "meta": { "n": 2 } }), "body.tags[1]");
-        reject(&schema, &json!({ "tags": [], "meta": { "n": -1 } }), "body.meta.n");
-        reject(&schema, &json!({ "tags": [], "meta": {} }), "body.meta: missing required property \"n\"");
+        reject(
+            &schema,
+            &json!({ "tags": ["a", 2], "meta": { "n": 2 } }),
+            "body.tags[1]",
+        );
+        reject(
+            &schema,
+            &json!({ "tags": [], "meta": { "n": -1 } }),
+            "body.meta.n",
+        );
+        reject(
+            &schema,
+            &json!({ "tags": [], "meta": {} }),
+            "body.meta: missing required property \"n\"",
+        );
     }
 
     #[test]

@@ -42,8 +42,7 @@ fn classify_model(model: &str) -> ModelFamily {
     // o-series: model string starts with 'o' followed immediately by a digit.
     // Covers o1, o1-mini, o3, o3-mini, o4-mini, etc.
     let bytes = model.trim().as_bytes();
-    if matches!(bytes.first(), Some(b'o'))
-        && matches!(bytes.get(1), Some(b) if b.is_ascii_digit())
+    if matches!(bytes.first(), Some(b'o')) && matches!(bytes.get(1), Some(b) if b.is_ascii_digit())
     {
         return ModelFamily::OSeriesReasoning;
     }
@@ -476,7 +475,10 @@ fn translate_murmur_request_to_openai(
 
     let mut body = Map::new();
     body.insert("model".to_string(), Value::String(request.model.clone()));
-    body.insert("max_completion_tokens".to_string(), Value::from(request.max_tokens));
+    body.insert(
+        "max_completion_tokens".to_string(),
+        Value::from(request.max_tokens),
+    );
     body.insert("messages".to_string(), Value::Array(messages));
 
     if !tools.is_empty() {
@@ -706,7 +708,10 @@ fn translate_murmur_request_to_responses(
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
     {
-        body.insert("instructions".to_string(), Value::String(system.to_string()));
+        body.insert(
+            "instructions".to_string(),
+            Value::String(system.to_string()),
+        );
     }
 
     if !tools.is_empty() {
@@ -1169,7 +1174,10 @@ fn translate_responses_to_murmur(response: &Value) -> Result<Value, String> {
                 }
             }
             Some("function_call") => {
-                let arguments_raw = item.get("arguments").and_then(Value::as_str).unwrap_or("{}");
+                let arguments_raw = item
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("{}");
                 let name = item.get("name").and_then(Value::as_str).unwrap_or_default();
                 let arguments: Value = match serde_json::from_str(arguments_raw) {
                     Ok(value) => value,
@@ -1217,7 +1225,10 @@ struct ThinkingState {
 
 impl ThinkingState {
     fn new() -> Self {
-        Self { in_thinking: false, partial_tag: String::new() }
+        Self {
+            in_thinking: false,
+            partial_tag: String::new(),
+        }
     }
 
     /// Process `content`, routing text to `emit_text` and thinking to `emit_thinking`.
@@ -1242,7 +1253,11 @@ impl ThinkingState {
         emit_text: &mut impl FnMut(&str),
         emit_thinking: &mut impl FnMut(&str),
     ) {
-        let target = if self.in_thinking { "</think>" } else { "<think>" };
+        let target = if self.in_thinking {
+            "</think>"
+        } else {
+            "<think>"
+        };
         if let Some(pos) = s.find(target) {
             if pos > 0 {
                 if self.in_thinking {
@@ -1278,11 +1293,7 @@ impl ThinkingState {
     }
 
     /// Flush any partial tag buffer after the stream ends. Emits in the current mode.
-    fn flush(
-        &mut self,
-        emit_text: &mut impl FnMut(&str),
-        emit_thinking: &mut impl FnMut(&str),
-    ) {
+    fn flush(&mut self, emit_text: &mut impl FnMut(&str), emit_thinking: &mut impl FnMut(&str)) {
         if !self.partial_tag.is_empty() {
             let partial = std::mem::take(&mut self.partial_tag);
             if self.in_thinking {
@@ -1638,7 +1649,9 @@ fn assemble_openai_streaming_response(
             return Ok(error_payload("OpenAI response blocked by content_filter"));
         }
         other => {
-            return Err(format!("driver: unsupported OpenAI finish_reason '{other}'"));
+            return Err(format!(
+                "driver: unsupported OpenAI finish_reason '{other}'"
+            ));
         }
     };
 
@@ -1675,7 +1688,11 @@ fn error_payload(message: &str) -> Value {
 /// Shared tail: orders content blocks as thinking (if any) first, then either
 /// tool_call blocks or a single text block. Used by both Chat Completions and
 /// Responses streaming assembly.
-fn assemble_content_tail(thinking_acc: &str, tool_content: Vec<Value>, text_acc: &str) -> Vec<Value> {
+fn assemble_content_tail(
+    thinking_acc: &str,
+    tool_content: Vec<Value>,
+    text_acc: &str,
+) -> Vec<Value> {
     let mut content = Vec::new();
     if !thinking_acc.is_empty() {
         content.push(json!({"type": "thinking", "text": thinking_acc}));
@@ -1735,7 +1752,10 @@ fn process_responses_sse_line(
         "response.output_item.added" => {
             let item = data.get("item").unwrap_or(&Value::Null);
             if item.get("type").and_then(Value::as_str) == Some("function_call") {
-                let output_index = data.get("output_index").and_then(Value::as_u64).unwrap_or(0);
+                let output_index = data
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
                 let idx = tool_states.len();
                 tool_states.push(ToolCallState {
                     id: item
@@ -1755,7 +1775,10 @@ fn process_responses_sse_line(
             }
         }
         "response.function_call_arguments.delta" => {
-            let output_index = data.get("output_index").and_then(Value::as_u64).unwrap_or(0);
+            let output_index = data
+                .get("output_index")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             if let (Some(&idx), Some(delta)) = (
                 tool_index_by_output_index.get(&output_index),
                 data.get("delta").and_then(Value::as_str),
@@ -1765,7 +1788,10 @@ fn process_responses_sse_line(
             }
         }
         "response.function_call_arguments.done" => {
-            let output_index = data.get("output_index").and_then(Value::as_u64).unwrap_or(0);
+            let output_index = data
+                .get("output_index")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             if let (Some(&idx), Some(arguments)) = (
                 tool_index_by_output_index.get(&output_index),
                 data.get("arguments").and_then(Value::as_str),
@@ -1830,11 +1856,8 @@ fn assemble_responses_streaming_response(
         "driver: OpenAI Responses stream ended with no terminal event".to_string()
     })?;
     let has_function_call = !tool_states.is_empty();
-    let stop_reason = responses_stop_reason(
-        status,
-        has_function_call,
-        incomplete_reason.as_deref(),
-    )?;
+    let stop_reason =
+        responses_stop_reason(status, has_function_call, incomplete_reason.as_deref())?;
     let stop_reason_str = stop_reason.as_str();
     let capped = stop_reason.is_max_tokens();
     if let Some(err_payload) = stop_reason.into_error() {
@@ -1879,8 +1902,8 @@ mod wasm_driver {
         MurmurRequest, ThinkingState, ToolCallSignal, ToolCallState, UsageTokens,
         CONTINUATION_ID_KEY,
     };
-    use std::collections::HashMap;
     use serde_json::Value;
+    use std::collections::HashMap;
 
     wit_bindgen::generate!({
         path: "../../wit/guest",
@@ -2044,9 +2067,7 @@ mod wasm_driver {
             let json: Value = serde_json::from_str(&text)
                 .map_err(|err| format!("driver: failed to parse OpenAI response JSON: {err}"))?;
             match surface {
-                ApiSurface::ChatCompletions => {
-                    (translate_openai_response_to_murmur(&json)?, None)
-                }
+                ApiSurface::ChatCompletions => (translate_openai_response_to_murmur(&json)?, None),
                 ApiSurface::Responses => (
                     translate_responses_to_murmur(&json)?,
                     json.get("id").and_then(Value::as_str).map(String::from),
@@ -2054,9 +2075,10 @@ mod wasm_driver {
             }
         } else {
             match surface {
-                ApiSurface::ChatCompletions => {
-                    (run_chat_completions_sse(stream, &first, incoming_body)?, None)
-                }
+                ApiSurface::ChatCompletions => (
+                    run_chat_completions_sse(stream, &first, incoming_body)?,
+                    None,
+                ),
                 ApiSurface::Responses => run_responses_sse(stream, &first, incoming_body)?,
             }
         };
@@ -2097,8 +2119,14 @@ mod wasm_driver {
                 let line = String::from_utf8_lossy(&line_buf);
                 let line = line.trim_end_matches('\r');
                 {
-                    let mut emit_t = |t: &str| { murmur::stream::events::emit_chunk(t); text_acc.push_str(t); };
-                    let mut emit_think = |t: &str| { murmur::stream::events::emit_thinking_chunk(t); thinking_acc.push_str(t); };
+                    let mut emit_t = |t: &str| {
+                        murmur::stream::events::emit_chunk(t);
+                        text_acc.push_str(t);
+                    };
+                    let mut emit_think = |t: &str| {
+                        murmur::stream::events::emit_thinking_chunk(t);
+                        thinking_acc.push_str(t);
+                    };
                     done = process_openai_sse_line(
                         line,
                         &mut tool_states,
@@ -2131,8 +2159,14 @@ mod wasm_driver {
                         let line = String::from_utf8_lossy(&line_buf);
                         let line = line.trim_end_matches('\r');
                         {
-                            let mut emit_t = |t: &str| { murmur::stream::events::emit_chunk(t); text_acc.push_str(t); };
-                            let mut emit_think = |t: &str| { murmur::stream::events::emit_thinking_chunk(t); thinking_acc.push_str(t); };
+                            let mut emit_t = |t: &str| {
+                                murmur::stream::events::emit_chunk(t);
+                                text_acc.push_str(t);
+                            };
+                            let mut emit_think = |t: &str| {
+                                murmur::stream::events::emit_thinking_chunk(t);
+                                thinking_acc.push_str(t);
+                            };
                             done = process_openai_sse_line(
                                 line,
                                 &mut tool_states,
@@ -2158,11 +2192,23 @@ mod wasm_driver {
         drop(stream);
         let _ = wasip2::http::types::IncomingBody::finish(incoming_body);
         {
-            let mut emit_t = |t: &str| { murmur::stream::events::emit_chunk(t); text_acc.push_str(t); };
-            let mut emit_think = |t: &str| { murmur::stream::events::emit_thinking_chunk(t); thinking_acc.push_str(t); };
+            let mut emit_t = |t: &str| {
+                murmur::stream::events::emit_chunk(t);
+                text_acc.push_str(t);
+            };
+            let mut emit_think = |t: &str| {
+                murmur::stream::events::emit_thinking_chunk(t);
+                thinking_acc.push_str(t);
+            };
             thinking.flush(&mut emit_t, &mut emit_think);
         }
-        assemble_openai_streaming_response(&text_acc, &thinking_acc, tool_states, stop_reason, usage)
+        assemble_openai_streaming_response(
+            &text_acc,
+            &thinking_acc,
+            tool_states,
+            stop_reason,
+            usage,
+        )
     }
 
     /// SSE streaming for the Responses surface: process lines incrementally,
@@ -2190,8 +2236,14 @@ mod wasm_driver {
                 let line = String::from_utf8_lossy(&line_buf);
                 let line = line.trim_end_matches('\r');
                 {
-                    let mut emit_t = |t: &str| { murmur::stream::events::emit_chunk(t); text_acc.push_str(t); };
-                    let mut emit_think = |t: &str| { murmur::stream::events::emit_thinking_chunk(t); thinking_acc.push_str(t); };
+                    let mut emit_t = |t: &str| {
+                        murmur::stream::events::emit_chunk(t);
+                        text_acc.push_str(t);
+                    };
+                    let mut emit_think = |t: &str| {
+                        murmur::stream::events::emit_thinking_chunk(t);
+                        thinking_acc.push_str(t);
+                    };
                     done = process_responses_sse_line(
                         line,
                         &mut tool_states,
@@ -2227,8 +2279,14 @@ mod wasm_driver {
                         let line = String::from_utf8_lossy(&line_buf);
                         let line = line.trim_end_matches('\r');
                         {
-                            let mut emit_t = |t: &str| { murmur::stream::events::emit_chunk(t); text_acc.push_str(t); };
-                            let mut emit_think = |t: &str| { murmur::stream::events::emit_thinking_chunk(t); thinking_acc.push_str(t); };
+                            let mut emit_t = |t: &str| {
+                                murmur::stream::events::emit_chunk(t);
+                                text_acc.push_str(t);
+                            };
+                            let mut emit_think = |t: &str| {
+                                murmur::stream::events::emit_thinking_chunk(t);
+                                thinking_acc.push_str(t);
+                            };
                             done = process_responses_sse_line(
                                 line,
                                 &mut tool_states,
@@ -2307,7 +2365,8 @@ mod wasm_driver {
             while !remaining.is_empty() {
                 let budget = stream
                     .check_write()
-                    .map_err(|e| format!("driver: check-write failed: {e:?}"))? as usize;
+                    .map_err(|e| format!("driver: check-write failed: {e:?}"))?
+                    as usize;
                 if budget == 0 {
                     stream.subscribe().block();
                     continue;
@@ -2355,9 +2414,7 @@ mod wasm_driver {
             .map_err(|err| format!("driver: error response body is not UTF-8: {err}"))
     }
 
-    fn read_chunk(
-        stream: &wasip2::io::streams::InputStream,
-    ) -> Result<Vec<u8>, String> {
+    fn read_chunk(stream: &wasip2::io::streams::InputStream) -> Result<Vec<u8>, String> {
         match stream.blocking_read(16 * 1024) {
             Ok(chunk) => Ok(chunk),
             Err(wasip2::io::streams::StreamError::Closed) => Ok(Vec::new()),
@@ -2554,14 +2611,7 @@ mod tests {
 
     #[test]
     fn classifies_o_series_as_reasoning() {
-        for model in &[
-            "o1",
-            "o1-mini",
-            "o1-preview",
-            "o3",
-            "o3-mini",
-            "o4-mini",
-        ] {
+        for model in &["o1", "o1-mini", "o1-preview", "o3", "o3-mini", "o4-mini"] {
             assert_eq!(
                 classify_model(model),
                 ModelFamily::OSeriesReasoning,
@@ -2590,10 +2640,19 @@ mod tests {
         let translated =
             translate_murmur_request_to_openai(&request, ModelFamily::OSeriesReasoning).unwrap();
 
-        assert!(translated.get("temperature").is_none(), "temperature must be stripped");
+        assert!(
+            translated.get("temperature").is_none(),
+            "temperature must be stripped"
+        );
         assert!(translated.get("top_p").is_none(), "top_p must be stripped");
-        assert!(translated.get("presence_penalty").is_none(), "presence_penalty must be stripped");
-        assert!(translated.get("frequency_penalty").is_none(), "frequency_penalty must be stripped");
+        assert!(
+            translated.get("presence_penalty").is_none(),
+            "presence_penalty must be stripped"
+        );
+        assert!(
+            translated.get("frequency_penalty").is_none(),
+            "frequency_penalty must be stripped"
+        );
         assert_eq!(translated["reasoning_effort"], "high");
         assert_eq!(translated["stream"], false);
     }
@@ -2629,8 +2688,12 @@ mod tests {
         );
 
         let mut emitted: Vec<String> = Vec::new();
-        let result = parse_openai_sse_body(body, &mut |chunk| emitted.push(chunk.to_string()), &mut |_| {})
-            .unwrap();
+        let result = parse_openai_sse_body(
+            body,
+            &mut |chunk| emitted.push(chunk.to_string()),
+            &mut |_| {},
+        )
+        .unwrap();
 
         assert_eq!(emitted, vec!["He", "llo", " world"]);
         assert_eq!(result["stop_reason"], "end_turn");
@@ -2649,8 +2712,12 @@ mod tests {
         );
 
         let mut emitted: Vec<String> = Vec::new();
-        let result = parse_openai_sse_body(body, &mut |chunk| emitted.push(chunk.to_string()), &mut |_| {})
-            .unwrap();
+        let result = parse_openai_sse_body(
+            body,
+            &mut |chunk| emitted.push(chunk.to_string()),
+            &mut |_| {},
+        )
+        .unwrap();
 
         assert!(emitted.is_empty(), "no text chunks expected for tool calls");
         assert_eq!(result["stop_reason"], "tool_call");
@@ -2675,11 +2742,11 @@ mod tests {
 
         let mut text_chunks: Vec<String> = Vec::new();
         let mut thinking_chunks: Vec<String> = Vec::new();
-        let result = parse_openai_sse_body(
-            body,
-            &mut |t| text_chunks.push(t.to_string()),
-            &mut |t| thinking_chunks.push(t.to_string()),
-        ).unwrap();
+        let result =
+            parse_openai_sse_body(body, &mut |t| text_chunks.push(t.to_string()), &mut |t| {
+                thinking_chunks.push(t.to_string())
+            })
+            .unwrap();
 
         assert_eq!(thinking_chunks.join(""), "Let me reason.");
         assert_eq!(text_chunks, vec!["The answer is 42."]);
@@ -2703,11 +2770,11 @@ mod tests {
 
         let mut text_chunks: Vec<String> = Vec::new();
         let mut thinking_chunks: Vec<String> = Vec::new();
-        let result = parse_openai_sse_body(
-            body,
-            &mut |t| text_chunks.push(t.to_string()),
-            &mut |t| thinking_chunks.push(t.to_string()),
-        ).unwrap();
+        let result =
+            parse_openai_sse_body(body, &mut |t| text_chunks.push(t.to_string()), &mut |t| {
+                thinking_chunks.push(t.to_string())
+            })
+            .unwrap();
 
         assert_eq!(thinking_chunks.join(""), "thoughts");
         assert_eq!(text_chunks.join(""), "answer");
@@ -2729,11 +2796,11 @@ mod tests {
 
         let mut text_chunks: Vec<String> = Vec::new();
         let mut thinking_chunks: Vec<String> = Vec::new();
-        let result = parse_openai_sse_body(
-            body,
-            &mut |t| text_chunks.push(t.to_string()),
-            &mut |t| thinking_chunks.push(t.to_string()),
-        ).unwrap();
+        let result =
+            parse_openai_sse_body(body, &mut |t| text_chunks.push(t.to_string()), &mut |t| {
+                thinking_chunks.push(t.to_string())
+            })
+            .unwrap();
 
         assert!(thinking_chunks.is_empty());
         assert_eq!(text_chunks, vec!["Hello ", "world"]);
@@ -2752,11 +2819,11 @@ mod tests {
 
         let mut text_chunks: Vec<String> = Vec::new();
         let mut thinking_chunks: Vec<String> = Vec::new();
-        let result = parse_openai_sse_body(
-            body,
-            &mut |t| text_chunks.push(t.to_string()),
-            &mut |t| thinking_chunks.push(t.to_string()),
-        ).unwrap();
+        let result =
+            parse_openai_sse_body(body, &mut |t| text_chunks.push(t.to_string()), &mut |t| {
+                thinking_chunks.push(t.to_string())
+            })
+            .unwrap();
 
         assert_eq!(thinking_chunks, vec!["inner thought"]);
         assert_eq!(text_chunks, vec!["reply"]);
@@ -2848,7 +2915,8 @@ mod tests {
             "messages": []
         }))
         .unwrap();
-        let translated_empty = translate_murmur_request_to_responses(&request_empty, false).unwrap();
+        let translated_empty =
+            translate_murmur_request_to_responses(&request_empty, false).unwrap();
         assert!(translated_empty.get("instructions").is_none());
 
         let request_absent: MurmurRequest = serde_json::from_value(json!({
@@ -2857,7 +2925,8 @@ mod tests {
             "messages": []
         }))
         .unwrap();
-        let translated_absent = translate_murmur_request_to_responses(&request_absent, false).unwrap();
+        let translated_absent =
+            translate_murmur_request_to_responses(&request_absent, false).unwrap();
         assert!(translated_absent.get("instructions").is_none());
     }
 
@@ -2876,7 +2945,10 @@ mod tests {
         assert_eq!(translated["tools"][0]["type"], "function");
         assert_eq!(translated["tools"][0]["name"], "calc");
         assert_eq!(translated["tools"][0]["description"], "calculate");
-        assert_eq!(translated["tools"][0]["parameters"], json!({"type": "object"}));
+        assert_eq!(
+            translated["tools"][0]["parameters"],
+            json!({"type": "object"})
+        );
         assert!(translated["tools"][0].get("function").is_none());
     }
 
@@ -2934,7 +3006,10 @@ mod tests {
         assert_eq!(translated["input"][0]["type"], "message");
         assert_eq!(translated["input"][0]["role"], "assistant");
         assert_eq!(translated["input"][0]["content"][0]["type"], "output_text");
-        assert_eq!(translated["input"][0]["content"][0]["text"], "Let me check that.");
+        assert_eq!(
+            translated["input"][0]["content"][0]["text"],
+            "Let me check that."
+        );
         assert_eq!(translated["input"][1]["type"], "function_call");
         assert_eq!(translated["input"][1]["call_id"], "tc-1");
     }
@@ -3041,7 +3116,11 @@ mod tests {
         assert_eq!(translated["store"], true);
         assert_eq!(translated["previous_response_id"], "resp_prev_123");
         let input = translated["input"].as_array().unwrap();
-        assert_eq!(input.len(), 1, "assistant items must be dropped on continuation");
+        assert_eq!(
+            input.len(),
+            1,
+            "assistant items must be dropped on continuation"
+        );
         assert_eq!(input[0]["type"], "function_call_output");
         assert_eq!(input[0]["call_id"], "tc-1");
         assert_eq!(input[0]["output"], "2");
@@ -3127,7 +3206,10 @@ mod tests {
         }))
         .unwrap();
         let t1 = translate_murmur_request_to_responses(&turn1, true).unwrap();
-        assert_eq!(t1["store"], true, "turn 1 must be stored for reasoning to persist");
+        assert_eq!(
+            t1["store"], true,
+            "turn 1 must be stored for reasoning to persist"
+        );
         assert!(t1.get("previous_response_id").is_none());
 
         // Turn 2 chains via previous_response_id; the reasoning-bearing assistant
@@ -3280,7 +3362,10 @@ mod tests {
         });
         let translated = translate_responses_to_murmur(&response).unwrap();
         assert_eq!(translated["stop_reason"], "error");
-        assert!(translated["error"].as_str().unwrap().contains("rate limited"));
+        assert!(translated["error"]
+            .as_str()
+            .unwrap()
+            .contains("rate limited"));
     }
 
     #[test]
@@ -3308,7 +3393,10 @@ mod tests {
         });
         let translated = translate_responses_to_murmur(&response).unwrap();
         assert_eq!(translated["stop_reason"], "error");
-        assert!(translated["error"].as_str().unwrap().contains("cannot help with that"));
+        assert!(translated["error"]
+            .as_str()
+            .unwrap()
+            .contains("cannot help with that"));
     }
 
     // ── Responses API: streaming ────────────────────────────────────────────
@@ -3321,8 +3409,9 @@ mod tests {
             "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n",
         );
         let mut emitted: Vec<String> = Vec::new();
-        let result = parse_responses_sse_body(body, &mut |t| emitted.push(t.to_string()), &mut |_| {})
-            .unwrap();
+        let result =
+            parse_responses_sse_body(body, &mut |t| emitted.push(t.to_string()), &mut |_| {})
+                .unwrap();
         assert_eq!(emitted, vec!["He", "llo"]);
         assert_eq!(result["stop_reason"], "end_turn");
         assert_eq!(result["content"][0]["type"], "text");
@@ -3366,12 +3455,11 @@ mod tests {
         );
         let mut text_chunks: Vec<String> = Vec::new();
         let mut thinking_chunks: Vec<String> = Vec::new();
-        let result = parse_responses_sse_body(
-            body,
-            &mut |t| text_chunks.push(t.to_string()),
-            &mut |t| thinking_chunks.push(t.to_string()),
-        )
-        .unwrap();
+        let result =
+            parse_responses_sse_body(body, &mut |t| text_chunks.push(t.to_string()), &mut |t| {
+                thinking_chunks.push(t.to_string())
+            })
+            .unwrap();
         assert_eq!(thinking_chunks, vec!["Thinking..."]);
         assert_eq!(text_chunks, vec!["Answer."]);
         assert_eq!(result["content"][0]["type"], "thinking");
@@ -3896,7 +3984,11 @@ mod tests {
 
     #[test]
     fn verbosity_lands_under_text_and_asks_for_no_reasoning() {
-        let body = provider_body(&request("gpt-5.1"), &config(r#"{"verbosity":"low"}"#), false);
+        let body = provider_body(
+            &request("gpt-5.1"),
+            &config(r#"{"verbosity":"low"}"#),
+            false,
+        );
         assert_eq!(body["text"], json!({"verbosity": "low"}));
         assert!(body.get("reasoning").is_none());
     }
@@ -3906,16 +3998,19 @@ mod tests {
         let body = include_str!("../tests/fixtures/responses_reasoning_summary_stream.sse");
         let mut text_chunks: Vec<String> = Vec::new();
         let mut thinking_chunks: Vec<String> = Vec::new();
-        let result = parse_responses_sse_body(
-            body,
-            &mut |t| text_chunks.push(t.to_string()),
-            &mut |t| thinking_chunks.push(t.to_string()),
-        )
-        .unwrap();
+        let result =
+            parse_responses_sse_body(body, &mut |t| text_chunks.push(t.to_string()), &mut |t| {
+                thinking_chunks.push(t.to_string())
+            })
+            .unwrap();
 
         assert_eq!(
             thinking_chunks,
-            vec!["The sky scatters ", "short wavelengths, ", "so blue dominates."]
+            vec![
+                "The sky scatters ",
+                "short wavelengths, ",
+                "so blue dominates."
+            ]
         );
         assert_eq!(text_chunks, vec!["Because of ", "Rayleigh scattering."]);
         assert_eq!(result["content"][0]["type"], "thinking");
@@ -3924,7 +4019,10 @@ mod tests {
             "The sky scatters short wavelengths, so blue dominates."
         );
         assert_eq!(result["content"][1]["type"], "text");
-        assert_eq!(result["content"][1]["text"], "Because of Rayleigh scattering.");
+        assert_eq!(
+            result["content"][1]["text"],
+            "Because of Rayleigh scattering."
+        );
     }
 
     #[test]
@@ -3942,8 +4040,10 @@ mod tests {
     fn several_unrecognised_config_keys_are_reported_together_in_sorted_order() {
         // An Anthropic driver config pasted onto this driver: one error, both keys, so the
         // manifest is fixed once.
-        let err = parse_driver_config(Some(r#"{"thinking_budget_tokens":4096,"beta_features":"x"}"#))
-            .expect_err("both unread keys must be reported");
+        let err = parse_driver_config(Some(
+            r#"{"thinking_budget_tokens":4096,"beta_features":"x"}"#,
+        ))
+        .expect_err("both unread keys must be reported");
         assert_eq!(
             err,
             "driver: unrecognised inference.driver.config key(s): beta_features, \
@@ -4012,7 +4112,11 @@ mod tests {
 
     #[test]
     fn gpt_classic_drops_the_effort_dial_through_the_incompatibility_predicate() {
-        let body = provider_body(&request("gpt-4o"), &config(r#"{"reasoning_effort":"high"}"#), false);
+        let body = provider_body(
+            &request("gpt-4o"),
+            &config(r#"{"reasoning_effort":"high"}"#),
+            false,
+        );
         assert!(body.get("reasoning_effort").is_none());
         // Dropped by the one predicate both the dials and the `params` loop consult.
         assert!(!provider_field_supported(
@@ -4071,7 +4175,10 @@ mod tests {
         assert!(parse_driver_config(Some("[]")).is_err());
         // An unset variable and a variable the host set to nothing both mean "no config".
         assert_eq!(parse_driver_config(None).unwrap(), DriverConfig::default());
-        assert_eq!(parse_driver_config(Some("  ")).unwrap(), DriverConfig::default());
+        assert_eq!(
+            parse_driver_config(Some("  ")).unwrap(),
+            DriverConfig::default()
+        );
     }
 
     #[test]
@@ -4080,9 +4187,7 @@ mod tests {
         // which is the proof that no HTTP request can be dispatched with a rejected config.
         // `run_inner` is wasm-only, so its statement order is asserted from the source.
         let source = include_str!("lib.rs");
-        let run_inner = &source[source
-            .find("fn run_inner(")
-            .expect("run_inner must exist")..];
+        let run_inner = &source[source.find("fn run_inner(").expect("run_inner must exist")..];
         let parse_at = run_inner
             .find("parse_driver_config(")
             .expect("run_inner must parse the driver config");
@@ -4360,9 +4465,7 @@ mod tests {
         // to disagree with it again. `run_inner` is wasm-only, so this is asserted from the
         // source; the needle is assembled so that this test is not its own evidence.
         let source = include_str!("lib.rs");
-        let run_inner = &source[source
-            .find("fn run_inner(")
-            .expect("run_inner must exist")..];
+        let run_inner = &source[source.find("fn run_inner(").expect("run_inner must exist")..];
         assert!(
             run_inner.contains(concat!("require_", "endpoint(")),
             "run_inner must resolve the endpoint through murmur_driver_env::require_endpoint"
@@ -4386,8 +4489,8 @@ mod tests {
         // The runtime attaches the header declared under `upstream_auth:`, so a driver-side
         // credential read would put the key back in the guest.
         let source = include_str!("lib.rs");
-        let non_test = source[..source.find("\nmod tests {").expect("mod tests must exist")]
-            .to_lowercase();
+        let non_test =
+            source[..source.find("\nmod tests {").expect("mod tests must exist")].to_lowercase();
         for needle in [
             concat!("murmur_inference_", "api_key"),
             concat!("\"author", "ization\""),

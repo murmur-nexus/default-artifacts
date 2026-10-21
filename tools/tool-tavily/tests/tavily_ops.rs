@@ -6,11 +6,11 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use serde_json::{json, Value};
+use tempfile::TempDir;
 use tool_tavily::config::{self, parse_config, Config, SearchDepth};
 use tool_tavily::ops::{run, HttpReply, OpStatus, Response, Transport};
 use tool_tavily::request;
-use serde_json::{json, Value};
-use tempfile::TempDir;
 
 const GATEWAY: &str = "http://127.0.0.1:9";
 

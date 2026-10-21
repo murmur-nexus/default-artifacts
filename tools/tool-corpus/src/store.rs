@@ -76,7 +76,9 @@ impl Store {
     /// repaired.
     pub fn open(state_dir: &Path) -> Result<Self, OpError> {
         match std::fs::metadata(state_dir) {
-            Ok(meta) if meta.is_dir() => Ok(Self { root: state_dir.to_path_buf() }),
+            Ok(meta) if meta.is_dir() => Ok(Self {
+                root: state_dir.to_path_buf(),
+            }),
             Ok(_) => Err(OpError::new(
                 kind::STATE_UNAVAILABLE,
                 format!(
@@ -131,7 +133,10 @@ impl Store {
     /// of one bad byte making the whole store unusable.
     pub fn read_all(&self) -> Result<Scan, OpError> {
         let Some(text) = self.read_text()? else {
-            return Ok(Scan { records: Vec::new(), skipped_lines: Vec::new() });
+            return Ok(Scan {
+                records: Vec::new(),
+                skipped_lines: Vec::new(),
+            });
         };
 
         let mut records = Vec::new();
@@ -146,7 +151,10 @@ impl Store {
                 Err(_) => skipped_lines.push(index as u64 + 1),
             }
         }
-        Ok(Scan { records, skipped_lines })
+        Ok(Scan {
+            records,
+            skipped_lines,
+        })
     }
 
     /// Read every line and report the ones that are not records.
@@ -157,7 +165,11 @@ impl Store {
     /// a human action on `corpus.jsonl`, informed by what this reports.
     pub fn verify(&self) -> Result<VerifyReport, OpError> {
         let Some(text) = self.read_text()? else {
-            return Ok(VerifyReport { lines: 0, records: 0, bad_lines: Vec::new() });
+            return Ok(VerifyReport {
+                lines: 0,
+                records: 0,
+                bad_lines: Vec::new(),
+            });
         };
 
         let mut lines = 0;
@@ -174,7 +186,11 @@ impl Store {
                 }),
             }
         }
-        Ok(VerifyReport { lines, records, bad_lines })
+        Ok(VerifyReport {
+            lines,
+            records,
+            bad_lines,
+        })
     }
 
     /// Append one record as a single JSON line.
@@ -224,12 +240,10 @@ pub fn withdrawal_index(records: &[Record]) -> BTreeMap<String, Withdrawal> {
     let mut index = BTreeMap::new();
     for record in records {
         if let Some(target) = &record.withdraws {
-            index
-                .entry(target.clone())
-                .or_insert_with(|| Withdrawal {
-                    by: record.id.clone(),
-                    at: record.created_at.clone(),
-                });
+            index.entry(target.clone()).or_insert_with(|| Withdrawal {
+                by: record.id.clone(),
+                at: record.created_at.clone(),
+            });
         }
     }
     index

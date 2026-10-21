@@ -1,13 +1,17 @@
 //! The inference endpoint a driver talks to, resolved from the host's environment.
 //!
-//! Where inference goes is the host's fact, never the driver's: murmur's manifest parser
-//! requires `inference.endpoint`, validates it, and injects it. A driver that substitutes
-//! its own value when the variable is absent is guessing about the one thing it is least
-//! entitled to guess about, and a guess that resolves to a public provider sends the
-//! capsule's credentials there. So the resolution lives here once, refuses rather than
-//! defaults, and no driver carries a provider URL of its own.
+//! Where inference goes is the host's fact, never the driver's. The capsule names the
+//! provider as `gateway.endpoint` on the driver's `artifacts:` entry, and murmur validates it
+//! when the manifest is parsed. The driver is handed the runtime's own loopback gateway plus
+//! the path of that endpoint; the runtime readdresses each request to the real upstream and
+//! attaches the key from `gateway.api_key`, so the driver never holds the key. A driver that
+//! substitutes its own URL when the variable is absent bypasses that gateway: its requests go
+//! where the driver guessed rather than where the capsule said, unmetered by the session's
+//! token budget. So the resolution lives here once, refuses rather than defaults, and no
+//! driver carries a provider URL of its own.
 
-/// The environment variable murmur's runtime delivers the resolved `inference.endpoint` in.
+/// The environment variable murmur's runtime delivers the endpoint in: its loopback gateway
+/// (`http://127.0.0.1:9`) followed by the path of the driver entry's `gateway.endpoint`.
 pub const INFERENCE_ENDPOINT_VAR: &str = "MURMUR_INFERENCE_ENDPOINT";
 
 /// The endpoint the host supplied, trimmed, or the reason it is unusable.

@@ -46,9 +46,8 @@ fn main() {
         std::process::exit(1);
     }
     let result = run(&raw);
-    let json = serde_json::to_string(&result).unwrap_or_else(|_| {
-        r#"{"ok":false,"message":"failed to serialize output"}"#.to_string()
-    });
+    let json = serde_json::to_string(&result)
+        .unwrap_or_else(|_| r#"{"ok":false,"message":"failed to serialize output"}"#.to_string());
     println!("{json}");
 }
 
@@ -177,7 +176,11 @@ fn resolve_repo(op: &Value) -> Result<String, String> {
 fn op_status(op: &Value, log: Option<&str>) -> Value {
     // Accept `path` as a legacy alias for `repo` — the original binary used `path` for
     // status, and existing test fixtures send `path`. If both are absent, auto-discover.
-    let repo = if let Some(r) = op.get("repo").or_else(|| op.get("path")).and_then(|v| v.as_str()) {
+    let repo = if let Some(r) = op
+        .get("repo")
+        .or_else(|| op.get("path"))
+        .and_then(|v| v.as_str())
+    {
         if let Ok(allow_env) = std::env::var("MURMUR_FILESYSTEM_ALLOW") {
             let allowed: Vec<&str> = allow_env.split(':').filter(|s| !s.is_empty()).collect();
             if !allowed.is_empty() {
@@ -217,7 +220,11 @@ fn op_status(op: &Value, log: Option<&str>) -> Value {
     if !out.success {
         return fail_msg(format!(
             "git status failed: {}",
-            if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+            if out.stderr.is_empty() {
+                "unknown error"
+            } else {
+                &out.stderr
+            }
         ));
     }
 
@@ -228,12 +235,20 @@ fn op_status(op: &Value, log: Option<&str>) -> Value {
         .map(|line| {
             // Porcelain v1 format: XY SP path  (XY is always exactly 2 chars)
             let xy = if line.len() >= 2 { &line[..2] } else { "??" };
-            let path = if line.len() > 3 { line[3..].to_string() } else { String::new() };
+            let path = if line.len() > 3 {
+                line[3..].to_string()
+            } else {
+                String::new()
+            };
             let x = xy.chars().next().unwrap_or(' ');
             let y = xy.chars().nth(1).unwrap_or(' ');
             // Map porcelain codes to human-readable status words.
             // Staged code (x) takes priority over unstaged (y).
-            let code = if x != ' ' && x != '?' && x != '!' { x } else { y };
+            let code = if x != ' ' && x != '?' && x != '!' {
+                x
+            } else {
+                y
+            };
             let status = match (x, y, code) {
                 ('?', '?', _) => "untracked",
                 ('!', '!', _) => "ignored",
@@ -286,7 +301,11 @@ fn op_add(op: &Value, log: Option<&str>) -> Value {
     if !out.success {
         return fail_msg(format!(
             "git add failed: {}",
-            if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+            if out.stderr.is_empty() {
+                "unknown error"
+            } else {
+                &out.stderr
+            }
         ));
     }
 
@@ -305,7 +324,10 @@ fn op_diff(op: &Value, log: Option<&str>) -> Value {
     let staged = op.get("staged").and_then(|v| v.as_bool()).unwrap_or(false);
     let path = op.get("path").and_then(|v| v.as_str());
 
-    log_write(log, &format!("diff: repo={repo:?} staged={staged} path={path:?}\n"));
+    log_write(
+        log,
+        &format!("diff: repo={repo:?} staged={staged} path={path:?}\n"),
+    );
 
     let mut args: Vec<&str> = vec!["-C", &repo, "diff"];
     if staged {
@@ -320,7 +342,11 @@ fn op_diff(op: &Value, log: Option<&str>) -> Value {
     if !out.success {
         return fail_msg(format!(
             "git diff failed: {}",
-            if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+            if out.stderr.is_empty() {
+                "unknown error"
+            } else {
+                &out.stderr
+            }
         ));
     }
 
@@ -347,7 +373,10 @@ fn op_restore(op: &Value, log: Option<&str>) -> Value {
 
     let staged = op.get("staged").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    log_write(log, &format!("restore: repo={repo:?} staged={staged} dest_paths={paths:?}\n"));
+    log_write(
+        log,
+        &format!("restore: repo={repo:?} staged={staged} dest_paths={paths:?}\n"),
+    );
 
     let mut args: Vec<&str> = vec!["-C", &repo, "restore"];
     if staged {
@@ -361,7 +390,11 @@ fn op_restore(op: &Value, log: Option<&str>) -> Value {
     if !out.success {
         return fail_msg(format!(
             "git restore failed: {}",
-            if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+            if out.stderr.is_empty() {
+                "unknown error"
+            } else {
+                &out.stderr
+            }
         ));
     }
 
@@ -397,7 +430,10 @@ fn stash_push(repo: &str, op: &Value, log: Option<&str>) -> Value {
         args.push(m);
     }
 
-    log_write(log, &format!("stash push: repo={repo:?} message={message:?}\n"));
+    log_write(
+        log,
+        &format!("stash push: repo={repo:?} message={message:?}\n"),
+    );
 
     let out = git(&args);
 
@@ -415,7 +451,11 @@ fn stash_push(repo: &str, op: &Value, log: Option<&str>) -> Value {
     if !out.success {
         return fail_msg(format!(
             "git stash push failed: {}",
-            if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+            if out.stderr.is_empty() {
+                "unknown error"
+            } else {
+                &out.stderr
+            }
         ));
     }
 
@@ -433,7 +473,11 @@ fn stash_pop(repo: &str, op: &Value, log: Option<&str>) -> Value {
     if !out.success {
         return fail_msg(format!(
             "git stash pop failed: {}",
-            if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+            if out.stderr.is_empty() {
+                "unknown error"
+            } else {
+                &out.stderr
+            }
         ));
     }
 
@@ -448,7 +492,11 @@ fn stash_list(repo: &str, log: Option<&str>) -> Value {
     if !out.success {
         return fail_msg(format!(
             "git stash list failed: {}",
-            if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+            if out.stderr.is_empty() {
+                "unknown error"
+            } else {
+                &out.stderr
+            }
         ));
     }
 
@@ -532,7 +580,11 @@ fn op_log(op: &Value, log: Option<&str>) -> Value {
     if !out.success {
         return fail_msg(format!(
             "git log failed: {}",
-            if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+            if out.stderr.is_empty() {
+                "unknown error"
+            } else {
+                &out.stderr
+            }
         ));
     }
 
@@ -593,10 +645,7 @@ fn op_show(op: &Value, log: Option<&str>) -> Value {
             || msg.contains("unknown revision")
             || msg.contains("not a valid object")
         {
-            return err_result(
-                err::NOT_FOUND,
-                format!("ref '{ref_str}' does not resolve"),
-            );
+            return err_result(err::NOT_FOUND, format!("ref '{ref_str}' does not resolve"));
         }
         return fail_msg(format!("git show failed: {}", meta_out.stderr));
     }
@@ -630,9 +679,16 @@ fn op_show(op: &Value, log: Option<&str>) -> Value {
 
     // 2. Full patch output.
     let diff_out = git(&["-C", &repo, "show", "--stat", "-p", &ref_str]);
-    let diff = if diff_out.success { diff_out.stdout } else { String::new() };
+    let diff = if diff_out.success {
+        diff_out.stdout
+    } else {
+        String::new()
+    };
 
-    ok_with(format!("show {ref_str}"), json!({ "commit": commit, "diff": diff }))
+    ok_with(
+        format!("show {ref_str}"),
+        json!({ "commit": commit, "diff": diff }),
+    )
 }
 
 // ── SYMBOL HISTORY operations ─────────────────────────────────────────────────
@@ -661,7 +717,11 @@ fn op_symbol_history(op: &Value, log: Option<&str>) -> Value {
 
     // Default 1 ("the last commit"). A zero or non-integer n falls back to 1 —
     // requesting zero commits is meaningless, not an error worth surfacing.
-    let n = op.get("n").and_then(|v| v.as_u64()).filter(|n| *n > 0).unwrap_or(1);
+    let n = op
+        .get("n")
+        .and_then(|v| v.as_u64())
+        .filter(|n| *n > 0)
+        .unwrap_or(1);
 
     log_write(
         log,
@@ -685,9 +745,7 @@ fn op_symbol_history(op: &Value, log: Option<&str>) -> Value {
             );
         }
         Err(resolve::ResolveError::Internal(e)) => {
-            return fail_msg(format!(
-                "symbol_history: failed to read code-graph db: {e}"
-            ));
+            return fail_msg(format!("symbol_history: failed to read code-graph db: {e}"));
         }
     };
 
@@ -788,9 +846,15 @@ fn op_commit(op: &Value, log: Option<&str>) -> Value {
         _ => return fail_msg("missing required field: message"),
     };
 
-    let allow_empty = op.get("allow_empty").and_then(|v| v.as_bool()).unwrap_or(false);
+    let allow_empty = op
+        .get("allow_empty")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
-    log_write(log, &format!("commit: repo={repo:?} allow_empty={allow_empty}\n"));
+    log_write(
+        log,
+        &format!("commit: repo={repo:?} allow_empty={allow_empty}\n"),
+    );
 
     let mut args: Vec<&str> = vec!["-C", &repo, "commit", "-m", &message];
     if allow_empty {
@@ -809,7 +873,11 @@ fn op_commit(op: &Value, log: Option<&str>) -> Value {
         }
         return fail_msg(format!(
             "git commit failed: {}",
-            if out.stderr.is_empty() { &out.stdout } else { &out.stderr }
+            if out.stderr.is_empty() {
+                &out.stdout
+            } else {
+                &out.stderr
+            }
         ));
     }
 
@@ -820,7 +888,10 @@ fn op_commit(op: &Value, log: Option<&str>) -> Value {
     let log_out = git(&["-C", &repo, "log", "-1", "--format=%s", "HEAD"]);
     let subject = log_out.stdout.trim().to_string();
 
-    ok_with("commit created", json!({ "hash": hash, "short_hash": short_hash, "subject": subject }))
+    ok_with(
+        "commit created",
+        json!({ "hash": hash, "short_hash": short_hash, "subject": subject }),
+    )
 }
 
 fn op_cherry_pick(op: &Value, log: Option<&str>) -> Value {
@@ -834,7 +905,10 @@ fn op_cherry_pick(op: &Value, log: Option<&str>) -> Value {
         _ => return fail_msg("missing required field: ref"),
     };
 
-    log_write(log, &format!("cherry_pick: repo={repo:?} ref={ref_str:?}\n"));
+    log_write(
+        log,
+        &format!("cherry_pick: repo={repo:?} ref={ref_str:?}\n"),
+    );
 
     let out = git(&["-C", &repo, "cherry-pick", &ref_str]);
 
@@ -851,7 +925,11 @@ fn op_cherry_pick(op: &Value, log: Option<&str>) -> Value {
         }
         return fail_msg(format!(
             "git cherry-pick failed: {}",
-            if out.stderr.is_empty() { &out.stdout } else { &out.stderr }
+            if out.stderr.is_empty() {
+                &out.stdout
+            } else {
+                &out.stderr
+            }
         ));
     }
 
@@ -900,7 +978,11 @@ fn branch_list(repo: &str, log: Option<&str>) -> Value {
     if !out.success {
         return fail_msg(format!(
             "git branch failed: {}",
-            if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+            if out.stderr.is_empty() {
+                "unknown error"
+            } else {
+                &out.stderr
+            }
         ));
     }
 
@@ -936,7 +1018,10 @@ fn branch_create(repo: &str, op: &Value, log: Option<&str>) -> Value {
     };
     let from = op.get("from").and_then(|v| v.as_str()).map(String::from);
 
-    log_write(log, &format!("branch create: repo={repo:?} name={name:?} from={from:?}\n"));
+    log_write(
+        log,
+        &format!("branch create: repo={repo:?} name={name:?} from={from:?}\n"),
+    );
 
     let mut args: Vec<&str> = vec!["-C", repo, "branch", &name];
     if let Some(ref f) = from {
@@ -947,11 +1032,18 @@ fn branch_create(repo: &str, op: &Value, log: Option<&str>) -> Value {
     if !out.success {
         let combined = format!("{}\n{}", out.stdout, out.stderr);
         if combined.contains("already exists") {
-            return err_result(err::ALREADY_EXISTS, format!("branch '{name}' already exists"));
+            return err_result(
+                err::ALREADY_EXISTS,
+                format!("branch '{name}' already exists"),
+            );
         }
         return fail_msg(format!(
             "git branch create failed: {}",
-            if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+            if out.stderr.is_empty() {
+                "unknown error"
+            } else {
+                &out.stderr
+            }
         ));
     }
 
@@ -965,7 +1057,10 @@ fn branch_delete(repo: &str, op: &Value, log: Option<&str>) -> Value {
     };
     let force = op.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    log_write(log, &format!("branch delete: repo={repo:?} name={name:?} force={force}\n"));
+    log_write(
+        log,
+        &format!("branch delete: repo={repo:?} name={name:?} force={force}\n"),
+    );
 
     let flag = if force { "-D" } else { "-d" };
     let out = git(&["-C", repo, "branch", flag, &name]);
@@ -982,7 +1077,11 @@ fn branch_delete(repo: &str, op: &Value, log: Option<&str>) -> Value {
         }
         return fail_msg(format!(
             "git branch delete failed: {}",
-            if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+            if out.stderr.is_empty() {
+                "unknown error"
+            } else {
+                &out.stderr
+            }
         ));
     }
 
@@ -1001,7 +1100,10 @@ fn op_checkout(op: &Value, log: Option<&str>) -> Value {
     };
     let create = op.get("create").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    log_write(log, &format!("checkout: repo={repo:?} ref={ref_str:?} create={create}\n"));
+    log_write(
+        log,
+        &format!("checkout: repo={repo:?} ref={ref_str:?} create={create}\n"),
+    );
 
     let mut args: Vec<&str> = vec!["-C", &repo, "checkout"];
     if create {
@@ -1019,14 +1121,21 @@ fn op_checkout(op: &Value, log: Option<&str>) -> Value {
             );
         }
         if combined.contains("already exists") {
-            return err_result(err::ALREADY_EXISTS, format!("branch '{ref_str}' already exists"));
+            return err_result(
+                err::ALREADY_EXISTS,
+                format!("branch '{ref_str}' already exists"),
+            );
         }
         if combined.contains("did not match") || combined.contains("invalid reference") {
             return err_result(err::NOT_FOUND, format!("ref '{ref_str}' not found"));
         }
         return fail_msg(format!(
             "git checkout failed: {}",
-            if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+            if out.stderr.is_empty() {
+                "unknown error"
+            } else {
+                &out.stderr
+            }
         ));
     }
 
@@ -1052,7 +1161,10 @@ fn op_switch(op: &Value, log: Option<&str>) -> Value {
     };
     let create = op.get("create").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    log_write(log, &format!("switch: repo={repo:?} branch={branch:?} create={create}\n"));
+    log_write(
+        log,
+        &format!("switch: repo={repo:?} branch={branch:?} create={create}\n"),
+    );
 
     let mut args: Vec<&str> = vec!["-C", &repo, "switch"];
     if create {
@@ -1070,21 +1182,31 @@ fn op_switch(op: &Value, log: Option<&str>) -> Value {
             );
         }
         if combined.contains("already exists") {
-            return err_result(err::ALREADY_EXISTS, format!("branch '{branch}' already exists"));
+            return err_result(
+                err::ALREADY_EXISTS,
+                format!("branch '{branch}' already exists"),
+            );
         }
         if combined.contains("invalid reference") || combined.contains("does not exist") {
             return err_result(err::NOT_FOUND, format!("branch '{branch}' not found"));
         }
         return fail_msg(format!(
             "git switch failed: {}",
-            if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+            if out.stderr.is_empty() {
+                "unknown error"
+            } else {
+                &out.stderr
+            }
         ));
     }
 
     let branch_out = git(&["-C", &repo, "branch", "--show-current"]);
     let current = branch_out.stdout.trim().to_string();
 
-    ok_with(format!("switched to {branch}"), json!({ "branch": current }))
+    ok_with(
+        format!("switched to {branch}"),
+        json!({ "branch": current }),
+    )
 }
 
 // ── RESET operations ──────────────────────────────────────────────────────────
@@ -1100,23 +1222,37 @@ fn op_reset(op: &Value, log: Option<&str>) -> Value {
         Some(m) => return fail_msg(format!("invalid mode '{m}'; expected soft|mixed|hard")),
         None => return fail_msg("missing required field: mode (soft|mixed|hard)"),
     };
-    let ref_str = op.get("ref").and_then(|v| v.as_str()).unwrap_or("HEAD").to_string();
+    let ref_str = op
+        .get("ref")
+        .and_then(|v| v.as_str())
+        .unwrap_or("HEAD")
+        .to_string();
     let mode_flag = format!("--{mode}");
 
-    log_write(log, &format!("reset: repo={repo:?} mode={mode} ref={ref_str:?}\n"));
+    log_write(
+        log,
+        &format!("reset: repo={repo:?} mode={mode} ref={ref_str:?}\n"),
+    );
 
     let out = git(&["-C", &repo, "reset", &mode_flag, &ref_str]);
     if !out.success {
         return fail_msg(format!(
             "git reset failed: {}",
-            if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+            if out.stderr.is_empty() {
+                "unknown error"
+            } else {
+                &out.stderr
+            }
         ));
     }
 
     let head = git(&["-C", &repo, "rev-parse", "HEAD"]);
     let resolved = head.stdout.trim().to_string();
 
-    ok_with(format!("reset {mode} to {ref_str}"), json!({ "ref": resolved }))
+    ok_with(
+        format!("reset {mode} to {ref_str}"),
+        json!({ "ref": resolved }),
+    )
 }
 
 // ── REMOTE operations ────────────────────────────────────────────────────────
@@ -1127,10 +1263,16 @@ fn op_fetch(op: &Value, log: Option<&str>) -> Value {
         Err(e) => return fail_msg(e),
     };
 
-    let remote = op.get("remote").and_then(|v| v.as_str()).unwrap_or("origin");
+    let remote = op
+        .get("remote")
+        .and_then(|v| v.as_str())
+        .unwrap_or("origin");
     let branch = op.get("branch").and_then(|v| v.as_str());
 
-    log_write(log, &format!("fetch: repo={repo:?} remote={remote:?} branch={branch:?}\n"));
+    log_write(
+        log,
+        &format!("fetch: repo={repo:?} remote={remote:?} branch={branch:?}\n"),
+    );
 
     let mut args: Vec<&str> = vec!["-C", &repo, "fetch", remote];
     if let Some(b) = branch {
@@ -1153,7 +1295,11 @@ fn op_fetch(op: &Value, log: Option<&str>) -> Value {
         }
         return fail_msg(format!(
             "git fetch failed: {}",
-            if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+            if out.stderr.is_empty() {
+                "unknown error"
+            } else {
+                &out.stderr
+            }
         ));
     }
 
@@ -1165,7 +1311,10 @@ fn op_fetch(op: &Value, log: Option<&str>) -> Value {
         format!("{} ref(s) updated", updated_refs.len())
     };
 
-    ok_with(msg, json!({ "remote": remote, "updated_refs": updated_refs }))
+    ok_with(
+        msg,
+        json!({ "remote": remote, "updated_refs": updated_refs }),
+    )
 }
 
 fn parse_fetch_updated_refs(stderr: &str) -> Vec<String> {
@@ -1191,7 +1340,10 @@ fn op_pull(op: &Value, log: Option<&str>) -> Value {
         Err(e) => return fail_msg(e),
     };
 
-    let remote = op.get("remote").and_then(|v| v.as_str()).unwrap_or("origin");
+    let remote = op
+        .get("remote")
+        .and_then(|v| v.as_str())
+        .unwrap_or("origin");
     let branch = op.get("branch").and_then(|v| v.as_str());
     let rebase = op.get("rebase").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -1230,7 +1382,11 @@ fn op_pull(op: &Value, log: Option<&str>) -> Value {
         }
         return fail_msg(format!(
             "git pull failed: {}",
-            if out.stderr.is_empty() { &out.stdout } else { &out.stderr }
+            if out.stderr.is_empty() {
+                &out.stdout
+            } else {
+                &out.stderr
+            }
         ));
     }
 
@@ -1251,7 +1407,10 @@ fn op_pull(op: &Value, log: Option<&str>) -> Value {
     let result_branch = if let Some(b) = branch {
         b.to_string()
     } else {
-        git(&["-C", &repo, "branch", "--show-current"]).stdout.trim().to_string()
+        git(&["-C", &repo, "branch", "--show-current"])
+            .stdout
+            .trim()
+            .to_string()
     };
 
     ok_with(
@@ -1271,10 +1430,16 @@ fn op_push(op: &Value, log: Option<&str>) -> Value {
         Err(e) => return fail_msg(e),
     };
 
-    let remote = op.get("remote").and_then(|v| v.as_str()).unwrap_or("origin");
+    let remote = op
+        .get("remote")
+        .and_then(|v| v.as_str())
+        .unwrap_or("origin");
     let branch = op.get("branch").and_then(|v| v.as_str());
     let force = op.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
-    let set_upstream = op.get("set_upstream").and_then(|v| v.as_bool()).unwrap_or(false);
+    let set_upstream = op
+        .get("set_upstream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     log_write(
         log,
@@ -1313,14 +1478,21 @@ fn op_push(op: &Value, log: Option<&str>) -> Value {
         }
         return fail_msg(format!(
             "git push failed: {}",
-            if out.stderr.is_empty() { &out.stdout } else { &out.stderr }
+            if out.stderr.is_empty() {
+                &out.stdout
+            } else {
+                &out.stderr
+            }
         ));
     }
 
     let push_branch = if let Some(b) = branch {
         b.to_string()
     } else {
-        git(&["-C", &repo, "branch", "--show-current"]).stdout.trim().to_string()
+        git(&["-C", &repo, "branch", "--show-current"])
+            .stdout
+            .trim()
+            .to_string()
     };
 
     // Parse full remote ref from porcelain stdout; fall back to constructing it.
@@ -1371,7 +1543,10 @@ fn op_clone(op: &Value, log: Option<&str>) -> Value {
     let branch = op.get("branch").and_then(|v| v.as_str());
     let depth = op.get("depth").and_then(|v| v.as_u64());
 
-    log_write(log, &format!("clone: url={url:?} dest={dest:?} branch={branch:?} depth={depth:?}\n"));
+    log_write(
+        log,
+        &format!("clone: url={url:?} dest={dest:?} branch={branch:?} depth={depth:?}\n"),
+    );
 
     if std::path::Path::new(&dest).exists() {
         return err_result(
@@ -1400,7 +1575,11 @@ fn op_clone(op: &Value, log: Option<&str>) -> Value {
             err::CLONE_FAILED,
             format!(
                 "clone failed: {}",
-                if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+                if out.stderr.is_empty() {
+                    "unknown error"
+                } else {
+                    &out.stderr
+                }
             ),
         );
     }
@@ -1440,7 +1619,11 @@ fn remote_list(repo: &str, log: Option<&str>) -> Value {
     if !out.success {
         return fail_msg(format!(
             "git remote -v failed: {}",
-            if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+            if out.stderr.is_empty() {
+                "unknown error"
+            } else {
+                &out.stderr
+            }
         ));
     }
 
@@ -1451,7 +1634,9 @@ fn remote_list(repo: &str, log: Option<&str>) -> Value {
         if line.is_empty() {
             continue;
         }
-        let Some((name, rest)) = line.split_once('\t') else { continue };
+        let Some((name, rest)) = line.split_once('\t') else {
+            continue;
+        };
         if let Some(url) = rest.strip_suffix(" (fetch)") {
             fetch_urls.insert(name.to_string(), url.to_string());
         } else if let Some(url) = rest.strip_suffix(" (push)") {
@@ -1490,7 +1675,10 @@ fn remote_add(repo: &str, op: &Value, log: Option<&str>) -> Value {
         _ => return fail_msg("missing required field: url"),
     };
 
-    log_write(log, &format!("remote add: repo={repo:?} name={name:?} url={url:?}\n"));
+    log_write(
+        log,
+        &format!("remote add: repo={repo:?} name={name:?} url={url:?}\n"),
+    );
 
     let out = git(&["-C", repo, "remote", "add", &name, &url]);
     if !out.success {
@@ -1503,11 +1691,18 @@ fn remote_add(repo: &str, op: &Value, log: Option<&str>) -> Value {
         }
         return fail_msg(format!(
             "git remote add failed: {}",
-            if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+            if out.stderr.is_empty() {
+                "unknown error"
+            } else {
+                &out.stderr
+            }
         ));
     }
 
-    ok_with(format!("remote '{name}' added"), json!({ "name": name, "url": url }))
+    ok_with(
+        format!("remote '{name}' added"),
+        json!({ "name": name, "url": url }),
+    )
 }
 
 fn remote_remove(repo: &str, op: &Value, log: Option<&str>) -> Value {
@@ -1516,7 +1711,10 @@ fn remote_remove(repo: &str, op: &Value, log: Option<&str>) -> Value {
         _ => return fail_msg("missing required field: name"),
     };
 
-    log_write(log, &format!("remote remove: repo={repo:?} name={name:?}\n"));
+    log_write(
+        log,
+        &format!("remote remove: repo={repo:?} name={name:?}\n"),
+    );
 
     let out = git(&["-C", repo, "remote", "remove", &name]);
     if !out.success {
@@ -1526,7 +1724,11 @@ fn remote_remove(repo: &str, op: &Value, log: Option<&str>) -> Value {
         }
         return fail_msg(format!(
             "git remote remove failed: {}",
-            if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+            if out.stderr.is_empty() {
+                "unknown error"
+            } else {
+                &out.stderr
+            }
         ));
     }
 
@@ -1554,11 +1756,21 @@ fn op_tag(op: &Value, log: Option<&str>) -> Value {
 fn tag_list(repo: &str, log: Option<&str>) -> Value {
     log_write(log, &format!("tag list: repo={repo:?}\n"));
 
-    let out = git(&["-C", repo, "tag", "-l", "--format=%(refname:short)|%(objectname:short)"]);
+    let out = git(&[
+        "-C",
+        repo,
+        "tag",
+        "-l",
+        "--format=%(refname:short)|%(objectname:short)",
+    ]);
     if !out.success {
         return fail_msg(format!(
             "git tag list failed: {}",
-            if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+            if out.stderr.is_empty() {
+                "unknown error"
+            } else {
+                &out.stderr
+            }
         ));
     }
 
@@ -1609,7 +1821,11 @@ fn tag_create(repo: &str, op: &Value, log: Option<&str>) -> Value {
         }
         return fail_msg(format!(
             "git tag create failed: {}",
-            if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+            if out.stderr.is_empty() {
+                "unknown error"
+            } else {
+                &out.stderr
+            }
         ));
     }
 
@@ -1617,7 +1833,10 @@ fn tag_create(repo: &str, op: &Value, log: Option<&str>) -> Value {
     let rev_out = git(&["-C", repo, "rev-parse", "--short", &name]);
     let resolved_ref = rev_out.stdout.trim().to_string();
 
-    ok_with(format!("tag '{name}' created"), json!({ "name": name, "ref": resolved_ref }))
+    ok_with(
+        format!("tag '{name}' created"),
+        json!({ "name": name, "ref": resolved_ref }),
+    )
 }
 
 // ── MERGE operations ──────────────────────────────────────────────────────────
@@ -1635,7 +1854,10 @@ fn op_merge(op: &Value, log: Option<&str>) -> Value {
     let message = op.get("message").and_then(|v| v.as_str());
     let ff_only = op.get("ff_only").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    log_write(log, &format!("merge: repo={repo:?} branch={branch:?} ff_only={ff_only}\n"));
+    log_write(
+        log,
+        &format!("merge: repo={repo:?} branch={branch:?} ff_only={ff_only}\n"),
+    );
 
     // Record HEAD before merge to detect whether a new commit was created.
     let head_before = git(&["-C", &repo, "rev-parse", "HEAD"]);
@@ -1678,7 +1900,11 @@ fn op_merge(op: &Value, log: Option<&str>) -> Value {
         }
         return fail_msg(format!(
             "git merge failed: {}",
-            if out.stderr.is_empty() { &out.stdout } else { &out.stderr }
+            if out.stderr.is_empty() {
+                &out.stdout
+            } else {
+                &out.stderr
+            }
         ));
     }
 
@@ -1728,7 +1954,10 @@ fn worktree_add(repo: &str, op: &Value, log: Option<&str>) -> Value {
         _ => return fail_msg("missing required field: branch"),
     };
 
-    log_write(log, &format!("worktree add: repo={repo:?} dest={dest:?} branch={branch:?}\n"));
+    log_write(
+        log,
+        &format!("worktree add: repo={repo:?} dest={dest:?} branch={branch:?}\n"),
+    );
 
     let out = git(&["-C", repo, "worktree", "add", &dest, &branch]);
     if !out.success {
@@ -1758,7 +1987,11 @@ fn worktree_list(repo: &str, log: Option<&str>) -> Value {
     if !out.success {
         return fail_msg(format!(
             "git worktree list failed: {}",
-            if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+            if out.stderr.is_empty() {
+                "unknown error"
+            } else {
+                &out.stderr
+            }
         ));
     }
 
@@ -1816,7 +2049,10 @@ fn worktree_remove(repo: &str, op: &Value, log: Option<&str>) -> Value {
     };
     let force = op.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    log_write(log, &format!("worktree remove: repo={repo:?} dest={dest:?} force={force}\n"));
+    log_write(
+        log,
+        &format!("worktree remove: repo={repo:?} dest={dest:?} force={force}\n"),
+    );
 
     let mut args: Vec<&str> = vec!["-C", repo, "worktree", "remove"];
     if force {
@@ -1830,7 +2066,8 @@ fn worktree_remove(repo: &str, op: &Value, log: Option<&str>) -> Value {
         if combined.contains("is not a worktree") || combined.contains("not a working tree") {
             return err_result(err::NOT_FOUND, format!("'{dest}' is not a worktree"));
         }
-        if combined.contains("contains modified or untracked files") || combined.contains("unclean") {
+        if combined.contains("contains modified or untracked files") || combined.contains("unclean")
+        {
             return err_result(
                 err::DIRTY,
                 format!("worktree '{dest}' has uncommitted changes; use force=true to remove"),
@@ -1838,7 +2075,11 @@ fn worktree_remove(repo: &str, op: &Value, log: Option<&str>) -> Value {
         }
         return fail_msg(format!(
             "git worktree remove failed: {}",
-            if out.stderr.is_empty() { "unknown error" } else { &out.stderr }
+            if out.stderr.is_empty() {
+                "unknown error"
+            } else {
+                &out.stderr
+            }
         ));
     }
 

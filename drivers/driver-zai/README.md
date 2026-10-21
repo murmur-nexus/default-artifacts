@@ -51,7 +51,7 @@ The Coding Plan base, `https://api.z.ai/api/coding/paas/v4`, works as
 | `inference.driver.artifact` | yes | — |
 | `inference.model` | yes | — (must be `glm-5.3`) |
 | `gateway.endpoint` | yes | — |
-| `gateway.api_key` | no in form, yes in practice | unset — requests go out unauthenticated and Z.ai rejects them |
+| `gateway.api_key` | yes, unless the entry declares `keyless: true` | — without either, the launch fails with `E-CAP-018` |
 | `inference.max_tokens` | no | from the host; ceiling `131072` |
 | `inference.driver.config` | no | `{}` — see below |
 

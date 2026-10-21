@@ -41,7 +41,7 @@ Declare in your capsule `murmur.yaml`:
 ```yaml
 artifacts:
   - name: murmur/hook-regression-verifier
-    version: 0.7.0
+    version: 0.8.0
     runtime: hook
     capabilities:
       filesystem:

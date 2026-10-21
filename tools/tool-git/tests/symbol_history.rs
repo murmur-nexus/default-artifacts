@@ -43,7 +43,10 @@ impl TestDir {
             .expect("system clock")
             .as_nanos();
         let seq = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        path.push(format!("murmur-git-symhist-{}-{nanos}-{seq}", std::process::id()));
+        path.push(format!(
+            "murmur-git-symhist-{}-{nanos}-{seq}",
+            std::process::id()
+        ));
         fs::create_dir_all(&path).expect("temp dir created");
         Self { path }
     }
@@ -60,7 +63,10 @@ impl Drop for TestDir {
 }
 
 fn git_ok<const N: usize>(args: [&str; N]) {
-    let out = Command::new("git").args(args).output().expect("git should run");
+    let out = Command::new("git")
+        .args(args)
+        .output()
+        .expect("git should run");
     assert!(
         out.status.success(),
         "git {} failed\nstderr: {}",
@@ -230,9 +236,24 @@ fn scenario_02_multi_commit_history_with_n() {
     let repo = TestDir::new();
     init_repo(repo.path());
     // Create the function, then edit a line inside its range across 3 commits.
-    write_commit(repo.path(), "src/lib.rs", "fn sym() {\n    let x = 1;\n    x\n}\n", "c1 create");
-    write_commit(repo.path(), "src/lib.rs", "fn sym() {\n    let x = 2;\n    x\n}\n", "c2 edit");
-    write_commit(repo.path(), "src/lib.rs", "fn sym() {\n    let x = 3;\n    x\n}\n", "c3 edit");
+    write_commit(
+        repo.path(),
+        "src/lib.rs",
+        "fn sym() {\n    let x = 1;\n    x\n}\n",
+        "c1 create",
+    );
+    write_commit(
+        repo.path(),
+        "src/lib.rs",
+        "fn sym() {\n    let x = 2;\n    x\n}\n",
+        "c2 edit",
+    );
+    write_commit(
+        repo.path(),
+        "src/lib.rs",
+        "fn sym() {\n    let x = 3;\n    x\n}\n",
+        "c3 edit",
+    );
     build_graph_db(repo.path(), &[(SID, "src/lib.rs", 1, 4)]);
 
     let res = symbol_history(repo.path(), SID, Some(3));
@@ -244,7 +265,10 @@ fn scenario_02_multi_commit_history_with_n() {
     assert_eq!(commits[1]["subject"], "c2 edit");
     assert_eq!(commits[2]["subject"], "c1 create");
     // Distinct commits.
-    let hashes: Vec<&str> = commits.iter().map(|c| c["hash"].as_str().unwrap()).collect();
+    let hashes: Vec<&str> = commits
+        .iter()
+        .map(|c| c["hash"].as_str().unwrap())
+        .collect();
     assert_ne!(hashes[0], hashes[1]);
     assert_ne!(hashes[1], hashes[2]);
 
@@ -305,7 +329,10 @@ fn scenario_04_unknown_symbol_id() {
     assert_eq!(res["ok"], false, "res={res}");
     assert_eq!(res["status"], "error");
     assert_eq!(res["error_kind"], "not_found");
-    assert!(res["commits"].is_null(), "no partial commit list; res={res}");
+    assert!(
+        res["commits"].is_null(),
+        "no partial commit list; res={res}"
+    );
 }
 
 // ── Scenario 5: repo never indexed → not_indexed, db not created ─────────────────
@@ -369,11 +396,7 @@ fn scenario_07_symbol_added_but_never_committed() {
     let repo = TestDir::new();
     init_repo(repo.path());
     // Write the symbol file into the working tree but never commit it.
-    fs::write(
-        repo.path().join("uncommitted.rs"),
-        "fn sym() {\n    1\n}\n",
-    )
-    .unwrap();
+    fs::write(repo.path().join("uncommitted.rs"), "fn sym() {\n    1\n}\n").unwrap();
     build_graph_db(repo.path(), &[(SID, "uncommitted.rs", 1, 3)]);
 
     let res = symbol_history(repo.path(), SID, None);

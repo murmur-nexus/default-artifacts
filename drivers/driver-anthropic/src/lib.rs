@@ -87,7 +87,10 @@ struct ThinkingConfig {
 
 impl ThinkingConfig {
     fn disabled() -> Self {
-        Self { enabled: false, budget_tokens: DEFAULT_THINKING_BUDGET_TOKENS }
+        Self {
+            enabled: false,
+            budget_tokens: DEFAULT_THINKING_BUDGET_TOKENS,
+        }
     }
 }
 
@@ -107,7 +110,10 @@ fn parse_thinking_config(config_json: &str) -> ThinkingConfig {
         .and_then(Value::as_u64)
         .map(|v| v as u32)
         .unwrap_or(DEFAULT_THINKING_BUDGET_TOKENS);
-    ThinkingConfig { enabled, budget_tokens }
+    ThinkingConfig {
+        enabled,
+        budget_tokens,
+    }
 }
 
 // ── Prompt caching ────────────────────────────────────────────────────────────
@@ -149,7 +155,10 @@ struct PromptCacheConfig {
 
 impl Default for PromptCacheConfig {
     fn default() -> Self {
-        Self { enabled: true, ttl: CacheTtl::FiveMinutes }
+        Self {
+            enabled: true,
+            ttl: CacheTtl::FiveMinutes,
+        }
     }
 }
 
@@ -617,7 +626,9 @@ fn map_anthropic_stop_reason(anthropic_stop: &str) -> Result<&'static str, Strin
 /// `Ok(error_payload(..))`; a body the driver cannot read as a finished turn is an `Err`.
 fn translate_anthropic_response_to_murmur(response: &Value) -> Result<Value, String> {
     if response.get("type").and_then(Value::as_str) == Some("error") {
-        return Ok(error_payload(&provider_error_message(response.get("error"))));
+        return Ok(error_payload(&provider_error_message(
+            response.get("error"),
+        )));
     }
 
     // Absent, `null` or non-string: not a finished Messages API response.
@@ -659,21 +670,26 @@ fn translate_anthropic_content_block(index: usize, block: &Value) -> Result<Opti
 
     match block_type {
         "text" => {
-            let text = field("text")
-                .ok_or_else(|| malformed_response(format_args!("text block {index} has no text")))?;
+            let text = field("text").ok_or_else(|| {
+                malformed_response(format_args!("text block {index} has no text"))
+            })?;
             Ok(Some(json!({"type": "text", "text": text})))
         }
         "tool_use" => {
-            let id = field("id")
-                .ok_or_else(|| malformed_response(format_args!("tool_use block {index} has no id")))?;
+            let id = field("id").ok_or_else(|| {
+                malformed_response(format_args!("tool_use block {index} has no id"))
+            })?;
             let name = field("name").ok_or_else(|| {
                 malformed_response(format_args!("tool_use block {index} has no name"))
             })?;
-            let input = block.get("input").filter(|input| input.is_object()).ok_or_else(|| {
-                malformed_response(format_args!(
-                    "tool_use block {index} input is not a JSON object"
-                ))
-            })?;
+            let input = block
+                .get("input")
+                .filter(|input| input.is_object())
+                .ok_or_else(|| {
+                    malformed_response(format_args!(
+                        "tool_use block {index} input is not a JSON object"
+                    ))
+                })?;
             Ok(Some(json!({
                 "type": "tool_call",
                 "id": id,
@@ -703,9 +719,18 @@ fn translate_anthropic_content_block(index: usize, block: &Value) -> Result<Opti
 // ── SSE streaming types and parsing ──────────────────────────────────────────
 
 enum AnthropicBlock {
-    Text { text: String },
-    Thinking { text: String, signature: String },
-    ToolUse { id: String, name: String, input: String },
+    Text {
+        text: String,
+    },
+    Thinking {
+        text: String,
+        signature: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: String,
+    },
     /// A block type murmur has no content block for (see `translate_anthropic_content_block`).
     /// Its deltas are dropped.
     Ignored,
@@ -847,7 +872,8 @@ fn dispatch_anthropic_sse_event(
     emit_thinking: &mut impl FnMut(&str),
     signal: &mut impl FnMut(ToolCallSignal<'_>),
 ) -> Result<(), StreamFailure> {
-    let malformed = |detail: std::fmt::Arguments<'_>| StreamFailure::Malformed(malformed_stream(detail));
+    let malformed =
+        |detail: std::fmt::Arguments<'_>| StreamFailure::Malformed(malformed_stream(detail));
     // Only the events whose data the driver reads are parsed, so only they can fail to parse.
     let parse = || {
         serde_json::from_str::<Value>(data)
@@ -876,7 +902,9 @@ fn dispatch_anthropic_sse_event(
                 .ok_or_else(|| malformed(format_args!("content block {index} has no type")))?;
 
             let block = match block_type {
-                "text" => AnthropicBlock::Text { text: String::new() },
+                "text" => AnthropicBlock::Text {
+                    text: String::new(),
+                },
                 "thinking" => AnthropicBlock::Thinking {
                     text: String::new(),
                     signature: String::new(),
@@ -945,7 +973,9 @@ fn dispatch_anthropic_sse_event(
                 val.pointer(&format!("/delta/{field}"))
                     .and_then(Value::as_str)
                     .ok_or_else(|| {
-                        malformed(format_args!("{delta_type} for block {index} has no {field}"))
+                        malformed(format_args!(
+                            "{delta_type} for block {index} has no {field}"
+                        ))
                     })
             };
 
@@ -1167,9 +1197,9 @@ mod wasm_driver {
     use super::{
         assemble_anthropic_streaming_response, classify_model, error_payload, parse_beta_features,
         parse_prompt_cache_config, parse_thinking_config, process_anthropic_sse_bytes,
-        stamp_streaming_flags,
-        translate_anthropic_response_to_murmur, translate_murmur_request_to_anthropic,
-        AnthropicSseState, MurmurRequest, ThinkingConfig, ToolCallSignal,
+        stamp_streaming_flags, translate_anthropic_response_to_murmur,
+        translate_murmur_request_to_anthropic, AnthropicSseState, MurmurRequest, ThinkingConfig,
+        ToolCallSignal,
     };
     use serde_json::Value;
 
@@ -1328,9 +1358,8 @@ mod wasm_driver {
             let _ = wasip2::http::types::IncomingBody::finish(incoming_body);
             let text = String::from_utf8(all)
                 .map_err(|err| format!("driver: response body is not UTF-8: {err}"))?;
-            let json: Value = serde_json::from_str(&text).map_err(|err| {
-                format!("driver: failed to parse Anthropic response JSON: {err}")
-            })?;
+            let json: Value = serde_json::from_str(&text)
+                .map_err(|err| format!("driver: failed to parse Anthropic response JSON: {err}"))?;
             translate_anthropic_response_to_murmur(&json)?
         } else {
             // SSE streaming: process lines incrementally, emitting chunks as they arrive.
@@ -1431,7 +1460,8 @@ mod wasm_driver {
             while !remaining.is_empty() {
                 let budget = stream
                     .check_write()
-                    .map_err(|e| format!("driver: check-write failed: {e:?}"))? as usize;
+                    .map_err(|e| format!("driver: check-write failed: {e:?}"))?
+                    as usize;
                 if budget == 0 {
                     stream.subscribe().block();
                     continue;
@@ -1498,9 +1528,7 @@ mod wasm_driver {
                         "driver: transport error while awaiting response: {err:?}"
                     ));
                 }
-                Some(Err(())) => {
-                    return Err("driver: response future already consumed".to_string())
-                }
+                Some(Err(())) => return Err("driver: response future already consumed".to_string()),
                 None => {
                     let pollable = future.subscribe();
                     pollable.block();
@@ -1556,19 +1584,21 @@ mod tests {
     }
 
     fn cache_off() -> PromptCacheConfig {
-        PromptCacheConfig { enabled: false, ..PromptCacheConfig::default() }
+        PromptCacheConfig {
+            enabled: false,
+            ..PromptCacheConfig::default()
+        }
     }
 
     // Counts `cache_control` members at every nesting depth of a serialized body.
     fn count_cache_markers(value: &Value) -> usize {
         match value {
-            Value::Object(map) => {
-                map.iter()
-                    .map(|(key, nested)| {
-                        usize::from(key == "cache_control") + count_cache_markers(nested)
-                    })
-                    .sum()
-            }
+            Value::Object(map) => map
+                .iter()
+                .map(|(key, nested)| {
+                    usize::from(key == "cache_control") + count_cache_markers(nested)
+                })
+                .sum(),
             Value::Array(items) => items.iter().map(count_cache_markers).sum(),
             _ => 0,
         }
@@ -1607,14 +1637,13 @@ mod tests {
         }))
         .unwrap();
 
-        let translated =
-            translate_murmur_request_to_anthropic(
-                &request,
-                ModelFamily::Claude4Plus,
-                &thinking_off(),
-                &cache_default(),
-            )
-            .unwrap();
+        let translated = translate_murmur_request_to_anthropic(
+            &request,
+            ModelFamily::Claude4Plus,
+            &thinking_off(),
+            &cache_default(),
+        )
+        .unwrap();
         let messages = translated["messages"].as_array().unwrap();
 
         assert_eq!(
@@ -1656,14 +1685,13 @@ mod tests {
         }))
         .unwrap();
 
-        let translated =
-            translate_murmur_request_to_anthropic(
-                &request,
-                ModelFamily::Claude4Plus,
-                &thinking_off(),
-                &cache_default(),
-            )
-            .unwrap();
+        let translated = translate_murmur_request_to_anthropic(
+            &request,
+            ModelFamily::Claude4Plus,
+            &thinking_off(),
+            &cache_default(),
+        )
+        .unwrap();
 
         assert_eq!(translated["tool_choice"], json!({"type": "any"}));
     }
@@ -1863,7 +1891,12 @@ mod tests {
 
     #[test]
     fn content_absent_null_or_not_an_array_is_malformed() {
-        for content in [None, Some(Value::Null), Some(json!("hi")), Some(json!({"type": "text"}))] {
+        for content in [
+            None,
+            Some(Value::Null),
+            Some(json!("hi")),
+            Some(json!({"type": "text"})),
+        ] {
             let mut body = json!({"stop_reason": "end_turn"});
             if let Some(content) = content.clone() {
                 body["content"] = content;
@@ -1878,7 +1911,11 @@ mod tests {
 
     #[test]
     fn buffered_block_with_no_type_is_malformed() {
-        for block in [json!({"text": "x"}), json!({"type": null, "text": "x"}), json!({"type": 3})] {
+        for block in [
+            json!({"text": "x"}),
+            json!({"type": null, "text": "x"}),
+            json!({"type": 3}),
+        ] {
             assert_eq!(
                 buffered_block_err(block),
                 "driver: malformed Anthropic response: content block 1 has no type"
@@ -1901,21 +1938,31 @@ mod tests {
         let err = buffered_block_err(
             json!({"type": "tool_use", "name": "bash", "input": {"cmd": "wipe-disk"}}),
         );
-        assert_eq!(err, "driver: malformed Anthropic response: tool_use block 1 has no id");
+        assert_eq!(
+            err,
+            "driver: malformed Anthropic response: tool_use block 1 has no id"
+        );
         assert!(!err.contains("wipe-disk"));
     }
 
     #[test]
     fn buffered_tool_use_with_no_name_is_malformed() {
         assert_eq!(
-            buffered_block_err(json!({"type": "tool_use", "id": "toolu_01", "name": null, "input": {}})),
+            buffered_block_err(
+                json!({"type": "tool_use", "id": "toolu_01", "name": null, "input": {}})
+            ),
             "driver: malformed Anthropic response: tool_use block 1 has no name"
         );
     }
 
     #[test]
     fn buffered_tool_use_input_that_is_not_an_object_is_malformed() {
-        for input in [None, Some(Value::Null), Some(json!("{\"cmd\":\"ls\"}")), Some(json!([1]))] {
+        for input in [
+            None,
+            Some(Value::Null),
+            Some(json!("{\"cmd\":\"ls\"}")),
+            Some(json!([1])),
+        ] {
             let mut block = json!({"type": "tool_use", "id": "toolu_01", "name": "bash"});
             if let Some(input) = input.clone() {
                 block["input"] = input;
@@ -1982,7 +2029,10 @@ mod tests {
         });
         let translated = translate_anthropic_response_to_murmur(&body).unwrap();
         assert_eq!(translated["stop_reason"], "end_turn");
-        assert_eq!(translated["content"], json!([{"type": "text", "text": "answer"}]));
+        assert_eq!(
+            translated["content"],
+            json!([{"type": "text", "text": "answer"}])
+        );
     }
 
     #[test]
@@ -2001,8 +2051,14 @@ mod tests {
     #[test]
     fn buffered_error_body_with_unreadable_detail_falls_back_to_unknown() {
         for (body, expected) in [
-            (json!({"type": "error"}), "Anthropic error: unknown: unknown"),
-            (json!({"type": "error", "error": {"type": 5}}), "Anthropic error: unknown: unknown"),
+            (
+                json!({"type": "error"}),
+                "Anthropic error: unknown: unknown",
+            ),
+            (
+                json!({"type": "error", "error": {"type": 5}}),
+                "Anthropic error: unknown: unknown",
+            ),
             (
                 json!({"type": "error", "error": {"message": "slow down"}}),
                 "Anthropic error: unknown: slow down",
@@ -2062,7 +2118,10 @@ mod tests {
 
     #[test]
     fn stream_error_event_with_unparseable_data_is_still_a_provider_error() {
-        let body = sse(&[("content_block_start", TEXT_START_0), ("error", "overloaded!")]);
+        let body = sse(&[
+            ("content_block_start", TEXT_START_0),
+            ("error", "overloaded!"),
+        ]);
         assert_eq!(
             parse_stream(&body).unwrap(),
             json!({"stop_reason": "error", "error": "Anthropic error: unknown: unknown"})
@@ -2074,16 +2133,26 @@ mod tests {
         let body = sse(&[
             ("content_block_start", TEXT_START_0),
             ("content_block_delta", &text_delta(0, "I can")),
-            ("message_delta", r#"{"type":"message_delta","delta":{"stop_reason":"refusal"}}"#),
+            (
+                "message_delta",
+                r#"{"type":"message_delta","delta":{"stop_reason":"refusal"}}"#,
+            ),
             ("message_stop", MESSAGE_STOP),
         ]);
-        assert_eq!(parse_stream(&body).unwrap(), json!({"stop_reason": "error", "error": REFUSED}));
+        assert_eq!(
+            parse_stream(&body).unwrap(),
+            json!({"stop_reason": "error", "error": REFUSED})
+        );
     }
 
     #[test]
     fn stream_event_whose_data_is_not_json_is_malformed() {
-        for event in ["message_start", "content_block_start", "content_block_delta", "message_delta"]
-        {
+        for event in [
+            "message_start",
+            "content_block_start",
+            "content_block_delta",
+            "message_delta",
+        ] {
             let body = sse(&[(event, "{not json"), ("message_delta", END_TURN)]);
             assert_eq!(
                 parse_stream(&body).unwrap_err(),
@@ -2168,7 +2237,10 @@ mod tests {
     fn stream_delta_with_no_delta_type_is_malformed() {
         let body = sse(&[
             ("content_block_start", TEXT_START_0),
-            ("content_block_delta", r#"{"type":"content_block_delta","index":0,"delta":{"text":"x"}}"#),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"text":"x"}}"#,
+            ),
         ]);
         assert_eq!(
             parse_stream(&body).unwrap_err(),
@@ -2295,7 +2367,10 @@ mod tests {
     fn stream_tool_input_cut_off_at_the_output_cap_names_the_cap() {
         let body = sse(&[
             ("content_block_start", TOOL_START_0),
-            ("content_block_delta", &input_delta(0, "{\"cmd\":\"wipe-disk")),
+            (
+                "content_block_delta",
+                &input_delta(0, "{\"cmd\":\"wipe-disk"),
+            ),
             ("message_delta", MAX_TOKENS_STOP),
             ("message_stop", MESSAGE_STOP),
         ]);
@@ -2311,7 +2386,10 @@ mod tests {
     fn stream_tool_input_that_is_not_json_is_malformed() {
         let body = sse(&[
             ("content_block_start", TOOL_START_0),
-            ("content_block_delta", &input_delta(0, "{\"cmd\":\"wipe-disk")),
+            (
+                "content_block_delta",
+                &input_delta(0, "{\"cmd\":\"wipe-disk"),
+            ),
             ("message_delta", TOOL_USE_STOP),
             ("message_stop", MESSAGE_STOP),
         ]);
@@ -2345,7 +2423,10 @@ mod tests {
     fn stream_argument_less_tool_call_gets_an_empty_object() {
         let no_delta = sse(&[
             ("content_block_start", TOOL_START_0),
-            ("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
+            (
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":0}"#,
+            ),
             ("message_delta", TOOL_USE_STOP),
             ("message_stop", MESSAGE_STOP),
         ]);
@@ -2423,9 +2504,8 @@ mod tests {
             "\n",
         );
         let mut emitted: Vec<String> = Vec::new();
-        let err =
-            parse_anthropic_sse_body(body, &mut |c| emitted.push(c.to_string()), &mut |_| {})
-                .unwrap_err();
+        let err = parse_anthropic_sse_body(body, &mut |c| emitted.push(c.to_string()), &mut |_| {})
+            .unwrap_err();
         assert_eq!(err, NOT_AN_EVENT_STREAM);
         assert!(emitted.is_empty());
     }
@@ -2494,7 +2574,11 @@ mod tests {
     #[test]
     fn blank_or_comment_only_stream_keeps_the_no_stop_reason_message() {
         for body in ["\n\n", "   \n\t\n", ": keep-alive\n\n: keep-alive\n"] {
-            assert_eq!(parse_stream(body).unwrap_err(), STREAM_NO_STOP_REASON, "body = {body:?}");
+            assert_eq!(
+                parse_stream(body).unwrap_err(),
+                STREAM_NO_STOP_REASON,
+                "body = {body:?}"
+            );
         }
     }
 
@@ -2541,14 +2625,13 @@ mod tests {
         }))
         .unwrap();
 
-        let translated =
-            translate_murmur_request_to_anthropic(
-                &request,
-                ModelFamily::Claude4Plus,
-                &thinking_off(),
-                &cache_default(),
-            )
-            .unwrap();
+        let translated = translate_murmur_request_to_anthropic(
+            &request,
+            ModelFamily::Claude4Plus,
+            &thinking_off(),
+            &cache_default(),
+        )
+        .unwrap();
 
         assert_eq!(translated["temperature"], 0.7);
         assert!(
@@ -2569,14 +2652,13 @@ mod tests {
         }))
         .unwrap();
 
-        let translated =
-            translate_murmur_request_to_anthropic(
-                &request,
-                ModelFamily::Claude4Plus,
-                &thinking_off(),
-                &cache_default(),
-            )
-            .unwrap();
+        let translated = translate_murmur_request_to_anthropic(
+            &request,
+            ModelFamily::Claude4Plus,
+            &thinking_off(),
+            &cache_default(),
+        )
+        .unwrap();
 
         assert_eq!(translated["top_p"], 0.9);
     }
@@ -2594,14 +2676,13 @@ mod tests {
         }))
         .unwrap();
 
-        let translated =
-            translate_murmur_request_to_anthropic(
-                &request,
-                ModelFamily::Claude3,
-                &thinking_off(),
-                &cache_default(),
-            )
-            .unwrap();
+        let translated = translate_murmur_request_to_anthropic(
+            &request,
+            ModelFamily::Claude3,
+            &thinking_off(),
+            &cache_default(),
+        )
+        .unwrap();
 
         assert_eq!(translated["temperature"], 0.5);
         assert_eq!(translated["top_p"], 0.8);
@@ -2618,7 +2699,8 @@ mod tests {
 
     #[test]
     fn parse_beta_features_from_list() {
-        let config = r#"{"beta_features": ["interleaved-thinking-2025-05-14", "fine-tuning-2024-01-01"]}"#;
+        let config =
+            r#"{"beta_features": ["interleaved-thinking-2025-05-14", "fine-tuning-2024-01-01"]}"#;
         assert_eq!(
             parse_beta_features(config),
             Some("interleaved-thinking-2025-05-14,fine-tuning-2024-01-01".to_string())
@@ -2663,8 +2745,12 @@ mod tests {
         );
 
         let mut emitted: Vec<String> = Vec::new();
-        let result =
-            parse_anthropic_sse_body(body, &mut |chunk| emitted.push(chunk.to_string()), &mut |_| {}).unwrap();
+        let result = parse_anthropic_sse_body(
+            body,
+            &mut |chunk| emitted.push(chunk.to_string()),
+            &mut |_| {},
+        )
+        .unwrap();
 
         assert_eq!(emitted, vec!["Hello", " world"]);
         assert_eq!(result["stop_reason"], "end_turn");
@@ -2696,8 +2782,12 @@ mod tests {
         );
 
         let mut emitted: Vec<String> = Vec::new();
-        let result =
-            parse_anthropic_sse_body(body, &mut |chunk| emitted.push(chunk.to_string()), &mut |_| {}).unwrap();
+        let result = parse_anthropic_sse_body(
+            body,
+            &mut |chunk| emitted.push(chunk.to_string()),
+            &mut |_| {},
+        )
+        .unwrap();
 
         assert!(emitted.is_empty(), "no text chunks expected for tool use");
         assert_eq!(result["stop_reason"], "tool_call");
@@ -2735,19 +2825,24 @@ mod tests {
         }))
         .unwrap();
 
-        let cfg = ThinkingConfig { enabled: true, budget_tokens: 2048 };
-        let translated =
-            translate_murmur_request_to_anthropic(
-                &request,
-                ModelFamily::Claude4Plus,
-                &cfg,
-                &cache_default(),
-            )
-            .unwrap();
+        let cfg = ThinkingConfig {
+            enabled: true,
+            budget_tokens: 2048,
+        };
+        let translated = translate_murmur_request_to_anthropic(
+            &request,
+            ModelFamily::Claude4Plus,
+            &cfg,
+            &cache_default(),
+        )
+        .unwrap();
 
         assert_eq!(translated["thinking"]["type"], "enabled");
         assert_eq!(translated["thinking"]["budget_tokens"], 2048);
-        assert!(translated.get("temperature").is_none(), "temperature must be stripped");
+        assert!(
+            translated.get("temperature").is_none(),
+            "temperature must be stripped"
+        );
         assert!(translated.get("top_p").is_none(), "top_p must be stripped");
         assert!(translated.get("top_k").is_none(), "top_k must be stripped");
     }
@@ -2761,15 +2856,17 @@ mod tests {
         }))
         .unwrap();
 
-        let cfg = ThinkingConfig { enabled: true, budget_tokens: 4096 };
-        let translated =
-            translate_murmur_request_to_anthropic(
-                &request,
-                ModelFamily::Claude4Plus,
-                &cfg,
-                &cache_default(),
-            )
-            .unwrap();
+        let cfg = ThinkingConfig {
+            enabled: true,
+            budget_tokens: 4096,
+        };
+        let translated = translate_murmur_request_to_anthropic(
+            &request,
+            ModelFamily::Claude4Plus,
+            &cfg,
+            &cache_default(),
+        )
+        .unwrap();
 
         assert_eq!(translated["thinking"]["budget_tokens"], 999);
     }
@@ -2790,15 +2887,17 @@ mod tests {
         .unwrap();
 
         // Enabled → thinking block replayed first, verbatim, with signature.
-        let on = ThinkingConfig { enabled: true, budget_tokens: 2048 };
-        let with_thinking =
-            translate_murmur_request_to_anthropic(
-                &request,
-                ModelFamily::Claude4Plus,
-                &on,
-                &cache_default(),
-            )
-            .unwrap();
+        let on = ThinkingConfig {
+            enabled: true,
+            budget_tokens: 2048,
+        };
+        let with_thinking = translate_murmur_request_to_anthropic(
+            &request,
+            ModelFamily::Claude4Plus,
+            &on,
+            &cache_default(),
+        )
+        .unwrap();
         let content = &with_thinking["messages"][0]["content"];
         assert_eq!(content[0]["type"], "thinking");
         assert_eq!(content[0]["thinking"], "step by step");
@@ -2806,14 +2905,13 @@ mod tests {
         assert_eq!(content[1]["type"], "text");
 
         // Disabled → thinking block dropped (sending it would 400).
-        let without =
-            translate_murmur_request_to_anthropic(
-                &request,
-                ModelFamily::Claude4Plus,
-                &thinking_off(),
-                &cache_default(),
-            )
-            .unwrap();
+        let without = translate_murmur_request_to_anthropic(
+            &request,
+            ModelFamily::Claude4Plus,
+            &thinking_off(),
+            &cache_default(),
+        )
+        .unwrap();
         assert_eq!(without["messages"][0]["content"][0]["type"], "text");
     }
 
@@ -2851,11 +2949,9 @@ mod tests {
 
         let mut text: Vec<String> = Vec::new();
         let mut think: Vec<String> = Vec::new();
-        let result = parse_anthropic_sse_body(
-            body,
-            &mut |c| text.push(c.to_string()),
-            &mut |c| think.push(c.to_string()),
-        )
+        let result = parse_anthropic_sse_body(body, &mut |c| text.push(c.to_string()), &mut |c| {
+            think.push(c.to_string())
+        })
         .unwrap();
 
         assert_eq!(think.join(""), "Let me reason.");
@@ -3107,7 +3203,10 @@ mod tests {
         assert_eq!(translated["tools"][0]["name"], "calc");
         assert_eq!(translated["tools"][1]["name"], "grep");
         assert_eq!(translated["tools"][1]["description"], "search");
-        assert_eq!(translated["tools"][1]["input_schema"], json!({"type": "object"}));
+        assert_eq!(
+            translated["tools"][1]["input_schema"],
+            json!({"type": "object"})
+        );
 
         // `system` becomes a one-element array of text blocks so a marker has a block to sit on.
         assert_eq!(
@@ -3196,12 +3295,21 @@ mod tests {
         }))
         .unwrap();
 
-        let thinking_on = ThinkingConfig { enabled: true, budget_tokens: 2048 };
+        let thinking_on = ThinkingConfig {
+            enabled: true,
+            budget_tokens: 2048,
+        };
 
-        for (config, expects_ttl) in [(cache_default(), false), (
-            PromptCacheConfig { enabled: true, ttl: CacheTtl::OneHour },
-            true,
-        )] {
+        for (config, expects_ttl) in [
+            (cache_default(), false),
+            (
+                PromptCacheConfig {
+                    enabled: true,
+                    ttl: CacheTtl::OneHour,
+                },
+                true,
+            ),
+        ] {
             let translated = translate_murmur_request_to_anthropic(
                 &request,
                 ModelFamily::Claude4Plus,
@@ -3276,7 +3384,10 @@ mod tests {
                 ]
             }]),
         );
-        let thinking_on = ThinkingConfig { enabled: true, budget_tokens: 2048 };
+        let thinking_on = ThinkingConfig {
+            enabled: true,
+            budget_tokens: 2048,
+        };
         let translated = translate_murmur_request_to_anthropic(
             &trailing_thinking,
             ModelFamily::Claude4Plus,
@@ -3376,7 +3487,10 @@ mod tests {
             );
         }
 
-        for input in [r#"{"prompt_cache":"disabled"}"#, r#"{"prompt_cache":false}"#] {
+        for input in [
+            r#"{"prompt_cache":"disabled"}"#,
+            r#"{"prompt_cache":false}"#,
+        ] {
             let config = parse_prompt_cache_config(input);
             assert!(!config.enabled, "expected disabled for {input}");
         }
@@ -3408,9 +3522,7 @@ mod tests {
         // to disagree with it again. `run_inner` is wasm-only, so this is asserted from the
         // source; the needle is assembled so that this test is not its own evidence.
         let source = include_str!("lib.rs");
-        let run_inner = &source[source
-            .find("fn run_inner(")
-            .expect("run_inner must exist")..];
+        let run_inner = &source[source.find("fn run_inner(").expect("run_inner must exist")..];
         assert!(
             run_inner.contains(concat!("require_", "endpoint(")),
             "run_inner must resolve the endpoint through murmur_driver_env::require_endpoint"
@@ -3434,8 +3546,8 @@ mod tests {
         // The runtime attaches the header declared under `upstream_auth:`, so a driver-side
         // credential read would put the key back in the guest.
         let source = include_str!("lib.rs");
-        let non_test = source[..source.find("\nmod tests {").expect("mod tests must exist")]
-            .to_lowercase();
+        let non_test =
+            source[..source.find("\nmod tests {").expect("mod tests must exist")].to_lowercase();
         for needle in [
             concat!("murmur_inference_", "api_key"),
             concat!("\"author", "ization\""),

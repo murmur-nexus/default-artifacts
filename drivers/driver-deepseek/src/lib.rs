@@ -59,8 +59,12 @@ impl ThinkingConfig {
 
 // Parameters stripped from the request when thinking is enabled.
 // DeepSeek ignores them silently, but we omit them explicitly.
-const THINKING_STRIPPED_PARAMS: &[&str] =
-    &["temperature", "top_p", "presence_penalty", "frequency_penalty"];
+const THINKING_STRIPPED_PARAMS: &[&str] = &[
+    "temperature",
+    "top_p",
+    "presence_penalty",
+    "frequency_penalty",
+];
 
 // ── Murmur request types ──────────────────────────────────────────────────────
 
@@ -103,13 +107,23 @@ struct MurmurTool {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum MurmurContentBlock {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     // Reasoning persisted from a prior driver response. DeepSeek requires `reasoning_content`
     // to be reattached to the assistant message on tool-call turns or it returns 400, so this
     // block round-trips through conversation history.
-    Thinking { text: String },
-    Image { source: MurmurImageSource },
-    ToolCall { id: String, name: String, input: Value },
+    Thinking {
+        text: String,
+    },
+    Image {
+        source: MurmurImageSource,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        input: Value,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -192,10 +206,7 @@ fn translate_murmur_request_to_deepseek(
     }
 
     // DeepSeek thinking extension
-    body.insert(
-        "thinking".to_string(),
-        json!({"type": thinking.thinking}),
-    );
+    body.insert("thinking".to_string(), json!({"type": thinking.thinking}));
 
     if thinking.is_thinking_enabled() {
         body.insert(
@@ -559,7 +570,9 @@ fn map_finish_reason(finish_reason: &str) -> Result<&'static str, String> {
         "stop" => Ok("end_turn"),
         "tool_calls" => Ok("tool_call"),
         "length" => Ok("max_tokens"),
-        other => Err(format!("driver: unsupported DeepSeek finish_reason '{other}'")),
+        other => Err(format!(
+            "driver: unsupported DeepSeek finish_reason '{other}'"
+        )),
     }
 }
 
@@ -800,8 +813,8 @@ mod wasm_driver {
         translate_murmur_request_to_deepseek, validate_model, MurmurRequest, ThinkingConfig,
         ToolCallSignal, ToolCallState, UsageTokens,
     };
-    use std::collections::HashMap;
     use serde_json::Value;
+    use std::collections::HashMap;
 
     wit_bindgen::generate!({
         path: "../../wit/guest",
@@ -871,8 +884,7 @@ mod wasm_driver {
                 .as_deref(),
         )?;
 
-        let driver_config_str =
-            std::env::var("MURMUR_INFERENCE_DRIVER_CONFIG").unwrap_or_default();
+        let driver_config_str = std::env::var("MURMUR_INFERENCE_DRIVER_CONFIG").unwrap_or_default();
         let driver_config: HashMap<String, String> =
             serde_json::from_str::<serde_json::Map<String, Value>>(&driver_config_str)
                 .unwrap_or_default()
@@ -957,11 +969,11 @@ mod wasm_driver {
             let mut done = false;
 
             let handle_line = |line: &str,
-                                   tool_states: &mut Vec<ToolCallState>,
-                                   stop_reason: &mut Option<String>,
-                                   usage: &mut UsageTokens,
-                                   text_acc: &mut String,
-                                   reasoning_acc: &mut String|
+                               tool_states: &mut Vec<ToolCallState>,
+                               stop_reason: &mut Option<String>,
+                               usage: &mut UsageTokens,
+                               text_acc: &mut String,
+                               reasoning_acc: &mut String|
              -> bool {
                 let mut et = |t: &str| {
                     murmur::stream::events::emit_chunk(t);
@@ -1087,7 +1099,8 @@ mod wasm_driver {
             while !remaining.is_empty() {
                 let budget = stream
                     .check_write()
-                    .map_err(|e| format!("driver: check-write failed: {e:?}"))? as usize;
+                    .map_err(|e| format!("driver: check-write failed: {e:?}"))?
+                    as usize;
                 if budget == 0 {
                     stream.subscribe().block();
                     continue;
@@ -1267,7 +1280,10 @@ mod tests {
     #[test]
     fn thinking_config_defaults() {
         let cfg = ThinkingConfig::from_config(&HashMap::new());
-        assert_eq!(cfg.thinking, "enabled", "thinking should default to 'enabled'");
+        assert_eq!(
+            cfg.thinking, "enabled",
+            "thinking should default to 'enabled'"
+        );
         assert_eq!(
             cfg.reasoning_effort, "high",
             "reasoning_effort should default to 'high'"
@@ -1303,8 +1319,7 @@ mod tests {
         }))
         .unwrap();
 
-        let body =
-            translate_murmur_request_to_deepseek(&request, &thinking_enabled()).unwrap();
+        let body = translate_murmur_request_to_deepseek(&request, &thinking_enabled()).unwrap();
 
         // Verify stripped fields are absent
         assert!(
@@ -1342,8 +1357,7 @@ mod tests {
         }))
         .unwrap();
 
-        let body =
-            translate_murmur_request_to_deepseek(&request, &thinking_disabled()).unwrap();
+        let body = translate_murmur_request_to_deepseek(&request, &thinking_disabled()).unwrap();
 
         // Temperature should pass through when thinking is disabled
         assert_eq!(
@@ -1362,9 +1376,10 @@ mod tests {
 
     #[test]
     fn request_contains_thinking_block_always() {
-        let request: MurmurRequest =
-            serde_json::from_value(json!({"model": "deepseek-v4-pro", "max_tokens": 1024, "messages": []}))
-                .unwrap();
+        let request: MurmurRequest = serde_json::from_value(
+            json!({"model": "deepseek-v4-pro", "max_tokens": 1024, "messages": []}),
+        )
+        .unwrap();
 
         let enabled = translate_murmur_request_to_deepseek(&request, &thinking_enabled()).unwrap();
         assert_eq!(enabled["thinking"]["type"], "enabled");
@@ -1513,11 +1528,9 @@ mod tests {
 
         let mut text: Vec<String> = Vec::new();
         let mut think: Vec<String> = Vec::new();
-        let result = parse_deepseek_sse_body(
-            body,
-            &mut |t| text.push(t.to_string()),
-            &mut |t| think.push(t.to_string()),
-        )
+        let result = parse_deepseek_sse_body(body, &mut |t| text.push(t.to_string()), &mut |t| {
+            think.push(t.to_string())
+        })
         .unwrap();
 
         assert_eq!(think.join(""), "Let me think.");
@@ -1541,11 +1554,9 @@ mod tests {
 
         let mut text: Vec<String> = Vec::new();
         let mut think: Vec<String> = Vec::new();
-        let result = parse_deepseek_sse_body(
-            body,
-            &mut |t| text.push(t.to_string()),
-            &mut |t| think.push(t.to_string()),
-        )
+        let result = parse_deepseek_sse_body(body, &mut |t| text.push(t.to_string()), &mut |t| {
+            think.push(t.to_string())
+        })
         .unwrap();
 
         assert_eq!(think.join(""), "Need echo.");
@@ -1817,9 +1828,7 @@ mod tests {
         // to disagree with it again. `run_inner` is wasm-only, so this is asserted from the
         // source; the needle is assembled so that this test is not its own evidence.
         let source = include_str!("lib.rs");
-        let run_inner = &source[source
-            .find("fn run_inner(")
-            .expect("run_inner must exist")..];
+        let run_inner = &source[source.find("fn run_inner(").expect("run_inner must exist")..];
         assert!(
             run_inner.contains(concat!("require_", "endpoint(")),
             "run_inner must resolve the endpoint through murmur_driver_env::require_endpoint"
@@ -1843,8 +1852,8 @@ mod tests {
         // The runtime attaches the header declared under `upstream_auth:`, so a driver-side
         // credential read would put the key back in the guest.
         let source = include_str!("lib.rs");
-        let non_test = source[..source.find("\nmod tests {").expect("mod tests must exist")]
-            .to_lowercase();
+        let non_test =
+            source[..source.find("\nmod tests {").expect("mod tests must exist")].to_lowercase();
         for needle in [
             concat!("murmur_inference_", "api_key"),
             concat!("\"author", "ization\""),

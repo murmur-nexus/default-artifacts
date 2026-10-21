@@ -52,7 +52,10 @@ struct HostState {
 
 impl WasiView for HostState {
     fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView { ctx: &mut self.wasi, table: &mut self.table }
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
     }
 }
 
@@ -129,7 +132,10 @@ fn store_for(
     }
     Store::new(
         engine,
-        HostState { table: ResourceTable::new(), wasi: builder.build() },
+        HostState {
+            table: ResourceTable::new(),
+            wasi: builder.build(),
+        },
     )
 }
 
@@ -146,7 +152,10 @@ fn run_corpus(
 ) -> (Status, Value, Vec<(String, String)>) {
     let mut store = store_for(engine, workdir, state, config);
     let tool = Tool::instantiate(&mut store, component, linker).expect("instantiate component");
-    let input = ToolInput { data: Some(payload.to_string()), log_path: None };
+    let input = ToolInput {
+        data: Some(payload.to_string()),
+        log_path: None,
+    };
     let result = tool
         .murmur_tool_run()
         .call_run(&mut store, &input)
@@ -216,13 +225,23 @@ fn fixture(tag: &str, with_state: bool) -> Fixture {
         }
     })
     .to_string();
-    Fixture { root, workdir, state, config }
+    Fixture {
+        root,
+        workdir,
+        state,
+        config,
+    }
 }
 
 fn workdir_entries(workdir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(workdir)
         .expect("read workdir")
-        .map(|e| e.expect("dir entry").file_name().to_string_lossy().into_owned())
+        .map(|e| {
+            e.expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect();
     names.sort();
     names
@@ -245,15 +264,20 @@ fn the_corpus_survives_independent_instantiations() {
         f.config(),
         json!({ "operation": "append", "type": "note", "body": { "text": "durable across stores" } }),
     );
-    assert!(matches!(status, Status::Passed), "append status: {status:?} {envelope}");
+    assert!(
+        matches!(status, Status::Passed),
+        "append status: {status:?} {envelope}"
+    );
     let id = envelope["id"].as_str().expect("an id").to_string();
     assert_eq!(envelope["deduped"], false);
     assert!(
-        meta.iter().any(|(k, v)| k == "state_effect" && v == "mutate"),
+        meta.iter()
+            .any(|(k, v)| k == "state_effect" && v == "mutate"),
         "expected state_effect=mutate, got {meta:?}"
     );
     assert!(
-        meta.iter().any(|(k, v)| k == "resource_id" && v == &format!("corpus:{id}")),
+        meta.iter()
+            .any(|(k, v)| k == "resource_id" && v == &format!("corpus:{id}")),
         "expected resource_id=corpus:{id}, got {meta:?}"
     );
 
@@ -268,10 +292,16 @@ fn the_corpus_survives_independent_instantiations() {
         f.config(),
         json!({ "operation": "read_recent", "type": "note", "n": 5 }),
     );
-    assert!(matches!(status, Status::Passed), "read_recent status: {status:?} {envelope}");
+    assert!(
+        matches!(status, Status::Passed),
+        "read_recent status: {status:?} {envelope}"
+    );
     assert_eq!(envelope["returned"], 1, "{envelope}");
     assert_eq!(envelope["records"][0]["id"], id);
-    assert_eq!(envelope["records"][0]["body"]["text"], "durable across stores");
+    assert_eq!(
+        envelope["records"][0]["body"]["text"],
+        "durable across stores"
+    );
 
     // Instantiation #3 — `get` resolves the same record.
     let (status, envelope, _meta) = run_corpus(
@@ -283,7 +313,10 @@ fn the_corpus_survives_independent_instantiations() {
         f.config(),
         json!({ "operation": "get", "id": id }),
     );
-    assert!(matches!(status, Status::Passed), "get status: {status:?} {envelope}");
+    assert!(
+        matches!(status, Status::Passed),
+        "get status: {status:?} {envelope}"
+    );
     assert_eq!(envelope["record"]["id"], id);
     assert_eq!(envelope["record"]["schema_version"], 1);
 
@@ -293,7 +326,10 @@ fn the_corpus_survives_independent_instantiations() {
         Vec::<String>::new(),
         "the tool must write nothing into the workdir"
     );
-    assert!(f.state.join("corpus.jsonl").exists(), "the corpus lives under the state grant");
+    assert!(
+        f.state.join("corpus.jsonl").exists(),
+        "the corpus lives under the state grant"
+    );
 
     let _ = std::fs::remove_dir_all(&f.root);
 }
@@ -326,7 +362,10 @@ fn a_withdrawal_in_one_instantiation_is_visible_to_the_next() {
         json!({ "operation": "append", "type": "withdrawal",
                 "body": { "reason": "superseded" }, "withdraws": target }),
     );
-    assert!(matches!(status, Status::Passed), "withdrawal status: {status:?} {envelope}");
+    assert!(
+        matches!(status, Status::Passed),
+        "withdrawal status: {status:?} {envelope}"
+    );
     let withdrawal_id = envelope["id"].as_str().expect("an id").to_string();
 
     // A fourth, independent instantiation sees the withdrawal.
@@ -339,7 +378,10 @@ fn a_withdrawal_in_one_instantiation_is_visible_to_the_next() {
         f.config(),
         json!({ "operation": "get", "id": target }),
     );
-    assert!(matches!(status, Status::Passed), "get status: {status:?} {envelope}");
+    assert!(
+        matches!(status, Status::Passed),
+        "get status: {status:?} {envelope}"
+    );
     assert_eq!(envelope["record"]["body"], Value::Null);
     assert_eq!(envelope["record"]["withdrawn_by"], withdrawal_id);
     assert!(envelope["record"]["withdrawn_at"].is_string());
@@ -353,7 +395,10 @@ fn a_withdrawal_in_one_instantiation_is_visible_to_the_next() {
         f.config(),
         json!({ "operation": "read_recent", "type": "note", "n": 5 }),
     );
-    assert_eq!(envelope["returned"], 0, "a withdrawn record drops out of read_recent");
+    assert_eq!(
+        envelope["returned"], 0,
+        "a withdrawn record drops out of read_recent"
+    );
 
     assert_eq!(workdir_entries(&f.workdir), Vec::<String>::new());
     let _ = std::fs::remove_dir_all(&f.root);
@@ -373,16 +418,29 @@ fn without_a_state_preopen_every_operation_fails_closed_and_creates_nothing() {
         json!({ "operation": "search", "query": "anything" }),
         json!({ "operation": "verify" }),
     ] {
-        let (status, envelope, _meta) =
-            run_corpus(&eng, &component, &lnk, &f.workdir, None, f.config(), payload.clone());
+        let (status, envelope, _meta) = run_corpus(
+            &eng,
+            &component,
+            &lnk,
+            &f.workdir,
+            None,
+            f.config(),
+            payload.clone(),
+        );
         assert!(
             matches!(status, Status::Error),
             "{payload} expected status error, got {status:?}: {envelope}"
         );
-        assert_eq!(envelope["error_kind"], "state_unavailable", "{payload} -> {envelope}");
+        assert_eq!(
+            envelope["error_kind"], "state_unavailable",
+            "{payload} -> {envelope}"
+        );
         assert_eq!(envelope["ok"], false);
         assert!(
-            envelope["message"].as_str().unwrap_or_default().contains("capabilities.state"),
+            envelope["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("capabilities.state"),
             "message must name the grant: {envelope}"
         );
     }
@@ -395,7 +453,10 @@ fn without_a_state_preopen_every_operation_fails_closed_and_creates_nothing() {
         Vec::<String>::new(),
         "the tool created something in the workdir"
     );
-    assert!(!f.workdir.join(STATE_GUEST_PATH).exists(), "the tool created a state directory");
+    assert!(
+        !f.workdir.join(STATE_GUEST_PATH).exists(),
+        "the tool created a state directory"
+    );
 
     let _ = std::fs::remove_dir_all(&f.root);
 }
@@ -407,7 +468,11 @@ fn search_runs_through_the_real_component() {
     let lnk = linker(&eng);
     let f = fixture("search", true);
 
-    for text in ["the rollback plan for the release", "rollback only", "unrelated entirely"] {
+    for text in [
+        "the rollback plan for the release",
+        "rollback only",
+        "unrelated entirely",
+    ] {
         let (status, envelope, _m) = run_corpus(
             &eng,
             &component,
@@ -417,7 +482,10 @@ fn search_runs_through_the_real_component() {
             f.config(),
             json!({ "operation": "append", "type": "note", "body": { "text": text } }),
         );
-        assert!(matches!(status, Status::Passed), "append status: {status:?} {envelope}");
+        assert!(
+            matches!(status, Status::Passed),
+            "append status: {status:?} {envelope}"
+        );
     }
 
     let (status, envelope, meta) = run_corpus(
@@ -429,19 +497,30 @@ fn search_runs_through_the_real_component() {
         f.config(),
         json!({ "operation": "search", "query": "rollback plan", "k": 5 }),
     );
-    assert!(matches!(status, Status::Passed), "search status: {status:?} {envelope}");
+    assert!(
+        matches!(status, Status::Passed),
+        "search status: {status:?} {envelope}"
+    );
     let hits = envelope["hits"].as_array().expect("hits array");
     assert_eq!(hits.len(), 2, "{envelope}");
     assert_eq!(hits[0]["score"], 1.0);
     assert_eq!(hits[0]["excerpt"], "the rollback plan for the release");
-    assert!(hits[0].get("body").is_none(), "a hit is not a record: {}", hits[0]);
+    assert!(
+        hits[0].get("body").is_none(),
+        "a hit is not a record: {}",
+        hits[0]
+    );
     assert_eq!(hits[1]["score"], 0.5);
     assert_eq!(hits[1]["excerpt"], "rollback only");
     assert!(
-        meta.iter().any(|(k, v)| k == "resource_id" && v == "corpus:search:rollback plan"),
+        meta.iter()
+            .any(|(k, v)| k == "resource_id" && v == "corpus:search:rollback plan"),
         "{meta:?}"
     );
-    assert!(meta.iter().any(|(k, v)| k == "state_effect" && v == "read"), "{meta:?}");
+    assert!(
+        meta.iter().any(|(k, v)| k == "state_effect" && v == "read"),
+        "{meta:?}"
+    );
 
     assert_eq!(workdir_entries(&f.workdir), Vec::<String>::new());
     let _ = std::fs::remove_dir_all(&f.root);
@@ -465,16 +544,32 @@ fn without_the_config_variable_the_configured_operations_are_config_missing() {
         json!({ "operation": "read_recent", "type": "note", "n": 5 }),
         json!({ "operation": "search", "query": "anything" }),
     ] {
-        let (status, envelope, _meta) =
-            run_corpus(&eng, &component, &lnk, &f.workdir, Some(&f.state), None, payload.clone());
+        let (status, envelope, _meta) = run_corpus(
+            &eng,
+            &component,
+            &lnk,
+            &f.workdir,
+            Some(&f.state),
+            None,
+            payload.clone(),
+        );
         assert!(
             matches!(status, Status::Error),
             "{payload} expected status error, got {status:?}: {envelope}"
         );
-        assert_eq!(envelope["error_kind"], "config_missing", "{payload} -> {envelope}");
+        assert_eq!(
+            envelope["error_kind"], "config_missing",
+            "{payload} -> {envelope}"
+        );
         let message = envelope["message"].as_str().unwrap_or_default();
-        assert!(message.contains("config:"), "must name the block: {envelope}");
-        assert!(message.contains("murmur.yaml"), "must name the file: {envelope}");
+        assert!(
+            message.contains("config:"),
+            "must name the block: {envelope}"
+        );
+        assert!(
+            message.contains("murmur.yaml"),
+            "must name the file: {envelope}"
+        );
     }
 
     // `verify` is the exception: it is the diagnostic for a corpus whose configuration may
@@ -488,12 +583,22 @@ fn without_the_config_variable_the_configured_operations_are_config_missing() {
         None,
         json!({ "operation": "verify" }),
     );
-    assert!(matches!(status, Status::Passed), "verify status: {status:?} {envelope}");
+    assert!(
+        matches!(status, Status::Passed),
+        "verify status: {status:?} {envelope}"
+    );
     assert_eq!(envelope["lines"], 0, "{envelope}");
     assert_eq!(envelope["bad_line_count"], 0, "{envelope}");
-    assert!(meta.iter().any(|(k, v)| k == "resource_id" && v == "corpus:file"), "{meta:?}");
+    assert!(
+        meta.iter()
+            .any(|(k, v)| k == "resource_id" && v == "corpus:file"),
+        "{meta:?}"
+    );
 
-    assert!(!f.state.join("corpus.jsonl").exists(), "nothing was written");
+    assert!(
+        !f.state.join("corpus.jsonl").exists(),
+        "nothing was written"
+    );
     assert_eq!(workdir_entries(&f.workdir), Vec::<String>::new());
     let _ = std::fs::remove_dir_all(&f.root);
 }
@@ -522,7 +627,10 @@ fn a_count_wider_than_the_components_usize_is_clamped_not_wrapped() {
             f.config(),
             json!({ "operation": "append", "type": "note", "body": { "text": format!("rollback plan {i}") } }),
         );
-        assert!(matches!(status, Status::Passed), "append status: {status:?} {envelope}");
+        assert!(
+            matches!(status, Status::Passed),
+            "append status: {status:?} {envelope}"
+        );
     }
 
     // 2^32 — zero in a wrapped 32-bit `usize`, and 2^32 + 3 truncates to 3 rather than
@@ -537,10 +645,23 @@ fn a_count_wider_than_the_components_usize_is_clamped_not_wrapped() {
             f.config(),
             json!({ "operation": "read_recent", "type": "note", "n": n }),
         );
-        assert!(matches!(status, Status::Passed), "read_recent status: {status:?} {envelope}");
-        assert_eq!(envelope["requested"], n, "requested must echo the count asked for");
-        assert_eq!(envelope["returned"], 3, "all three records, capped by max=20: {envelope}");
-        assert_eq!(envelope["records"].as_array().expect("records").len(), 3, "{envelope}");
+        assert!(
+            matches!(status, Status::Passed),
+            "read_recent status: {status:?} {envelope}"
+        );
+        assert_eq!(
+            envelope["requested"], n,
+            "requested must echo the count asked for"
+        );
+        assert_eq!(
+            envelope["returned"], 3,
+            "all three records, capped by max=20: {envelope}"
+        );
+        assert_eq!(
+            envelope["records"].as_array().expect("records").len(),
+            3,
+            "{envelope}"
+        );
 
         let (status, envelope, _) = run_corpus(
             &eng,
@@ -551,7 +672,10 @@ fn a_count_wider_than_the_components_usize_is_clamped_not_wrapped() {
             f.config(),
             json!({ "operation": "search", "query": "rollback plan", "k": n }),
         );
-        assert!(matches!(status, Status::Passed), "search status: {status:?} {envelope}");
+        assert!(
+            matches!(status, Status::Passed),
+            "search status: {status:?} {envelope}"
+        );
         assert_eq!(
             envelope["hits"].as_array().expect("hits").len(),
             3,

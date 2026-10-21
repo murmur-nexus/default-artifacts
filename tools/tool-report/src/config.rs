@@ -53,12 +53,16 @@ impl ReportConfig {
     /// Whether the operator declared `kind` — vacuously true when no vocabulary was
     /// declared at all.
     pub fn accepts_kind(&self, kind: &str) -> bool {
-        self.deliverable_kinds.as_ref().is_none_or(|kinds| kinds.contains(kind))
+        self.deliverable_kinds
+            .as_ref()
+            .is_none_or(|kinds| kinds.contains(kind))
     }
 
     /// Whether the operator declared `stage`, on the same terms as [`Self::accepts_kind`].
     pub fn accepts_stage(&self, stage: &str) -> bool {
-        self.note_stages.as_ref().is_none_or(|stages| stages.contains(stage))
+        self.note_stages
+            .as_ref()
+            .is_none_or(|stages| stages.contains(stage))
     }
 
     /// The declared kinds as a message fragment, for the refusal that names them.
@@ -181,9 +185,7 @@ fn optional_vocabulary(
             Value::String(s) if !s.trim().is_empty() => {
                 set.insert(s.clone());
             }
-            Value::String(_) => {
-                return Err(operator_error(&path, "contains an empty string"))
-            }
+            Value::String(_) => return Err(operator_error(&path, "contains an empty string")),
             other => {
                 return Err(operator_error(
                     &path,
@@ -202,7 +204,6 @@ fn operator_error(key: &str, detail: &str) -> String {
          murmur.yaml"
     )
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -271,7 +272,10 @@ mod tests {
 
     #[test]
     fn a_wrong_or_missing_config_version_is_rejected() {
-        for value in [json!({ "config_version": 99 }), json!({ "require_report": true })] {
+        for value in [
+            json!({ "config_version": 99 }),
+            json!({ "require_report": true }),
+        ] {
             let err = parse(value).expect_err("config_version must be checked");
             assert!(err.contains("config_version"), "{err}");
             assert!(err.contains("murmur.yaml"), "{err}");

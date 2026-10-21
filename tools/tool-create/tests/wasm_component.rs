@@ -32,7 +32,10 @@ struct HostState {
 
 impl WasiView for HostState {
     fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView { ctx: &mut self.wasi, table: &mut self.table }
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
     }
 }
 
@@ -84,12 +87,21 @@ fn run_create(workdir: &Path, data_payload: &str) -> (Status, Option<String>, Va
         .expect("preopen");
     let mut store = Store::new(
         &engine,
-        HostState { table: ResourceTable::new(), wasi: builder.build() },
+        HostState {
+            table: ResourceTable::new(),
+            wasi: builder.build(),
+        },
     );
 
     let tool = Tool::instantiate(&mut store, &component, &linker).expect("instantiate");
-    let input = ToolInput { data: Some(data_payload.to_string()), log_path: None };
-    let result = tool.murmur_tool_run().call_run(&mut store, &input).expect("run");
+    let input = ToolInput {
+        data: Some(data_payload.to_string()),
+        log_path: None,
+    };
+    let result = tool
+        .murmur_tool_run()
+        .call_run(&mut store, &input)
+        .expect("run");
     let summary = result.summary.clone();
     let data: Value = result
         .data

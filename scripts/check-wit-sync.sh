@@ -15,21 +15,62 @@
 # A file murmur has that no vendored world references is still informational (ONLY_MURMUR), as
 # guest/deps/murmur-shell/shell-execute.wit legitimately is.
 #
-# Run from anywhere inside the default-artifacts repo.
+# Run from anywhere inside a default-artifacts checkout or one of its worktrees. The compared
+# mirror is always the wit/ of the checkout this script belongs to.
+#
+# The murmur it compares against is found by one rule:
+#   MURMUR_DIR set and non-empty — that directory is the murmur root, and the only place looked.
+#   otherwise                    — the directory `murmur` beside the main checkout, where the
+#                                  main checkout is the parent of `git rev-parse --git-common-dir`.
+#                                  A plain checkout and each of its worktrees share that answer,
+#                                  and so does CI's $GITHUB_WORKSPACE/{default-artifacts,murmur}.
+# Either way, murmur's WIT is read from <murmur root>/crates/capsule-runtime/wit.
 #
 # Exit codes:
 #   0 — all shared files match and every vendored world resolves
 #   1 — a shared file has drifted, default-artifacts has a file murmur does not, or a vendored
 #       world references an interface no vendored file defines
+#   2 — murmur's WIT directory was not found; nothing was compared
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DA_WIT="$(cd "$SCRIPT_DIR/.." && pwd)/wit"
-MURMUR_WIT="$(cd "$SCRIPT_DIR/../../murmur/crates/capsule-runtime/wit" 2>/dev/null && pwd)" || {
-    echo "error: murmur repo not found at $SCRIPT_DIR/../../murmur" >&2
-    echo "Expected layout: both repos checked out side-by-side under the same parent directory." >&2
-    exit 1
+
+# Exit 2 with what was tried and why; nothing else is printed.
+not_found() {
+    {
+        echo "error: $1"
+        echo "  $2"
+        echo "  To compare against a murmur checkout elsewhere, set MURMUR_DIR to its root."
+    } >&2
+    exit 2
 }
+
+if [ -n "${MURMUR_DIR:-}" ]; then
+    case "$MURMUR_DIR" in
+        /*) MURMUR_ROOT="$MURMUR_DIR" ;;
+        *) MURMUR_ROOT="$PWD/$MURMUR_DIR" ;;
+    esac
+    why="Looked there because MURMUR_DIR=$MURMUR_DIR."
+else
+    common="$(git -C "$SCRIPT_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ||
+        not_found "murmur not found: no path to try, because MURMUR_DIR is unset and \`git rev-parse --git-common-dir\` failed in $SCRIPT_DIR" \
+            "Without MURMUR_DIR, murmur is looked for in the directory beside the main checkout, which git names."
+    main_checkout="$(dirname "$common")"
+    MURMUR_ROOT="$(dirname "$main_checkout")/murmur"
+    why="Looked there because it is the directory beside the main checkout $main_checkout, found with \`git rev-parse --git-common-dir\`."
+fi
+MURMUR_WIT="$MURMUR_ROOT/crates/capsule-runtime/wit"
+[ -d "$MURMUR_WIT" ] || not_found "murmur WIT directory not found at $MURMUR_WIT" "$why"
+
+# An exported tree (`git archive`) has no commit to name; neither does a directory that is merely
+# inside some other repository.
+if murmur_top="$(git -C "$MURMUR_ROOT" rev-parse --show-toplevel 2>/dev/null)" &&
+    [ "$(cd "$murmur_top" && pwd -P)" = "$(cd "$MURMUR_ROOT" && pwd -P)" ]; then
+    echo "Comparing against $MURMUR_WIT (murmur $(git -C "$MURMUR_ROOT" rev-parse --short HEAD))"
+else
+    echo "Comparing against $MURMUR_WIT"
+fi
 
 drift=0
 only_da=0

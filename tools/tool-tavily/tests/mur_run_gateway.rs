@@ -75,9 +75,7 @@ fn is_executable(path: &Path) -> bool {
 /// can only come from the scratch config.
 fn mur(home: &TempDir) -> Command {
     let mut command = Command::new(mur_binary());
-    command
-        .env("HOME", home.path())
-        .env_remove(CREDENTIAL_NAME);
+    command.env("HOME", home.path()).env_remove(CREDENTIAL_NAME);
     command
 }
 

@@ -41,9 +41,9 @@ use std::{
     thread,
 };
 
-use tool_corpus::{store::CORPUS_FILE, STATE_DIR};
 use serde_json::{json, Value};
 use tempfile::TempDir;
+use tool_corpus::{store::CORPUS_FILE, STATE_DIR};
 
 /// Crate directories, relative to the workspace root, of the two artifacts a launch needs.
 const TOOL_CRATE: &str = "tools/tool-corpus";
@@ -164,7 +164,10 @@ fn build_components() {
             ])
             .status()
             .expect("failed to spawn `cargo build` for the wasm components");
-        assert!(status.success(), "cargo build of the wasm components failed");
+        assert!(
+            status.success(),
+            "cargo build of the wasm components failed"
+        );
     });
 }
 
@@ -507,9 +510,7 @@ fn unfence(text: &str, expected_source: &str) -> String {
         "a tool result must open with the untrusted fence naming this tool; got:\n{text}"
     );
     body.strip_suffix(&format!("\n{FENCE_CLOSE}"))
-        .unwrap_or_else(|| {
-            panic!("a fenced tool result must end at `{FENCE_CLOSE}`; got:\n{text}")
-        })
+        .unwrap_or_else(|| panic!("a fenced tool result must end at `{FENCE_CLOSE}`; got:\n{text}"))
         .to_string()
 }
 
@@ -592,7 +593,11 @@ impl ScriptedServer {
             }
         });
 
-        Self { endpoint, requests, join: Some(join) }
+        Self {
+            endpoint,
+            requests,
+            join: Some(join),
+        }
     }
 
     fn requests(&self) -> Vec<Value> {
@@ -695,7 +700,12 @@ fn assert_workdir_holds_no_corpus(workdir: &Path) {
 fn assert_store_is_private(staging: &Staging, store: &str) {
     for dir in [staging.state_root(), staging.store_dir(store)] {
         let mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o700, "{} must be 0700, got {mode:04o}", dir.display());
+        assert_eq!(
+            mode,
+            0o700,
+            "{} must be 0700, got {mode:04o}",
+            dir.display()
+        );
     }
 }
 
@@ -904,7 +914,12 @@ fn an_undeclared_store_name_defaults_to_the_capsule_name() {
         ),
         end_turn_response("recorded"),
     ]);
-    staging.write_manifest(capsule, &server.endpoint, Some(" {}"), Some(OPERATOR_CONFIG));
+    staging.write_manifest(
+        capsule,
+        &server.endpoint,
+        Some(" {}"),
+        Some(OPERATOR_CONFIG),
+    );
     run_session(&staging, "Record one note.");
 
     let response = corpus_response(&server.requests(), "call-append");

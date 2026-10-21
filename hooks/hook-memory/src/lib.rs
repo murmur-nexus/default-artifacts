@@ -265,8 +265,7 @@ pub mod recall {
         }
 
         let text = if message.role == "tool" {
-            unwrap_tool_envelope(&message.content)
-                .unwrap_or_else(|| extract_text(&message.content))
+            unwrap_tool_envelope(&message.content).unwrap_or_else(|| extract_text(&message.content))
         } else {
             extract_text(&message.content)
         };
@@ -394,10 +393,8 @@ pub mod recall {
     /// summary, or an original the scan cap cut off — is content in its own right and is
     /// kept.
     pub fn drop_reseeded(record: Vec<RecordMessage>) -> Vec<RecordMessage> {
-        let ids: std::collections::HashSet<&str> = record
-            .iter()
-            .filter_map(|m| m.id.as_deref())
-            .collect();
+        let ids: std::collections::HashSet<&str> =
+            record.iter().filter_map(|m| m.id.as_deref()).collect();
         let reseeded: Vec<bool> = record
             .iter()
             .map(|m| {
@@ -535,7 +532,10 @@ pub mod recall {
             return 0.0;
         }
         let present = distinct_terms(&plain_text(&message.content));
-        let hits = query.iter().filter(|t| present.binary_search(t).is_ok()).count();
+        let hits = query
+            .iter()
+            .filter(|t| present.binary_search(t).is_ok())
+            .count();
         hits as f64 / query.len() as f64
     }
 }
@@ -577,7 +577,9 @@ mod wasm_hook {
                 return Ok(HookOutput::None);
             }
 
-            Ok(HookOutput::SeedContext(seeds.into_iter().map(seed).collect()))
+            Ok(HookOutput::SeedContext(
+                seeds.into_iter().map(seed).collect(),
+            ))
         }
 
         fn on_stage(_event: StageEvent) -> Result<HookOutput, String> {
@@ -646,12 +648,7 @@ mod wasm_hook {
         if len == 0 {
             return None;
         }
-        let text = read_input(
-            TaskInputForm::AsGiven,
-            0,
-            len.min(recall::TASK_TEXT_WINDOW),
-        )
-        .ok()?;
+        let text = read_input(TaskInputForm::AsGiven, 0, len.min(recall::TASK_TEXT_WINDOW)).ok()?;
         if text.trim().is_empty() {
             None
         } else {
@@ -811,7 +808,10 @@ mod tests {
         let err = collect_record(|c| fake.read(c)).unwrap_err();
 
         assert!(err.contains("hook-memory"), "{err}");
-        assert!(err.contains("capabilities.conversation.read: true"), "{err}");
+        assert!(
+            err.contains("capabilities.conversation.read: true"),
+            "{err}"
+        );
         assert!(err.contains("murmur.yaml"), "{err}");
     }
 
@@ -830,7 +830,11 @@ mod tests {
 
     // ── rendering ─────────────────────────────────────────────────────────────
 
-    fn envelope(id: serde_json::Value, is_error: serde_json::Value, body: serde_json::Value) -> String {
+    fn envelope(
+        id: serde_json::Value,
+        is_error: serde_json::Value,
+        body: serde_json::Value,
+    ) -> String {
         serde_json::json!({
             TOOL_MARKER: true,
             "tool_call_id": id,
@@ -855,10 +859,20 @@ mod tests {
         })
         .expect("a tool result seeds");
 
-        assert_eq!(rendered.role, "user", "a tool result is seeded, re-roled to user");
+        assert_eq!(
+            rendered.role, "user",
+            "a tool result is seeded, re-roled to user"
+        );
         assert!(rendered.content.contains("call_42"), "{}", rendered.content);
-        assert!(rendered.content.contains("3 tests passed"), "{}", rendered.content);
-        assert!(!rendered.content.contains(TOOL_MARKER), "no raw envelope JSON is seeded");
+        assert!(
+            rendered.content.contains("3 tests passed"),
+            "{}",
+            rendered.content
+        );
+        assert!(
+            !rendered.content.contains(TOOL_MARKER),
+            "no raw envelope JSON is seeded"
+        );
         assert_eq!(rendered.source_id.as_deref(), Some("msg_t"));
     }
 
@@ -877,8 +891,15 @@ mod tests {
         })
         .unwrap();
         assert!(rendered.content.contains("(error)"), "{}", rendered.content);
-        assert!(rendered.content.contains("exit code 1"), "{}", rendered.content);
-        assert_eq!(rendered.source_id, None, "a record message with no id still seeds");
+        assert!(
+            rendered.content.contains("exit code 1"),
+            "{}",
+            rendered.content
+        );
+        assert_eq!(
+            rendered.source_id, None,
+            "a record message with no id still seeds"
+        );
 
         let bare = envelope(
             serde_json::Value::Null,
@@ -897,7 +918,10 @@ mod tests {
 
     #[test]
     fn content_that_is_json_but_not_an_envelope_and_content_that_is_not_json_at_all() {
-        assert_eq!(unwrap_tool_envelope(r#"{"__murmur_tool_msg__":false,"body":"x"}"#), None);
+        assert_eq!(
+            unwrap_tool_envelope(r#"{"__murmur_tool_msg__":false,"body":"x"}"#),
+            None
+        );
         assert_eq!(unwrap_tool_envelope(r#"{"body":"x"}"#), None);
         assert_eq!(unwrap_tool_envelope("just some output"), None);
         assert_eq!(unwrap_tool_envelope("[1,2,3]"), None);
@@ -924,19 +948,31 @@ mod tests {
 
     #[test]
     fn system_and_empty_messages_are_dropped_and_roles_normalise() {
-        assert_eq!(render(&record("system", "you are a helpful agent", "msg_s")), None);
+        assert_eq!(
+            render(&record("system", "you are a helpful agent", "msg_s")),
+            None
+        );
         assert_eq!(render(&record("user", "   ", "msg_e")), None);
         assert_eq!(render(&record("user", "", "msg_z")), None);
 
-        assert_eq!(render(&record("assistant", "hi", "msg_a")).unwrap().role, "assistant");
+        assert_eq!(
+            render(&record("assistant", "hi", "msg_a")).unwrap().role,
+            "assistant"
+        );
         assert_eq!(render(&record("user", "hi", "msg_u")).unwrap().role, "user");
-        assert_eq!(render(&record("developer", "hi", "msg_d")).unwrap().role, "user");
+        assert_eq!(
+            render(&record("developer", "hi", "msg_d")).unwrap().role,
+            "user"
+        );
     }
 
     #[test]
     fn content_is_json_encoded_and_the_wire_form_is_what_gets_counted() {
         let rendered = render(&record("user", "42", "msg_1")).unwrap();
-        assert_eq!(rendered.content, r#""42""#, "text that looks like JSON stays text");
+        assert_eq!(
+            rendered.content, r#""42""#,
+            "text that looks like JSON stays text"
+        );
         assert_eq!(
             wire_form(&rendered),
             r#"{"role":"user","content":[{"type":"text","text":"42"}]}"#
@@ -976,7 +1012,10 @@ mod tests {
         assert_eq!(effective_budget(20), 19);
         let committed: u64 = chosen.len() as u64 * per_message;
         assert!(committed <= effective_budget(20), "{committed} over budget");
-        assert!(committed + per_message > effective_budget(20), "under-filled");
+        assert!(
+            committed + per_message > effective_budget(20),
+            "under-filled"
+        );
         assert!(spent > 0, "the injected counter was actually consulted");
     }
 
@@ -1025,7 +1064,12 @@ mod tests {
         let candidates = vec![seed("alpha", "msg_0"), seed("beta", "msg_1")];
         let per_message = word_count(&wire_form(&candidates[0]));
 
-        let chosen = select(candidates, Some("!!! ??? ---"), per_message * 100 / 95, word_count);
+        let chosen = select(
+            candidates,
+            Some("!!! ??? ---"),
+            per_message * 100 / 95,
+            word_count,
+        );
 
         assert_eq!(ids(&chosen), vec!["msg_1"], "newest, not everything");
     }
@@ -1043,8 +1087,10 @@ mod tests {
 
     #[test]
     fn terms_are_lowercase_alphanumeric_runs_on_both_sides() {
-        assert_eq!(terms("Parser: rejects_trailing-comma!"),
-            vec!["parser", "rejects", "trailing", "comma"]);
+        assert_eq!(
+            terms("Parser: rejects_trailing-comma!"),
+            vec!["parser", "rejects", "trailing", "comma"]
+        );
         assert_eq!(terms("v0.3.0"), vec!["v0", "3", "0"]);
         assert_eq!(terms("!!! ---"), Vec::<String>::new());
     }
@@ -1165,24 +1211,50 @@ mod tests {
         assert_eq!(parse_config(None).unwrap(), MemoryConfig::default());
         assert_eq!(parse_config(Some("{}")).unwrap(), MemoryConfig::default());
 
-        let unconfigured =
-            plan_seed(None, 10_000, 0, |c| mixed_record().read(c), || None, word_count).unwrap();
-        let empty_block =
-            plan_seed(Some("{}"), 10_000, 0, |c| mixed_record().read(c), || None, word_count)
-                .unwrap();
+        let unconfigured = plan_seed(
+            None,
+            10_000,
+            0,
+            |c| mixed_record().read(c),
+            || None,
+            word_count,
+        )
+        .unwrap();
+        let empty_block = plan_seed(
+            Some("{}"),
+            10_000,
+            0,
+            |c| mixed_record().read(c),
+            || None,
+            word_count,
+        )
+        .unwrap();
 
-        assert_eq!(ids(&unconfigured), vec!["msg_u", "msg_a", "msg_t", "msg_v", "msg_k"]);
+        assert_eq!(
+            ids(&unconfigured),
+            vec!["msg_u", "msg_a", "msg_t", "msg_v", "msg_k"]
+        );
         assert_eq!(unconfigured, empty_block);
     }
 
     #[test]
     fn seed_roles_excludes_every_role_not_listed() {
         let fake = mixed_record();
-        let seeds =
-            plan_seed(Some(USER_AND_ASSISTANT), 10_000, 0, |c| fake.read(c), || None, word_count)
-                .unwrap();
+        let seeds = plan_seed(
+            Some(USER_AND_ASSISTANT),
+            10_000,
+            0,
+            |c| fake.read(c),
+            || None,
+            word_count,
+        )
+        .unwrap();
 
-        assert_eq!(ids(&seeds), vec!["msg_u", "msg_a"], "oldest first, user and assistant only");
+        assert_eq!(
+            ids(&seeds),
+            vec!["msg_u", "msg_a"],
+            "oldest first, user and assistant only"
+        );
 
         // The seed's own role says nothing, since `render` folds every role into `user` or
         // `assistant`. What is asserted is the role each seeded message had in the record.
@@ -1198,9 +1270,16 @@ mod tests {
             seeds.iter().map(|m| record_role(&m.source_id)).collect();
         assert_eq!(seeded_record_roles, vec!["user", "assistant"]);
         for excluded in ["tool", "developer", "critic", "system"] {
-            let with_role: Vec<&Option<String>> =
-                record.iter().filter(|m| m.role == excluded).map(|m| &m.id).collect();
-            assert_eq!(with_role.len(), 1, "the record holds one {excluded} message");
+            let with_role: Vec<&Option<String>> = record
+                .iter()
+                .filter(|m| m.role == excluded)
+                .map(|m| &m.id)
+                .collect();
+            assert_eq!(
+                with_role.len(),
+                1,
+                "the record holds one {excluded} message"
+            );
             assert!(
                 seeds.iter().all(|m| &m.source_id != with_role[0]),
                 "the {excluded} message is excluded, not re-roled"
@@ -1218,15 +1297,26 @@ mod tests {
         let fake = FakeRecord::new(vec![Ok(page(
             vec![
                 record("user", "what did the tests say", "msg_n"),
-                reseeded("user", "tool result call_1: 3 tests passed", "msg_c", "msg_t"),
+                reseeded(
+                    "user",
+                    "tool result call_1: 3 tests passed",
+                    "msg_c",
+                    "msg_t",
+                ),
                 tool_result("msg_t", "3 tests passed"),
             ],
             None,
         ))]);
 
-        let seeds =
-            plan_seed(Some(USER_AND_ASSISTANT), 10_000, 0, |c| fake.read(c), || None, word_count)
-                .unwrap();
+        let seeds = plan_seed(
+            Some(USER_AND_ASSISTANT),
+            10_000,
+            0,
+            |c| fake.read(c),
+            || None,
+            word_count,
+        )
+        .unwrap();
 
         assert_eq!(ids(&seeds), vec!["msg_n"]);
     }
@@ -1244,7 +1334,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(ids(&seeds), vec!["msg_u", "msg_a", "msg_t"], "developer stays excluded");
+        assert_eq!(
+            ids(&seeds),
+            vec!["msg_u", "msg_a", "msg_t"],
+            "developer stays excluded"
+        );
         let tool = &seeds[2];
         assert_eq!(tool.role, "user");
         assert!(tool.content.contains("3 tests passed"), "{}", tool.content);
@@ -1280,23 +1374,33 @@ mod tests {
         assert!(typo.contains("seed_roles"), "{typo}");
 
         let system = parse_config(Some(r#"{"seed_roles":["user","system"]}"#)).unwrap_err();
-        assert!(system.contains("`system` messages are never seeded"), "{system}");
+        assert!(
+            system.contains("`system` messages are never seeded"),
+            "{system}"
+        );
 
         let unknown = parse_config(Some(r#"{"seed_roles":["user","critic"]}"#)).unwrap_err();
         assert!(unknown.contains("`critic`"), "{unknown}");
         for role in SEEDABLE_ROLES {
-            assert!(unknown.contains(&format!("`{role}`")), "lists {role}: {unknown}");
+            assert!(
+                unknown.contains(&format!("`{role}`")),
+                "lists {role}: {unknown}"
+            );
         }
     }
 
     #[test]
     fn a_valid_list_is_kept_as_written() {
         assert_eq!(
-            parse_config(Some(r#"{"seed_roles":["user","assistant","user","developer"]}"#))
-                .unwrap(),
+            parse_config(Some(
+                r#"{"seed_roles":["user","assistant","user","developer"]}"#
+            ))
+            .unwrap(),
             MemoryConfig {
                 seed_roles: Some(
-                    ["user", "assistant", "user", "developer"].map(str::to_string).to_vec()
+                    ["user", "assistant", "user", "developer"]
+                        .map(str::to_string)
+                        .to_vec()
                 ),
             }
         );
@@ -1399,7 +1503,10 @@ mod tests {
             concat!("std::", "io::Write"),
             concat!("murmur::", "hook::inference"),
         ] {
-            assert!(!non_test.contains(needle), "the hook must not use `{needle}`");
+            assert!(
+                !non_test.contains(needle),
+                "the hook must not use `{needle}`"
+            );
         }
 
         let host_imports: Vec<&str> = non_test
@@ -1422,7 +1529,13 @@ mod tests {
         );
 
         let manifest = include_str!("../murmur.yaml");
-        assert!(manifest.contains("commit_policy: seed-context\n"), "{manifest}");
-        assert!(!manifest.contains("capabilities"), "the artifact declares no grant: {manifest}");
+        assert!(
+            manifest.contains("commit_policy: seed-context\n"),
+            "{manifest}"
+        );
+        assert!(
+            !manifest.contains("capabilities"),
+            "the artifact declares no grant: {manifest}"
+        );
     }
 }

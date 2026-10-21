@@ -98,8 +98,12 @@ fn call(bin: &Path, input: &Value) -> Result<Value, String> {
         ));
     }
 
-    serde_json::from_slice(&out.stdout)
-        .map_err(|e| format!("stdout not valid JSON: {e}\n{}", String::from_utf8_lossy(&out.stdout)))
+    serde_json::from_slice(&out.stdout).map_err(|e| {
+        format!(
+            "stdout not valid JSON: {e}\n{}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    })
 }
 
 // ── Git harness commands (setup only, not via tool) ───────────────────────────
@@ -142,16 +146,41 @@ fn create_playground() -> Playground {
     // 2. working repo
     let repo = pg.repo();
     git_run(&["init", repo.to_str().unwrap()]);
-    git_run(&["-C", repo.to_str().unwrap(), "config", "user.email", "test@murmur.dev"]);
-    git_run(&["-C", repo.to_str().unwrap(), "config", "user.name", "Murmur Test"]);
+    git_run(&[
+        "-C",
+        repo.to_str().unwrap(),
+        "config",
+        "user.email",
+        "test@murmur.dev",
+    ]);
+    git_run(&[
+        "-C",
+        repo.to_str().unwrap(),
+        "config",
+        "user.name",
+        "Murmur Test",
+    ]);
 
     // 5. seed file
     std::fs::write(repo.join("README.md"), "# test repo\n").unwrap();
     git_run(&["-C", repo.to_str().unwrap(), "add", "README.md"]);
-    git_run(&["-C", repo.to_str().unwrap(), "commit", "-m", "initial commit"]);
+    git_run(&[
+        "-C",
+        repo.to_str().unwrap(),
+        "commit",
+        "-m",
+        "initial commit",
+    ]);
 
     // 8. add remote (relative path from repo/ to remote.git/)
-    git_run(&["-C", repo.to_str().unwrap(), "remote", "add", "origin", "../remote.git"]);
+    git_run(&[
+        "-C",
+        repo.to_str().unwrap(),
+        "remote",
+        "add",
+        "origin",
+        "../remote.git",
+    ]);
     // rename branch to main if needed
     let _ = git_cmd(&["-C", repo.to_str().unwrap(), "branch", "-M", "main"]);
     git_run(&["-C", repo.to_str().unwrap(), "push", "-u", "origin", "main"]);
@@ -169,7 +198,11 @@ fn create_playground() -> Playground {
 // ── Assertion helpers ─────────────────────────────────────────────────────────
 
 fn pass(results: &mut Vec<OpResult>, label: &str) {
-    results.push(OpResult { label: label.to_string(), passed: true, detail: None });
+    results.push(OpResult {
+        label: label.to_string(),
+        passed: true,
+        detail: None,
+    });
 }
 
 fn fail(results: &mut Vec<OpResult>, label: &str, input: &Value, actual: &Value, reason: &str) {
@@ -178,7 +211,11 @@ fn fail(results: &mut Vec<OpResult>, label: &str, input: &Value, actual: &Value,
         serde_json::to_string_pretty(input).unwrap_or_default(),
         serde_json::to_string_pretty(actual).unwrap_or_default(),
     );
-    results.push(OpResult { label: label.to_string(), passed: false, detail: Some(detail) });
+    results.push(OpResult {
+        label: label.to_string(),
+        passed: false,
+        detail: Some(detail),
+    });
 }
 
 fn fail_err(results: &mut Vec<OpResult>, label: &str, input: &Value, err: &str) {
@@ -186,7 +223,11 @@ fn fail_err(results: &mut Vec<OpResult>, label: &str, input: &Value, err: &str) 
         "  reason: call failed\n  input:  {}\n  error:  {err}",
         serde_json::to_string_pretty(input).unwrap_or_default(),
     );
-    results.push(OpResult { label: label.to_string(), passed: false, detail: Some(detail) });
+    results.push(OpResult {
+        label: label.to_string(),
+        passed: false,
+        detail: Some(detail),
+    });
 }
 
 macro_rules! assert_ok {
@@ -201,12 +242,27 @@ macro_rules! assert_ok {
 macro_rules! assert_fail_kind {
     ($results:expr, $label:expr, $input:expr, $res:expr, $kind:expr) => {
         if $res["ok"] != false {
-            fail($results, $label, $input, $res, &format!("expected ok=false with error_kind={:?}", $kind));
+            fail(
+                $results,
+                $label,
+                $input,
+                $res,
+                &format!("expected ok=false with error_kind={:?}", $kind),
+            );
             return;
         }
         if $res["error_kind"].as_str() != Some($kind) {
-            fail($results, $label, $input, $res,
-                &format!("expected error_kind={:?}, got {:?}", $kind, $res["error_kind"].as_str()));
+            fail(
+                $results,
+                $label,
+                $input,
+                $res,
+                &format!(
+                    "expected error_kind={:?}, got {:?}",
+                    $kind,
+                    $res["error_kind"].as_str()
+                ),
+            );
             return;
         }
     };
@@ -225,7 +281,13 @@ fn run_status(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
             assert_ok!(results, "status — clean repo", &input, &res);
             let entries = res["entries"].as_array();
             if entries.map(|a| a.is_empty()) != Some(true) {
-                fail(results, "status — clean repo", &input, &res, "expected entries=[]");
+                fail(
+                    results,
+                    "status — clean repo",
+                    &input,
+                    &res,
+                    "expected entries=[]",
+                );
                 return;
             }
             pass(results, "status — clean repo");
@@ -240,9 +302,17 @@ fn run_status(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
         Ok(res) => {
             assert_ok!(results, "status — dirty (untracked)", &input, &res);
             let entries = res["entries"].as_array().unwrap_or(&vec![]).clone();
-            let has_untracked = entries.iter().any(|e| e["status_code"].as_str() == Some("??"));
+            let has_untracked = entries
+                .iter()
+                .any(|e| e["status_code"].as_str() == Some("??"));
             if !has_untracked {
-                fail(results, "status — dirty (untracked)", &input, &res, "expected entry with status_code=??");
+                fail(
+                    results,
+                    "status — dirty (untracked)",
+                    &input,
+                    &res,
+                    "expected entry with status_code=??",
+                );
                 return;
             }
             pass(results, "status — dirty (untracked)");
@@ -261,7 +331,13 @@ fn run_add(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
             assert_ok!(results, "add — specific path", &input, &res);
             let staged = res["staged"].as_array();
             if staged.map(|a| a.iter().any(|v| v.as_str() == Some("newfile.txt"))) != Some(true) {
-                fail(results, "add — specific path", &input, &res, "expected staged=[\"newfile.txt\"]");
+                fail(
+                    results,
+                    "add — specific path",
+                    &input,
+                    &res,
+                    "expected staged=[\"newfile.txt\"]",
+                );
                 return;
             }
             pass(results, "add — specific path");
@@ -290,7 +366,13 @@ fn run_diff(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
         Ok(res) => {
             assert_ok!(results, "diff — staged", &input, &res);
             if res["diff"].as_str().map(|s| s.is_empty()) != Some(false) {
-                fail(results, "diff — staged", &input, &res, "expected non-empty diff");
+                fail(
+                    results,
+                    "diff — staged",
+                    &input,
+                    &res,
+                    "expected non-empty diff",
+                );
                 return;
             }
             pass(results, "diff — staged");
@@ -299,7 +381,10 @@ fn run_diff(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
 
     // unstaged diff
     let readme = pg.repo().join("README.md");
-    let mut f = std::fs::OpenOptions::new().append(true).open(&readme).unwrap();
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&readme)
+        .unwrap();
     writeln!(f, "modified").unwrap();
     drop(f);
 
@@ -309,7 +394,13 @@ fn run_diff(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
         Ok(res) => {
             assert_ok!(results, "diff — unstaged", &input, &res);
             if res["diff"].as_str().map(|s| s.is_empty()) != Some(false) {
-                fail(results, "diff — unstaged", &input, &res, "expected non-empty diff");
+                fail(
+                    results,
+                    "diff — unstaged",
+                    &input,
+                    &res,
+                    "expected non-empty diff",
+                );
                 return;
             }
             pass(results, "diff — unstaged");
@@ -330,8 +421,13 @@ fn run_commit(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>, commit_h
             let short = res["short_hash"].as_str().unwrap_or("").to_string();
             let subject = res["subject"].as_str().unwrap_or("").to_string();
             if hash.is_empty() || short.is_empty() || subject != "add files" {
-                fail(results, "commit — normal", &input, &res,
-                    "expected non-empty hash/short_hash and subject=add files");
+                fail(
+                    results,
+                    "commit — normal",
+                    &input,
+                    &res,
+                    "expected non-empty hash/short_hash and subject=add files",
+                );
                 return;
             }
             *commit_hash = hash;
@@ -340,14 +436,23 @@ fn run_commit(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>, commit_h
     }
 
     // restore README.md modified in the diff group — we need a clean tree for nothing_to_commit
-    let _ = call(bin, &json!({ "operation": "restore", "repo": repo, "dest_paths": ["README.md"] }));
+    let _ = call(
+        bin,
+        &json!({ "operation": "restore", "repo": repo, "dest_paths": ["README.md"] }),
+    );
 
     // nothing to commit
     let input = json!({ "operation": "commit", "repo": repo, "message": "empty" });
     match call(bin, &input) {
         Err(e) => fail_err(results, "commit — nothing_to_commit", &input, &e),
         Ok(res) => {
-            assert_fail_kind!(results, "commit — nothing_to_commit", &input, &res, "nothing_to_commit");
+            assert_fail_kind!(
+                results,
+                "commit — nothing_to_commit",
+                &input,
+                &res,
+                "nothing_to_commit"
+            );
             pass(results, "commit — nothing_to_commit");
         }
     }
@@ -383,7 +488,13 @@ fn run_log(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
                     && !c["date_iso"].as_str().unwrap_or("").is_empty()
             });
             if !valid {
-                fail(results, "log — n=5", &input, &res, "entries missing hash/short_hash/author/date_iso");
+                fail(
+                    results,
+                    "log — n=5",
+                    &input,
+                    &res,
+                    "entries missing hash/short_hash/author/date_iso",
+                );
                 return;
             }
             pass(results, "log — n=5");
@@ -397,7 +508,13 @@ fn run_log(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
             assert_ok!(results, "log — n=1", &input, &res);
             let commits = res["commits"].as_array().unwrap_or(&vec![]).clone();
             if commits.len() != 1 {
-                fail(results, "log — n=1", &input, &res, "expected exactly 1 commit");
+                fail(
+                    results,
+                    "log — n=1",
+                    &input,
+                    &res,
+                    "expected exactly 1 commit",
+                );
                 return;
             }
             pass(results, "log — n=1");
@@ -417,7 +534,13 @@ fn run_show(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
             let subject_ok = !res["commit"]["subject"].as_str().unwrap_or("").is_empty();
             let diff_ok = !res["diff"].as_str().unwrap_or("").is_empty();
             if !hash_ok || !subject_ok || !diff_ok {
-                fail(results, "show — HEAD", &input, &res, "expected commit.hash, commit.subject, diff non-empty");
+                fail(
+                    results,
+                    "show — HEAD",
+                    &input,
+                    &res,
+                    "expected commit.hash, commit.subject, diff non-empty",
+                );
                 return;
             }
             pass(results, "show — HEAD");
@@ -439,7 +562,10 @@ fn run_stash(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
 
     // make README dirty
     let readme = pg.repo().join("README.md");
-    let mut f = std::fs::OpenOptions::new().append(true).open(&readme).unwrap();
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&readme)
+        .unwrap();
     writeln!(f, "stash me").unwrap();
     drop(f);
 
@@ -451,7 +577,13 @@ fn run_stash(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
             assert_ok!(results, "stash — push", &input, &res);
             let stash_ref = res["stash_ref"].as_str().unwrap_or("");
             if !stash_ref.starts_with("stash@{") {
-                fail(results, "stash — push", &input, &res, "expected stash_ref starting with stash@{");
+                fail(
+                    results,
+                    "stash — push",
+                    &input,
+                    &res,
+                    "expected stash_ref starting with stash@{",
+                );
                 return;
             }
             pass(results, "stash — push");
@@ -466,12 +598,24 @@ fn run_stash(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
             assert_ok!(results, "stash — list", &input, &res);
             let entries = res["entries"].as_array().unwrap_or(&vec![]).clone();
             if entries.is_empty() {
-                fail(results, "stash — list", &input, &res, "expected >= 1 stash entry");
+                fail(
+                    results,
+                    "stash — list",
+                    &input,
+                    &res,
+                    "expected >= 1 stash entry",
+                );
                 return;
             }
             let msg = entries[0]["message"].as_str().unwrap_or("");
             if !msg.contains("wip changes") {
-                fail(results, "stash — list", &input, &res, "expected entries[0].message to contain 'wip changes'");
+                fail(
+                    results,
+                    "stash — list",
+                    &input,
+                    &res,
+                    "expected entries[0].message to contain 'wip changes'",
+                );
                 return;
             }
             pass(results, "stash — list");
@@ -490,14 +634,21 @@ fn run_stash(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
 
     // nothing_to_stash (repo clean after pop, README was modified but now restored)
     // First restore README so we have a truly clean repo
-    let restore_input = json!({ "operation": "restore", "repo": repo, "dest_paths": ["README.md"] });
+    let restore_input =
+        json!({ "operation": "restore", "repo": repo, "dest_paths": ["README.md"] });
     let _ = call(bin, &restore_input);
 
     let input = json!({ "operation": "stash", "repo": repo, "subcommand": "push" });
     match call(bin, &input) {
         Err(e) => fail_err(results, "stash — nothing_to_stash", &input, &e),
         Ok(res) => {
-            assert_fail_kind!(results, "stash — nothing_to_stash", &input, &res, "nothing_to_stash");
+            assert_fail_kind!(
+                results,
+                "stash — nothing_to_stash",
+                &input,
+                &res,
+                "nothing_to_stash"
+            );
             pass(results, "stash — nothing_to_stash");
         }
     }
@@ -508,7 +659,10 @@ fn run_restore(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
 
     // dirty README again
     let readme = pg.repo().join("README.md");
-    let mut f = std::fs::OpenOptions::new().append(true).open(&readme).unwrap();
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&readme)
+        .unwrap();
     writeln!(f, "dirty again").unwrap();
     drop(f);
 
@@ -519,7 +673,13 @@ fn run_restore(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
             assert_ok!(results, "restore — README", &input, &res);
             let restored = res["restored"].as_array().unwrap_or(&vec![]).clone();
             if !restored.iter().any(|v| v.as_str() == Some("README.md")) {
-                fail(results, "restore — README", &input, &res, "expected restored=[\"README.md\"]");
+                fail(
+                    results,
+                    "restore — README",
+                    &input,
+                    &res,
+                    "expected restored=[\"README.md\"]",
+                );
                 return;
             }
             pass(results, "restore — README");
@@ -533,10 +693,17 @@ fn run_restore(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
         Ok(res) => {
             assert_ok!(results, "restore — status confirms clean", &input, &res);
             let entries = res["entries"].as_array().unwrap_or(&vec![]).clone();
-            let readme_dirty = entries.iter().any(|e| e["path"].as_str() == Some("README.md"));
+            let readme_dirty = entries
+                .iter()
+                .any(|e| e["path"].as_str() == Some("README.md"));
             if readme_dirty {
-                fail(results, "restore — status confirms clean", &input, &res,
-                    "README.md still appears dirty after restore");
+                fail(
+                    results,
+                    "restore — status confirms clean",
+                    &input,
+                    &res,
+                    "README.md still appears dirty after restore",
+                );
                 return;
             }
             pass(results, "restore — status confirms clean");
@@ -554,12 +721,23 @@ fn run_branch(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
         Ok(res) => {
             assert_ok!(results, "branch — list", &input, &res);
             let branches = res["branches"].as_array().unwrap_or(&vec![]).clone();
-            let has_main = branches.iter().any(|b| b["name"].as_str() == Some("main") && b["current"] == true);
-            let has_fa = branches.iter().any(|b| b["name"].as_str() == Some("feature-a"));
-            let has_fb = branches.iter().any(|b| b["name"].as_str() == Some("feature-b"));
+            let has_main = branches
+                .iter()
+                .any(|b| b["name"].as_str() == Some("main") && b["current"] == true);
+            let has_fa = branches
+                .iter()
+                .any(|b| b["name"].as_str() == Some("feature-a"));
+            let has_fb = branches
+                .iter()
+                .any(|b| b["name"].as_str() == Some("feature-b"));
             if !has_main || !has_fa || !has_fb {
-                fail(results, "branch — list", &input, &res,
-                    "expected main(current), feature-a, feature-b");
+                fail(
+                    results,
+                    "branch — list",
+                    &input,
+                    &res,
+                    "expected main(current), feature-a, feature-b",
+                );
                 return;
             }
             pass(results, "branch — list");
@@ -567,13 +745,20 @@ fn run_branch(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
     }
 
     // create feature-c
-    let input = json!({ "operation": "branch", "repo": repo, "subcommand": "create", "name": "feature-c" });
+    let input =
+        json!({ "operation": "branch", "repo": repo, "subcommand": "create", "name": "feature-c" });
     match call(bin, &input) {
         Err(e) => fail_err(results, "branch — create feature-c", &input, &e),
         Ok(res) => {
             assert_ok!(results, "branch — create feature-c", &input, &res);
             if res["name"].as_str() != Some("feature-c") {
-                fail(results, "branch — create feature-c", &input, &res, "expected name=feature-c");
+                fail(
+                    results,
+                    "branch — create feature-c",
+                    &input,
+                    &res,
+                    "expected name=feature-c",
+                );
                 return;
             }
             pass(results, "branch — create feature-c");
@@ -581,13 +766,20 @@ fn run_branch(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
     }
 
     // delete feature-c (merged, since it was created from main)
-    let input = json!({ "operation": "branch", "repo": repo, "subcommand": "delete", "name": "feature-c" });
+    let input =
+        json!({ "operation": "branch", "repo": repo, "subcommand": "delete", "name": "feature-c" });
     match call(bin, &input) {
         Err(e) => fail_err(results, "branch — delete feature-c", &input, &e),
         Ok(res) => {
             assert_ok!(results, "branch — delete feature-c", &input, &res);
             if res["name"].as_str() != Some("feature-c") {
-                fail(results, "branch — delete feature-c", &input, &res, "expected name=feature-c");
+                fail(
+                    results,
+                    "branch — delete feature-c",
+                    &input,
+                    &res,
+                    "expected name=feature-c",
+                );
                 return;
             }
             pass(results, "branch — delete feature-c");
@@ -602,11 +794,18 @@ fn run_branch(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
     git_run(&["-C", &repo, "checkout", "main"]);
 
     // delete feature-a — not_merged
-    let input = json!({ "operation": "branch", "repo": repo, "subcommand": "delete", "name": "feature-a" });
+    let input =
+        json!({ "operation": "branch", "repo": repo, "subcommand": "delete", "name": "feature-a" });
     match call(bin, &input) {
         Err(e) => fail_err(results, "branch — delete feature-a not_merged", &input, &e),
         Ok(res) => {
-            assert_fail_kind!(results, "branch — delete feature-a not_merged", &input, &res, "not_merged");
+            assert_fail_kind!(
+                results,
+                "branch — delete feature-a not_merged",
+                &input,
+                &res,
+                "not_merged"
+            );
             pass(results, "branch — delete feature-a not_merged");
         }
     }
@@ -622,7 +821,13 @@ fn run_switch_checkout(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>)
         Ok(res) => {
             assert_ok!(results, "switch — to feature-b", &input, &res);
             if res["branch"].as_str() != Some("feature-b") {
-                fail(results, "switch — to feature-b", &input, &res, "expected branch=feature-b");
+                fail(
+                    results,
+                    "switch — to feature-b",
+                    &input,
+                    &res,
+                    "expected branch=feature-b",
+                );
                 return;
             }
             pass(results, "switch — to feature-b");
@@ -632,7 +837,8 @@ fn run_switch_checkout(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>)
     // add commits on feature-b: feature-b.txt AND a diverging README so checkout can conflict
     std::fs::write(pg.repo().join("feature-b.txt"), "feature-b content\n").unwrap();
     std::fs::write(pg.repo().join("README.md"), "# feature-b version\n").unwrap();
-    let add_input = json!({ "operation": "add", "repo": repo, "paths": ["feature-b.txt", "README.md"] });
+    let add_input =
+        json!({ "operation": "add", "repo": repo, "paths": ["feature-b.txt", "README.md"] });
     let _ = call(bin, &add_input);
     let commit_input = json!({ "operation": "commit", "repo": repo, "message": "feature-b work" });
     let _ = call(bin, &commit_input);
@@ -645,7 +851,13 @@ fn run_switch_checkout(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>)
         }
         Ok(res) => {
             if res["ok"] != true || res["branch"].as_str() != Some("main") {
-                fail(results, "switch — back to main", &input, &res, "expected ok=true, branch=main");
+                fail(
+                    results,
+                    "switch — back to main",
+                    &input,
+                    &res,
+                    "expected ok=true, branch=main",
+                );
             } else {
                 pass(results, "switch — back to main");
             }
@@ -655,7 +867,10 @@ fn run_switch_checkout(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>)
     // checkout with dirty working tree — dirty_working_tree error
     // Appending to README.md creates a local modification that conflicts with feature-b's README.md
     let readme = pg.repo().join("README.md");
-    let mut f = std::fs::OpenOptions::new().append(true).open(&readme).unwrap();
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&readme)
+        .unwrap();
     writeln!(f, "dirty local change").unwrap();
     drop(f);
 
@@ -670,8 +885,13 @@ fn run_switch_checkout(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>)
                 pass(results, "checkout — dirty_working_tree");
                 true
             } else {
-                fail(results, "checkout — dirty_working_tree", &input, &res,
-                    "expected ok=false, error_kind=dirty_working_tree");
+                fail(
+                    results,
+                    "checkout — dirty_working_tree",
+                    &input,
+                    &res,
+                    "expected ok=false, error_kind=dirty_working_tree",
+                );
                 false
             }
         }
@@ -687,12 +907,19 @@ fn run_switch_checkout(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>)
     }
 
     // clean checkout to feature-b
-    let input = json!({ "operation": "checkout", "repo": repo, "ref": "feature-b", "create": false });
+    let input =
+        json!({ "operation": "checkout", "repo": repo, "ref": "feature-b", "create": false });
     match call(bin, &input) {
         Err(e) => fail_err(results, "checkout — to feature-b", &input, &e),
         Ok(res) => {
             if res["ok"] != true {
-                fail(results, "checkout — to feature-b", &input, &res, "expected ok=true");
+                fail(
+                    results,
+                    "checkout — to feature-b",
+                    &input,
+                    &res,
+                    "expected ok=true",
+                );
             } else {
                 pass(results, "checkout — to feature-b");
             }
@@ -705,7 +932,13 @@ fn run_switch_checkout(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>)
         Err(e) => fail_err(results, "checkout — back to main", &input, &e),
         Ok(res) => {
             if res["ok"] != true {
-                fail(results, "checkout — back to main", &input, &res, "expected ok=true");
+                fail(
+                    results,
+                    "checkout — back to main",
+                    &input,
+                    &res,
+                    "expected ok=true",
+                );
             } else {
                 pass(results, "checkout — back to main");
             }
@@ -730,7 +963,13 @@ fn run_reset(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
         Ok(res) => {
             assert_ok!(results, "reset — soft HEAD~1", &input, &res);
             if res["ref"].as_str().map(|s| s.is_empty()) != Some(false) {
-                fail(results, "reset — soft HEAD~1", &input, &res, "expected non-empty ref");
+                fail(
+                    results,
+                    "reset — soft HEAD~1",
+                    &input,
+                    &res,
+                    "expected non-empty ref",
+                );
                 return;
             }
             pass(results, "reset — soft HEAD~1");
@@ -780,7 +1019,13 @@ fn run_cherry_pick(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
             return;
         }
         Ok(res) if res["ok"] != true => {
-            fail(results, "cherry_pick — setup: switch to feature-a", &sw, &res, "switch failed");
+            fail(
+                results,
+                "cherry_pick — setup: switch to feature-a",
+                &sw,
+                &res,
+                "switch failed",
+            );
             return;
         }
         _ => {}
@@ -792,11 +1037,22 @@ fn run_cherry_pick(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
     let commit = json!({ "operation": "commit", "repo": repo, "message": "cherry commit" });
     let cherry_hash = match call(bin, &commit) {
         Err(e) => {
-            fail_err(results, "cherry_pick — setup: commit on feature-a", &commit, &e);
+            fail_err(
+                results,
+                "cherry_pick — setup: commit on feature-a",
+                &commit,
+                &e,
+            );
             return;
         }
         Ok(res) if res["ok"] != true => {
-            fail(results, "cherry_pick — setup: commit on feature-a", &commit, &res, "commit failed");
+            fail(
+                results,
+                "cherry_pick — setup: commit on feature-a",
+                &commit,
+                &res,
+                "commit failed",
+            );
             return;
         }
         Ok(res) => res["hash"].as_str().unwrap_or("").to_string(),
@@ -815,7 +1071,13 @@ fn run_cherry_pick(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
             let hash_ok = !res["hash"].as_str().unwrap_or("").is_empty();
             let subject_ok = !res["subject"].as_str().unwrap_or("").is_empty();
             if !hash_ok || !subject_ok {
-                fail(results, "cherry_pick — clean", &input, &res, "expected non-empty hash and subject");
+                fail(
+                    results,
+                    "cherry_pick — clean",
+                    &input,
+                    &res,
+                    "expected non-empty hash and subject",
+                );
                 return;
             }
             pass(results, "cherry_pick — clean");
@@ -848,7 +1110,10 @@ fn run_cherry_pick(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
         results.push(OpResult {
             label: "cherry_pick — conflict".to_string(),
             passed: false,
-            detail: Some("  reason: could not set up conflict scenario (feature-a commit hash missing)".to_string()),
+            detail: Some(
+                "  reason: could not set up conflict scenario (feature-a commit hash missing)"
+                    .to_string(),
+            ),
         });
         return;
     }
@@ -891,7 +1156,13 @@ fn run_merge(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
         Ok(res) => {
             assert_ok!(results, "merge — fast_forward", &input, &res);
             if res["fast_forward"] != true {
-                fail(results, "merge — fast_forward", &input, &res, "expected fast_forward=true");
+                fail(
+                    results,
+                    "merge — fast_forward",
+                    &input,
+                    &res,
+                    "expected fast_forward=true",
+                );
                 return;
             }
             pass(results, "merge — fast_forward");
@@ -946,14 +1217,21 @@ fn run_merge(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
     std::fs::write(pg.repo().join("main-diverge.txt"), "main diverge\n").unwrap();
     let add = json!({ "operation": "add", "repo": repo, "paths": ["main-diverge.txt"] });
     let _ = call(bin, &add);
-    let commit = json!({ "operation": "commit", "repo": repo, "message": "main diverge for ff-only" });
+    let commit =
+        json!({ "operation": "commit", "repo": repo, "message": "main diverge for ff-only" });
     let _ = call(bin, &commit);
 
     let input = json!({ "operation": "merge", "repo": repo, "branch": "no-ff", "ff_only": true });
     match call(bin, &input) {
         Err(e) => fail_err(results, "merge — ff_only_failed", &input, &e),
         Ok(res) => {
-            assert_fail_kind!(results, "merge — ff_only_failed", &input, &res, "ff_only_failed");
+            assert_fail_kind!(
+                results,
+                "merge — ff_only_failed",
+                &input,
+                &res,
+                "ff_only_failed"
+            );
             pass(results, "merge — ff_only_failed");
         }
     }
@@ -970,7 +1248,13 @@ fn run_remote(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
             assert_ok!(results, "remote — list", &input, &res);
             let remotes = res["remotes"].as_array().unwrap_or(&vec![]).clone();
             if !remotes.iter().any(|r| r["name"].as_str() == Some("origin")) {
-                fail(results, "remote — list", &input, &res, "expected entry with name=origin");
+                fail(
+                    results,
+                    "remote — list",
+                    &input,
+                    &res,
+                    "expected entry with name=origin",
+                );
                 return;
             }
             pass(results, "remote — list");
@@ -987,7 +1271,13 @@ fn run_remote(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
         Ok(res) => {
             assert_ok!(results, "remote — add upstream", &input, &res);
             if res["name"].as_str() != Some("upstream") {
-                fail(results, "remote — add upstream", &input, &res, "expected name=upstream");
+                fail(
+                    results,
+                    "remote — add upstream",
+                    &input,
+                    &res,
+                    "expected name=upstream",
+                );
                 return;
             }
             pass(results, "remote — add upstream");
@@ -1002,19 +1292,32 @@ fn run_remote(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
     match call(bin, &input) {
         Err(e) => fail_err(results, "remote — add already_exists", &input, &e),
         Ok(res) => {
-            assert_fail_kind!(results, "remote — add already_exists", &input, &res, "already_exists");
+            assert_fail_kind!(
+                results,
+                "remote — add already_exists",
+                &input,
+                &res,
+                "already_exists"
+            );
             pass(results, "remote — add already_exists");
         }
     }
 
     // remove upstream
-    let input = json!({ "operation": "remote", "repo": repo, "subcommand": "remove", "name": "upstream" });
+    let input =
+        json!({ "operation": "remote", "repo": repo, "subcommand": "remove", "name": "upstream" });
     match call(bin, &input) {
         Err(e) => fail_err(results, "remote — remove upstream", &input, &e),
         Ok(res) => {
             assert_ok!(results, "remote — remove upstream", &input, &res);
             if res["name"].as_str() != Some("upstream") {
-                fail(results, "remote — remove upstream", &input, &res, "expected name=upstream");
+                fail(
+                    results,
+                    "remote — remove upstream",
+                    &input,
+                    &res,
+                    "expected name=upstream",
+                );
                 return;
             }
             pass(results, "remote — remove upstream");
@@ -1032,7 +1335,13 @@ fn run_push_fetch_pull(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>)
         Ok(res) => {
             assert_ok!(results, "push — main to origin", &input, &res);
             if res["remote"].as_str() != Some("origin") {
-                fail(results, "push — main to origin", &input, &res, "expected remote=origin");
+                fail(
+                    results,
+                    "push — main to origin",
+                    &input,
+                    &res,
+                    "expected remote=origin",
+                );
                 return;
             }
             pass(results, "push — main to origin");
@@ -1043,11 +1352,29 @@ fn run_push_fetch_pull(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>)
     let repo2 = pg.path.join("repo2");
     let remote_url = format!("file://{}", pg.remote_git().to_string_lossy());
     git_run(&["clone", &remote_url, repo2.to_str().unwrap()]);
-    git_run(&["-C", repo2.to_str().unwrap(), "config", "user.email", "test@murmur.dev"]);
-    git_run(&["-C", repo2.to_str().unwrap(), "config", "user.name", "Murmur Test"]);
+    git_run(&[
+        "-C",
+        repo2.to_str().unwrap(),
+        "config",
+        "user.email",
+        "test@murmur.dev",
+    ]);
+    git_run(&[
+        "-C",
+        repo2.to_str().unwrap(),
+        "config",
+        "user.name",
+        "Murmur Test",
+    ]);
     std::fs::write(repo2.join("remote-file.txt"), "from remote\n").unwrap();
     git_run(&["-C", repo2.to_str().unwrap(), "add", "."]);
-    git_run(&["-C", repo2.to_str().unwrap(), "commit", "-m", "remote advance"]);
+    git_run(&[
+        "-C",
+        repo2.to_str().unwrap(),
+        "commit",
+        "-m",
+        "remote advance",
+    ]);
     git_run(&["-C", repo2.to_str().unwrap(), "push", "origin", "main"]);
 
     // fetch
@@ -1057,7 +1384,13 @@ fn run_push_fetch_pull(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>)
         Ok(res) => {
             assert_ok!(results, "fetch — origin", &input, &res);
             if res["remote"].as_str() != Some("origin") {
-                fail(results, "fetch — origin", &input, &res, "expected remote=origin");
+                fail(
+                    results,
+                    "fetch — origin",
+                    &input,
+                    &res,
+                    "expected remote=origin",
+                );
                 return;
             }
             pass(results, "fetch — origin");
@@ -1072,8 +1405,13 @@ fn run_push_fetch_pull(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>)
             assert_ok!(results, "pull — origin main", &input, &res);
             let pulled = res["commits_pulled"].as_i64().unwrap_or(-1);
             if pulled < 1 {
-                fail(results, "pull — origin main", &input, &res,
-                    "expected commits_pulled >= 1");
+                fail(
+                    results,
+                    "pull — origin main",
+                    &input,
+                    &res,
+                    "expected commits_pulled >= 1",
+                );
                 return;
             }
             pass(results, "pull — origin main");
@@ -1083,7 +1421,13 @@ fn run_push_fetch_pull(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>)
     // advance remote again, do NOT fetch — push should fail with non_fast_forward
     std::fs::write(repo2.join("remote-file2.txt"), "from remote 2\n").unwrap();
     git_run(&["-C", repo2.to_str().unwrap(), "add", "."]);
-    git_run(&["-C", repo2.to_str().unwrap(), "commit", "-m", "remote advance 2"]);
+    git_run(&[
+        "-C",
+        repo2.to_str().unwrap(),
+        "commit",
+        "-m",
+        "remote advance 2",
+    ]);
     git_run(&["-C", repo2.to_str().unwrap(), "push", "origin", "main"]);
 
     // make a local commit to diverge
@@ -1097,7 +1441,13 @@ fn run_push_fetch_pull(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>)
     match call(bin, &input) {
         Err(e) => fail_err(results, "push — non_fast_forward", &input, &e),
         Ok(res) => {
-            assert_fail_kind!(results, "push — non_fast_forward", &input, &res, "non_fast_forward");
+            assert_fail_kind!(
+                results,
+                "push — non_fast_forward",
+                &input,
+                &res,
+                "non_fast_forward"
+            );
             pass(results, "push — non_fast_forward");
         }
     }
@@ -1122,11 +1472,23 @@ fn run_clone(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
         Ok(res) => {
             assert_ok!(results, "clone — success", &input, &res);
             if res["dest"].as_str().map(|s| s.is_empty()) != Some(false) {
-                fail(results, "clone — success", &input, &res, "expected non-empty dest");
+                fail(
+                    results,
+                    "clone — success",
+                    &input,
+                    &res,
+                    "expected non-empty dest",
+                );
                 return;
             }
             if res["default_branch"].as_str().map(|s| s.is_empty()) != Some(false) {
-                fail(results, "clone — success", &input, &res, "expected non-empty default_branch");
+                fail(
+                    results,
+                    "clone — success",
+                    &input,
+                    &res,
+                    "expected non-empty default_branch",
+                );
                 return;
             }
             pass(results, "clone — success");
@@ -1154,7 +1516,13 @@ fn run_tag(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
         Ok(res) => {
             assert_ok!(results, "tag — list empty", &input, &res);
             if !res["tags"].is_array() {
-                fail(results, "tag — list empty", &input, &res, "expected tags to be an array");
+                fail(
+                    results,
+                    "tag — list empty",
+                    &input,
+                    &res,
+                    "expected tags to be an array",
+                );
                 return;
             }
             pass(results, "tag — list empty");
@@ -1162,13 +1530,20 @@ fn run_tag(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
     }
 
     // create lightweight tag
-    let input = json!({ "operation": "tag", "repo": repo, "subcommand": "create", "name": "v0.1.0" });
+    let input =
+        json!({ "operation": "tag", "repo": repo, "subcommand": "create", "name": "v0.1.0" });
     match call(bin, &input) {
         Err(e) => fail_err(results, "tag — create v0.1.0", &input, &e),
         Ok(res) => {
             assert_ok!(results, "tag — create v0.1.0", &input, &res);
             if res["name"].as_str() != Some("v0.1.0") {
-                fail(results, "tag — create v0.1.0", &input, &res, "expected name=v0.1.0");
+                fail(
+                    results,
+                    "tag — create v0.1.0",
+                    &input,
+                    &res,
+                    "expected name=v0.1.0",
+                );
                 return;
             }
             pass(results, "tag — create v0.1.0");
@@ -1185,7 +1560,13 @@ fn run_tag(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
         Ok(res) => {
             assert_ok!(results, "tag — create v0.1.0-annotated", &input, &res);
             if res["name"].as_str() != Some("v0.1.0-annotated") {
-                fail(results, "tag — create v0.1.0-annotated", &input, &res, "expected name=v0.1.0-annotated");
+                fail(
+                    results,
+                    "tag — create v0.1.0-annotated",
+                    &input,
+                    &res,
+                    "expected name=v0.1.0-annotated",
+                );
                 return;
             }
             pass(results, "tag — create v0.1.0-annotated");
@@ -1193,11 +1574,18 @@ fn run_tag(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
     }
 
     // create duplicate — already_exists
-    let input = json!({ "operation": "tag", "repo": repo, "subcommand": "create", "name": "v0.1.0" });
+    let input =
+        json!({ "operation": "tag", "repo": repo, "subcommand": "create", "name": "v0.1.0" });
     match call(bin, &input) {
         Err(e) => fail_err(results, "tag — create already_exists", &input, &e),
         Ok(res) => {
-            assert_fail_kind!(results, "tag — create already_exists", &input, &res, "already_exists");
+            assert_fail_kind!(
+                results,
+                "tag — create already_exists",
+                &input,
+                &res,
+                "already_exists"
+            );
             pass(results, "tag — create already_exists");
         }
     }
@@ -1210,14 +1598,27 @@ fn run_tag(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
             assert_ok!(results, "tag — list with tags", &input, &res);
             let tags = res["tags"].as_array().unwrap_or(&vec![]).clone();
             if tags.len() < 2 {
-                fail(results, "tag — list with tags", &input, &res, "expected >= 2 tags");
+                fail(
+                    results,
+                    "tag — list with tags",
+                    &input,
+                    &res,
+                    "expected >= 2 tags",
+                );
                 return;
             }
             let has_v010 = tags.iter().any(|t| t["name"].as_str() == Some("v0.1.0"));
-            let has_ann = tags.iter().any(|t| t["name"].as_str() == Some("v0.1.0-annotated"));
+            let has_ann = tags
+                .iter()
+                .any(|t| t["name"].as_str() == Some("v0.1.0-annotated"));
             if !has_v010 || !has_ann {
-                fail(results, "tag — list with tags", &input, &res,
-                    "expected tags v0.1.0 and v0.1.0-annotated");
+                fail(
+                    results,
+                    "tag — list with tags",
+                    &input,
+                    &res,
+                    "expected tags v0.1.0 and v0.1.0-annotated",
+                );
                 return;
             }
             pass(results, "tag — list with tags");
@@ -1227,7 +1628,11 @@ fn run_tag(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
 
 fn run_worktree(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
     let repo = pg.repo().to_string_lossy().to_string();
-    let wt_path = pg.worktrees().join("wt-feature").to_string_lossy().to_string();
+    let wt_path = pg
+        .worktrees()
+        .join("wt-feature")
+        .to_string_lossy()
+        .to_string();
 
     // add worktree on feature-b
     let input = json!({
@@ -1240,15 +1645,33 @@ fn run_worktree(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
             assert_ok!(results, "worktree — add", &input, &res);
             let path_val = res["path"].as_str().unwrap_or("");
             if path_val.is_empty() {
-                fail(results, "worktree — add", &input, &res, "expected non-empty path");
+                fail(
+                    results,
+                    "worktree — add",
+                    &input,
+                    &res,
+                    "expected non-empty path",
+                );
                 return;
             }
             if res["branch"].as_str() != Some("feature-b") {
-                fail(results, "worktree — add", &input, &res, "expected branch=feature-b");
+                fail(
+                    results,
+                    "worktree — add",
+                    &input,
+                    &res,
+                    "expected branch=feature-b",
+                );
                 return;
             }
             if !Path::new(&wt_path).exists() {
-                fail(results, "worktree — add", &input, &res, "worktree path does not exist on disk");
+                fail(
+                    results,
+                    "worktree — add",
+                    &input,
+                    &res,
+                    "worktree path does not exist on disk",
+                );
                 return;
             }
             pass(results, "worktree — add");
@@ -1263,7 +1686,13 @@ fn run_worktree(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
             assert_ok!(results, "worktree — list", &input, &res);
             let worktrees = res["worktrees"].as_array().unwrap_or(&vec![]).clone();
             if worktrees.len() < 2 {
-                fail(results, "worktree — list", &input, &res, "expected >= 2 worktrees");
+                fail(
+                    results,
+                    "worktree — list",
+                    &input,
+                    &res,
+                    "expected >= 2 worktrees",
+                );
                 return;
             }
             pass(results, "worktree — list");
@@ -1271,7 +1700,11 @@ fn run_worktree(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
     }
 
     // branch conflict: feature-b already in use
-    let wt_conflict = pg.worktrees().join("wt-conflict").to_string_lossy().to_string();
+    let wt_conflict = pg
+        .worktrees()
+        .join("wt-conflict")
+        .to_string_lossy()
+        .to_string();
     let input = json!({
         "operation": "worktree", "repo": repo, "subcommand": "add",
         "dest": wt_conflict, "branch": "feature-b"
@@ -1279,7 +1712,13 @@ fn run_worktree(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
     match call(bin, &input) {
         Err(e) => fail_err(results, "worktree — branch_conflict", &input, &e),
         Ok(res) => {
-            assert_fail_kind!(results, "worktree — branch_conflict", &input, &res, "branch_conflict");
+            assert_fail_kind!(
+                results,
+                "worktree — branch_conflict",
+                &input,
+                &res,
+                "branch_conflict"
+            );
             pass(results, "worktree — branch_conflict");
         }
     }
@@ -1293,7 +1732,13 @@ fn run_worktree(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
         Ok(res) => {
             assert_ok!(results, "worktree — remove", &input, &res);
             if Path::new(&wt_path).exists() {
-                fail(results, "worktree — remove", &input, &res, "worktree path still exists after remove");
+                fail(
+                    results,
+                    "worktree — remove",
+                    &input,
+                    &res,
+                    "worktree path still exists after remove",
+                );
                 return;
             }
             pass(results, "worktree — remove");
@@ -1303,7 +1748,11 @@ fn run_worktree(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
 
 fn run_create_worktree(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>) {
     let repo = pg.repo().to_string_lossy().to_string();
-    let wt_compat = pg.worktrees().join("wt-compat").to_string_lossy().to_string();
+    let wt_compat = pg
+        .worktrees()
+        .join("wt-compat")
+        .to_string_lossy()
+        .to_string();
 
     let input = json!({
         "operation": "create_worktree",
@@ -1316,7 +1765,13 @@ fn run_create_worktree(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>)
         Ok(res) => {
             assert_ok!(results, "create_worktree — compat alias", &input, &res);
             if res["path"].as_str().map(|s| s.is_empty()) != Some(false) {
-                fail(results, "create_worktree — compat alias", &input, &res, "expected non-empty path");
+                fail(
+                    results,
+                    "create_worktree — compat alias",
+                    &input,
+                    &res,
+                    "expected non-empty path",
+                );
                 return;
             }
             pass(results, "create_worktree — compat alias");
@@ -1324,7 +1779,8 @@ fn run_create_worktree(bin: &Path, pg: &Playground, results: &mut Vec<OpResult>)
     }
 
     // cleanup: remove the compat worktree
-    let rm = json!({ "operation": "worktree", "repo": repo, "subcommand": "remove", "dest": wt_compat });
+    let rm =
+        json!({ "operation": "worktree", "repo": repo, "subcommand": "remove", "dest": wt_compat });
     let _ = call(bin, &rm);
 }
 
@@ -1415,25 +1871,37 @@ fn main() {
         }};
     }
 
-    maybe_run!(&["status"],         run_status(&bin, &pg, &mut results));
-    maybe_run!(&["add"],            run_add(&bin, &pg, &mut results));
-    maybe_run!(&["diff"],           run_diff(&bin, &pg, &mut results));
-    maybe_run!(&["commit"],         run_commit(&bin, &pg, &mut results, &mut commit_hash));
-    maybe_run!(&["log"],            run_log(&bin, &pg, &mut results));
-    maybe_run!(&["show"],           run_show(&bin, &pg, &mut results));
-    maybe_run!(&["stash"],          run_stash(&bin, &pg, &mut results));
-    maybe_run!(&["restore"],        run_restore(&bin, &pg, &mut results));
-    maybe_run!(&["branch"],         run_branch(&bin, &pg, &mut results));
-    maybe_run!(&["switch", "checkout"], run_switch_checkout(&bin, &pg, &mut results));
-    maybe_run!(&["reset"],          run_reset(&bin, &pg, &mut results));
-    maybe_run!(&["cherry_pick"],    run_cherry_pick(&bin, &pg, &mut results));
-    maybe_run!(&["merge"],          run_merge(&bin, &pg, &mut results));
-    maybe_run!(&["remote"],         run_remote(&bin, &pg, &mut results));
-    maybe_run!(&["push", "fetch", "pull"], run_push_fetch_pull(&bin, &pg, &mut results));
-    maybe_run!(&["clone"],          run_clone(&bin, &pg, &mut results));
-    maybe_run!(&["tag"],            run_tag(&bin, &pg, &mut results));
-    maybe_run!(&["worktree"],       run_worktree(&bin, &pg, &mut results));
-    maybe_run!(&["create_worktree"], run_create_worktree(&bin, &pg, &mut results));
+    maybe_run!(&["status"], run_status(&bin, &pg, &mut results));
+    maybe_run!(&["add"], run_add(&bin, &pg, &mut results));
+    maybe_run!(&["diff"], run_diff(&bin, &pg, &mut results));
+    maybe_run!(
+        &["commit"],
+        run_commit(&bin, &pg, &mut results, &mut commit_hash)
+    );
+    maybe_run!(&["log"], run_log(&bin, &pg, &mut results));
+    maybe_run!(&["show"], run_show(&bin, &pg, &mut results));
+    maybe_run!(&["stash"], run_stash(&bin, &pg, &mut results));
+    maybe_run!(&["restore"], run_restore(&bin, &pg, &mut results));
+    maybe_run!(&["branch"], run_branch(&bin, &pg, &mut results));
+    maybe_run!(
+        &["switch", "checkout"],
+        run_switch_checkout(&bin, &pg, &mut results)
+    );
+    maybe_run!(&["reset"], run_reset(&bin, &pg, &mut results));
+    maybe_run!(&["cherry_pick"], run_cherry_pick(&bin, &pg, &mut results));
+    maybe_run!(&["merge"], run_merge(&bin, &pg, &mut results));
+    maybe_run!(&["remote"], run_remote(&bin, &pg, &mut results));
+    maybe_run!(
+        &["push", "fetch", "pull"],
+        run_push_fetch_pull(&bin, &pg, &mut results)
+    );
+    maybe_run!(&["clone"], run_clone(&bin, &pg, &mut results));
+    maybe_run!(&["tag"], run_tag(&bin, &pg, &mut results));
+    maybe_run!(&["worktree"], run_worktree(&bin, &pg, &mut results));
+    maybe_run!(
+        &["create_worktree"],
+        run_create_worktree(&bin, &pg, &mut results)
+    );
 
     // Print summary
     println!();

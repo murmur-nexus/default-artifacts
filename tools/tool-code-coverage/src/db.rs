@@ -63,10 +63,22 @@ fn column_exists(conn: &Connection, table: &str, col: &str) -> rusqlite::Result<
 /// low score.
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     for (col, ddl) in [
-        ("suspicion_ef", "ALTER TABLE symbols ADD COLUMN suspicion_ef INTEGER"),
-        ("suspicion_ep", "ALTER TABLE symbols ADD COLUMN suspicion_ep INTEGER"),
-        ("suspicion_ochiai", "ALTER TABLE symbols ADD COLUMN suspicion_ochiai REAL"),
-        ("suspicion_tarantula", "ALTER TABLE symbols ADD COLUMN suspicion_tarantula REAL"),
+        (
+            "suspicion_ef",
+            "ALTER TABLE symbols ADD COLUMN suspicion_ef INTEGER",
+        ),
+        (
+            "suspicion_ep",
+            "ALTER TABLE symbols ADD COLUMN suspicion_ep INTEGER",
+        ),
+        (
+            "suspicion_ochiai",
+            "ALTER TABLE symbols ADD COLUMN suspicion_ochiai REAL",
+        ),
+        (
+            "suspicion_tarantula",
+            "ALTER TABLE symbols ADD COLUMN suspicion_tarantula REAL",
+        ),
     ] {
         if !column_exists(conn, "symbols", col)? {
             conn.execute(ddl, [])?;

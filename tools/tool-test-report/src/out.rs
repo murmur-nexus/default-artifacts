@@ -23,7 +23,10 @@ pub struct Meta {
 
 impl Meta {
     pub fn read(resource_id: impl Into<String>) -> Self {
-        Meta { resource_id: resource_id.into(), state_effect: "read".into() }
+        Meta {
+            resource_id: resource_id.into(),
+            state_effect: "read".into(),
+        }
     }
     pub(crate) fn to_json(&self) -> Value {
         json!({ "resource_id": self.resource_id, "state_effect": self.state_effect })

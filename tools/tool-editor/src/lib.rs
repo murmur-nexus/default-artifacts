@@ -274,14 +274,20 @@ pub mod logic {
         if let Some(parent) = std::path::Path::new(&path).parent() {
             if !parent.as_os_str().is_empty() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
-                    return err_result(io_error_kind(&e), format!("failed to create directories for {path}: {e}"));
+                    return err_result(
+                        io_error_kind(&e),
+                        format!("failed to create directories for {path}: {e}"),
+                    );
                 }
             }
         }
 
         let byte_count = content.len();
         match std::fs::write(&path, content) {
-            Ok(()) => ok_summary_only(format!("wrote {path}"), format!("{byte_count} bytes written")),
+            Ok(()) => ok_summary_only(
+                format!("wrote {path}"),
+                format!("{byte_count} bytes written"),
+            ),
             Err(e) => err_result(io_error_kind(&e), format!("{path}: {e}")),
         }
     }
@@ -1193,7 +1199,10 @@ pub mod logic {
             }));
             assert_eq!(out["ok"], false);
             assert_eq!(out["message"], "missing required field: dest_path");
-            assert!(!path.exists(), "a rejected write must not reach the filesystem");
+            assert!(
+                !path.exists(),
+                "a rejected write must not reach the filesystem"
+            );
             let _ = fs::remove_dir_all(&dir);
         }
 
@@ -1312,12 +1321,18 @@ pub mod logic {
             let dir = scratch("absolute_read");
             let file = dir.join("results.txt");
             fs::write(&file, "content from the wrong place\n").unwrap();
-            let absolute = fs::canonicalize(&file).unwrap().to_string_lossy().to_string();
+            let absolute = fs::canonicalize(&file)
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
 
             let out = op_read_file(&json!({ "operation": "read_file", "path": &absolute }));
             assert_eq!(out["ok"], false);
             assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
-            assert!(out["content"].is_null(), "a refused read returns no content: {out:?}");
+            assert!(
+                out["content"].is_null(),
+                "a refused read returns no content: {out:?}"
+            );
             let msg = out["message"].as_str().unwrap();
             assert!(
                 msg.starts_with("'path' must be relative to the capsule workdir"),
@@ -1375,7 +1390,10 @@ pub mod logic {
             let out = run(&envelope.to_string());
             assert_eq!(out["ok"], false);
             assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
-            assert!(out["metadata"].is_null(), "a refused write declares no effect: {out:?}");
+            assert!(
+                out["metadata"].is_null(),
+                "a refused write declares no effect: {out:?}"
+            );
         }
 
         #[test]
@@ -1383,7 +1401,10 @@ pub mod logic {
             let dir = scratch("absolute_replace");
             let file = dir.join("patch.txt");
             fs::write(&file, "hello world\n").unwrap();
-            let absolute = fs::canonicalize(&file).unwrap().to_string_lossy().to_string();
+            let absolute = fs::canonicalize(&file)
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
 
             let out = op_replace_in_file(&json!({
                 "operation": "replace_in_file",
@@ -1393,7 +1414,10 @@ pub mod logic {
             }));
             assert_eq!(out["ok"], false);
             assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
-            assert!(out["message"].as_str().unwrap().contains("'dest_path'"), "{out:?}");
+            assert!(
+                out["message"].as_str().unwrap().contains("'dest_path'"),
+                "{out:?}"
+            );
             assert_eq!(
                 fs::read_to_string(&file).unwrap(),
                 "hello world\n",
@@ -1416,7 +1440,10 @@ pub mod logic {
             let msg = out["message"].as_str().unwrap();
             assert!(msg.contains("'dir'"), "{msg}");
             assert!(msg.contains("did you mean 'app'"), "{msg}");
-            assert!(out["matches"].is_null(), "a refused search performs no walk: {out:?}");
+            assert!(
+                out["matches"].is_null(),
+                "a refused search performs no walk: {out:?}"
+            );
         }
 
         #[test]
@@ -1435,7 +1462,10 @@ pub mod logic {
             let msg = out["message"].as_str().unwrap();
             assert!(msg.contains("'dir'"), "{msg}");
             assert!(msg.contains("got '/'"), "{msg}");
-            assert!(!msg.contains("did you mean"), "no file name to suggest: {msg}");
+            assert!(
+                !msg.contains("did you mean"),
+                "no file name to suggest: {msg}"
+            );
         }
 
         #[test]
@@ -1639,8 +1669,14 @@ pub mod logic {
             assert_eq!(out["content"], "line 1\nline 2\nline 3\nline 4\nline 5\n");
             assert_eq!(out["total_lines"], 5);
             assert_data_keys(&out, &["content", "total_lines"]);
-            assert!(out["start_line"].is_null(), "whole-file read must not add start_line");
-            assert!(out["end_line"].is_null(), "whole-file read must not add end_line");
+            assert!(
+                out["start_line"].is_null(),
+                "whole-file read must not add start_line"
+            );
+            assert!(
+                out["end_line"].is_null(),
+                "whole-file read must not add end_line"
+            );
 
             let _ = fs::remove_dir_all(&dir);
         }
@@ -1649,7 +1685,8 @@ pub mod logic {
         fn read_file_ranged_happy_path() {
             let dir = scratch("read_ranged");
             let path = write_numbered_file(&dir, "f.txt", 10);
-            let op = json!({ "operation": "read_file", "path": &path, "start_line": 2, "end_line": 4 });
+            let op =
+                json!({ "operation": "read_file", "path": &path, "start_line": 2, "end_line": 4 });
 
             let out = op_read_file(&op);
             assert_eq!(out["ok"], true, "{out:?}");
@@ -1697,7 +1734,8 @@ pub mod logic {
         fn read_file_ranged_inverted_span_errors() {
             let dir = scratch("read_inverted");
             let path = write_numbered_file(&dir, "f.txt", 10);
-            let op = json!({ "operation": "read_file", "path": &path, "start_line": 5, "end_line": 2 });
+            let op =
+                json!({ "operation": "read_file", "path": &path, "start_line": 5, "end_line": 2 });
 
             let out = op_read_file(&op);
             assert_eq!(out["ok"], false);
@@ -1734,7 +1772,10 @@ pub mod logic {
             assert_eq!(out["error_kind"], err::INVALID_RANGE);
             let msg = out["message"].as_str().unwrap();
             assert!(msg.contains("beyond end of file"), "{msg}");
-            assert!(msg.contains("4 lines"), "message must state real line count: {msg}");
+            assert!(
+                msg.contains("4 lines"),
+                "message must state real line count: {msg}"
+            );
 
             let _ = fs::remove_dir_all(&dir);
         }
@@ -1770,7 +1811,10 @@ pub mod logic {
             let out = op_read_file(&op);
             assert_eq!(out["ok"], false);
             assert_eq!(out["error_kind"], err::RANGE_TOO_LARGE);
-            assert!(out["message"].as_str().unwrap().contains("exceeds the maximum"));
+            assert!(out["message"]
+                .as_str()
+                .unwrap()
+                .contains("exceeds the maximum"));
 
             let _ = fs::remove_dir_all(&dir);
         }
@@ -1904,8 +1948,14 @@ pub mod logic {
             let m = &out["matches"][0];
             assert_eq!(m["line"], 2);
             assert_eq!(m["text"], "two needle");
-            assert!(m.get("context_before").is_none(), "no context key when omitted");
-            assert!(m.get("context_after").is_none(), "no context key when omitted");
+            assert!(
+                m.get("context_before").is_none(),
+                "no context key when omitted"
+            );
+            assert!(
+                m.get("context_after").is_none(),
+                "no context key when omitted"
+            );
 
             let _ = fs::remove_dir_all(&dir);
         }
@@ -1944,8 +1994,16 @@ pub mod logic {
             assert_eq!(out["ok"], true, "{out:?}");
             let m = &out["matches"][0];
             assert_eq!(m["line"], 1);
-            assert_eq!(m["context_before"], json!([]), "top-of-file match: empty before");
-            assert_eq!(m["context_after"], json!(["b", "c"]), "clamped to existing lines");
+            assert_eq!(
+                m["context_before"],
+                json!([]),
+                "top-of-file match: empty before"
+            );
+            assert_eq!(
+                m["context_after"],
+                json!(["b", "c"]),
+                "clamped to existing lines"
+            );
 
             let _ = fs::remove_dir_all(&dir);
         }

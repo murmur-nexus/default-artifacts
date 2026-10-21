@@ -110,7 +110,10 @@ pub fn op_parse(op: &Value) -> Value {
 /// (in which case the caller simply omits `data_path`).
 fn write_full(input_path: &str, full: &Value) -> Option<String> {
     let p = Path::new(input_path);
-    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("test-report");
+    let stem = p
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("test-report");
     let dir = p.parent().filter(|d| !d.as_os_str().is_empty());
     let out = match dir {
         Some(d) => d.join(format!("{stem}.failures.json")),

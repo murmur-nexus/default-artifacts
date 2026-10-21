@@ -22,7 +22,9 @@ use crate::resolve::resolve_failing_ids;
 // ── Input helpers (mirrors tool-code-graph's ops.rs) ────────────────────
 
 fn str_field<'a>(op: &'a Value, key: &str) -> Option<&'a str> {
-    op.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+    op.get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
 }
 
 fn opt_i64(op: &Value, key: &str, default: i64) -> i64 {
@@ -37,10 +39,16 @@ fn resolve_repo(op: &Value, operation: &str) -> Result<PathBuf, Value> {
         .or_else(|| std::env::current_dir().ok())
         .ok_or_else(|| failed(format!("{operation}: could not determine repo_path")))?;
     if !raw.exists() {
-        return Err(failed(format!("{operation}: repo_path does not exist: {}", raw.display())));
+        return Err(failed(format!(
+            "{operation}: repo_path does not exist: {}",
+            raw.display()
+        )));
     }
     if !raw.is_dir() {
-        return Err(failed(format!("{operation}: repo_path is not a directory: {}", raw.display())));
+        return Err(failed(format!(
+            "{operation}: repo_path is not a directory: {}",
+            raw.display()
+        )));
     }
     Ok(raw.canonicalize().unwrap_or(raw))
 }
@@ -59,24 +67,39 @@ pub fn op_localize(op: &Value) -> Value {
         None => return failed("localize: missing required field 'coverage_dir'"),
     };
     if !coverage_dir.exists() {
-        return failed(format!("localize: coverage_dir does not exist: {}", coverage_dir.display()));
+        return failed(format!(
+            "localize: coverage_dir does not exist: {}",
+            coverage_dir.display()
+        ));
     }
     if !coverage_dir.is_dir() {
-        return failed(format!("localize: coverage_dir is not a directory: {}", coverage_dir.display()));
+        return failed(format!(
+            "localize: coverage_dir is not a directory: {}",
+            coverage_dir.display()
+        ));
     }
 
     // failing_tests: required, non-empty array of non-empty strings.
-    let failing_tests: Vec<String> = match op.get("failing_tests") {
-        Some(Value::Array(a)) if !a.is_empty() => {
-            let names: Vec<String> =
-                a.iter().filter_map(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from).collect();
-            if names.is_empty() {
-                return failed("localize: 'failing_tests' must be a non-empty array of test-name strings");
+    let failing_tests: Vec<String> =
+        match op.get("failing_tests") {
+            Some(Value::Array(a)) if !a.is_empty() => {
+                let names: Vec<String> = a
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect();
+                if names.is_empty() {
+                    return failed(
+                        "localize: 'failing_tests' must be a non-empty array of test-name strings",
+                    );
+                }
+                names
             }
-            names
-        }
-        _ => return failed("localize: missing or empty required field 'failing_tests' (array of test names)"),
-    };
+            _ => return failed(
+                "localize: missing or empty required field 'failing_tests' (array of test names)",
+            ),
+        };
 
     let limit = opt_i64(op, "limit", 50).clamp(1, 10_000);
 
@@ -91,7 +114,11 @@ pub fn op_localize(op: &Value) -> Value {
 
     let conn = match db::open(&repo) {
         Ok(c) => c,
-        Err(e) => return errored(format!("localize: failed to open/migrate code graph db: {e}")),
+        Err(e) => {
+            return errored(format!(
+                "localize: failed to open/migrate code graph db: {e}"
+            ))
+        }
     };
 
     // Load the symbol table once: repo-relative file path → its symbols' ranges,
@@ -113,7 +140,9 @@ pub fn op_localize(op: &Value) -> Value {
     let mut info_files = list_info_files(&coverage_dir);
     info_files.sort();
     for path in &info_files {
-        let Some(stem) = info_stem(path) else { continue };
+        let Some(stem) = info_stem(path) else {
+            continue;
+        };
         let is_failing = failing_set.contains(stem.as_str());
 
         let text = match std::fs::read_to_string(path) {
@@ -150,8 +179,11 @@ pub fn op_localize(op: &Value) -> Value {
 
     // Failing tests for which no parseable coverage was found (absent file or
     // unparseable). Reported, but not fatal on their own.
-    let failing_tests_without_coverage: Vec<String> =
-        failing_tests.iter().filter(|n| !covered_failing.contains(*n)).cloned().collect();
+    let failing_tests_without_coverage: Vec<String> = failing_tests
+        .iter()
+        .filter(|n| !covered_failing.contains(*n))
+        .cloned()
+        .collect();
 
     // SBFL is undefined with zero failing observations.
     if f_total == 0 {
@@ -208,7 +240,12 @@ pub fn op_localize(op: &Value) -> Value {
         bo.partial_cmp(&ao)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(bt.partial_cmp(&at).unwrap_or(std::cmp::Ordering::Equal))
-            .then_with(|| a["symbol_id"].as_str().unwrap_or("").cmp(b["symbol_id"].as_str().unwrap_or("")))
+            .then_with(|| {
+                a["symbol_id"]
+                    .as_str()
+                    .unwrap_or("")
+                    .cmp(b["symbol_id"].as_str().unwrap_or(""))
+            })
     });
 
     let scored_count = suspects.len();
@@ -234,7 +271,11 @@ pub fn op_localize(op: &Value) -> Value {
         "failing_tests_without_coverage": failing_tests_without_coverage.clone(),
         "skipped_files": skipped_files.clone(),
     });
-    let data_path = if truncated { write_localize_file(&repo, &full) } else { None };
+    let data_path = if truncated {
+        write_localize_file(&repo, &full)
+    } else {
+        None
+    };
 
     let inline_suspects: Vec<Value> = suspects.iter().take(limit as usize).cloned().collect();
     let summary = format!(
@@ -255,7 +296,12 @@ pub fn op_localize(op: &Value) -> Value {
         "data_path": data_path,
     });
 
-    passed(summary, data, data_path, Some(Meta::mutate(format!("coverage:{}", repo.display()))))
+    passed(
+        summary,
+        data,
+        data_path,
+        Some(Meta::mutate(format!("coverage:{}", repo.display()))),
+    )
 }
 
 // ── SBFL formulas ──────────────────────────────────────────────────────────────
@@ -278,7 +324,11 @@ fn tarantula(ef: i64, ep: i64, f_total: i64, p_total: i64) -> f64 {
         return 0.0;
     }
     let fail_ratio = ef as f64 / f_total as f64;
-    let pass_ratio = if p_total == 0 { 0.0 } else { ep as f64 / p_total as f64 };
+    let pass_ratio = if p_total == 0 {
+        0.0
+    } else {
+        ep as f64 / p_total as f64
+    };
     let denom = fail_ratio + pass_ratio;
     if denom == 0.0 {
         0.0
@@ -307,8 +357,8 @@ fn load_symbols(
     let rows = stmt.query_map([], |r| {
         Ok((
             r.get::<_, String>(0)?, // symbol_id
-            r.get::<_, i64>(1)?,     // start_line
-            r.get::<_, i64>(2)?,     // end_line
+            r.get::<_, i64>(1)?,    // start_line
+            r.get::<_, i64>(2)?,    // end_line
             r.get::<_, String>(3)?, // qualified_name
             r.get::<_, String>(4)?, // kind
             r.get::<_, String>(5)?, // path
@@ -319,7 +369,10 @@ fn load_symbols(
     let mut detail: HashMap<String, SymDetail> = HashMap::new();
     for row in rows {
         let (sid, start, end, qn, kind, path) = row?;
-        path_to_syms.entry(path.clone()).or_default().push((sid.clone(), start, end));
+        path_to_syms
+            .entry(path.clone())
+            .or_default()
+            .push((sid.clone(), start, end));
         detail.insert(sid, (qn, kind, path, start));
     }
     Ok((path_to_syms, detail))
@@ -336,7 +389,9 @@ fn covered_symbols(
     let mut covered: HashSet<String> = HashSet::new();
     for section in sections {
         let rel = normalize_rel(repo, &section.source_file);
-        let Some(syms) = path_to_syms.get(&rel) else { continue };
+        let Some(syms) = path_to_syms.get(&rel) else {
+            continue;
+        };
         // Sort hit lines once so each symbol range can be probed with a single
         // binary search (first hit line >= start, then compare against end).
         let mut lines = section.hit_lines.clone();
@@ -422,7 +477,9 @@ fn info_stem(path: &Path) -> Option<String> {
 }
 
 fn file_name(path: &Path) -> String {
-    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// Normalize an LCOV `SF:` path to the stored repo-relative form: forward
@@ -448,7 +505,10 @@ fn normalize_rel(repo: &Path, file: &str) -> String {
 
 fn rel_path(repo: &Path, file: &Path) -> String {
     let rel = file.strip_prefix(repo).unwrap_or(file);
-    rel.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -462,7 +522,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn write_localize_file(repo: &Path, full: &Value) -> Option<String> {
     let dir = repo.join(db::STORE_DIR).join("coverage");
     std::fs::create_dir_all(&dir).ok()?;
-    let name = format!("localize-{}.json", sha256_hex(repo.display().to_string().as_bytes()));
+    let name = format!(
+        "localize-{}.json",
+        sha256_hex(repo.display().to_string().as_bytes())
+    );
     let path = dir.join(name);
     let body = serde_json::to_string_pretty(full).ok()?;
     std::fs::write(&path, body).ok()?;

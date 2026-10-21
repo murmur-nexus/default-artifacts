@@ -40,7 +40,10 @@ pub fn parse(text: &str) -> Vec<FileCoverage> {
             if let Some(prev) = current.take() {
                 out.push(prev);
             }
-            current = Some(FileCoverage { source_file: sf.trim().to_string(), hit_lines: Vec::new() });
+            current = Some(FileCoverage {
+                source_file: sf.trim().to_string(),
+                hit_lines: Vec::new(),
+            });
         } else if let Some(da) = line.strip_prefix("DA:") {
             // DA:<line>,<hits>[,<checksum>]
             if let Some(cur) = current.as_mut() {
