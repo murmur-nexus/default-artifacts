@@ -2962,6 +2962,60 @@ mod tests {
         assert_eq!(result["usage"]["cache_write_tokens"], 10);
     }
 
+    /// Anthropic's `input_tokens` already excludes the cache reads and writes, so the members
+    /// pass through unchanged and `input_tokens + cached_tokens + cache_write_tokens` is the
+    /// request total: 5 + 11780 + 260 = 12045.
+    #[test]
+    fn usage_members_sum_to_the_provider_request_total() {
+        let expected = json!({
+            "input_tokens": 5,
+            "output_tokens": 218,
+            "cached_tokens": 11780,
+            "cache_write_tokens": 260
+        });
+        let reported_request = |usage: &Value| -> u64 {
+            ["input_tokens", "cached_tokens", "cache_write_tokens"]
+                .iter()
+                .map(|key| usage.get(*key).and_then(Value::as_u64).unwrap_or(0))
+                .sum()
+        };
+
+        let response = json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "Hello"}],
+            "usage": {
+                "input_tokens": 5,
+                "output_tokens": 218,
+                "cache_read_input_tokens": 11780,
+                "cache_creation_input_tokens": 260
+            }
+        });
+        let translated = translate_anthropic_response_to_murmur(&response).unwrap();
+        assert_eq!(translated["usage"], expected);
+        assert_eq!(reported_request(&translated["usage"]), 12045);
+
+        let body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"usage\":{\"input_tokens\":5,\"output_tokens\":1,\"cache_read_input_tokens\":11780,\"cache_creation_input_tokens\":260}}}\n",
+            "\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n",
+            "\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":218}}\n",
+            "\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n",
+            "\n",
+        );
+        let result = parse_anthropic_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap();
+        assert_eq!(result["usage"], expected);
+        assert_eq!(reported_request(&result["usage"]), 12045);
+    }
+
     #[test]
     fn missing_or_malformed_usage_omits_the_member() {
         for usage in [

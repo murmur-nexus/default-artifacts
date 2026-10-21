@@ -821,9 +821,15 @@ fn translate_tool_message_responses(message: &MurmurMessage) -> Result<Value, St
 /// translated response. Every member is independently optional: a count the provider did not
 /// report is omitted rather than sent as `0`, because the host records a reported `0` as a real
 /// zero and a fabricated one reads as a cache miss on the `inference` trace event.
+///
+/// Both OpenAI surfaces report the request total with the cache reads and writes inside it,
+/// while the usage contract puts `cached_tokens` and `cache_write_tokens` beside
+/// `input_tokens`. So the raw total is held here as `request_total`, and the contract's
+/// `input_tokens` is derived from it only in `to_value`, after every streamed event has been
+/// merged — a total and a cache count arriving in different events still subtract correctly.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct UsageTokens {
-    input_tokens: Option<u64>,
+    request_total: Option<u64>,
     output_tokens: Option<u64>,
     cached_tokens: Option<u64>,
     cache_write_tokens: Option<u64>,
@@ -833,8 +839,8 @@ impl UsageTokens {
     /// Take every member `later` reports, keeping the current value for the rest. Streaming
     /// usage arrives across more than one event, each carrying only part of the picture.
     fn merge_from(&mut self, later: UsageTokens) {
-        if later.input_tokens.is_some() {
-            self.input_tokens = later.input_tokens;
+        if later.request_total.is_some() {
+            self.request_total = later.request_total;
         }
         if later.output_tokens.is_some() {
             self.output_tokens = later.output_tokens;
@@ -847,11 +853,21 @@ impl UsageTokens {
         }
     }
 
-    /// `None` when no member survived, in which case the response carries no `usage` key at all.
+    /// The contract `usage` object. `input_tokens` is the request tokens neither read from nor
+    /// written to the cache — `request_total` minus both cache counts, an unreported cache
+    /// member counting as `0` — so `input_tokens + cached_tokens + cache_write_tokens` is the
+    /// provider's total. It is omitted when the total is unreported or the cache counts exceed
+    /// it: such a report is inconsistent, and no value is invented for it. The other members
+    /// are passed through as reported. `None` when no member survived, in which case the
+    /// response carries no `usage` key at all.
     fn to_value(self) -> Option<Value> {
+        let input_tokens = self
+            .request_total
+            .and_then(|total| total.checked_sub(self.cached_tokens.unwrap_or(0)))
+            .and_then(|rest| rest.checked_sub(self.cache_write_tokens.unwrap_or(0)));
         let mut obj = Map::new();
         for (key, count) in [
-            ("input_tokens", self.input_tokens),
+            ("input_tokens", input_tokens),
             ("output_tokens", self.output_tokens),
             ("cached_tokens", self.cached_tokens),
             ("cache_write_tokens", self.cache_write_tokens),
@@ -868,32 +884,38 @@ impl UsageTokens {
     }
 }
 
-/// Read the contract members out of a Chat Completions `usage` object. The two surfaces spell
-/// these differently, so this extractor is not shared with `extract_responses_usage`. Neither
-/// surface reports a cache write count, so that member is always omitted. A member that is
-/// absent, null, or not a non-negative integer is dropped; its siblings are kept.
+/// Read a Chat Completions `usage` object: the request total from `prompt_tokens`, the cache
+/// read and write counts that are parts of it from `prompt_tokens_details`, the completion
+/// count from `completion_tokens`. The two surfaces spell these differently, so this extractor
+/// is not shared with `extract_responses_usage`. A member that is absent, null, or not a
+/// non-negative integer is dropped; its siblings are kept.
 fn extract_chat_usage(usage: &Value) -> UsageTokens {
     UsageTokens {
-        input_tokens: usage.get("prompt_tokens").and_then(Value::as_u64),
+        request_total: usage.get("prompt_tokens").and_then(Value::as_u64),
         output_tokens: usage.get("completion_tokens").and_then(Value::as_u64),
         cached_tokens: usage
             .pointer("/prompt_tokens_details/cached_tokens")
             .and_then(Value::as_u64),
-        cache_write_tokens: None,
+        cache_write_tokens: usage
+            .pointer("/prompt_tokens_details/cache_write_tokens")
+            .and_then(Value::as_u64),
     }
 }
 
-/// Read the contract members out of a Responses `usage` object, which spells the request and
-/// completion counts `input_tokens` / `output_tokens` and nests the cache hit under
-/// `input_tokens_details` (see `extract_chat_usage` for the Chat Completions spelling).
+/// Read a Responses `usage` object, which spells the request total and completion count
+/// `input_tokens` / `output_tokens` and nests the cache read and write counts that are parts of
+/// that total under `input_tokens_details` (see `extract_chat_usage` for the Chat Completions
+/// spelling).
 fn extract_responses_usage(usage: &Value) -> UsageTokens {
     UsageTokens {
-        input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
+        request_total: usage.get("input_tokens").and_then(Value::as_u64),
         output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
         cached_tokens: usage
             .pointer("/input_tokens_details/cached_tokens")
             .and_then(Value::as_u64),
-        cache_write_tokens: None,
+        cache_write_tokens: usage
+            .pointer("/input_tokens_details/cache_write_tokens")
+            .and_then(Value::as_u64),
     }
 }
 
@@ -3495,10 +3517,10 @@ mod tests {
 
         assert_eq!(translated["stop_reason"], "end_turn");
         assert_eq!(translated["content"][0]["text"], "Hello");
-        assert_eq!(translated["usage"]["input_tokens"], 900);
+        // The cache hit is part of `prompt_tokens`; the contract puts it beside `input_tokens`.
+        assert_eq!(translated["usage"]["input_tokens"], 132);
         assert_eq!(translated["usage"]["output_tokens"], 40);
         assert_eq!(translated["usage"]["cached_tokens"], 768);
-        // Neither OpenAI surface reports a cache write count.
         assert!(translated["usage"].get("cache_write_tokens").is_none());
     }
 
@@ -3520,7 +3542,7 @@ mod tests {
 
         assert_eq!(translated["stop_reason"], "end_turn");
         assert_eq!(translated["content"][0]["text"], "Hello");
-        assert_eq!(translated["usage"]["input_tokens"], 900);
+        assert_eq!(translated["usage"]["input_tokens"], 132);
         assert_eq!(translated["usage"]["output_tokens"], 40);
         assert_eq!(translated["usage"]["cached_tokens"], 768);
         assert!(translated["usage"].get("cache_write_tokens").is_none());
@@ -3541,7 +3563,7 @@ mod tests {
         assert_eq!(result["content"][0]["text"], "Hello");
         assert_eq!(
             result["usage"],
-            json!({"input_tokens": 900, "output_tokens": 40, "cached_tokens": 768})
+            json!({"input_tokens": 132, "output_tokens": 40, "cached_tokens": 768})
         );
     }
 
@@ -3558,7 +3580,7 @@ mod tests {
         assert_eq!(result["content"][0]["text"], "Hello");
         assert_eq!(
             result["usage"],
-            json!({"input_tokens": 900, "output_tokens": 40, "cached_tokens": 768})
+            json!({"input_tokens": 132, "output_tokens": 40, "cached_tokens": 768})
         );
     }
 
@@ -3629,6 +3651,194 @@ mod tests {
         let translated = translate_openai_response_to_murmur(&response).unwrap();
         assert_eq!(translated["stop_reason"], "error");
         assert!(translated.get("usage").is_none());
+    }
+
+    /// `input_tokens + cached_tokens + cache_write_tokens`, an absent member counted as `0` —
+    /// the request count the runtime derives from a `usage` object.
+    fn reported_request(usage: &Value) -> u64 {
+        ["input_tokens", "cached_tokens", "cache_write_tokens"]
+            .iter()
+            .map(|key| usage.get(*key).and_then(Value::as_u64).unwrap_or(0))
+            .sum()
+    }
+
+    fn chat_response_with_usage(usage: Value) -> Value {
+        json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "Hello"}
+            }],
+            "usage": usage
+        })
+    }
+
+    fn responses_response_with_usage(usage: Value) -> Value {
+        json!({
+            "status": "completed",
+            "output": [
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Hello"}]}
+            ],
+            "usage": usage
+        })
+    }
+
+    /// The prompt-caching guide's worked example: 12000 request tokens, 4000 read from the
+    /// cache and 7000 written to it, leave 1000 ordinary input tokens.
+    #[test]
+    fn chat_completions_usage_members_sum_to_the_provider_request_total() {
+        let expected = json!({
+            "input_tokens": 1000,
+            "output_tokens": 40,
+            "cached_tokens": 4000,
+            "cache_write_tokens": 7000
+        });
+
+        let translated = translate_openai_response_to_murmur(&chat_response_with_usage(json!({
+            "prompt_tokens": 12000,
+            "completion_tokens": 40,
+            "prompt_tokens_details": {"cached_tokens": 4000, "cache_write_tokens": 7000}
+        })))
+        .unwrap();
+        assert_eq!(translated["usage"], expected);
+        assert_eq!(reported_request(&translated["usage"]), 12000);
+
+        // Streaming, with the total and the cache details split across two usage-bearing
+        // chunks: the subtraction runs on the merged counts, not per chunk.
+        let body = concat!(
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":12000}}\n",
+            "data: {\"id\":\"c1\",\"choices\":[],\"usage\":{\"completion_tokens\":40,\"prompt_tokens_details\":{\"cached_tokens\":4000,\"cache_write_tokens\":7000}}}\n",
+            "data: [DONE]\n",
+        );
+        let result = parse_openai_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap();
+        assert_eq!(result["usage"], expected);
+        assert_eq!(reported_request(&result["usage"]), 12000);
+    }
+
+    #[test]
+    fn responses_usage_members_sum_to_the_provider_request_total() {
+        let expected = json!({
+            "input_tokens": 1000,
+            "output_tokens": 40,
+            "cached_tokens": 4000,
+            "cache_write_tokens": 7000
+        });
+
+        let translated = translate_responses_to_murmur(&responses_response_with_usage(json!({
+            "input_tokens": 12000,
+            "output_tokens": 40,
+            "input_tokens_details": {"cached_tokens": 4000, "cache_write_tokens": 7000}
+        })))
+        .unwrap();
+        assert_eq!(translated["usage"], expected);
+        assert_eq!(reported_request(&translated["usage"]), 12000);
+
+        let body = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":12000,\"output_tokens\":40,\"input_tokens_details\":{\"cached_tokens\":4000,\"cache_write_tokens\":7000}}}}\n",
+        );
+        let result = parse_responses_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap();
+        assert_eq!(result["usage"], expected);
+        assert_eq!(reported_request(&result["usage"]), 12000);
+    }
+
+    /// Each case as Chat Completions spells it; the Responses spelling is derived from it.
+    fn partial_and_inconsistent_usage_cases() -> Vec<(&'static str, Value, Value)> {
+        vec![
+            (
+                "cache counts exceed the total",
+                json!({
+                    "prompt_tokens": 100,
+                    "completion_tokens": 40,
+                    "prompt_tokens_details": {"cached_tokens": 90, "cache_write_tokens": 20}
+                }),
+                json!({"output_tokens": 40, "cached_tokens": 90, "cache_write_tokens": 20}),
+            ),
+            (
+                "total with no cache details",
+                json!({"prompt_tokens": 100, "completion_tokens": 40}),
+                json!({"input_tokens": 100, "output_tokens": 40}),
+            ),
+            (
+                "cache details with no total",
+                json!({
+                    "completion_tokens": 40,
+                    "prompt_tokens_details": {"cached_tokens": 90, "cache_write_tokens": 20}
+                }),
+                json!({"output_tokens": 40, "cached_tokens": 90, "cache_write_tokens": 20}),
+            ),
+            (
+                "malformed cache members beside a valid total",
+                json!({
+                    "prompt_tokens": 100,
+                    "completion_tokens": 40,
+                    "prompt_tokens_details": {"cached_tokens": "90", "cache_write_tokens": -20}
+                }),
+                json!({"input_tokens": 100, "output_tokens": 40}),
+            ),
+            (
+                "fractional cache member beside a valid total",
+                json!({
+                    "prompt_tokens": 100,
+                    "completion_tokens": 40,
+                    "prompt_tokens_details": {"cached_tokens": 1.5, "cache_write_tokens": 20}
+                }),
+                json!({"input_tokens": 80, "output_tokens": 40, "cache_write_tokens": 20}),
+            ),
+        ]
+    }
+
+    /// Rename the Chat Completions keys of a case to their Responses spelling.
+    fn chat_usage_as_responses(chat: &Value) -> Value {
+        let mut responses = serde_json::Map::new();
+        for (key, value) in chat.as_object().unwrap() {
+            let key = match key.as_str() {
+                "prompt_tokens" => "input_tokens",
+                "completion_tokens" => "output_tokens",
+                "prompt_tokens_details" => "input_tokens_details",
+                other => other,
+            };
+            responses.insert(key.to_string(), value.clone());
+        }
+        Value::Object(responses)
+    }
+
+    #[test]
+    fn partial_or_inconsistent_usage_never_reports_a_negative_or_invented_input_count() {
+        for (case, chat_usage, expected) in partial_and_inconsistent_usage_cases() {
+            let responses_usage = chat_usage_as_responses(&chat_usage);
+
+            let translated =
+                translate_openai_response_to_murmur(&chat_response_with_usage(chat_usage.clone()))
+                    .unwrap();
+            assert_eq!(translated["usage"], expected, "chat, {case}");
+
+            let translated = translate_responses_to_murmur(&responses_response_with_usage(
+                responses_usage.clone(),
+            ))
+            .unwrap();
+            assert_eq!(translated["usage"], expected, "responses, {case}");
+
+            let chunk = json!({"id": "c1", "choices": [], "usage": chat_usage});
+            let body = format!(
+                "data: {{\"id\":\"c1\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"Hello\"}},\"finish_reason\":\"stop\"}}]}}\n\
+                 data: {chunk}\n\
+                 data: [DONE]\n"
+            );
+            let result = parse_openai_sse_body(&body, &mut |_| {}, &mut |_| {}).unwrap();
+            assert_eq!(result["usage"], expected, "chat streaming, {case}");
+
+            let completed = json!({
+                "type": "response.completed",
+                "response": {"id": "resp_1", "status": "completed", "usage": responses_usage}
+            });
+            let body = format!(
+                "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}}\n\
+                 data: {completed}\n"
+            );
+            let result = parse_responses_sse_body(&body, &mut |_| {}, &mut |_| {}).unwrap();
+            assert_eq!(result["usage"], expected, "responses streaming, {case}");
+        }
     }
 
     #[test]

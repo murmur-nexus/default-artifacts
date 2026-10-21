@@ -80,13 +80,16 @@ members on the `inference` trace event as `input_tokens_actual`,
 
 | `usage` member | DeepSeek field |
 |---|---|
-| `input_tokens` | `usage.prompt_tokens` |
+| `input_tokens` | `usage.prompt_cache_miss_tokens` |
 | `output_tokens` | `usage.completion_tokens` |
-| `cached_tokens` | `usage.prompt_tokens_details.cached_tokens`, else `usage.prompt_cache_hit_tokens` |
+| `cached_tokens` | `usage.prompt_cache_hit_tokens` |
 | `cache_write_tokens` | not reported by DeepSeek — always absent |
 
-`usage.prompt_cache_miss_tokens` counts input that missed the cache, not input
-written into it, and is never mapped anywhere.
+`input_tokens` is the request tokens not served from the cache, and
+`cached_tokens` sits beside it, so `input_tokens + cached_tokens` is DeepSeek's
+total request count: DeepSeek documents `usage.prompt_tokens` as the sum of its
+cache-hit and cache-miss counts, and the driver reports those two parts directly.
+A cache miss is ordinary input, not a cache write.
 
 Each member is independently optional. A count the provider did not report is
 omitted rather than sent as `0`; a reported `0` is kept as `0`. When no member

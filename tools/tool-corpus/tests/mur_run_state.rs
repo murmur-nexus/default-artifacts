@@ -287,7 +287,8 @@ impl Staging {
     /// Write the capsule manifest, pointing the driver's credential gateway at `endpoint`. Called
     /// again before every launch, because the endpoint a scripted server binds is not known until
     /// it has bound one. The gateway's requests are not checked against `network.allow`, so the
-    /// endpoint needs no network grant.
+    /// endpoint needs no network grant. `test-model` is listed under no driver's `models:`, so
+    /// the manifest sets the output cap itself: without one the launch is refused (E-RUN-052).
     fn write_manifest(
         &self,
         capsule: &str,
@@ -310,7 +311,7 @@ impl Staging {
                  runtime: driver\n    gateway:\n      endpoint: {endpoint}\n      api_key: \
                  test-key\n  - name: {}\n    version: {}\n    runtime: \
                  tool\n{capabilities}{config}inference:\n  transport: http\n  model: \
-                 test-model\n  driver:\n    artifact: {}\n",
+                 test-model\n  max_tokens: 1024\n  driver:\n    artifact: {}\n",
                 driver.reference(),
                 driver.version,
                 tool.reference(),

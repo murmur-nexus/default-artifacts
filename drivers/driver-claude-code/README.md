@@ -283,6 +283,11 @@ runtime is handed the interface's generic names.
 | cache creation | `usage.cache_creation_input_tokens` |
 | thinking | `usage.output_tokens_details.thinking_tokens` |
 
+`input` is the prompt tokens neither read from nor written to the cache; `cache-read` and
+`cache-creation` sit beside it, so `input + cache-read + cache-creation` is the turn's total
+request count. Claude's `usage` block is Anthropic-shaped and its `input_tokens` already
+excludes both cache counts, so each count is relayed unchanged.
+
 **Absent is not zero.** Each count is read as a non-negative integer; a value that is absent,
 `null`, a string, a float or negative reads as *absent*, never as zero. A harness that does not
 report a count and a turn that spent none of it are different facts, and a ceiling weighed
