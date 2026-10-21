@@ -17,9 +17,8 @@ artifacts:
     version: "0.6.0"
 ```
 
-Installing by scoped name needs a `mur` released after v0.6.0. `mur` v0.6.0 and earlier have
-no `murmur/<name>` form and do not read the release's `artifacts-index.json`; until the next
-release ships, build `mur` from murmur's `main`.
+Installing by scoped name needs `mur` 0.7.0 or later. `mur` v0.6.0 and earlier have no
+`murmur/<name>` form and do not read the release's `artifacts-index.json`.
 
 The tables below give each artifact's bare name, which is also the tool name the model calls.
 Each one's version is the `version:` in its own `murmur.yaml`; `./scripts/list-artifacts.sh`
@@ -54,8 +53,8 @@ it, through `murmur:stream/events@0.1.0`: the call's start, with the id and name
 `tool_call` the driver will return, then a rising UTF-8 byte count of its arguments, never the
 arguments themselves. On `transport: http` these become `tool-call-started` and
 `tool-call-progress` frames ahead of the call's `artifact`. murmur v0.6.0 is the first release to
-serve that interface. A `mur` that can install these artifacts by scoped name (one released after
-v0.6.0, see above) refuses a driver release built before it at launch, with `E-WIT-LEVEL-001`:
+serve that interface. A `mur` that can install these artifacts by scoped name (0.7.0 or later,
+see above) refuses a driver release built before it at launch, with `E-WIT-LEVEL-001`:
 
 | Artifact | First release on `murmur:stream/events` |
 |---|---|
@@ -82,7 +81,7 @@ WASM components (`runtime: hook`) that attach to lifecycle events. Each hook dec
 | `hook-grafana` | `hooks/hook-grafana/` | *(all events)* | async | none | Exports OTel spans to a Grafana Tempo OTLP/HTTP endpoint |
 | `hook-regression-verifier` | `hooks/hook-regression-verifier/` | *(all events)* | blocking | reopen-task | Reopens a task whose edits broke previously-passing tests; appends each verdict to `regression-verifier.jsonl` |
 
-Hooks have no filesystem by default. A hook that writes a record — `hook-debug`, `hook-eval`, `hook-regression-verifier` — is granted `capabilities.filesystem.records: true` on its own `artifacts:` entry, and writes into the `hooks/` directory of the session's records directory (`$MURMUR_RECORDS_DIR/hooks/`, or `~/.murmur/records/<workdir root>/<session-id>/hooks/` on disk), beside the session's `trace.jsonl`. `hook-diff-summary` reads files in the work folder, so it is granted `capabilities.filesystem.scope` instead. The records directory and `records: true` need a `mur` released after v0.6.0; v0.6.0 and earlier ignore `records` with a `W-SEC-019` warning and preopen nothing for the hook.
+Hooks have no filesystem by default. A hook that writes a record — `hook-debug`, `hook-eval`, `hook-regression-verifier` — is granted `capabilities.filesystem.records: true` on its own `artifacts:` entry, and writes into the `hooks/` directory of the session's records directory (`$MURMUR_RECORDS_DIR/hooks/`, or `~/.murmur/records/<workdir root>/<session-id>/hooks/` on disk), beside the session's `trace.jsonl`. `hook-diff-summary` reads files in the work folder, so it is granted `capabilities.filesystem.scope` instead. The records directory and `records: true` need `mur` 0.7.0 or later; v0.6.0 and earlier ignore `records` with a `W-SEC-019` warning and preopen nothing for the hook.
 
 ## Process drivers
 
@@ -128,8 +127,8 @@ Documentation artifacts (`runtime: skill`). No binary or WASM component — each
 `skill.md` guidance file the runtime installs to `tools/<name>/skill.md` in the session's
 runtime directory (`$MURMUR_RUNTIME_DIR`, read-only to the capsule) before the agent loop
 starts. The agent reads the file voluntarily; content is never injected into the system prompt.
-That is the layout of a `mur` released after v0.6.0; `mur` v0.6.0 and earlier install the
-file into the capsule workdir instead.
+That is the layout of `mur` 0.7.0 or later; `mur` v0.6.0 and earlier install the file into the
+capsule workdir instead.
 
 | Artifact | Location | Description |
 |---|---|---|

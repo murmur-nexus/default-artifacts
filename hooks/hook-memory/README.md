@@ -133,8 +133,8 @@ default.
 
 Every error names `hook-memory` and lands in `logs/hook-hook-memory.log` in the
 session's records directory (`$MURMUR_RECORDS_DIR/logs/hook-hook-memory.log`);
-the session continues unseeded. The records directory is the layout of a `mur`
-released after v0.6.0.
+the session continues unseeded. The records directory is the layout of `mur`
+0.7.0 or later.
 
 ## When the hook seeds nothing
 

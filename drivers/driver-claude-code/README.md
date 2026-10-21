@@ -24,7 +24,7 @@ rather than an API key.
 
 This artifact exports `murmur:driver/process@0.3.0`, which murmur serves from v0.6.0, and **the
 host accepts exactly one version of that interface and carries no fallback for an earlier one.**
-Installing `murmur/driver-claude-code` by scoped name needs a `mur` released after v0.6.0.
+Installing `murmur/driver-claude-code` by scoped name needs `mur` 0.7.0 or later.
 
 That `mur` refuses `0.3.0` and earlier at launch with `E-WIT-LEVEL-001`, with the clause
 `it exports murmur:driver/process@0.2.0, and level 1 has murmur:driver@0.3.0`. Install `0.4.0` or

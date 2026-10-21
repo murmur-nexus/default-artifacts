@@ -13,8 +13,8 @@ git show v0.24.0:artifacts-index.json > tools/tool-registry-search/tests/fixture
 ## `artifacts-index.json`
 
 A schema 2 index for two releases, written by `mur index` from murmur commit
-`57012159bc0b8d981f58105181197f8d4d184eb3`, unreleased `main` after v0.6.0 (`mur version` prints
-`0.6.0`, WIT level 1). Release `v0.25.0` holds
+`57012159bc0b8d981f58105181197f8d4d184eb3`, a murmur `main` commit between v0.6.0 and v0.7.0
+(`mur version` prints `0.6.0`, WIT level 1). Release `v0.25.0` holds
 `tool-editor` 0.6.0, `driver-anthropic` 0.10.0, `skill-create-manifest` 0.1.0 and `tool-git`
 0.2.0 for two platforms. Release `v0.26.0` holds `tool-editor` 0.7.0, and its index is merged
 over the first.

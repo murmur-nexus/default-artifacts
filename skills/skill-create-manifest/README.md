@@ -8,12 +8,12 @@ Skill artifact (`runtime: skill`): no binary or WASM component, just the
 `tools/<name>/skill.md` in the session's runtime directory
 (`$MURMUR_RUNTIME_DIR`, read-only to the capsule) before the agent loop starts.
 
-`skill.md` gives the paths a `mur` released after v0.6.0 uses:
+`skill.md` gives the paths `mur` 0.7.0 or later uses:
 `$MURMUR_RUNTIME_DIR/tools/<name>/skill.md` and `$MURMUR_RUNTIME_DIR/MURMUR.md`, or
 `murmur-runtime/…` in a file tool. `mur` v0.6.0 and earlier put both in the capsule workdir,
 which is the layout 0.1.0 of this skill describes.
 
-0.2.0 also teaches the records layout of a `mur` released after v0.6.0:
+0.2.0 also teaches the records layout of `mur` 0.7.0 or later:
 
 | What | Where `skill.md` teaches it |
 |---|---|

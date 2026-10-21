@@ -237,8 +237,8 @@ on the same entry, on an entry that is not `runtime: hook`, or in the capsule-wi
 **The records directory.** Every record the runtime keeps about a session is in
 `~/.murmur/records/<workdir root>/<session-id>/`, where `<workdir root>` is the `--workdir`
 directory, otherwise `<manifest-dir>/workdir`. A shell command sees it as `$MURMUR_RECORDS_DIR`.
-This is the layout of a `mur` released after v0.6.0. The directory is read-only to the capsule's
-own commands and kept after the session ends.
+This is the layout of `mur` 0.7.0 or later. The directory is read-only to the capsule's own
+commands and kept after the session ends.
 
 | Path | Holds |
 |---|---|

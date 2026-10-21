@@ -10,7 +10,7 @@ It reads schema 2 indexes, the kind `mur index` writes. A schema 1 index is refu
 
 | Needs | From |
 |---|---|
-| `mur index`, `murmur/<name>` installs, and fit chosen at install | a `mur` released after v0.6.0; until then, `mur` built from murmur's `main` |
+| `mur index`, `murmur/<name>` installs, and fit chosen at install | `mur` 0.7.0 or later |
 | The default index | the first default-artifacts release after v0.24.0; until then the default answers `fetch_error` `HTTP 404` |
 
 The tool's description tells the agent to install `<scope>/<name>` with no version and let `mur`
@@ -67,7 +67,7 @@ without a version.
 
 ## What the capsule must grant
 
-On Linux, from the first `mur` released after v0.6.0, the tool runs in the capsule's own sandbox, with the capsule-wide grants ([Native tools](https://docs.murmur.nexus/reference/containment/#native-tools)). A `capabilities:` block on the tool's entry in the capsule's `artifacts:` does not narrow them and prints `W-SEC-008`.
+On Linux, with `mur` 0.7.0 or later, the tool runs in the capsule's own sandbox, with the capsule-wide grants ([Native tools](https://docs.murmur.nexus/reference/containment/#native-tools)). A `capabilities:` block on the tool's entry in the capsule's `artifacts:` does not narrow them and prints `W-SEC-008`.
 
 | Need | Capsule grant |
 |---|---|
