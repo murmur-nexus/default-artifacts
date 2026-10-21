@@ -6,12 +6,12 @@ description: |
   Structured file editing interface for Murmur capsules. Provides read, write,
   surgical patch, and search operations without requiring shell capability grants.
 
-  | op              | inputs                                         | outputs                                |
-  |-----------------|------------------------------------------------|----------------------------------------|
-  | read_file       | path, start_line?, end_line?                   | content: string, total_lines: int      |
-  | write_file      | dest_path, content                             | (file created/updated)                 |
-  | replace_in_file | dest_path, old_string, new_string              | count: N replacements                  |
-  | find_in_files   | pattern, dir, recursive?, context_lines?       | matches: [{path, line, text}]          |
+  | op              | inputs                                             | outputs                                         |
+  |-----------------|----------------------------------------------------|-------------------------------------------------|
+  | read_file       | path, start_line?, end_line?                       | content: string, total_lines: int               |
+  | write_file      | dest_path, content                                 | (file created/updated)                          |
+  | replace_in_file | dest_path, old_string, new_string                  | count: N replacements                           |
+  | find_in_files   | pattern, dir?, glob?, recursive?, context_lines?   | matches: [{path, line, text}], capped?: string  |
 
   read_file start_line/end_line are 1-based inclusive; both optional. Omitting both
   reads the whole file. A ranged read returns only that span plus total_lines and the
@@ -23,6 +23,17 @@ description: |
   find_in_files context_lines (default 0, like `grep -C`, max 20) attaches
   context_before/context_after arrays to each match; 0 omits those keys entirely.
 
+  find_in_files searches the whole workdir when dir is omitted, "" or ".". Below the
+  directory it searches, it skips hidden directories (names starting with ".", such as
+  .git and .venv), target and node_modules, and it skips binary files (a NUL byte in the
+  first 8 KiB, or not UTF-8); a dir that names a skipped directory searches it. glob
+  filters which files are read: a glob without "/", such as *.py, matches the file name
+  at any depth; one with "/", such as src/**/*.rs, matches the path relative to dir. A
+  search stops at the first limit it reaches: 200 matches, 5000 files read, 32 MiB read,
+  or a 500 KB result. A search that reaches a limit still succeeds: it returns the matches
+  found so far plus a capped note naming the limit. Each match's path is relative to dir.
+  A dir whose ".." climbs above the workdir returns error_kind outside_workdir.
+
   The two writing operations take their destination as dest_path; read_file and
   find_in_files take path and dir. dest_path is the only input this tool declares as a
   write destination, so a capsule's filesystem read_only grant is enforced against that
@@ -30,7 +41,7 @@ description: |
 
   All responses: {ok:bool, message:string, error_kind?:string}
   Paths are relative to the capsule workdir (the binary's CWD at dispatch time). An
-  absolute value on path, dest_path or dir is refused rather than resolved: it returns
+  absolute value on path, dest_path, dir or glob is refused rather than resolved: it returns
   error_kind absolute_path naming the offending value and the relative form to send, and
   the operation touches no file. Send 'results.txt', not '/app/results.txt'.
 
@@ -66,7 +77,10 @@ input_schema:
       description: "Regex pattern to search for. Required for find_in_files."
     dir:
       type: string
-      description: "Directory to search in, relative to workdir; an absolute value is refused. Required for find_in_files."
+      description: "Directory to search, relative to the capsule workdir. Optional; omitted, \"\" or \".\" searches the whole workdir. An absolute value is refused."
+    glob:
+      type: string
+      description: "Filters which files find_in_files reads. Optional. *.py matches a file name at any depth; a pattern containing /, such as src/**/*.rs, matches the path relative to dir. An absolute value is refused."
     recursive:
       type: boolean
       description: "Whether to search recursively. Optional for find_in_files. Defaults to true."

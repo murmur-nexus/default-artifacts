@@ -12,7 +12,8 @@
 // ── Pure, host-testable dispatch logic (no WASM bindings, no `cfg`) ────────────
 pub mod logic {
     use std::collections::HashSet;
-    use std::path::Path;
+    use std::io::Read;
+    use std::path::{Path, PathBuf};
 
     use regex::Regex;
     use serde_json::{json, Value};
@@ -20,7 +21,13 @@ pub mod logic {
 
     // ── Configuration ──────────────────────────────────────────────────────────
 
+    // find_in_files limits. A search stops at the first one it reaches and still succeeds,
+    // returning the matches found so far with a `capped` note; see `cap_note`.
     const FIND_RESULT_SIZE_LIMIT: usize = 500 * 1024; // 500 KB ceiling for find_in_files output
+    const FIND_MAX_MATCHES: usize = 200;
+    // Files read, counting only those the `glob` admits.
+    const FIND_MAX_FILES: usize = 5_000;
+    const FIND_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
     // Upper bound on a single ranged `read_file` request, in lines. A bounded read exists to
     // let an agent inspect a function instead of a whole module, so the cap enforces by
@@ -42,7 +49,6 @@ pub mod logic {
         pub const IO_ERROR: &str = "io_error";
         pub const STRING_NOT_FOUND: &str = "string_not_found";
         pub const INVALID_PATTERN: &str = "invalid_pattern";
-        pub const SEARCH_TOO_BROAD: &str = "search_too_broad";
         pub const RESULT_SIZE_EXCEEDED: &str = "result_size_exceeded";
         // read_file range validation: start_line < 1, an inverted span (start > end), or a
         // start_line past the end of the file. All three are caller mistakes about *which*
@@ -52,10 +58,12 @@ pub mod logic {
         pub const RANGE_TOO_LARGE: &str = "range_too_large";
         // find_in_files context_lines is negative or exceeds MAX_CONTEXT_LINES.
         pub const CONTEXT_TOO_LARGE: &str = "context_too_large";
-        // A path input (`path`, `dest_path` or `dir`) was given as an absolute value, which
-        // the manifest's contract forbids: every path this tool takes is relative to the
+        // A path input (`path`, `dest_path`, `dir` or `glob`) was given as an absolute value,
+        // which the manifest's contract forbids: every path this tool takes is relative to the
         // capsule workdir.
         pub const ABSOLUTE_PATH: &str = "absolute_path";
+        // find_in_files `dir` has a `..` that climbs above the capsule workdir.
+        pub const OUTSIDE_WORKDIR: &str = "outside_workdir";
     }
 
     // ── Dispatch entry point ────────────────────────────────────────────────────
@@ -322,24 +330,66 @@ pub mod logic {
     }
 
     fn op_find_in_files(op: &Value) -> Value {
+        find_in_files(op, Limits::PRODUCTION)
+    }
+
+    /// The bounds one `find_in_files` call works within. Production calls use
+    /// [`Limits::PRODUCTION`]; unit tests pass smaller ones so a budget can be reached with a
+    /// fixture of a few files.
+    #[derive(Clone, Copy, Debug)]
+    struct Limits {
+        matches: usize,
+        files: usize,
+        bytes: u64,
+        result_size: usize,
+    }
+
+    impl Limits {
+        const PRODUCTION: Limits = Limits {
+            matches: FIND_MAX_MATCHES,
+            files: FIND_MAX_FILES,
+            bytes: FIND_MAX_BYTES,
+            result_size: FIND_RESULT_SIZE_LIMIT,
+        };
+    }
+
+    /// Which limit stopped a search. A stopped search still succeeds, carrying the matches
+    /// found so far and a `capped` note built by [`cap_note`].
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum CapReason {
+        Matches,
+        Files,
+        Bytes,
+        ResultSize,
+    }
+
+    fn find_in_files(op: &Value, limits: Limits) -> Value {
         let pattern = match op.get("pattern").and_then(|v| v.as_str()) {
             Some(p) if !p.is_empty() => p.to_string(),
             _ => return fail_msg("missing required field: pattern"),
         };
-        // Distinguish an absent `dir` field (missing required field) from a present-but-empty
-        // one. An empty string, ".", or "./" all resolve to "no scope narrower than repo
-        // root" and must be rejected identically to an explicit repo-root search.
-        let dir = match op.get("dir").and_then(|v| v.as_str()) {
-            Some(d) => d.to_string(),
-            None => return fail_msg("missing required field: dir"),
+        // Absent or null means the workdir root, the same as "" or ".".
+        let dir = match op.get("dir") {
+            None | Some(Value::Null) => String::new(),
+            Some(Value::String(d)) => d.clone(),
+            Some(_) => return fail_msg("dir must be a string"),
         };
-        // An absolute scope is refused ahead of the scope check below: `/` is neither empty,
-        // "." nor "./", so search_too_broad would otherwise let it through to a full walk of
-        // the preopen.
         if let Some(refusal) = reject_absolute("dir", &dir) {
             return refusal;
         }
-        let recursive = op.get("recursive").and_then(|v| v.as_bool()).unwrap_or(true);
+        let glob = match op.get("glob") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(g)) if g.is_empty() => None,
+            Some(Value::String(g)) => Some(g.clone()),
+            Some(_) => return fail_msg("glob must be a string"),
+        };
+        if let Some(refusal) = glob.as_deref().and_then(|g| reject_absolute("glob", g)) {
+            return refusal;
+        }
+        let recursive = op
+            .get("recursive")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
 
         // Optional grep-style context window. Default 0 reproduces the historical match shape
         // exactly (no context keys). Validate before any filesystem walk so a rejected input
@@ -355,14 +405,16 @@ pub mod logic {
             );
         }
 
-        // Scope check: reject any input that does not narrow the search below repo root.
-        let scope = dir.trim();
-        if scope.is_empty() || scope == "." || scope == "./" {
-            return err_result(
-                err::SEARCH_TOO_BROAD,
-                "find_in_files requires a specific subdirectory scope, not repo root. Provide a more specific path.",
-            );
-        }
+        let root = match normalize_dir(&dir) {
+            Some(n) if n.is_empty() => ".".to_string(),
+            Some(n) => n,
+            None => {
+                return err_result(
+                    err::OUTSIDE_WORKDIR,
+                    format!("'dir' resolves outside the capsule workdir: '{dir}'"),
+                )
+            }
+        };
 
         let re = match Regex::new(&pattern) {
             Ok(r) => r,
@@ -373,101 +425,380 @@ pub mod logic {
                 )
             }
         };
+        // A glob with no `/` is matched against the file name, so `*.py` finds a Python file
+        // at any depth; one with a `/` is matched against the path relative to `dir`.
+        let glob_filter = match glob.as_deref().map(|g| (glob_to_regex(g), g.contains('/'))) {
+            None => None,
+            Some((Ok(re), whole_path)) => Some((re, whole_path)),
+            Some((Err(e), _)) => {
+                return err_result(
+                    err::INVALID_PATTERN,
+                    format!("invalid glob '{}': {e}", glob.unwrap_or_default()),
+                )
+            }
+        };
 
-        let file_paths: Vec<std::path::PathBuf> = if recursive {
-            WalkDir::new(&dir)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-                .map(|e| e.into_path())
-                .collect()
-        } else {
-            match std::fs::read_dir(&dir) {
-                Ok(entries) => entries
+        let root_path = Path::new(&root);
+        let file_paths: Box<dyn Iterator<Item = PathBuf>> = if recursive {
+            Box::new(
+                WalkDir::new(root_path)
+                    .sort_by_file_name()
+                    .into_iter()
+                    .filter_entry(|e| e.depth() == 0 || !is_skipped_dir(e))
                     .filter_map(|e| e.ok())
-                    .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-                    .map(|e| e.path())
-                    .collect(),
+                    .filter(|e| e.file_type().is_file())
+                    .map(|e| e.into_path()),
+            )
+        } else {
+            match std::fs::read_dir(root_path) {
+                Ok(entries) => {
+                    let mut files: Vec<PathBuf> = entries
+                        .filter_map(|e| e.ok())
+                        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                        .map(|e| e.path())
+                        .collect();
+                    files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+                    Box::new(files.into_iter())
+                }
                 Err(e) => return err_result(io_error_kind(&e), format!("{dir}: {e}")),
             }
         };
 
+        // The result goes out as the whole `ok_with` envelope, in which every match appears
+        // twice (nested under `data.matches` and flattened to the top-level `matches`). The
+        // running estimate starts from the envelope at its largest — the longest cap note and
+        // summary this search could produce — so it only has to add each match's two copies.
+        let ceiling = limits.result_size.saturating_sub(METADATA_RESERVE);
+        let mut approx_out_size = envelope_overhead(limits);
         let mut matches: Vec<Value> = Vec::new();
-        let mut files_matched = HashSet::new();
-        // Running lower bound on the final serialized output. `ok_with` emits each match
-        // object twice — nested under `data.matches` and flattened at the top-level
-        // `matches` field — so every match contributes ~2x its serialized length to the
-        // real payload. The original code counted it once, under-bounding the true output by
-        // roughly half. This early-exit guard bounds memory on pathological inputs; the
-        // authoritative ceiling check below measures the exact bytes that go out the door.
-        let mut approx_out_size: usize = 0;
+        let mut files_searched: usize = 0;
+        let mut bytes_read: u64 = 0;
+        let mut capped: Option<CapReason> = None;
 
-        for file_path in file_paths {
-            let contents = match std::fs::read_to_string(&file_path) {
-                Ok(c) => c,
-                Err(_) => continue, // skip binary or unreadable files
+        'walk: for file_path in file_paths {
+            let relative = relative_path(root_path, &file_path);
+            if let Some((glob_re, whole_path)) = &glob_filter {
+                let subject = if *whole_path {
+                    relative.as_str()
+                } else {
+                    file_path.file_name().and_then(|n| n.to_str()).unwrap_or("")
+                };
+                if !glob_re.is_match(subject) {
+                    continue;
+                }
+            }
+
+            if matches.len() >= limits.matches {
+                capped = Some(CapReason::Matches);
+                break;
+            }
+            if files_searched >= limits.files {
+                capped = Some(CapReason::Files);
+                break;
+            }
+            let contents = match read_text_file(&file_path, &mut bytes_read, limits.bytes) {
+                FileRead::Text(c) => c,
+                FileRead::Binary => {
+                    files_searched += 1;
+                    continue;
+                }
+                FileRead::Unreadable => continue,
+                FileRead::OverBudget => {
+                    capped = Some(CapReason::Bytes);
+                    break;
+                }
             };
-
-            let relative = file_path
-                .strip_prefix(&dir)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| file_path.to_string_lossy().to_string());
-            // Normalize away leading slash that strip_prefix can produce on some paths.
-            let relative = relative.trim_start_matches('/').to_string();
+            files_searched += 1;
 
             let lines: Vec<&str> = contents.lines().collect();
             for (idx, line) in lines.iter().enumerate() {
-                if re.is_match(line) {
-                    let mut match_obj = json!({
-                        "path": relative,
-                        "line": idx + 1,
-                        "text": line,
-                    });
-                    // Attach context only when requested, so the default shape is byte-for-byte
-                    // unchanged (no empty arrays). Each side is clamped to the lines that exist
-                    // — a match near a file boundary gets a shorter array, never padding.
-                    if context_lines > 0 {
-                        let cl = context_lines as usize;
-                        let before_start = idx.saturating_sub(cl);
-                        let after_end = std::cmp::min(idx + 1 + cl, lines.len());
-                        match_obj["context_before"] = json!(&lines[before_start..idx]);
-                        match_obj["context_after"] = json!(&lines[idx + 1..after_end]);
-                    }
-                    // The running lower bound is measured *after* context is attached, so a
-                    // large context window inflating the payload is caught here (and again by
-                    // the authoritative post-serialization check below).
-                    approx_out_size += 2 * serde_json::to_string(&match_obj).unwrap_or_default().len();
-                    if approx_out_size > FIND_RESULT_SIZE_LIMIT {
-                        return err_result(err::RESULT_SIZE_EXCEEDED, size_exceeded_message());
-                    }
-
-                    matches.push(match_obj);
-                    files_matched.insert(relative.clone());
+                if !re.is_match(line) {
+                    continue;
                 }
+                if matches.len() >= limits.matches {
+                    capped = Some(CapReason::Matches);
+                    break 'walk;
+                }
+                let mut match_obj = json!({
+                    "path": relative,
+                    "line": idx + 1,
+                    "text": line,
+                });
+                // Attach context only when requested, so the default shape is byte-for-byte
+                // unchanged (no empty arrays). Each side is clamped to the lines that exist
+                // — a match near a file boundary gets a shorter array, never padding.
+                if context_lines > 0 {
+                    let cl = context_lines as usize;
+                    let before_start = idx.saturating_sub(cl);
+                    let after_end = std::cmp::min(idx + 1 + cl, lines.len());
+                    match_obj["context_before"] = json!(&lines[before_start..idx]);
+                    match_obj["context_after"] = json!(&lines[idx + 1..after_end]);
+                }
+                // Measured after context is attached, so a large context window counts. Each
+                // copy also takes the comma that separates it from its neighbour.
+                let match_size = serde_json::to_string(&match_obj)
+                    .map(|s| s.len())
+                    .unwrap_or(0);
+                if approx_out_size + 2 * (match_size + 1) > ceiling {
+                    if matches.is_empty() {
+                        return err_result(
+                            err::RESULT_SIZE_EXCEEDED,
+                            size_exceeded_message(limits),
+                        );
+                    }
+                    capped = Some(CapReason::ResultSize);
+                    break 'walk;
+                }
+                approx_out_size += 2 * (match_size + 1);
+                matches.push(match_obj);
             }
         }
 
-        let match_count = matches.len();
-        let file_count = files_matched.len();
-        let summary = format!("{match_count} matches in {file_count} files");
-        let result = ok_with(summary.clone(), json!({ "matches": matches }), summary);
-
-        // Authoritative ceiling: measure the actual serialized output that the tool will
-        // return, not an intermediate representation. This catches boundary cases where the
-        // running lower bound stayed under the limit but the full envelope (both copies of
-        // the matches array plus the wrapper fields) tips it over.
-        let serialized_len = serde_json::to_string(&result).map(|s| s.len()).unwrap_or(0);
-        if serialized_len > FIND_RESULT_SIZE_LIMIT {
-            return err_result(err::RESULT_SIZE_EXCEEDED, size_exceeded_message());
+        // Authoritative ceiling: the exact bytes that go out. The estimate is built to stay
+        // above them, so this trims only if it ever undercounts.
+        loop {
+            let result = find_result(&matches, files_searched, capped, limits);
+            let serialized_len = serde_json::to_string(&result).map(|s| s.len()).unwrap_or(0);
+            if serialized_len <= ceiling {
+                return result;
+            }
+            if matches.len() <= 1 {
+                return err_result(err::RESULT_SIZE_EXCEEDED, size_exceeded_message(limits));
+            }
+            matches.pop();
+            capped = Some(CapReason::ResultSize);
         }
-
-        result
     }
 
-    fn size_exceeded_message() -> String {
+    /// Room left under the result ceiling for the `metadata.state_effect` that [`run`] attaches
+    /// to a successful result after the handler returns.
+    const METADATA_RESERVE: usize = 64;
+
+    /// The serialized size of a `find_in_files` result with no matches, at its largest: the
+    /// longest cap note, and a summary whose counts are as wide as the limits allow.
+    fn envelope_overhead(limits: Limits) -> usize {
+        [
+            CapReason::Matches,
+            CapReason::Files,
+            CapReason::Bytes,
+            CapReason::ResultSize,
+        ]
+        .into_iter()
+        .map(|reason| {
+            let note = cap_note(reason, limits, limits.files);
+            let summary = format!(
+                "{} matches in {} files (capped)",
+                limits.matches, limits.files
+            );
+            let empty = ok_with(
+                summary.clone(),
+                json!({ "capped": note, "matches": [] }),
+                summary,
+            );
+            serde_json::to_string(&empty).map(|s| s.len()).unwrap_or(0)
+        })
+        .max()
+        .unwrap_or(0)
+    }
+
+    /// The success envelope for a search: `data` is `{"matches": [...]}`, plus `capped` when a
+    /// limit stopped the search.
+    fn find_result(
+        matches: &[Value],
+        files_searched: usize,
+        capped: Option<CapReason>,
+        limits: Limits,
+    ) -> Value {
+        let match_count = matches.len();
+        let file_count = matches
+            .iter()
+            .filter_map(|m| m["path"].as_str())
+            .collect::<HashSet<_>>()
+            .len();
+        let mut summary = format!("{match_count} matches in {file_count} files");
+        let data = match capped {
+            None => json!({ "matches": matches }),
+            Some(reason) => {
+                summary.push_str(" (capped)");
+                json!({
+                    "capped": cap_note(reason, limits, files_searched),
+                    "matches": matches,
+                })
+            }
+        };
+        ok_with(summary.clone(), data, summary)
+    }
+
+    /// The `capped` note: which limit stopped the search, how much was searched, and how to
+    /// narrow the next call.
+    fn cap_note(reason: CapReason, limits: Limits, files_searched: usize) -> String {
+        let limit = match reason {
+            CapReason::Matches => format!("the limit of {} matches", limits.matches),
+            CapReason::Files => format!("the limit of {} files read", limits.files),
+            CapReason::Bytes => format!("the limit of {} read", format_bytes(limits.bytes)),
+            CapReason::ResultSize => format!(
+                "the {} result size limit",
+                format_result_size(limits.result_size)
+            ),
+        };
+        let files = if files_searched == 1 { "file" } else { "files" };
         format!(
-            "search result would exceed size limit of {FIND_RESULT_SIZE_LIMIT} bytes. Try a more specific pattern or narrower scope."
+            "Search stopped at {limit} after searching {files_searched} {files}; more matches may \
+             exist. Narrow the search with a dir (for example \"src\"), a glob (for example \
+             \"*.py\") or a more specific pattern."
         )
+    }
+
+    fn format_bytes(bytes: u64) -> String {
+        const MIB: u64 = 1024 * 1024;
+        if bytes >= MIB && bytes.is_multiple_of(MIB) {
+            format!("{} MiB", bytes / MIB)
+        } else {
+            format!("{bytes} bytes")
+        }
+    }
+
+    fn format_result_size(bytes: usize) -> String {
+        if bytes >= 1024 && bytes.is_multiple_of(1024) {
+            format!("{} KB", bytes / 1024)
+        } else {
+            format!("{bytes} bytes")
+        }
+    }
+
+    fn size_exceeded_message(limits: Limits) -> String {
+        format!(
+            "a single match exceeds the find_in_files result size limit of {} bytes ({}). \
+             Narrow the search with a dir, a glob or a more specific pattern.",
+            limits.result_size,
+            format_result_size(limits.result_size)
+        )
+    }
+
+    /// What [`read_text_file`] found.
+    enum FileRead {
+        Text(String),
+        /// A NUL in the first [`BINARY_SNIFF_BYTES`], or not UTF-8. Read, so it counts toward
+        /// the file and byte budgets, but never searched.
+        Binary,
+        /// Could not be opened or read; skipped without counting.
+        Unreadable,
+        /// Its length would take the search past the byte budget; nothing was read.
+        OverBudget,
+    }
+
+    /// The leading bytes inspected for a NUL when deciding a file is binary.
+    const BINARY_SNIFF_BYTES: usize = 8 * 1024;
+
+    /// Read `path` as text, adding the bytes read to `bytes_read`. The file's length is checked
+    /// against `budget` before any byte of it is read.
+    fn read_text_file(path: &Path, bytes_read: &mut u64, budget: u64) -> FileRead {
+        let Ok(file) = std::fs::File::open(path) else {
+            return FileRead::Unreadable;
+        };
+        let Ok(len) = file.metadata().map(|m| m.len()) else {
+            return FileRead::Unreadable;
+        };
+        if *bytes_read + len > budget {
+            return FileRead::OverBudget;
+        }
+        // Read at most the length checked above, so a file still being written cannot carry
+        // the search past its byte budget.
+        let mut bytes = Vec::with_capacity(len as usize);
+        if file.take(len).read_to_end(&mut bytes).is_err() {
+            return FileRead::Unreadable;
+        }
+        *bytes_read += bytes.len() as u64;
+        if bytes[..bytes.len().min(BINARY_SNIFF_BYTES)].contains(&0) {
+            return FileRead::Binary;
+        }
+        match String::from_utf8(bytes) {
+            Ok(text) => FileRead::Text(text),
+            Err(_) => FileRead::Binary,
+        }
+    }
+
+    /// A directory the recursive walk does not descend into: hidden (`.git`, `.venv`, …),
+    /// `target` or `node_modules`. Only applied below the search root, so naming one of these
+    /// as `dir` still searches it.
+    fn is_skipped_dir(entry: &walkdir::DirEntry) -> bool {
+        if !entry.file_type().is_dir() {
+            return false;
+        }
+        let name = entry.file_name().to_string_lossy();
+        name.starts_with('.') || name == "target" || name == "node_modules"
+    }
+
+    /// `file` relative to the search root, `/`-separated. A `dir` that names a file reports
+    /// that file's name.
+    fn relative_path(root: &Path, file: &Path) -> String {
+        let relative = file
+            .strip_prefix(root)
+            .unwrap_or(file)
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        if relative.is_empty() {
+            file.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default()
+        } else {
+            relative
+        }
+    }
+
+    /// `dir` with its `.` and empty segments dropped and each `..` applied to the segment
+    /// before it, `/`-joined. `""` is the workdir root. `None` when a `..` has no segment left
+    /// to pop, i.e. the value climbs above the workdir.
+    fn normalize_dir(dir: &str) -> Option<String> {
+        let mut segments: Vec<&str> = Vec::new();
+        for segment in dir.split('/') {
+            match segment {
+                "" | "." => {}
+                ".." => {
+                    segments.pop()?;
+                }
+                s => segments.push(s),
+            }
+        }
+        Some(segments.join("/"))
+    }
+
+    /// An anchored regex for `glob`. `**/` matches zero or more whole segments, a trailing `**`
+    /// after `/` matches everything below, and a `**` that is the whole glob matches anything.
+    /// `*` matches within one segment and `?` one non-`/` character; every other character is
+    /// literal.
+    fn glob_to_regex(glob: &str) -> Result<Regex, regex::Error> {
+        let chars: Vec<char> = glob.chars().collect();
+        let mut out = String::from("^");
+        let mut i = 0;
+        while i < chars.len() {
+            match chars[i] {
+                '*' if chars.get(i + 1) == Some(&'*') => {
+                    let at_segment_start = i == 0 || chars[i - 1] == '/';
+                    let next = chars.get(i + 2);
+                    if at_segment_start && next == Some(&'/') {
+                        out.push_str("(?:[^/]+/)*");
+                        i += 3;
+                        continue;
+                    }
+                    if at_segment_start && next.is_none() {
+                        out.push_str(".*");
+                    } else {
+                        out.push_str("[^/]*");
+                    }
+                    i += 2;
+                    continue;
+                }
+                '*' => out.push_str("[^/]*"),
+                '?' => out.push_str("[^/]"),
+                c => out.push_str(&regex::escape(c.encode_utf8(&mut [0; 4]))),
+            }
+            i += 1;
+        }
+        out.push('$');
+        Regex::new(&out)
     }
 
     // ── I/O error mapping ───────────────────────────────────────────────────────
@@ -558,7 +889,7 @@ pub mod logic {
     /// contract in `murmur.yaml` — every path is relative to the capsule workdir — is
     /// observable at all.
     ///
-    /// `property` is the key the caller actually wrote (`path`, `dest_path` or `dir`), so the
+    /// `property` is the key the caller actually wrote (`path`, `dest_path`, `dir` or `glob`), so the
     /// message names the field to fix. The suggestion is the value's final component: the tool
     /// cannot know which leading components the caller mistook for a root, but under a
     /// `Sealed` capsule the workdir is the only writable location, so the bare file name is
@@ -626,12 +957,12 @@ pub mod logic {
                 err::IO_ERROR,
                 err::STRING_NOT_FOUND,
                 err::INVALID_PATTERN,
-                err::SEARCH_TOO_BROAD,
                 err::RESULT_SIZE_EXCEEDED,
                 err::INVALID_RANGE,
                 err::RANGE_TOO_LARGE,
                 err::CONTEXT_TOO_LARGE,
                 err::ABSOLUTE_PATH,
+                err::OUTSIDE_WORKDIR,
             ];
             for (i, a) in kinds.iter().enumerate() {
                 for (j, b) in kinds.iter().enumerate() {
@@ -921,69 +1252,6 @@ pub mod logic {
             );
         }
 
-        // ── Scoped search tests ─────────────────────────────────────────────────
-
-        #[test]
-        fn find_in_files_rejects_repo_root_dot() {
-            let op = json!({
-                "operation": "find_in_files",
-                "pattern": "test",
-                "dir": ".",
-                "recursive": true,
-            });
-            let out = op_find_in_files(&op);
-            assert_eq!(out["ok"], false);
-            assert_eq!(out["error_kind"], err::SEARCH_TOO_BROAD);
-            assert!(out["message"]
-                .as_str()
-                .unwrap()
-                .contains("specific subdirectory"));
-        }
-
-        #[test]
-        fn find_in_files_rejects_empty_dir() {
-            // Regression: dir="" means "no scope narrower than repo root", exactly like
-            // dir=".", so it must return error_kind=search_too_broad — not a bare
-            // missing-field message. The old test only checked ok==false and so passed even
-            // while the branch returned the wrong error kind.
-            let op = json!({
-                "operation": "find_in_files",
-                "pattern": "test",
-                "dir": "",
-                "recursive": true,
-            });
-            let out = op_find_in_files(&op);
-            assert_eq!(out["ok"], false);
-            assert_eq!(out["error_kind"], err::SEARCH_TOO_BROAD);
-        }
-
-        #[test]
-        fn find_in_files_rejects_dot_slash_dir() {
-            let op = json!({
-                "operation": "find_in_files",
-                "pattern": "test",
-                "dir": "./",
-                "recursive": true,
-            });
-            let out = op_find_in_files(&op);
-            assert_eq!(out["ok"], false);
-            assert_eq!(out["error_kind"], err::SEARCH_TOO_BROAD);
-        }
-
-        #[test]
-        fn find_in_files_absent_dir_is_missing_field() {
-            // An absent dir field is distinct from an empty one: it is a missing required
-            // field, not a too-broad scope.
-            let op = json!({
-                "operation": "find_in_files",
-                "pattern": "test",
-            });
-            let out = op_find_in_files(&op);
-            assert_eq!(out["ok"], false);
-            assert!(out["error_kind"].is_null());
-            assert!(out["message"].as_str().unwrap().contains("missing required field"));
-        }
-
         // ── Absolute path refusal ───────────────────────────────────────────────
         //
         // Every path input is relative to the capsule workdir. Under the single WASI preopen a
@@ -1000,7 +1268,7 @@ pub mod logic {
             );
             assert!(
                 reject_absolute("dir", "").is_none(),
-                "an empty value is not absolute — it is the scope check's business"
+                "an empty value is not absolute — it names the workdir root"
             );
 
             for (property, value, expected) in [
@@ -1152,10 +1420,10 @@ pub mod logic {
         }
 
         #[test]
-        fn find_in_files_refuses_the_bare_root_ahead_of_the_scope_check() {
-            // "/" is neither empty, "." nor "./", so the search_too_broad check does not catch
-            // it — it would walk the whole preopen. The absolute check runs first, and with no
-            // final component there is nothing to suggest.
+        fn find_in_files_refuses_the_bare_root_slash_as_absolute() {
+            // Under the preopen "/" resolves to the workdir root, which a relative "" or "."
+            // already names; spelled absolutely it is refused like any other absolute dir. With
+            // no final component there is nothing to suggest.
             let out = op_find_in_files(&json!({
                 "operation": "find_in_files",
                 "pattern": "needle",
@@ -1177,7 +1445,7 @@ pub mod logic {
             for out in [
                 op_read_file(&json!({ "operation": "read_file" })),
                 op_write_file(&json!({ "operation": "write_file", "content": "x" })),
-                op_find_in_files(&json!({ "operation": "find_in_files", "pattern": "needle" })),
+                op_find_in_files(&json!({ "operation": "find_in_files", "dir": "src" })),
             ] {
                 assert_eq!(out["ok"], false);
                 assert!(
@@ -1211,61 +1479,73 @@ pub mod logic {
         }
 
         #[test]
-        fn find_in_files_enforces_size_ceiling() {
-            // This fixture is sized to catch the ~2x accounting bug specifically: the sum of
-            // the individual match objects (the quantity the OLD code counted) stays UNDER
-            // the 500KB ceiling, but the real serialized output — in which `ok_with` emits
-            // the matches array twice — is comfortably OVER it. The old accounting therefore
-            // passed this input; correct accounting must reject it.
-            let temp_dir = scratch("find_2x_ceiling");
-
-            let test_file = temp_dir.join("large_match_file.txt");
-            // Each line -> a match object of ~230 bytes serialized. 1400 lines -> single-count
-            // sum ~320KB (< 500KB, old code passes), doubled ~640KB (> 500KB, new code fails).
-            let padding = "x".repeat(200);
+        fn find_in_files_caps_at_the_result_ceiling() {
+            // 200 matching lines of ~2,000 bytes each: under the match limit, but the result
+            // (every match emitted twice by `ok_with`) would be ~800 KB. The search returns the
+            // matches that fit and says why it stopped.
+            let dir = scratch("find_result_ceiling");
+            let padding = "x".repeat(2000);
             let mut content = String::new();
-            for i in 0..1400 {
+            for i in 0..200 {
                 content.push_str(&format!("line {i} has marker {padding}\n"));
             }
-            fs::write(&test_file, content).expect("failed to write test file");
+            fs::write(dir.join("large_match_file.txt"), content).unwrap();
 
-            // Independently reconstruct the single-count sum the OLD code measured and assert
-            // it is under the ceiling — proving this fixture would have passed the old check.
-            let single_count_sum: usize = std::fs::read_to_string(&test_file)
-                .unwrap()
-                .lines()
-                .enumerate()
-                .filter(|(_, l)| l.contains("marker"))
-                .map(|(idx, line)| {
-                    serde_json::to_string(&json!({
-                        "path": "large_match_file.txt",
-                        "line": idx + 1,
-                        "text": line,
-                    }))
-                    .unwrap()
-                    .len()
-                })
-                .sum();
-            assert!(
-                single_count_sum < FIND_RESULT_SIZE_LIMIT,
-                "fixture invalid: single-count sum {single_count_sum} is not below the ceiling, \
-                 so it would not distinguish the old 1x accounting from correct 2x accounting"
-            );
-
-            let dir_name = temp_dir.to_string_lossy().to_string();
-            let op = json!({
+            let out = op_find_in_files(&json!({
                 "operation": "find_in_files",
                 "pattern": "marker",
-                "dir": &dir_name,
+                "dir": dir.to_str().unwrap(),
                 "recursive": false,
-            });
+            }));
+            assert_eq!(out["ok"], true, "{}", out["message"]);
+            assert_eq!(out["status"], "passed");
+            let n = out["matches"].as_array().unwrap().len();
+            assert!(n > 0 && n < 200, "got {n} matches");
+            let note = out["data"]["capped"].as_str().expect("a capped note");
+            assert!(note.contains("500 KB"), "{note}");
+            assert_eq!(out["summary"], format!("{n} matches in 1 files (capped)"));
+            assert!(
+                serde_json::to_string(&out).unwrap().len() <= FIND_RESULT_SIZE_LIMIT,
+                "a capped result fits under the ceiling"
+            );
+            // The matches kept are the first ones, in file order.
+            for (i, m) in out["matches"].as_array().unwrap().iter().enumerate() {
+                assert_eq!(m["line"], i + 1);
+            }
+            // With the metadata `run` attaches, the result still fits.
+            let via_run = run(&json!({
+                "data": {
+                    "operation": "find_in_files",
+                    "pattern": "marker",
+                    "dir": dir.to_str().unwrap(),
+                }
+            })
+            .to_string());
+            assert_eq!(via_run["metadata"]["state_effect"], "read");
+            assert!(serde_json::to_string(&via_run).unwrap().len() <= FIND_RESULT_SIZE_LIMIT);
 
-            let out = op_find_in_files(&op);
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn find_in_files_refuses_a_single_match_over_the_ceiling() {
+            // No partial answer exists: the first match alone does not fit.
+            let dir = scratch("find_single_oversized");
+            let line = format!("marker {}\n", "x".repeat(FIND_RESULT_SIZE_LIMIT));
+            fs::write(dir.join("huge.txt"), line).unwrap();
+
+            let out = op_find_in_files(&json!({
+                "operation": "find_in_files",
+                "pattern": "marker",
+                "dir": dir.to_str().unwrap(),
+            }));
             assert_eq!(out["ok"], false);
             assert_eq!(out["error_kind"], err::RESULT_SIZE_EXCEEDED);
-            assert!(out["message"].as_str().unwrap().contains("size limit"));
+            let msg = out["message"].as_str().unwrap();
+            assert!(msg.contains("512000 bytes (500 KB)"), "{msg}");
+            assert!(msg.contains("glob"), "{msg}");
 
-            let _ = fs::remove_dir_all(&temp_dir);
+            let _ = fs::remove_dir_all(&dir);
         }
 
         #[test]
@@ -1689,9 +1969,9 @@ pub mod logic {
 
         #[test]
         fn find_in_files_size_ceiling_accounts_for_context() {
-            // The fixture is under the 500KB ceiling with NO context, but the same search with
-            // a non-zero context window blows past it — proving the size accounting measures
-            // the context text, not just the match lines.
+            // The same search with a context window carries the neighbouring lines in every
+            // match, so it reaches the result ceiling after fewer matches than without one —
+            // proving the size accounting measures the context text, not just the match lines.
             let dir = scratch("find_ctx_ceiling");
 
             let padding = "x".repeat(200);
@@ -1708,23 +1988,399 @@ pub mod logic {
             fs::write(dir.join("big.txt"), content).expect("failed to write fixture");
             let dir_name = dir.to_string_lossy().to_string();
 
-            // Without context: comfortably under the ceiling.
             let no_ctx = op_find_in_files(&json!({
                 "operation": "find_in_files", "pattern": "marker",
                 "dir": &dir_name, "recursive": false, "context_lines": 0
             }));
-            assert_eq!(no_ctx["ok"], true, "no-context search should fit: {}", no_ctx["message"]);
-
-            // With context: the added neighbor text tips it over, and it is rejected.
             let with_ctx = op_find_in_files(&json!({
                 "operation": "find_in_files", "pattern": "marker",
                 "dir": &dir_name, "recursive": false, "context_lines": 3
             }));
-            assert_eq!(with_ctx["ok"], false);
-            assert_eq!(with_ctx["error_kind"], err::RESULT_SIZE_EXCEEDED);
-            assert!(with_ctx["message"].as_str().unwrap().contains("size limit"));
+            for out in [&no_ctx, &with_ctx] {
+                assert_eq!(out["ok"], true, "{}", out["message"]);
+                assert!(serde_json::to_string(out).unwrap().len() <= FIND_RESULT_SIZE_LIMIT);
+            }
+            let without = no_ctx["matches"].as_array().unwrap().len();
+            let with = with_ctx["matches"].as_array().unwrap().len();
+            assert!(with < without, "with context {with}, without {without}");
+            let note = with_ctx["data"]["capped"].as_str().unwrap();
+            assert!(note.contains("500 KB"), "{note}");
 
             let _ = fs::remove_dir_all(&dir);
+        }
+
+        // ── find_in_files: dir normalization ────────────────────────────────────
+
+        #[test]
+        fn normalize_dir_resolves_dot_segments_lexically() {
+            for root in ["", ".", "./", "./.", "src/..", "a/b/../.."] {
+                assert_eq!(
+                    normalize_dir(root).as_deref(),
+                    Some(""),
+                    "{root:?} is the root"
+                );
+            }
+            assert_eq!(normalize_dir("src/./lib/").as_deref(), Some("src/lib"));
+            assert_eq!(normalize_dir("src//lib").as_deref(), Some("src/lib"));
+            for climb in ["..", "../x", "src/../.."] {
+                assert_eq!(
+                    normalize_dir(climb),
+                    None,
+                    "{climb:?} climbs above the root"
+                );
+            }
+        }
+
+        #[test]
+        fn find_in_files_refuses_a_dir_above_the_workdir() {
+            // `pattern` is an invalid regex: the refusal lands ahead of compiling it, and so
+            // ahead of any walk.
+            for climb in ["..", "../x", "src/../.."] {
+                let out = op_find_in_files(&json!({
+                    "operation": "find_in_files", "pattern": "(", "dir": climb,
+                }));
+                assert_eq!(out["ok"], false, "{climb}");
+                assert_eq!(out["error_kind"], err::OUTSIDE_WORKDIR, "{climb}: {out:?}");
+                assert_eq!(
+                    out["message"],
+                    format!("'dir' resolves outside the capsule workdir: '{climb}'")
+                );
+                assert!(out["matches"].is_null());
+            }
+        }
+
+        #[test]
+        fn find_in_files_resolves_dot_segments_inside_dir() {
+            let dir = scratch("find_dot_segments");
+            fs::create_dir_all(dir.join("sub")).unwrap();
+            fs::write(dir.join("top.txt"), "needle\n").unwrap();
+            fs::write(dir.join("sub/inner.txt"), "needle\n").unwrap();
+            let base = dir.to_str().unwrap();
+
+            for spelling in [
+                format!("{base}/sub/.."),
+                format!("./{base}/."),
+                format!("{base}/"),
+            ] {
+                let out = op_find_in_files(&json!({
+                    "operation": "find_in_files", "pattern": "needle", "dir": spelling,
+                }));
+                assert_eq!(out["ok"], true, "{spelling}: {out:?}");
+                assert_eq!(
+                    out["data"],
+                    json!({ "matches": [
+                        { "path": "sub/inner.txt", "line": 1, "text": "needle" },
+                        { "path": "top.txt", "line": 1, "text": "needle" },
+                    ]}),
+                    "{spelling}"
+                );
+            }
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn find_in_files_rejects_a_non_string_dir_or_glob() {
+            let out = op_find_in_files(&json!({
+                "operation": "find_in_files", "pattern": "x", "dir": 3,
+            }));
+            assert_eq!(out["message"], "dir must be a string");
+            assert!(out["error_kind"].is_null());
+            let out = op_find_in_files(&json!({
+                "operation": "find_in_files", "pattern": "x", "glob": ["*.py"],
+            }));
+            assert_eq!(out["message"], "glob must be a string");
+            assert!(out["error_kind"].is_null());
+        }
+
+        // ── find_in_files: glob ─────────────────────────────────────────────────
+
+        #[test]
+        fn glob_to_regex_translates_each_wildcard() {
+            let matches =
+                |glob: &str, subject: &str| glob_to_regex(glob).unwrap().is_match(subject);
+
+            assert!(matches("*.py", "app.py"));
+            assert!(!matches("*.py", "app.pyc"));
+            assert!(
+                !matches("*.py", "pkg/app.py"),
+                "`*` stays within one segment"
+            );
+
+            assert!(
+                matches("src/**/*.rs", "src/a.rs"),
+                "`**/` matches zero segments"
+            );
+            assert!(matches("src/**/*.rs", "src/x/y/a.rs"));
+            assert!(!matches("src/**/*.rs", "lib/a.rs"));
+            assert!(!matches("src/**/*.rs", "src/a.rsx"), "anchored at the end");
+            assert!(
+                !matches("src/**/*.rs", "x/src/a.rs"),
+                "anchored at the start"
+            );
+
+            assert!(matches("lib/**", "lib/a"));
+            assert!(matches("lib/**", "lib/x/y/z.txt"));
+            assert!(!matches("lib/**", "libx/a"));
+            assert!(matches("**", "anything/at/all"));
+            assert!(matches("**/*.md", "notes.md"));
+            assert!(matches("**/*.md", "docs/a/notes.md"));
+
+            assert!(matches("f?.txt", "f1.txt"));
+            assert!(!matches("f?.txt", "f12.txt"));
+            assert!(!matches("a?b", "a/b"), "`?` never matches `/`");
+
+            assert!(matches("a+b.txt", "a+b.txt"), "metacharacters are literal");
+            assert!(!matches("a+b.txt", "aab.txt"));
+            assert!(!matches("a+b.txt", "a+bxtxt"), "`.` is literal");
+            assert!(matches("(x)[y]{z}^$|.txt", "(x)[y]{z}^$|.txt"));
+        }
+
+        #[test]
+        fn find_in_files_glob_filters_by_name_or_relative_path() {
+            let dir = scratch("find_glob");
+            fs::create_dir_all(dir.join("lib")).unwrap();
+            fs::create_dir_all(dir.join("src/a")).unwrap();
+            for file in ["main.py", "lib/helper.py", "lib/notes.md", "src/a/b.rs"] {
+                fs::write(dir.join(file), "needle\n").unwrap();
+            }
+            let paths = |glob: &str| -> Vec<String> {
+                let out = op_find_in_files(&json!({
+                    "operation": "find_in_files", "pattern": "needle",
+                    "dir": dir.to_str().unwrap(), "glob": glob,
+                }));
+                assert_eq!(out["ok"], true, "{glob}: {out:?}");
+                out["matches"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|m| m["path"].as_str().unwrap().to_string())
+                    .collect()
+            };
+            assert_eq!(paths("*.py"), ["lib/helper.py", "main.py"]);
+            assert_eq!(paths("src/**/*.rs"), ["src/a/b.rs"]);
+            assert_eq!(paths("lib/*"), ["lib/helper.py", "lib/notes.md"]);
+            assert_eq!(
+                paths(""),
+                ["lib/helper.py", "lib/notes.md", "main.py", "src/a/b.rs"]
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn find_in_files_refuses_an_absolute_glob() {
+            let out = op_find_in_files(&json!({
+                "operation": "find_in_files", "pattern": "needle", "glob": "/src/*.rs",
+            }));
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
+            assert_eq!(
+                out["message"],
+                "'glob' must be relative to the capsule workdir; got '/src/*.rs' (did you mean '*.rs'?)"
+            );
+            assert!(
+                out["matches"].is_null(),
+                "a refused search performs no walk: {out:?}"
+            );
+        }
+
+        // ── find_in_files: walk rules and budgets ───────────────────────────────
+
+        #[test]
+        fn find_in_files_skips_hidden_build_and_binary_entries_below_the_root() {
+            let dir = scratch("find_skip_rules");
+            for sub in [".git", ".hidden", "target", "node_modules/m"] {
+                fs::create_dir_all(dir.join(sub)).unwrap();
+            }
+            for file in [
+                "a.txt",
+                ".git/config",
+                ".hidden/x.txt",
+                "target/out.txt",
+                "node_modules/m/i.js",
+                ".env",
+            ] {
+                fs::write(dir.join(file), "needle\n").unwrap();
+            }
+            fs::write(dir.join("bin.dat"), b"needle\n\0\x01").unwrap();
+            fs::write(dir.join("latin1.txt"), b"needle \xe9\n").unwrap();
+            let base = dir.to_str().unwrap();
+
+            let paths = |dir: &str| -> Vec<String> {
+                let out = op_find_in_files(&json!({
+                    "operation": "find_in_files", "pattern": "needle", "dir": dir,
+                }));
+                assert_eq!(out["ok"], true, "{out:?}");
+                out["matches"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|m| m["path"].as_str().unwrap().to_string())
+                    .collect()
+            };
+            assert_eq!(paths(base), [".env", "a.txt"]);
+            assert_eq!(paths(&format!("{base}/.git")), ["config"]);
+            assert_eq!(paths(&format!("{base}/target")), ["out.txt"]);
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        // Five files `f0`..`f4`, each 7 bytes ("needle\n"), under a fresh scratch dir.
+        fn write_five_needles(tag: &str) -> std::path::PathBuf {
+            let dir = scratch(tag);
+            for i in 0..5 {
+                fs::write(dir.join(format!("f{i}")), "needle\n").unwrap();
+            }
+            dir
+        }
+
+        fn matched_paths(out: &Value) -> Vec<&str> {
+            out["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["path"].as_str().unwrap())
+                .collect()
+        }
+
+        #[test]
+        fn find_in_files_caps_at_the_file_limit() {
+            let dir = write_five_needles("find_file_limit");
+            let limits = Limits {
+                files: 3,
+                ..Limits::PRODUCTION
+            };
+            let op = json!({ "operation": "find_in_files", "pattern": "needle", "dir": dir.to_str().unwrap() });
+
+            let out = find_in_files(&op, limits);
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(matched_paths(&out), ["f0", "f1", "f2"]);
+            assert_eq!(
+                out["data"]["capped"],
+                "Search stopped at the limit of 3 files read after searching 3 files; more \
+                 matches may exist. Narrow the search with a dir (for example \"src\"), a glob \
+                 (for example \"*.py\") or a more specific pattern."
+            );
+            assert_eq!(out["summary"], "3 matches in 3 files (capped)");
+            assert_eq!(out["message"], out["summary"]);
+
+            // Files the glob excludes count against no limit: with room for one file, the
+            // walk passes f0..f3 unread and still reaches f4.
+            let mut globbed = op.clone();
+            globbed["glob"] = json!("f4");
+            let out = find_in_files(
+                &globbed,
+                Limits {
+                    files: 1,
+                    ..Limits::PRODUCTION
+                },
+            );
+            assert_eq!(matched_paths(&out), ["f4"]);
+            assert!(out["data"].get("capped").is_none(), "{out:?}");
+
+            // A walk that ends on exactly the limit was not stopped by it.
+            let out = find_in_files(
+                &op,
+                Limits {
+                    files: 5,
+                    ..Limits::PRODUCTION
+                },
+            );
+            assert_eq!(
+                out["data"],
+                json!({ "matches": out["matches"] }),
+                "no capped key"
+            );
+            assert_eq!(out["summary"], "5 matches in 5 files");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn find_in_files_caps_at_the_byte_limit() {
+            let dir = write_five_needles("find_byte_limit");
+            // Two 7-byte files fit in 20 bytes; the third would take the total to 21.
+            let limits = Limits {
+                bytes: 20,
+                ..Limits::PRODUCTION
+            };
+            let out = find_in_files(
+                &json!({ "operation": "find_in_files", "pattern": "needle", "dir": dir.to_str().unwrap() }),
+                limits,
+            );
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(matched_paths(&out), ["f0", "f1"]);
+            let note = out["data"]["capped"].as_str().unwrap();
+            assert!(
+                note.starts_with(
+                    "Search stopped at the limit of 20 bytes read after searching 2 files;"
+                ),
+                "{note}"
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn find_in_files_caps_at_the_match_limit_and_reads_no_further_file() {
+            let dir = write_five_needles("find_match_limit");
+            fs::write(dir.join("f1"), "needle\nneedle\nneedle\n").unwrap();
+            let op = json!({ "operation": "find_in_files", "pattern": "needle", "dir": dir.to_str().unwrap() });
+
+            let out = find_in_files(
+                &op,
+                Limits {
+                    matches: 3,
+                    ..Limits::PRODUCTION
+                },
+            );
+            assert_eq!(matched_paths(&out), ["f0", "f1", "f1"]);
+            assert_eq!(out["matches"][2]["line"], 2);
+            let note = out["data"]["capped"].as_str().unwrap();
+            assert!(
+                note.starts_with(
+                    "Search stopped at the limit of 3 matches after searching 2 files;"
+                ),
+                "{note}"
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn cap_notes_name_each_production_limit() {
+            let limits = Limits::PRODUCTION;
+            for (reason, named) in [
+                (CapReason::Matches, "the limit of 200 matches"),
+                (CapReason::Files, "the limit of 5000 files read"),
+                (CapReason::Bytes, "the limit of 32 MiB read"),
+                (CapReason::ResultSize, "the 500 KB result size limit"),
+            ] {
+                let note = cap_note(reason, limits, 1);
+                assert_eq!(
+                    note,
+                    format!(
+                        "Search stopped at {named} after searching 1 file; more matches may \
+                         exist. Narrow the search with a dir (for example \"src\"), a glob (for \
+                         example \"*.py\") or a more specific pattern."
+                    )
+                );
+            }
+        }
+
+        #[test]
+        fn a_capped_note_sorts_before_the_matches() {
+            let data = find_result(
+                &[json!({"path": "a", "line": 1, "text": "x"})],
+                1,
+                Some(CapReason::Matches),
+                Limits::PRODUCTION,
+            )["data"]
+                .to_string();
+            let capped = data.find("\"capped\"").unwrap();
+            let matches = data.find("\"matches\"").unwrap();
+            assert!(capped < matches, "{data}");
         }
     }
 }
@@ -1797,12 +2453,16 @@ mod wasm_tool {
                         .map(|d| d.to_string())
                 });
 
+            // A find_in_files search stopped by one of its limits carries a `capped` note in
+            // `data`; `truncated` tells a UI the same without parsing it.
+            let truncated = result.get("data").and_then(|d| d.get("capped")).is_some();
+
             ToolResult {
                 status,
                 summary,
                 data,
                 data_path: None,
-                truncated: false,
+                truncated,
                 metadata,
             }
         }
