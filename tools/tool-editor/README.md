@@ -176,14 +176,14 @@ input — the runtime scans tool input only.
 
 ## Breaking change in 0.8.0
 
-- The error kind search\_too\_broad is gone. A `find_in_files` call with
+- The error kind `search_too_broad` is gone. A `find_in_files` call with
   `dir` set to `""`, `.` or `./` now searches the workdir root instead of being
   refused.
 - `dir` is optional. Omitted, it searches the workdir root.
 - A search over a limit returns `ok: true` with a `capped` note and the
   matches found so far, where it used to return `result_size_exceeded`. That
   error now fires only when a single match exceeds 500 KB. A caller that
-  handled search\_too\_broad or `result_size_exceeded` must read `capped`
+  handled `search_too_broad` or `result_size_exceeded` must read `capped`
   instead.
 
 ## Breaking change in 0.5.0

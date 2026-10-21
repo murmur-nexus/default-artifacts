@@ -693,7 +693,7 @@ pub mod logic {
     /// Read `path` as text, adding the bytes read to `bytes_read`. The file's length is checked
     /// against `budget` before any byte of it is read.
     fn read_text_file(path: &Path, bytes_read: &mut u64, budget: u64) -> FileRead {
-        let Ok(mut file) = std::fs::File::open(path) else {
+        let Ok(file) = std::fs::File::open(path) else {
             return FileRead::Unreadable;
         };
         let Ok(len) = file.metadata().map(|m| m.len()) else {
@@ -702,8 +702,10 @@ pub mod logic {
         if *bytes_read + len > budget {
             return FileRead::OverBudget;
         }
+        // Read at most the length checked above, so a file still being written cannot carry
+        // the search past its byte budget.
         let mut bytes = Vec::with_capacity(len as usize);
-        if file.read_to_end(&mut bytes).is_err() {
+        if file.take(len).read_to_end(&mut bytes).is_err() {
             return FileRead::Unreadable;
         }
         *bytes_read += bytes.len() as u64;
