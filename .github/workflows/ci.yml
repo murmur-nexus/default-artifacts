@@ -21,6 +21,7 @@ jobs:
         with:
           toolchain: "1.95.0"
           targets: wasm32-wasip2
+          components: rustfmt
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -38,6 +39,13 @@ jobs:
       # and an unknown `implementation:` — the same enumeration the release packs from.
       - name: List artifacts
         run: ./scripts/list-artifacts.sh
+
+      # The workspace is rustfmt-clean with no rustfmt.toml, and stays that way. This
+      # runs before the tests so a formatting failure is reported without waiting on them.
+      # rustfmt comes from the toolchain step's `components:`, not from
+      # rust-toolchain.toml, which is a payload input of every compiled artifact.
+      - name: Cargo fmt
+        run: cargo fmt --all -- --check
 
       # --locked: a Cargo.lock that no longer matches the workspace (a member renamed,
       # added, or its version changed without `cargo update --workspace --offline`)
@@ -92,8 +100,8 @@ jobs:
   # unrelated murmur merge can't turn this repo's CI red without a deliberate bump here.
   #
   # Both repos are checked out into sibling subdirectories of $GITHUB_WORKSPACE
-  # (default-artifacts/, murmur/) so that check-wit-sync.sh's hard-coded
-  # MURMUR_WIT="$SCRIPT_DIR/../../murmur/crates/capsule-runtime/wit" resolves.
+  # (default-artifacts/, murmur/). check-wit-sync.sh looks for murmur in the directory
+  # beside the main checkout, which here is $GITHUB_WORKSPACE/murmur.
   # (actions/checkout rejects a path that escapes $GITHUB_WORKSPACE, so murmur
   # cannot be checked out to `../murmur`; nesting both under the workspace is the
   # equivalent sibling layout that passes that validation.)
