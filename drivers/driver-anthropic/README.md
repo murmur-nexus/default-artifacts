@@ -144,6 +144,12 @@ members on the `inference` trace event as `input_tokens_actual`,
 | `cached_tokens` | `usage.cache_read_input_tokens` |
 | `cache_write_tokens` | `usage.cache_creation_input_tokens` |
 
+`input_tokens` is the request tokens neither read from nor written to the cache;
+`cached_tokens` and `cache_write_tokens` sit beside it, so
+`input_tokens + cached_tokens + cache_write_tokens` is Anthropic's total request
+count. Anthropic's own `input_tokens` already excludes both cache counts, so each
+member is passed through unchanged.
+
 While streaming, the counts are seeded from `message_start` and each member a
 later `message_delta` reports replaces the seeded value — so the cumulative
 `output_tokens` wins over the placeholder `message_start` carries.

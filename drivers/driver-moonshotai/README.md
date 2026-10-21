@@ -238,10 +238,20 @@ members on the `inference` trace event as `input_tokens_actual`,
 
 | `usage` member | Moonshot field |
 |---|---|
-| `input_tokens` | `usage.prompt_tokens` |
+| `input_tokens` | `usage.prompt_tokens` − `cached_tokens` − `cache_write_tokens` |
 | `output_tokens` | `usage.completion_tokens` |
 | `cached_tokens` | `usage.prompt_tokens_details.cached_tokens` |
-| `cache_write_tokens` | not reported by Moonshot — always absent |
+| `cache_write_tokens` | `usage.prompt_tokens_details.cache_write_tokens` |
+
+`input_tokens` is the request tokens neither read from nor written to the cache;
+`cached_tokens` and `cache_write_tokens` sit beside it, so
+`input_tokens + cached_tokens + cache_write_tokens` is Moonshot's total request
+count. Moonshot reports that total with both cache counts inside it, so the
+driver subtracts them once, after merging every streamed chunk; an unreported
+cache count is subtracted as `0`. A report whose cache counts exceed its total is
+inconsistent: `input_tokens` is omitted rather than invented, and the other
+members are still reported. The top-level `usage.cached_tokens` some responses
+also carry is not read.
 
 Each member is independently optional. A count the provider did not report is
 omitted rather than sent as `0`; a reported `0` is kept as `0`. When no member

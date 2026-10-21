@@ -327,6 +327,10 @@ fn translate_tool_message(message: &MurmurMessage) -> Result<Value, String> {
 /// translated response. Every member is independently optional: a count the provider did not
 /// report is omitted rather than sent as `0`, because the host records a reported `0` as a real
 /// zero and a fabricated one reads as a cache miss on the `inference` trace event.
+///
+/// Each member already has its contract meaning: `input_tokens` is the request tokens not
+/// served from the cache, with `cached_tokens` beside it, so `input_tokens + cached_tokens` is
+/// DeepSeek's request total (see `extract_deepseek_usage`).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct UsageTokens {
     input_tokens: Option<u64>,
@@ -353,7 +357,8 @@ impl UsageTokens {
         }
     }
 
-    /// `None` when no member survived, in which case the response carries no `usage` key at all.
+    /// The contract `usage` object, each present member under its own name. `None` when no
+    /// member survived, in which case the response carries no `usage` key at all.
     fn to_value(self) -> Option<Value> {
         let mut obj = Map::new();
         for (key, count) in [
@@ -374,21 +379,20 @@ impl UsageTokens {
     }
 }
 
-/// Read the contract members out of a DeepSeek `usage` object. `prompt_tokens_details` is the
-/// current spelling of the cache-hit count and `prompt_cache_hit_tokens` the older one, so the
-/// first is preferred and the second is the fallback. `prompt_cache_miss_tokens` is never read:
-/// it counts input that missed the cache, not input written into it, so mapping it to
-/// `cache_write_tokens` would report a cache write on every cold turn. DeepSeek reports no cache
-/// write count at all, so that member is always omitted. A member that is absent, null, or not a
-/// non-negative integer is dropped; its siblings are kept.
+/// Read a DeepSeek `usage` object. DeepSeek splits its request total into two disjoint parts,
+/// `prompt_cache_hit_tokens + prompt_cache_miss_tokens == prompt_tokens`, which are exactly the
+/// contract's `cached_tokens` and `input_tokens`: read directly, they sum to the total without a
+/// subtraction that could go negative. `prompt_tokens` and its `prompt_tokens_details.cached_tokens`
+/// duplicate of the hit count are therefore not read. DeepSeek reports no cache-write count, so
+/// `cache_write_tokens` is always omitted. A member that is absent, null, or not a non-negative
+/// integer is dropped; its siblings are kept.
 fn extract_deepseek_usage(usage: &Value) -> UsageTokens {
     UsageTokens {
-        input_tokens: usage.get("prompt_tokens").and_then(Value::as_u64),
+        input_tokens: usage
+            .get("prompt_cache_miss_tokens")
+            .and_then(Value::as_u64),
         output_tokens: usage.get("completion_tokens").and_then(Value::as_u64),
-        cached_tokens: usage
-            .pointer("/prompt_tokens_details/cached_tokens")
-            .and_then(Value::as_u64)
-            .or_else(|| usage.get("prompt_cache_hit_tokens").and_then(Value::as_u64)),
+        cached_tokens: usage.get("prompt_cache_hit_tokens").and_then(Value::as_u64),
         cache_write_tokens: None,
     }
 }
@@ -1596,7 +1600,7 @@ mod tests {
             "usage": {
                 "prompt_tokens": 500,
                 "completion_tokens": 30,
-                "prompt_tokens_details": {"cached_tokens": 448},
+                "prompt_cache_hit_tokens": 448,
                 "prompt_cache_miss_tokens": 52
             }
         });
@@ -1607,34 +1611,73 @@ mod tests {
         assert_eq!(translated["content"][0]["text"], "Hello");
         assert_eq!(
             translated["usage"],
-            json!({"input_tokens": 500, "output_tokens": 30, "cached_tokens": 448})
+            json!({"input_tokens": 52, "output_tokens": 30, "cached_tokens": 448})
         );
-        // A cache miss is not a cache write; it must not be mapped anywhere.
+        // A cache miss is ordinary input, not a cache write.
         assert!(translated["usage"].get("cache_write_tokens").is_none());
-        assert!(!serde_json::to_string(&translated)
-            .unwrap()
-            .contains("prompt_cache_miss_tokens"));
     }
 
-    #[test]
-    fn legacy_prompt_cache_hit_tokens_supplies_cached_tokens() {
-        let response = json!({
+    /// `input_tokens + cached_tokens + cache_write_tokens`, an absent member counted as `0` —
+    /// the request count the runtime derives from a `usage` object.
+    fn reported_request(usage: &Value) -> u64 {
+        ["input_tokens", "cached_tokens", "cache_write_tokens"]
+            .iter()
+            .map(|key| usage.get(*key).and_then(Value::as_u64).unwrap_or(0))
+            .sum()
+    }
+
+    fn response_with_usage(usage: Value) -> Value {
+        json!({
             "choices": [{
                 "finish_reason": "stop",
                 "message": {"role": "assistant", "content": "Hello"}
             }],
-            "usage": {
-                "prompt_tokens": 500,
-                "completion_tokens": 30,
-                "prompt_cache_hit_tokens": 448,
-                "prompt_cache_miss_tokens": 52
-            }
+            "usage": usage
+        })
+    }
+
+    #[test]
+    fn usage_members_sum_to_the_provider_request_total() {
+        let usage = json!({
+            "prompt_tokens": 500,
+            "completion_tokens": 30,
+            "prompt_cache_hit_tokens": 448,
+            "prompt_cache_miss_tokens": 52,
+            "prompt_tokens_details": {"cached_tokens": 448}
         });
+        let expected = json!({"input_tokens": 52, "output_tokens": 30, "cached_tokens": 448});
 
-        let translated = translate_deepseek_response_to_murmur(&response).unwrap();
+        let translated =
+            translate_deepseek_response_to_murmur(&response_with_usage(usage.clone())).unwrap();
+        assert_eq!(translated["usage"], expected);
+        assert_eq!(reported_request(&translated["usage"]), 500);
 
-        assert_eq!(translated["usage"]["cached_tokens"], 448);
-        assert!(translated["usage"].get("cache_write_tokens").is_none());
+        let chunk = json!({"choices": [], "usage": usage});
+        let body = format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"content\":\"Hello\"}},\"finish_reason\":\"stop\"}}]}}\n\
+             data: {chunk}\n\
+             data: [DONE]\n"
+        );
+        let result = parse_deepseek_sse_body(&body, &mut |_| {}, &mut |_| {}).unwrap();
+        assert_eq!(result["usage"], expected);
+        assert_eq!(reported_request(&result["usage"]), 500);
+    }
+
+    #[test]
+    fn only_the_hit_and_miss_counts_supply_the_request_members() {
+        // Only the hit count: the cache member alone.
+        let translated = translate_deepseek_response_to_murmur(&response_with_usage(
+            json!({"prompt_tokens": 500, "prompt_cache_hit_tokens": 448}),
+        ))
+        .unwrap();
+        assert_eq!(translated["usage"], json!({"cached_tokens": 448}));
+
+        // `prompt_tokens` and `prompt_tokens_details.cached_tokens` alone supply nothing.
+        let translated = translate_deepseek_response_to_murmur(&response_with_usage(
+            json!({"prompt_tokens": 500, "prompt_tokens_details": {"cached_tokens": 448}}),
+        ))
+        .unwrap();
+        assert!(translated.get("usage").is_none(), "got {translated}");
     }
 
     #[test]
@@ -1642,7 +1685,7 @@ mod tests {
         let body = concat!(
             "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n",
             "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n",
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":500,\"completion_tokens\":30,\"prompt_tokens_details\":{\"cached_tokens\":448}}}\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":500,\"completion_tokens\":30,\"prompt_cache_hit_tokens\":448,\"prompt_cache_miss_tokens\":52}}\n",
             "data: [DONE]\n",
         );
 
@@ -1652,7 +1695,7 @@ mod tests {
         assert_eq!(result["content"][0]["text"], "Hello");
         assert_eq!(
             result["usage"],
-            json!({"input_tokens": 500, "output_tokens": 30, "cached_tokens": 448})
+            json!({"input_tokens": 52, "output_tokens": 30, "cached_tokens": 448})
         );
     }
 
@@ -1690,7 +1733,7 @@ mod tests {
                 "finish_reason": "stop",
                 "message": {"role": "assistant", "content": "Hello"}
             }],
-            "usage": {"prompt_tokens": 40, "prompt_tokens_details": {"cached_tokens": 0}}
+            "usage": {"prompt_cache_miss_tokens": 40, "prompt_cache_hit_tokens": 0}
         });
 
         let translated = translate_deepseek_response_to_murmur(&response).unwrap();

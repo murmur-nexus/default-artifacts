@@ -535,9 +535,15 @@ fn translate_tool_message(message: &MurmurMessage) -> Result<Value, String> {
 /// translated response. Every member is independently optional: a count the provider did not
 /// report is omitted rather than sent as `0`, because the host records a reported `0` as a real
 /// zero and a fabricated one reads as a cache miss on the `inference` trace event.
+///
+/// Moonshot reports the request total with the cache reads and writes inside it, while the
+/// usage contract puts `cached_tokens` and `cache_write_tokens` beside `input_tokens`. So the
+/// raw total is held here as `request_total`, and the contract's `input_tokens` is derived from
+/// it only in `to_value`, after every streamed chunk has been merged — a total and a cache
+/// count arriving in different chunks still subtract correctly.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct UsageTokens {
-    input_tokens: Option<u64>,
+    request_total: Option<u64>,
     output_tokens: Option<u64>,
     cached_tokens: Option<u64>,
     cache_write_tokens: Option<u64>,
@@ -547,8 +553,8 @@ impl UsageTokens {
     /// Take every member `later` reports, keeping the current value for the rest. Streaming
     /// usage arrives across more than one chunk, each carrying only part of the picture.
     fn merge_from(&mut self, later: UsageTokens) {
-        if later.input_tokens.is_some() {
-            self.input_tokens = later.input_tokens;
+        if later.request_total.is_some() {
+            self.request_total = later.request_total;
         }
         if later.output_tokens.is_some() {
             self.output_tokens = later.output_tokens;
@@ -561,11 +567,21 @@ impl UsageTokens {
         }
     }
 
-    /// `None` when no member survived, in which case the response carries no `usage` key at all.
+    /// The contract `usage` object. `input_tokens` is the request tokens neither read from nor
+    /// written to the cache — `request_total` minus both cache counts, an unreported cache
+    /// member counting as `0` — so `input_tokens + cached_tokens + cache_write_tokens` is the
+    /// provider's total. It is omitted when the total is unreported or the cache counts exceed
+    /// it: such a report is inconsistent, and no value is invented for it. The other members
+    /// are passed through as reported. `None` when no member survived, in which case the
+    /// response carries no `usage` key at all.
     fn to_value(self) -> Option<Value> {
+        let input_tokens = self
+            .request_total
+            .and_then(|total| total.checked_sub(self.cached_tokens.unwrap_or(0)))
+            .and_then(|rest| rest.checked_sub(self.cache_write_tokens.unwrap_or(0)));
         let mut obj = Map::new();
         for (key, count) in [
-            ("input_tokens", self.input_tokens),
+            ("input_tokens", input_tokens),
             ("output_tokens", self.output_tokens),
             ("cached_tokens", self.cached_tokens),
             ("cache_write_tokens", self.cache_write_tokens),
@@ -582,18 +598,21 @@ impl UsageTokens {
     }
 }
 
-/// Read the contract members out of a Moonshot `usage` object. `cache_write_tokens` is always
-/// omitted: Moonshot's caching is automatic and it reports no cache-write count, so any value
-/// put there would be invented. A member that is absent, null, or not a non-negative integer is
-/// dropped; its siblings are kept.
+/// Read a Moonshot `usage` object: the request total from `prompt_tokens`, the cache read and
+/// write counts that are parts of it from `prompt_tokens_details`, the completion count from
+/// `completion_tokens`. The top-level `usage.cached_tokens` some responses also carry is not
+/// read — `prompt_tokens_details` is the documented home of the cache counts. A member that is
+/// absent, null, or not a non-negative integer is dropped; its siblings are kept.
 fn extract_moonshot_usage(usage: &Value) -> UsageTokens {
     UsageTokens {
-        input_tokens: usage.get("prompt_tokens").and_then(Value::as_u64),
+        request_total: usage.get("prompt_tokens").and_then(Value::as_u64),
         output_tokens: usage.get("completion_tokens").and_then(Value::as_u64),
         cached_tokens: usage
             .pointer("/prompt_tokens_details/cached_tokens")
             .and_then(Value::as_u64),
-        cache_write_tokens: None,
+        cache_write_tokens: usage
+            .pointer("/prompt_tokens_details/cache_write_tokens")
+            .and_then(Value::as_u64),
     }
 }
 
@@ -2007,11 +2026,11 @@ mod tests {
         let response = translate_moonshot_response_to_murmur(&buffered).unwrap();
         assert_eq!(
             response["usage"],
-            json!({"input_tokens": 100, "output_tokens": 20, "cached_tokens": 40})
+            json!({"input_tokens": 60, "output_tokens": 20, "cached_tokens": 40})
         );
         assert!(
             !contains_key_anywhere(&response, "cache_write_tokens"),
-            "Moonshot reports no cache-write count, so the member is always absent"
+            "an unreported cache-write count is omitted, not sent as 0"
         );
 
         // Streaming — the usage-bearing final chunk has an empty `choices` array.
@@ -2045,6 +2064,151 @@ mod tests {
         });
         let response = translate_moonshot_response_to_murmur(&empty).unwrap();
         assert!(response.get("usage").is_none(), "got {response}");
+    }
+
+    /// `input_tokens + cached_tokens + cache_write_tokens`, an absent member counted as `0` —
+    /// the request count the runtime derives from a `usage` object.
+    fn reported_request(usage: &Value) -> u64 {
+        ["input_tokens", "cached_tokens", "cache_write_tokens"]
+            .iter()
+            .map(|key| usage.get(*key).and_then(Value::as_u64).unwrap_or(0))
+            .sum()
+    }
+
+    fn buffered_with_usage(usage: Value) -> Value {
+        json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": "hi"}}],
+            "usage": usage
+        })
+    }
+
+    fn streamed_with_usage(usage: Value) -> Value {
+        let chunk = json!({"choices": [], "usage": usage});
+        let stream = format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"content\":\"hi\"}},\"finish_reason\":\"stop\"}}]}}\n\
+             data: {chunk}\n\
+             data: [DONE]\n"
+        );
+        parse_moonshot_sse_body(&stream, &mut |_: &str| {}, &mut |_: &str| {}).unwrap()
+    }
+
+    #[test]
+    fn usage_members_sum_to_the_provider_request_total() {
+        // Moonshot's cached, cache-write and uncached counts are disjoint parts of
+        // `prompt_tokens`: 10 + 4 + 5 = 19.
+        let usage = json!({
+            "prompt_tokens": 19,
+            "completion_tokens": 3,
+            "cached_tokens": 10,
+            "prompt_tokens_details": {"cached_tokens": 10, "cache_write_tokens": 4}
+        });
+        let expected = json!({
+            "input_tokens": 5,
+            "output_tokens": 3,
+            "cached_tokens": 10,
+            "cache_write_tokens": 4
+        });
+
+        let response =
+            translate_moonshot_response_to_murmur(&buffered_with_usage(usage.clone())).unwrap();
+        assert_eq!(response["usage"], expected);
+        assert_eq!(reported_request(&response["usage"]), 19);
+
+        let streamed = streamed_with_usage(usage);
+        assert_eq!(streamed["usage"], expected);
+        assert_eq!(reported_request(&streamed["usage"]), 19);
+
+        // The total and the cache details split across two chunks still subtract correctly.
+        let stream = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":19}}\n",
+            "data: {\"choices\":[],\"usage\":{\"completion_tokens\":3,\"prompt_tokens_details\":{\"cached_tokens\":10,\"cache_write_tokens\":4}}}\n",
+            "data: [DONE]\n",
+        );
+        let split = parse_moonshot_sse_body(stream, &mut |_: &str| {}, &mut |_: &str| {}).unwrap();
+        assert_eq!(split["usage"], expected);
+    }
+
+    #[test]
+    fn the_top_level_cached_tokens_duplicate_is_never_read() {
+        let usage = json!({
+            "prompt_tokens": 19,
+            "completion_tokens": 3,
+            "cached_tokens": 17,
+            "prompt_tokens_details": {"cached_tokens": 10, "cache_write_tokens": 4}
+        });
+        let expected = json!({
+            "input_tokens": 5,
+            "output_tokens": 3,
+            "cached_tokens": 10,
+            "cache_write_tokens": 4
+        });
+
+        let response =
+            translate_moonshot_response_to_murmur(&buffered_with_usage(usage.clone())).unwrap();
+        assert_eq!(response["usage"], expected);
+        assert_eq!(streamed_with_usage(usage)["usage"], expected);
+
+        // With no details at all the duplicate still supplies nothing.
+        let response = translate_moonshot_response_to_murmur(&buffered_with_usage(
+            json!({"prompt_tokens": 19, "cached_tokens": 10}),
+        ))
+        .unwrap();
+        assert_eq!(response["usage"], json!({"input_tokens": 19}));
+    }
+
+    #[test]
+    fn partial_or_inconsistent_usage_never_reports_a_negative_or_invented_input_count() {
+        for (case, usage, expected) in [
+            (
+                "cache counts exceed the total",
+                json!({
+                    "prompt_tokens": 100,
+                    "completion_tokens": 40,
+                    "prompt_tokens_details": {"cached_tokens": 90, "cache_write_tokens": 20}
+                }),
+                json!({"output_tokens": 40, "cached_tokens": 90, "cache_write_tokens": 20}),
+            ),
+            (
+                "total with no cache details",
+                json!({"prompt_tokens": 100, "completion_tokens": 40}),
+                json!({"input_tokens": 100, "output_tokens": 40}),
+            ),
+            (
+                "cache details with no total",
+                json!({
+                    "completion_tokens": 40,
+                    "prompt_tokens_details": {"cached_tokens": 90, "cache_write_tokens": 20}
+                }),
+                json!({"output_tokens": 40, "cached_tokens": 90, "cache_write_tokens": 20}),
+            ),
+            (
+                "malformed cache members beside a valid total",
+                json!({
+                    "prompt_tokens": 100,
+                    "completion_tokens": 40,
+                    "prompt_tokens_details": {"cached_tokens": "90", "cache_write_tokens": -20}
+                }),
+                json!({"input_tokens": 100, "output_tokens": 40}),
+            ),
+            (
+                "fractional cache member beside a valid total",
+                json!({
+                    "prompt_tokens": 100,
+                    "completion_tokens": 40,
+                    "prompt_tokens_details": {"cached_tokens": 1.5, "cache_write_tokens": 20}
+                }),
+                json!({"input_tokens": 80, "output_tokens": 40, "cache_write_tokens": 20}),
+            ),
+        ] {
+            let response =
+                translate_moonshot_response_to_murmur(&buffered_with_usage(usage.clone())).unwrap();
+            assert_eq!(response["usage"], expected, "buffered, {case}");
+            assert_eq!(
+                streamed_with_usage(usage)["usage"],
+                expected,
+                "streamed, {case}"
+            );
+        }
     }
 
     #[test]
