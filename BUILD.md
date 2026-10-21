@@ -152,8 +152,12 @@ against a murmur checkout elsewhere, set `MURMUR_DIR` to its root.
 ## Tests
 
 ```bash
+cargo fmt --all -- --check
 cargo test --workspace --locked
 ```
+
+CI runs both, formatting first. The workspace uses rustfmt's defaults (there is no `rustfmt.toml`);
+run `cargo fmt --all` before committing.
 
 Four suites are `#[ignore]`d because they need something the default run does not have. The three
 that drive a real `mur` read it from `MUR_BIN`, else `PATH`, and fail rather than skip without one:
