@@ -42,9 +42,12 @@ All five report the provider's own token counts on an optional top-level `usage`
 
 All five also take the endpoint they talk to from the host, in
 `MURMUR_INFERENCE_ENDPOINT`, and none of them carries a provider URL of its own.
-`inference.endpoint` is therefore required in the capsule manifest for every one
-of them: an endpoint that is absent, empty or whitespace-only is refused before
-any request is built, never replaced with a provider default.
+The capsule manifest therefore names the provider as `gateway.endpoint` on the
+driver's `artifacts:` entry, with the key as `gateway.api_key`; the runtime hands
+the driver its own loopback gateway plus that endpoint's path, and attaches the
+key to each request it sends on. An endpoint that is absent, empty or
+whitespace-only is refused before any request is built, never replaced with a
+provider default.
 
 All five stream text and thinking, and report each tool call while the model is still writing
 it, through `murmur:stream/events@0.1.0`: the call's start, with the id and name of the

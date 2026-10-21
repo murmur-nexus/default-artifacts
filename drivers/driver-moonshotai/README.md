@@ -11,33 +11,42 @@ round trip and preserved reasoning across turns.
 The driver reads no provider key and sends no authentication header. Murmur's
 runtime authenticates each call with the header declared under
 `upstream_auth:` in [murmur.yaml](./murmur.yaml), the full manifest; the
-capsule author still supplies the key as `inference.api_key`.
+capsule author supplies the key as `gateway.api_key` on the driver's
+`artifacts:` entry.
 
-The endpoint arrives in the `MURMUR_INFERENCE_ENDPOINT` environment variable,
-resolved from the capsule manifest's `inference.endpoint`. That field is
-required, and the driver carries no provider URL of its own to fall back on: a
-value that never arrives fails the call with `driver: missing
-MURMUR_INFERENCE_ENDPOINT`, and one that arrives empty or whitespace-only with
-`driver: MURMUR_INFERENCE_ENDPOINT is set but empty`. Neither reaches the
-network. A usable value is trimmed and used exactly as given.
+The endpoint arrives in the `MURMUR_INFERENCE_ENDPOINT` environment variable.
+The runtime sets it to its own loopback gateway plus the path of the entry's
+`gateway.endpoint`, and readdresses each request to the real upstream. The
+driver carries no provider URL of its own to fall back on: a value that never
+arrives fails the call with `driver: missing MURMUR_INFERENCE_ENDPOINT`, and one
+that arrives empty or whitespace-only with `driver: MURMUR_INFERENCE_ENDPOINT is
+set but empty`. Neither reaches the network. Requests go to
+`<endpoint>/chat/completions`.
 
 ## Using it from a capsule manifest
 
 ```yaml
+artifacts:
+  - name: murmur/driver-moonshotai
+    version: "0.10.0"
+    runtime: driver
+    gateway:
+      endpoint: https://api.moonshot.ai/v1
+      api_key: ${MOONSHOT_API_KEY}
+
 inference:
+  transport: http
+  model: kimi-k3
   driver:
     artifact: murmur/driver-moonshotai
-  model: kimi-k3
-  endpoint: https://api.moonshot.ai/v1
-  api_key: ${MOONSHOT_API_KEY}
 ```
 
 | Field | Required | Default |
 |---|---|---|
 | `inference.driver.artifact` | yes | — |
 | `inference.model` | yes | — (must be `kimi-k3`) |
-| `inference.endpoint` | yes | — |
-| `inference.api_key` | no in form, yes in practice | unset — requests go out unauthenticated and Moonshot rejects them |
+| `gateway.endpoint` | yes | — |
+| `gateway.api_key` | yes, unless the entry declares `keyless: true` | — without either, the launch fails with `E-CAP-018` |
 | `inference.max_tokens` | no | `8192`, from the host; ceiling `1048576` |
 | `inference.driver.config` | no | `{}` — see below |
 
