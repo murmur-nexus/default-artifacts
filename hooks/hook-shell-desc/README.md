@@ -53,7 +53,7 @@ No `capabilities:` block is required — this hook touches neither the network
 nor the filesystem, and runs fully confined under the runtime's default-deny
 capability model.
 
-The enriched manifests are returned as its `HookOutput`; the host — not the
+The manifests are returned as its `HookOutput`; the host — not the
 hook — writes them to `tools/<binary>/murmur.yaml` in the session's runtime
 directory (`$MURMUR_RUNTIME_DIR`) under the `write-manifests` commit policy.
 `mur` v0.6.0 and earlier write them to `tools/<binary>/murmur.yaml` in the
