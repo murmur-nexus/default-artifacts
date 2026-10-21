@@ -67,7 +67,8 @@ fn the_read_inputs_carry_no_destination_annotation() {
 
     // `path` is `read_file`'s input. Annotating it would make the runtime refuse every read
     // under a `read_only` subtree — the tool made unusable by the grant it exists to respect.
-    for property in ["path", "dir"] {
+    // `dir` and `glob` scope `find_in_files`, which reads the same subtrees.
+    for property in ["path", "dir", "glob"] {
         let body = property_body(&manifest, property)
             .unwrap_or_else(|| panic!("input_schema must declare a `{property}` property"));
         assert!(

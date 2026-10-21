@@ -32,7 +32,7 @@ mod bindings {
         path: "../../wit/guest",
     });
 }
-use bindings::exports::murmur::tool::run::{Status, ToolInput};
+use bindings::exports::murmur::tool::run::{Status, ToolInput, ToolResult};
 use bindings::Tool;
 
 /// Store state: just a WASI context + resource table. `WasiView` is all the linker needs.
@@ -134,19 +134,33 @@ fn run_editor_reporting(
     workdir: &Path,
     data_payload: &str,
 ) -> (Status, Value, Option<String>, Vec<(String, String)>) {
-    let mut store = store_for(engine, workdir);
-    let tool = Tool::instantiate(&mut store, component, linker).expect("instantiate component");
-    let input = ToolInput { data: Some(data_payload.to_string()), log_path: None };
-    let result = tool
-        .murmur_tool_run()
-        .call_run(&mut store, &input)
-        .expect("call run");
+    let result = run_editor_raw(engine, component, linker, workdir, data_payload);
     let payload: Value = result
         .data
         .as_deref()
         .map(|s| serde_json::from_str(s).expect("ToolResult.data is JSON"))
         .unwrap_or(Value::Null);
     (result.status, payload, result.summary, result.metadata)
+}
+
+/// One independent instantiation + `run` call, returning the `ToolResult` exactly as it
+/// crossed the component boundary — `data` as its raw string, plus `truncated`.
+fn run_editor_raw(
+    engine: &Engine,
+    component: &Component,
+    linker: &Linker<HostState>,
+    workdir: &Path,
+    data_payload: &str,
+) -> ToolResult {
+    let mut store = store_for(engine, workdir);
+    let tool = Tool::instantiate(&mut store, component, linker).expect("instantiate component");
+    let input = ToolInput {
+        data: Some(data_payload.to_string()),
+        log_path: None,
+    };
+    tool.murmur_tool_run()
+        .call_run(&mut store, &input)
+        .expect("call run")
 }
 
 /// The workdir's immediate entries, sorted — the "did the call leave anything behind" check.
@@ -568,6 +582,227 @@ fn component_loads_and_runs_find_with_context_lines() {
     let _ = std::fs::remove_dir_all(&workdir);
 }
 
+// ── find_in_files at the workdir root ───────────────────────────────────────────
+//
+// A root search walks the whole preopen, so it can only be exercised here, where the preopen is
+// a fixture workdir; under `cargo test` the unit tests' CWD is the crate root.
+
+/// `find_in_files` with `fields` merged into `{"operation":"find_in_files"}`.
+fn find_payload(fields: Value) -> String {
+    let mut payload = serde_json::json!({ "operation": "find_in_files" });
+    payload
+        .as_object_mut()
+        .unwrap()
+        .extend(fields.as_object().expect("fields is an object").clone());
+    payload.to_string()
+}
+
+/// Write each `(path, content)` under `workdir`, creating parent directories.
+fn write_files(workdir: &Path, files: &[(&str, &[u8])]) {
+    for (path, content) in files {
+        let full = workdir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, content).unwrap();
+    }
+}
+
+/// The `path` of each match in a find payload, in result order.
+fn match_paths(payload: &Value) -> Vec<String> {
+    payload["matches"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no matches array: {payload}"))
+        .iter()
+        .map(|m| m["path"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn find_in_files_searches_the_workdir_root_for_every_root_spelling() {
+    let eng = engine();
+    let component = Component::from_file(&eng, component_path()).expect("load component");
+    let lnk = linker(&eng);
+    let workdir = unique_workdir("find_root");
+    write_files(
+        &workdir,
+        &[
+            ("app.py", b"def find_me():\n    pass\n"),
+            ("pkg/util.py", b"def helper():\n    pass\n"),
+        ],
+    );
+    let expected = serde_json::json!([{ "path": "app.py", "line": 1, "text": "def find_me():" }]);
+
+    let absent = serde_json::json!({ "pattern": "def find_me" });
+    let spellings = ["", ".", "./", "src/..", "./."];
+    let payloads = std::iter::once(find_payload(absent)).chain(
+        spellings
+            .iter()
+            .map(|dir| find_payload(serde_json::json!({ "pattern": "def find_me", "dir": dir }))),
+    );
+    for payload in payloads {
+        let result = run_editor_raw(&eng, &component, &lnk, &workdir, &payload);
+        assert!(
+            matches!(result.status, Status::Passed),
+            "{payload}: {:?}",
+            result.status
+        );
+        let data: Value = serde_json::from_str(result.data.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            data,
+            serde_json::json!({ "matches": expected }),
+            "{payload}"
+        );
+        assert!(
+            !result.truncated,
+            "{payload}: an uncapped search is not truncated"
+        );
+        assert!(
+            result
+                .metadata
+                .iter()
+                .any(|(k, v)| k == "state_effect" && v == "read"),
+            "{payload}: {:?}",
+            result.metadata
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn find_in_files_root_search_skips_hidden_build_and_binary_entries() {
+    let eng = engine();
+    let component = Component::from_file(&eng, component_path()).expect("load component");
+    let lnk = linker(&eng);
+    let workdir = unique_workdir("find_skip");
+    write_files(
+        &workdir,
+        &[
+            ("a.txt", b"needle\n"),
+            (".git/config", b"needle\n"),
+            (".hidden/x.txt", b"needle\n"),
+            ("target/out.txt", b"needle\n"),
+            ("node_modules/m/i.js", b"needle\n"),
+            (".env", b"needle\n"),
+            ("bin.dat", b"needle\n\0\x01\x02"),
+        ],
+    );
+
+    let (status, payload, _meta) = run_editor(
+        &eng,
+        &component,
+        &lnk,
+        &workdir,
+        &find_payload(serde_json::json!({ "pattern": "needle" })),
+    );
+    assert!(matches!(status, Status::Passed), "status: {status:?}");
+    assert_eq!(match_paths(&payload), [".env", "a.txt"]);
+
+    // Naming a skipped directory searches it.
+    let (status, payload, _meta) = run_editor(
+        &eng,
+        &component,
+        &lnk,
+        &workdir,
+        &find_payload(serde_json::json!({ "pattern": "needle", "dir": ".git" })),
+    );
+    assert!(matches!(status, Status::Passed), "status: {status:?}");
+    assert_eq!(
+        payload,
+        serde_json::json!({ "matches": [{ "path": "config", "line": 1, "text": "needle" }] })
+    );
+
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn find_in_files_glob_filters_a_root_search() {
+    let eng = engine();
+    let component = Component::from_file(&eng, component_path()).expect("load component");
+    let lnk = linker(&eng);
+    let workdir = unique_workdir("find_glob");
+    write_files(
+        &workdir,
+        &[
+            ("main.py", b"needle\n"),
+            ("lib/helper.py", b"needle\n"),
+            ("lib/notes.md", b"needle\n"),
+            ("src/a/b.rs", b"needle\n"),
+        ],
+    );
+
+    for (glob, expected) in [
+        ("*.py", vec!["lib/helper.py", "main.py"]),
+        ("src/**/*.rs", vec!["src/a/b.rs"]),
+        ("lib/*", vec!["lib/helper.py", "lib/notes.md"]),
+    ] {
+        let (status, payload, _meta) = run_editor(
+            &eng,
+            &component,
+            &lnk,
+            &workdir,
+            &find_payload(serde_json::json!({ "pattern": "needle", "glob": glob })),
+        );
+        assert!(matches!(status, Status::Passed), "{glob}: {status:?}");
+        assert_eq!(match_paths(&payload), expected, "{glob}");
+    }
+
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn find_in_files_root_search_caps_at_200_matches() {
+    let eng = engine();
+    let component = Component::from_file(&eng, component_path()).expect("load component");
+    let lnk = linker(&eng);
+    let workdir = unique_workdir("find_match_cap");
+    let body: String = (1..=250).map(|i| format!("def f{i}(): pass\n")).collect();
+    std::fs::write(workdir.join("big.py"), body).unwrap();
+
+    let result = run_editor_raw(
+        &eng,
+        &component,
+        &lnk,
+        &workdir,
+        &find_payload(serde_json::json!({ "pattern": "def " })),
+    );
+    assert!(
+        matches!(result.status, Status::Passed),
+        "status: {:?}",
+        result.status
+    );
+    assert!(
+        result.truncated,
+        "a capped search sets ToolResult.truncated"
+    );
+    assert_eq!(
+        result.summary.as_deref(),
+        Some("200 matches in 1 files (capped)")
+    );
+
+    let raw = result.data.as_deref().expect("data");
+    let capped_at = raw.find("\"capped\"").expect("a capped key");
+    let matches_at = raw.find("\"matches\"").expect("a matches key");
+    assert!(
+        capped_at < matches_at,
+        "the model reads the note before the matches: {raw:.200}"
+    );
+
+    let data: Value = serde_json::from_str(raw).unwrap();
+    let note = data["capped"].as_str().expect("capped is a string");
+    for word in ["200", "dir", "glob"] {
+        assert!(note.contains(word), "note lacks {word:?}: {note}");
+    }
+    let lines: Vec<i64> = data["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["line"].as_i64().unwrap())
+        .collect();
+    assert_eq!(lines, (1..=200).collect::<Vec<i64>>());
+
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
 /// Build a synthetic tree of `dirs * files_per_dir` small text files under `root`, one of
 /// which contains the marker `NEEDLE`. Returns the file count.
 fn build_tree(root: &Path, dirs: usize, files_per_dir: usize) -> usize {
@@ -634,6 +869,8 @@ fn find_in_files_benchmark_no_orders_of_magnitude_regression() {
     // ToolResult.data for find is the `data` field: `{"matches":[...]}`.
     let wasm_payload: Value = serde_json::from_str(wasm_res.data.as_deref().unwrap()).unwrap();
     assert_eq!(wasm_payload["matches"].as_array().map(|a| a.len()), Some(1));
+    assert!(wasm_payload.get("capped").is_none(), "3000 files stay under every limit");
+    assert!(!wasm_res.truncated);
 
     // Full instantiate+call, for the process-spawn analogue number.
     let t = Instant::now();

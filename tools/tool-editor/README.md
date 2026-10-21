@@ -18,10 +18,77 @@ workdir (the component's CWD at dispatch time); an absolute value is
 | `read_file` | `path` | `start_line`, `end_line` | — |
 | `write_file` | `dest_path`, `content` | — | `dest_path` |
 | `replace_in_file` | `dest_path`, `old_string`, `new_string` | — | `dest_path` |
-| `find_in_files` | `pattern`, `dir` | `recursive`, `context_lines` | — |
+| `find_in_files` | `pattern` | `dir`, `glob`, `recursive`, `context_lines` | — |
 
 The two writing operations name their target `dest_path`; the two reading
 operations take `path` and `dir`. The split is not cosmetic — see below.
+
+## Searching with `find_in_files`
+
+`find_in_files` matches `pattern`, a regular expression, against each line of
+the files it reads, and returns one `{path, line, text}` per matching line.
+`path` is relative to `dir`, `/`-separated.
+
+`dir` is optional. Omitted, `null`, `""`, `.`, `./`, or any value that
+normalizes to the workdir root, such as `src/..`, searches the whole workdir.
+`.` segments are dropped and each `..` removes the segment before it; a `..`
+that climbs above the workdir is refused with `error_kind: "outside_workdir"`.
+
+Below the directory it searches, the walk skips:
+
+| Skipped | Rule |
+|---|---|
+| Hidden directories | any name starting with `.`, such as `.git` and `.venv` |
+| Build and dependency directories | `target`, `node_modules` |
+| Binary files | a NUL byte in the first 8 KiB, or content that is not UTF-8 |
+
+Hidden files, such as `.env`, are searched. A `dir` that names a skipped
+directory, such as `.git` or `target/debug`, searches it. `recursive: false`
+reads only the files directly in `dir`.
+
+`glob` is optional and filters which files are read. A glob without `/` is
+matched against the file name, so `*.py` matches a Python file at any depth. A
+glob with `/` is matched against the path relative to `dir`, the same `path` a
+match reports.
+
+| Glob syntax | Matches |
+|---|---|
+| `*` | any characters within one path segment |
+| `?` | one character other than `/` |
+| `**/` | zero or more whole segments: `src/**/*.rs` matches `src/a.rs` and `src/x/y/a.rs` |
+| `/**` at the end | everything below: `lib/**` |
+| any other character | itself |
+
+Files the glob excludes are never read and count against no limit. An absolute
+`glob` is refused like an absolute `dir`.
+
+A search stops at the first limit it reaches:
+
+| Limit | Value |
+|---|---|
+| Matches | 200 |
+| Files read | 5000 |
+| Bytes read | 32 MiB |
+| Result size | 500 KB |
+
+A search that reaches a limit still succeeds. It returns the matches found so
+far, in walk order (sorted by name within each directory), with a `capped` note
+in `data`, and its summary ends in `(capped)`:
+
+```json
+{
+  "capped": "Search stopped at the limit of 200 matches after searching 1 file; more matches may exist. Narrow the search with a dir (for example \"src\"), a glob (for example \"*.py\") or a more specific pattern.",
+  "matches": [
+    { "path": "big.py", "line": 1, "text": "def f1(): pass" },
+    { "path": "big.py", "line": 2, "text": "def f2(): pass" }
+  ]
+}
+```
+
+A search that reaches no limit carries no `capped` key. The result's
+`truncated` flag is set exactly when `capped` is present. The only refusal on
+size is `error_kind: "result_size_exceeded"`, when the first match alone does
+not fit in 500 KB.
 
 ## A missing or unknown `operation`
 
@@ -45,8 +112,8 @@ with no `operation` read `unknown operation: ` with nothing after the colon.
 
 ## Absolute paths are refused
 
-`path`, `dest_path` and `dir` are workdir-relative by contract, and a value
-beginning with `/` is refused before the operation touches the filesystem:
+`path`, `dest_path`, `dir` and `glob` are workdir-relative by contract, and a
+value beginning with `/` is refused before the operation touches the filesystem:
 
 ```json
 {
@@ -57,8 +124,8 @@ beginning with `/` is refused before the operation touches the filesystem:
 ```
 
 The message names the property the call actually wrote — `path` for `read_file`,
-`dest_path` for `write_file` and `replace_in_file`, `dir` for `find_in_files` —
-and suggests the value's final component. A value with no final component (`/`,
+`dest_path` for `write_file` and `replace_in_file`, `dir` or `glob` for
+`find_in_files` — and suggests the value's final component. A value with no final component (`/`,
 or one ending in `..`) gets no suggestion, so the message ends at the offending
 value:
 
@@ -106,6 +173,18 @@ have made every read under that subtree a refusal.
 
 `find_in_files` results carry a `path` key per match. That is an output, not an
 input — the runtime scans tool input only.
+
+## Breaking change in 0.8.0
+
+- The error kind search\_too\_broad is gone. A `find_in_files` call with
+  `dir` set to `""`, `.` or `./` now searches the workdir root instead of being
+  refused.
+- `dir` is optional. Omitted, it searches the workdir root.
+- A search over a limit returns `ok: true` with a `capped` note and the
+  matches found so far, where it used to return `result_size_exceeded`. That
+  error now fires only when a single match exceeds 500 KB. A caller that
+  handled search\_too\_broad or `result_size_exceeded` must read `capped`
+  instead.
 
 ## Breaking change in 0.5.0
 
