@@ -138,7 +138,11 @@ jobs:
   build-isolation:
     runs-on: ubuntu-latest
     env:
-      MUR_BIN: ${{ github.workspace }}/murmur/target/debug/mur
+      # Outside every target directory rust-cache restores: on a cache key that is not a
+      # full match (any change to either Cargo.lock), rust-cache pre-cleans each listed
+      # workspace's target/debug down to build/, .fingerprint/ and deps/, which would
+      # delete a mur left in murmur/target/debug.
+      MUR_BIN: ${{ github.workspace }}/bin/mur
     steps:
       # Both repositories nest under $GITHUB_WORKSPACE: actions/checkout rejects a path
       # that escapes it, so this is the sibling layout that passes its validation.
@@ -195,6 +199,7 @@ jobs:
         working-directory: murmur
         run: |
           cargo build -p murmur-cli
+          install -D target/debug/mur "$MUR_BIN"
           "$MUR_BIN" version
 
       # Pinned toolchain. rust-toolchain.toml is the source of truth; this
