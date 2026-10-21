@@ -1,5 +1,5 @@
 name: tool-git
-version: 0.3.0
+version: 0.4.0
 runtime: tool
 implementation: native
 description: |
