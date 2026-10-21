@@ -1,9 +1,9 @@
 name: hook-shell-desc
-version: 0.7.0
+version: 0.8.0
 runtime: hook
 binding: on-stage
 execution_mode: blocking
 commit_policy: write-manifests
-description: "Returns enriched tool manifests for common shell binaries at staging time."
+description: "Returns tool manifests for common non-interpreter shell binaries at staging time, stating what each takes and returns; shell interpreters keep the runtime's own description."
 requires_files:
   - hook_shell_desc.wasm
