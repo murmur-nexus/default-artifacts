@@ -12,7 +12,9 @@ The driver reads no provider key and sends no authentication header. Murmur's
 runtime authenticates each call with the header declared under
 `upstream_auth:` in [murmur.yaml](./murmur.yaml), the full manifest; the
 capsule author supplies the key as `gateway.api_key` on the driver's
-`artifacts:` entry.
+`artifacts:` entry, as a reference such as `${ANTHROPIC_API_KEY}`. An entry that
+sets neither `api_key` nor `keyless: true` fails the launch with
+`E-CAP-018`.
 
 The endpoint arrives in the `MURMUR_INFERENCE_ENDPOINT` environment variable.
 The runtime sets it to its own loopback gateway plus the path of the entry's
