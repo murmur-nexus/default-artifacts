@@ -647,6 +647,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "driver-zai"
+version = "0.0.0"
+dependencies = [
+ "murmur-driver-env",
+ "serde",
+ "serde_json",
+ "wasip2",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
 name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

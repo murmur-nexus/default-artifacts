@@ -36,16 +36,17 @@ WASM components (`runtime: driver`). Export `murmur:tool/run` (`world driver`) a
 | `driver-deepseek` | `drivers/driver-deepseek/` | DeepSeek API — `deepseek-v4-flash` and `deepseek-v4-pro`, with thinking mode |
 | `driver-moonshotai` | `drivers/driver-moonshotai/` | Moonshot AI Chat Completions API — `kimi-k3` only, which always reasons; reasoning effort and `json_schema` structured output are tuned by `inference.driver.config`, which rejects any key it does not read |
 | `driver-openai` | `drivers/driver-openai/` | OpenAI-compatible Chat Completions API, with Responses API for `gpt-5` and later models; reasoning summaries, effort and verbosity are tuned by `inference.driver.config`, which rejects any key it does not read |
+| `driver-zai` | `drivers/driver-zai/` | Z.ai Chat Completions API — `glm-5.3` only, which always reasons; reasoning effort is tuned by `inference.driver.config`, which rejects any key it does not read, and the reasoning goes back to Z.ai on every later turn |
 
-All four report the provider's own token counts on an optional top-level `usage` object of the response — `input_tokens`, `output_tokens`, `cached_tokens`, `cache_write_tokens` — which Murmur carries onto the `inference` trace event. `input_tokens` counts only the request tokens neither read from nor written to the prompt cache, so `input_tokens + cached_tokens + cache_write_tokens` is the provider's total request count, whichever way the provider itself splits it. Each member is independently optional and is omitted, never zero-filled, when the provider did not report it. `driver-openai` also forwards Murmur's `prompt_cache_key` routing hint into the provider body; the other three drop it, because none of those provider APIs defines a cache-key field. See each driver's own README for the per-provider field mapping.
+All five report the provider's own token counts on an optional top-level `usage` object of the response — `input_tokens`, `output_tokens`, `cached_tokens`, `cache_write_tokens` — which Murmur carries onto the `inference` trace event. `input_tokens` counts only the request tokens neither read from nor written to the prompt cache, so `input_tokens + cached_tokens + cache_write_tokens` is the provider's total request count, whichever way the provider itself splits it. Each member is independently optional and is omitted, never zero-filled, when the provider did not report it. `driver-openai` also forwards Murmur's `prompt_cache_key` routing hint into the provider body; the other four drop it, because none of those provider APIs defines a cache-key field. See each driver's own README for the per-provider field mapping.
 
-All four also take the endpoint they talk to from the host, in
+All five also take the endpoint they talk to from the host, in
 `MURMUR_INFERENCE_ENDPOINT`, and none of them carries a provider URL of its own.
 `inference.endpoint` is therefore required in the capsule manifest for every one
 of them: an endpoint that is absent, empty or whitespace-only is refused before
 any request is built, never replaced with a provider default.
 
-All four stream text and thinking, and report each tool call while the model is still writing
+All five stream text and thinking, and report each tool call while the model is still writing
 it, through `murmur:stream/events@0.1.0`: the call's start, with the id and name of the
 `tool_call` the driver will return, then a rising UTF-8 byte count of its arguments, never the
 arguments themselves. On `transport: http` these become `tool-call-started` and
@@ -59,6 +60,7 @@ v0.6.0, see above) refuses a driver release built before it at launch, with `E-W
 | `driver-deepseek` | 0.8.0 |
 | `driver-moonshotai` | 0.7.0 |
 | `driver-openai` | 0.9.0 |
+| `driver-zai` | 0.1.0 |
 
 See each driver's "Tool-call progress" section for the provider event each report is taken from.
 

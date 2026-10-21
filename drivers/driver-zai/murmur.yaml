@@ -1,0 +1,17 @@
+name: driver-zai
+version: 0.1.0
+runtime: driver
+description: "Z.ai inference driver — glm-5.3 on the Chat Completions surface, with reasoning_effort and thinking config keys"
+requires_files:
+  - driver_zai.wasm
+
+# How this provider expects the inference credential to be presented; the runtime substitutes {key}.
+upstream_auth:
+  header: Authorization
+  value: "Bearer {key}"
+
+# The limits of each model this driver serves; src/lib.rs's SUPPORTED_MODELS holds the same numbers.
+models:
+  glm-5.3:
+    max_output_tokens: 131072
+    context_window: 1048576
