@@ -1,5 +1,5 @@
 name: driver-zai
-version: 0.1.0
+version: 0.2.0
 runtime: driver
 description: "Z.ai inference driver — glm-5.3 on the Chat Completions surface, with reasoning_effort and thinking config keys"
 requires_files:

@@ -882,7 +882,6 @@ fn dispatch_anthropic_sse_event(
     let block_index = |val: &Value| {
         val.get("index")
             .and_then(Value::as_u64)
-            .and_then(|index| usize::try_from(index).ok())
             .ok_or_else(|| malformed(format_args!("{event} has no index")))
     };
 
@@ -896,6 +895,9 @@ fn dispatch_anthropic_sse_event(
         "content_block_start" => {
             let val = parse()?;
             let index = block_index(&val)?;
+            // Taken before the block is built, so a refused index sends no tool-call signal.
+            let slot = murmur_driver_stream::slot_mut(&mut state.blocks, index)
+                .map_err(|err| malformed(format_args!("content block {err}")))?;
             let block_type = val
                 .pointer("/content_block/type")
                 .and_then(Value::as_str)
@@ -935,10 +937,7 @@ fn dispatch_anthropic_sse_event(
                 _ => AnthropicBlock::Ignored,
             };
 
-            while state.blocks.len() <= index {
-                state.blocks.push(None);
-            }
-            state.blocks[index] = Some(block);
+            *slot = Some(block);
         }
         "content_block_delta" => {
             let val = parse()?;
@@ -951,7 +950,10 @@ fn dispatch_anthropic_sse_event(
                         "content_block_delta for block {index} has no delta type"
                     ))
                 })?;
-            let Some(Some(block)) = state.blocks.get_mut(index) else {
+            let Some(Some(block)) = usize::try_from(index)
+                .ok()
+                .and_then(|index| state.blocks.get_mut(index))
+            else {
                 return Err(malformed(format_args!(
                     "{delta_type} for block {index}, which never started"
                 )));
@@ -3752,6 +3754,69 @@ mod tests {
         assert_eq!(result["content"][1]["id"], "toolu_b");
         assert_eq!(result["content"][1]["input"], json!({"cmd": "ls ZQXJ"}));
         assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    #[test]
+    fn a_content_block_index_past_the_limit_fails_the_turn_without_allocating() {
+        use super::{process_anthropic_sse_line, AnthropicSseState};
+
+        for index in [1024, 4_294_967_296, u64::MAX] {
+            let expected = format!(
+                "driver: malformed Anthropic stream: content block index {index} is past the limit of 1024 per turn"
+            );
+            let tool_start = json!({"type": "content_block_start", "index": index, "content_block": {"type": "tool_use", "id": "toolu_x", "name": "bash", "input": {}}})
+                .to_string();
+            let text_start = json!({"type": "content_block_start", "index": index, "content_block": {"type": "text", "text": ""}})
+                .to_string();
+            for start in [tool_start.as_str(), text_start.as_str()] {
+                let body = sse(&[
+                    ("content_block_start", start),
+                    ("message_delta", TOOL_USE_STOP),
+                    ("message_stop", MESSAGE_STOP),
+                ]);
+                assert_eq!(parse_stream(&body), Err(expected.clone()));
+
+                let mut state = AnthropicSseState::new();
+                let mut signals = Vec::new();
+                for line in body.lines() {
+                    process_anthropic_sse_line(
+                        line,
+                        &mut state,
+                        &mut |_| {},
+                        &mut |_| {},
+                        &mut |s| signals.push(RecordedSignal::from(s)),
+                    );
+                }
+                assert_eq!(state.blocks.capacity(), 0);
+                assert_eq!(signals, vec![]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_tool_use_block_at_the_last_index_under_the_limit_is_kept() {
+        let body = sse(&[
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":1023,"content_block":{"type":"tool_use","id":"toolu_last","name":"bash","input":{}}}"#,
+            ),
+            ("content_block_delta", &input_delta(1023, r#"{"cmd":"ls"}"#)),
+            ("message_delta", TOOL_USE_STOP),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+
+        let (result, signals) = parse_stream_with_signals(&body);
+
+        assert_eq!(
+            signals,
+            vec![started("toolu_last", "bash"), input_bytes("toolu_last", 12)]
+        );
+        assert_eq!(result["stop_reason"], "tool_call");
+        assert_eq!(result["content"].as_array().unwrap().len(), 1);
+        let call = &result["content"][0];
+        assert_eq!(call["id"], "toolu_last");
+        assert_eq!(call["name"], "bash");
+        assert_eq!(call["input"], json!({"cmd": "ls"}));
     }
 
     #[test]

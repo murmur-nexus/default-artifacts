@@ -599,6 +599,7 @@ name = "driver-anthropic"
 version = "0.0.0"
 dependencies = [
  "murmur-driver-env",
+ "murmur-driver-stream",
  "serde",
  "serde_json",
  "wasip2",
@@ -618,6 +619,7 @@ name = "driver-deepseek"
 version = "0.0.0"
 dependencies = [
  "murmur-driver-env",
+ "murmur-driver-stream",
  "serde",
  "serde_json",
  "wasip2",
@@ -629,6 +631,7 @@ name = "driver-moonshotai"
 version = "0.0.0"
 dependencies = [
  "murmur-driver-env",
+ "murmur-driver-stream",
  "serde",
  "serde_json",
  "wasip2",
@@ -640,6 +643,7 @@ name = "driver-openai"
 version = "0.0.0"
 dependencies = [
  "murmur-driver-env",
+ "murmur-driver-stream",
  "serde",
  "serde_json",
  "wasip2",
@@ -651,6 +655,7 @@ name = "driver-zai"
 version = "0.0.0"
 dependencies = [
  "murmur-driver-env",
+ "murmur-driver-stream",
  "serde",
  "serde_json",
  "wasip2",
@@ -1439,6 +1444,10 @@ dependencies = [
 
 [[package]]
 name = "murmur-driver-env"
+version = "0.0.0"
+
+[[package]]
+name = "murmur-driver-stream"
 version = "0.0.0"
 
 [[package]]
