@@ -1353,7 +1353,8 @@ enum ToolCallSignal<'a> {
     InputBytes { id: &'a str, bytes: u64 },
 }
 
-/// Process one complete SSE line. Returns `true` when the stream is done (`[DONE]`).
+/// Process one complete SSE line. Returns `Ok(true)` when the stream is done (`[DONE]`),
+/// and `Err` for a tool call index past [`murmur_driver_stream::MAX_SLOTS_PER_TURN`].
 ///
 /// Text content is routed through `thinking` and split between `emit_text` (which the
 /// caller also uses to accumulate `text_acc`) and `emit_thinking`. Structured thinking
@@ -1368,15 +1369,15 @@ fn process_openai_sse_line(
     emit_text: &mut impl FnMut(&str),
     emit_thinking: &mut impl FnMut(&str),
     signal: &mut impl FnMut(ToolCallSignal<'_>),
-) -> bool {
+) -> Result<bool, String> {
     if line == "data: [DONE]" {
-        return true;
+        return Ok(true);
     }
     let Some(json_str) = line.strip_prefix("data: ") else {
-        return false;
+        return Ok(false);
     };
     let Ok(data) = serde_json::from_str::<Value>(json_str) else {
-        return false;
+        return Ok(false);
     };
 
     // Read before the `choices`-shaped early returns below: the chunk that carries usage (sent
@@ -1400,7 +1401,7 @@ fn process_openai_sse_line(
     }
 
     let Some(delta) = choice.and_then(|c| c.get("delta")) else {
-        return false;
+        return Ok(false);
     };
 
     // Text delta — handle both string and array content forms.
@@ -1435,30 +1436,29 @@ fn process_openai_sse_line(
     // Tool call fragments.
     if let Some(tc_arr) = delta.get("tool_calls").and_then(Value::as_array) {
         for tc in tc_arr {
-            let idx = tc.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-            while tool_states.len() <= idx {
-                tool_states.push(ToolCallState::default());
-            }
+            let index = tc.get("index").and_then(Value::as_u64).unwrap_or(0);
+            let state = murmur_driver_stream::slot_mut(tool_states, index)
+                .map_err(|err| format!("driver: tool call {err}"))?;
             if let Some(id) = tc.get("id").and_then(Value::as_str) {
-                if tool_states[idx].id.is_empty() {
-                    tool_states[idx].id = id.to_string();
+                if state.id.is_empty() {
+                    state.id = id.to_string();
                 }
             }
             if let Some(func) = tc.get("function") {
                 if let Some(name) = func.get("name").and_then(Value::as_str) {
-                    if tool_states[idx].name.is_empty() {
-                        tool_states[idx].name = name.to_string();
+                    if state.name.is_empty() {
+                        state.name = name.to_string();
                     }
                 }
                 if let Some(args) = func.get("arguments").and_then(Value::as_str) {
-                    tool_states[idx].arguments.push_str(args);
+                    state.arguments.push_str(args);
                 }
             }
-            tool_states[idx].signal_due(signal);
+            state.signal_due(signal);
         }
     }
 
-    false
+    Ok(false)
 }
 
 /// Parse a complete SSE body string (used in tests).
@@ -1533,8 +1533,10 @@ fn parse_openai_sse_body_with_signals<F: FnMut(&str), G: FnMut(&str)>(
                 &mut |s| signals.push(RecordedSignal::from(s)),
             )
         };
-        if done {
-            break;
+        match done {
+            Ok(true) => break,
+            Ok(false) => {}
+            Err(err) => return (Err(err), signals),
         }
     }
     {
@@ -2111,86 +2113,94 @@ mod wasm_driver {
         let mut stop_reason: Option<String> = None;
         let mut usage = UsageTokens::default();
         let mut thinking = ThinkingState::new();
-        let mut done = false;
 
-        // Process bytes already read.
-        for &b in first {
-            if b == b'\n' {
-                let line = String::from_utf8_lossy(&line_buf);
-                let line = line.trim_end_matches('\r');
-                {
-                    let mut emit_t = |t: &str| {
-                        murmur::stream::events::emit_chunk(t);
-                        text_acc.push_str(t);
-                    };
-                    let mut emit_think = |t: &str| {
-                        murmur::stream::events::emit_thinking_chunk(t);
-                        thinking_acc.push_str(t);
-                    };
-                    done = process_openai_sse_line(
-                        line,
-                        &mut tool_states,
-                        &mut stop_reason,
-                        &mut usage,
-                        &mut thinking,
-                        &mut emit_t,
-                        &mut emit_think,
-                        &mut signal_tool_call,
-                    );
+        // The line loop runs in a closure so that every exit, an `Err`
+        // included, reaches the drops below: wasmtime traps when the
+        // `IncomingBody` is dropped while its child `InputStream` lives.
+        let streamed = (|| -> Result<(), String> {
+            let mut done = false;
+
+            // Process bytes already read.
+            for &b in first {
+                if b == b'\n' {
+                    let line = String::from_utf8_lossy(&line_buf);
+                    let line = line.trim_end_matches('\r');
+                    {
+                        let mut emit_t = |t: &str| {
+                            murmur::stream::events::emit_chunk(t);
+                            text_acc.push_str(t);
+                        };
+                        let mut emit_think = |t: &str| {
+                            murmur::stream::events::emit_thinking_chunk(t);
+                            thinking_acc.push_str(t);
+                        };
+                        done = process_openai_sse_line(
+                            line,
+                            &mut tool_states,
+                            &mut stop_reason,
+                            &mut usage,
+                            &mut thinking,
+                            &mut emit_t,
+                            &mut emit_think,
+                            &mut signal_tool_call,
+                        )?;
+                    }
+                    line_buf.clear();
+                    if done {
+                        break;
+                    }
+                } else {
+                    line_buf.push(b);
                 }
-                line_buf.clear();
-                if done {
-                    break;
-                }
-            } else {
-                line_buf.push(b);
             }
-        }
 
-        // Continue reading remaining chunks.
-        if !done {
-            'outer: loop {
-                let chunk = read_chunk(&stream)?;
-                if chunk.is_empty() {
-                    break;
-                }
-                for &b in &chunk {
-                    if b == b'\n' {
-                        let line = String::from_utf8_lossy(&line_buf);
-                        let line = line.trim_end_matches('\r');
-                        {
-                            let mut emit_t = |t: &str| {
-                                murmur::stream::events::emit_chunk(t);
-                                text_acc.push_str(t);
-                            };
-                            let mut emit_think = |t: &str| {
-                                murmur::stream::events::emit_thinking_chunk(t);
-                                thinking_acc.push_str(t);
-                            };
-                            done = process_openai_sse_line(
-                                line,
-                                &mut tool_states,
-                                &mut stop_reason,
-                                &mut usage,
-                                &mut thinking,
-                                &mut emit_t,
-                                &mut emit_think,
-                                &mut signal_tool_call,
-                            );
+            // Continue reading remaining chunks.
+            if !done {
+                'outer: loop {
+                    let chunk = read_chunk(&stream)?;
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    for &b in &chunk {
+                        if b == b'\n' {
+                            let line = String::from_utf8_lossy(&line_buf);
+                            let line = line.trim_end_matches('\r');
+                            {
+                                let mut emit_t = |t: &str| {
+                                    murmur::stream::events::emit_chunk(t);
+                                    text_acc.push_str(t);
+                                };
+                                let mut emit_think = |t: &str| {
+                                    murmur::stream::events::emit_thinking_chunk(t);
+                                    thinking_acc.push_str(t);
+                                };
+                                done = process_openai_sse_line(
+                                    line,
+                                    &mut tool_states,
+                                    &mut stop_reason,
+                                    &mut usage,
+                                    &mut thinking,
+                                    &mut emit_t,
+                                    &mut emit_think,
+                                    &mut signal_tool_call,
+                                )?;
+                            }
+                            line_buf.clear();
+                            if done {
+                                break 'outer;
+                            }
+                        } else {
+                            line_buf.push(b);
                         }
-                        line_buf.clear();
-                        if done {
-                            break 'outer;
-                        }
-                    } else {
-                        line_buf.push(b);
                     }
                 }
             }
-        }
+            Ok(())
+        })();
 
         drop(stream);
         let _ = wasip2::http::types::IncomingBody::finish(incoming_body);
+        streamed?;
         {
             let mut emit_t = |t: &str| {
                 murmur::stream::events::emit_chunk(t);
@@ -2228,92 +2238,100 @@ mod wasm_driver {
         let mut error_message: Option<String> = None;
         let mut response_id: Option<String> = None;
         let mut usage = UsageTokens::default();
-        let mut done = false;
 
-        // Process bytes already read.
-        for &b in first {
-            if b == b'\n' {
-                let line = String::from_utf8_lossy(&line_buf);
-                let line = line.trim_end_matches('\r');
-                {
-                    let mut emit_t = |t: &str| {
-                        murmur::stream::events::emit_chunk(t);
-                        text_acc.push_str(t);
-                    };
-                    let mut emit_think = |t: &str| {
-                        murmur::stream::events::emit_thinking_chunk(t);
-                        thinking_acc.push_str(t);
-                    };
-                    done = process_responses_sse_line(
-                        line,
-                        &mut tool_states,
-                        &mut tool_index_by_output_index,
-                        &mut status,
-                        &mut incomplete_reason,
-                        &mut error_message,
-                        &mut response_id,
-                        &mut usage,
-                        &mut emit_t,
-                        &mut emit_think,
-                        &mut signal_tool_call,
-                    );
+        // The line loop runs in a closure so that every exit, an `Err`
+        // included, reaches the drops below: wasmtime traps when the
+        // `IncomingBody` is dropped while its child `InputStream` lives.
+        let streamed = (|| -> Result<(), String> {
+            let mut done = false;
+
+            // Process bytes already read.
+            for &b in first {
+                if b == b'\n' {
+                    let line = String::from_utf8_lossy(&line_buf);
+                    let line = line.trim_end_matches('\r');
+                    {
+                        let mut emit_t = |t: &str| {
+                            murmur::stream::events::emit_chunk(t);
+                            text_acc.push_str(t);
+                        };
+                        let mut emit_think = |t: &str| {
+                            murmur::stream::events::emit_thinking_chunk(t);
+                            thinking_acc.push_str(t);
+                        };
+                        done = process_responses_sse_line(
+                            line,
+                            &mut tool_states,
+                            &mut tool_index_by_output_index,
+                            &mut status,
+                            &mut incomplete_reason,
+                            &mut error_message,
+                            &mut response_id,
+                            &mut usage,
+                            &mut emit_t,
+                            &mut emit_think,
+                            &mut signal_tool_call,
+                        );
+                    }
+                    line_buf.clear();
+                    if done {
+                        break;
+                    }
+                } else {
+                    line_buf.push(b);
                 }
-                line_buf.clear();
-                if done {
-                    break;
-                }
-            } else {
-                line_buf.push(b);
             }
-        }
 
-        // Continue reading remaining chunks.
-        if !done {
-            'outer: loop {
-                let chunk = read_chunk(&stream)?;
-                if chunk.is_empty() {
-                    break;
-                }
-                for &b in &chunk {
-                    if b == b'\n' {
-                        let line = String::from_utf8_lossy(&line_buf);
-                        let line = line.trim_end_matches('\r');
-                        {
-                            let mut emit_t = |t: &str| {
-                                murmur::stream::events::emit_chunk(t);
-                                text_acc.push_str(t);
-                            };
-                            let mut emit_think = |t: &str| {
-                                murmur::stream::events::emit_thinking_chunk(t);
-                                thinking_acc.push_str(t);
-                            };
-                            done = process_responses_sse_line(
-                                line,
-                                &mut tool_states,
-                                &mut tool_index_by_output_index,
-                                &mut status,
-                                &mut incomplete_reason,
-                                &mut error_message,
-                                &mut response_id,
-                                &mut usage,
-                                &mut emit_t,
-                                &mut emit_think,
-                                &mut signal_tool_call,
-                            );
+            // Continue reading remaining chunks.
+            if !done {
+                'outer: loop {
+                    let chunk = read_chunk(&stream)?;
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    for &b in &chunk {
+                        if b == b'\n' {
+                            let line = String::from_utf8_lossy(&line_buf);
+                            let line = line.trim_end_matches('\r');
+                            {
+                                let mut emit_t = |t: &str| {
+                                    murmur::stream::events::emit_chunk(t);
+                                    text_acc.push_str(t);
+                                };
+                                let mut emit_think = |t: &str| {
+                                    murmur::stream::events::emit_thinking_chunk(t);
+                                    thinking_acc.push_str(t);
+                                };
+                                done = process_responses_sse_line(
+                                    line,
+                                    &mut tool_states,
+                                    &mut tool_index_by_output_index,
+                                    &mut status,
+                                    &mut incomplete_reason,
+                                    &mut error_message,
+                                    &mut response_id,
+                                    &mut usage,
+                                    &mut emit_t,
+                                    &mut emit_think,
+                                    &mut signal_tool_call,
+                                );
+                            }
+                            line_buf.clear();
+                            if done {
+                                break 'outer;
+                            }
+                        } else {
+                            line_buf.push(b);
                         }
-                        line_buf.clear();
-                        if done {
-                            break 'outer;
-                        }
-                    } else {
-                        line_buf.push(b);
                     }
                 }
             }
-        }
+            Ok(())
+        })();
 
         drop(stream);
         let _ = wasip2::http::types::IncomingBody::finish(incoming_body);
+        streamed?;
         let result = assemble_responses_streaming_response(
             &text_acc,
             &thinking_acc,
@@ -4791,6 +4809,71 @@ mod tests {
         assert_eq!(result["content"][1]["id"], "call_b");
         assert_eq!(result["content"][1]["input"], json!({"cmd": "ls ZQXJ"}));
         assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    #[test]
+    fn a_tool_call_index_past_the_limit_fails_the_turn_without_allocating() {
+        use super::{process_openai_sse_line, ThinkingState, UsageTokens};
+
+        for index in [1024, 4_294_967_296, u64::MAX] {
+            let line = chat_tool_delta(index, Some("call_x"), Some("bash"), Some(""));
+            let mut tool_states = Vec::new();
+            let mut signals = Vec::new();
+            let result = process_openai_sse_line(
+                line.trim_end_matches('\n'),
+                &mut tool_states,
+                &mut None,
+                &mut UsageTokens::default(),
+                &mut ThinkingState::new(),
+                &mut |_| {},
+                &mut |_| {},
+                &mut |s| signals.push(RecordedSignal::from(s)),
+            );
+            assert_eq!(
+                result,
+                Err(format!(
+                    "driver: tool call index {index} is past the limit of 1024 per turn"
+                ))
+            );
+            assert_eq!(tool_states.capacity(), 0);
+            assert_eq!(signals, vec![]);
+        }
+
+        let body = [
+            chat_tool_delta(0, Some("call_a"), Some("read"), Some("")),
+            chat_tool_delta(4_294_967_296, Some("call_x"), Some("bash"), Some("")),
+            CHAT_TOOL_CALLS_FINISH.to_string(),
+        ]
+        .concat();
+        let (result, _) = parse_openai_sse_body_with_signals(&body, &mut |_| {}, &mut |_| {});
+        assert_eq!(
+            result,
+            Err(
+                "driver: tool call index 4294967296 is past the limit of 1024 per turn".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn a_tool_call_at_the_last_index_under_the_limit_is_kept() {
+        let body = [
+            chat_tool_delta(
+                1023,
+                Some("call_last"),
+                Some("bash"),
+                Some(r#"{"cmd":"ls"}"#),
+            ),
+            CHAT_TOOL_CALLS_FINISH.to_string(),
+        ]
+        .concat();
+
+        let (result, _) = parse_chat_with_signals(&body);
+
+        assert_eq!(result["content"].as_array().unwrap().len(), 1);
+        let call = &result["content"][0];
+        assert_eq!(call["id"], "call_last");
+        assert_eq!(call["name"], "bash");
+        assert_eq!(call["input"], json!({"cmd": "ls"}));
     }
 
     #[test]

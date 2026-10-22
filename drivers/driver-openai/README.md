@@ -243,6 +243,20 @@ so the task ends failed. A connection dropped before the final chunk is the
 common cause; text already streamed is not withdrawn, it is just not recorded as
 a finished reply.
 
+A stream that breaks off with a read error instead, such as a body cut short of
+its declared `content-length`, fails the turn on either surface with
+`driver: failed to read response stream: <error>`, returned the same way.
+
 A failed task status and a `task_failed` trace line with cause `driver_error`
 need a murmur runtime released after v0.4.0. On v0.4.0 and earlier the runtime
 records the error but still reports the task as `ok` and exits 0.
+
+## A tool call index past 1024 is refused
+
+On Chat Completions, a turn holds at most 1024 tool calls: a streamed chunk
+numbers each call with an `index`, and one naming index 1024 or more fails the
+turn with `driver: tool call index <n> is past the limit of 1024 per turn`
+before anything is stored for it or the call is reported. A chunk whose call has
+no `index` is read as index 0.
+
+The Responses surface keys its calls by `output_index` and has no such limit.

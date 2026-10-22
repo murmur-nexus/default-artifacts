@@ -50,6 +50,14 @@ A failed task status and a `task_failed` trace line with cause `driver_error`
 need a murmur runtime released after v0.4.0. On v0.4.0 and earlier the runtime
 records the error but still reports the task as `ok` and exits 0.
 
+## A tool call index past 1024 is refused
+
+A turn holds at most 1024 tool calls: a streamed chunk numbers each call with an
+`index`, and one naming index 1024 or more fails the turn with
+`driver: tool call index <n> is past the limit of 1024 per turn` before anything
+is stored for it or the call is reported. A chunk whose call has no `index` is
+read as index 0.
+
 ## Tool-call progress
 
 While the model is still writing a tool call, the driver reports it to the host through

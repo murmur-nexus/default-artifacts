@@ -206,6 +206,7 @@ The translation failures:
 | SSE stream that ends before any `message_delta` carries a non-empty `stop_reason`: a dropped connection, or an empty body | `driver: Anthropic stream ended with no stop_reason` |
 | JSON body missing a field that changes what the turn means | `driver: malformed Anthropic response: <what is missing>` |
 | SSE event missing a field that changes what the turn means | `driver: malformed Anthropic stream: <what is missing>` |
+| SSE `content_block_start` at an `index` of 1024 or more | `driver: malformed Anthropic stream: content block index <n> is past the limit of 1024 per turn` |
 | Streamed tool input that does not parse, on a turn stopped by `max_tokens` | `driver: Anthropic turn stopped at the inference.max_tokens output cap; tool call '<name>' was cut off mid-input and cannot be run — raise the cap and re-run` |
 
 A JSON body must carry a `content` array. Each block must carry a string `type`;
@@ -215,10 +216,12 @@ a `text` block its `text`; a `tool_use` block its `id`, `name` and an object
 Every line of a stream must be UTF-8, as a JSON body must be. In a stream, the
 driver reads the data of `message_start`,
 `content_block_start`, `content_block_delta` and `message_delta`, and that data
-must be JSON. A block event must carry an integer `index`; a block start its
-block `type`, and a `tool_use` start its `id` and `name`; a delta its `type`,
-for a block that started, of the matching kind, with a string payload. Streamed
-tool input must parse to a JSON object.
+must be JSON. A block event must carry an integer `index`, and a block start
+one from 0 through 1023: a turn holds at most 1024 blocks, and a start past
+that is refused before anything is stored for it or a tool call is reported.
+A block start must carry its block `type`, and a `tool_use` start its `id` and
+`name`; a delta its `type`, for a block that started, of the matching kind,
+with a string payload. Streamed tool input must parse to a JSON object.
 
 No message includes any part of the response body or of a tool call's input.
 Text already streamed through `murmur:stream/events` before a failure has been

@@ -66,6 +66,12 @@ see above) refuses a driver release built before it at launch, with `E-WIT-LEVEL
 
 See each driver's "Tool-call progress" section for the provider event each report is taken from.
 
+All five hold at most 1024 tool calls per streamed turn, numbered 0 through 1023 by the provider's
+own `index` (`driver-anthropic` counts content blocks; `driver-openai` applies it on Chat
+Completions only). A stream naming index 1024 or more fails the turn with a `driver:` error that
+names the index and the limit, before anything is stored for it. Each driver's README gives the
+exact message.
+
 ## Hooks
 
 WASM components (`runtime: hook`) that attach to lifecycle events. Each hook declares its `binding`, `execution_mode`, and `commit_policy` in its own `murmur.yaml`; where a field is omitted the runtime defaults apply (all events, async, no commit).
