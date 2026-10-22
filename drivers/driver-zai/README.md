@@ -284,6 +284,13 @@ any request is sent.
 | a `tool` message with no `tool_call_id` | `driver: tool message is missing required field 'tool_call_id'` |
 | an unknown message role | `driver: unsupported message role '<role>'` |
 
+One refusal comes from the response instead. A turn holds at most 1024 tool
+calls: a streamed chunk numbers each call with an `index`, and one naming index
+1024 or more fails the turn with
+`driver: tool call index <n> is past the limit of 1024 per turn` before anything
+is stored for it or the call is reported. A chunk whose call has no `index` is
+read as index 0.
+
 The `run` wrapper turns an error into a `ToolResult` with `status: error`, the
 message as its summary, and `{"stop_reason":"error","error":…}` as its data. A
 provider status `>= 400` produces the same shape carrying `HTTP <status>: <body>`.

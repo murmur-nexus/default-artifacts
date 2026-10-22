@@ -646,6 +646,7 @@ dependencies = [
  "murmur-driver-stream",
  "serde",
  "serde_json",
+ "tempfile",
  "wasip2",
  "wit-bindgen 0.59.0",
 ]
