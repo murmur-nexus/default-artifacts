@@ -61,9 +61,9 @@ has no preopened directory at all, the open fails, and no verdict log is written
 the file in the work folder instead, where the capsule's own commands can edit
 it.
 
-`records: true` needs a `mur` released after v0.6.0. `mur` v0.6.0 and earlier
-warn `W-SEC-019` on the unrecognized `records` key, ignore it, and preopen
-nothing for the hook, so no verdict log is written.
+`records: true` needs `mur` 0.7.0 or later. `mur` v0.6.0 and earlier warn
+`W-SEC-019` on the unrecognized `records` key, ignore it, and preopen nothing for
+the hook, so no verdict log is written.
 
 No network capability is required — the hook makes no outbound calls.
 
@@ -94,7 +94,7 @@ The hook exports `murmur:hook/lifecycle` from `murmur:hook@0.9.0`. Every murmur
 release that runs a `murmur:hook@0.9.0` hook honours `commit_policy: reopen-task`
 and the `reopen-task` case, budgeted by `lifecycle.max_task_reopens`. The verdict
 log's `records: true` grant and installing the hook as
-`murmur/hook-regression-verifier` need a `mur` released after v0.6.0; see
+`murmur/hook-regression-verifier` need `mur` 0.7.0 or later; see
 [Configuration](#configuration).
 
 See [murmur.yaml](./murmur.yaml) for the full manifest.

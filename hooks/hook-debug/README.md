@@ -32,9 +32,9 @@ preopened directory at all, the open fails, and the hook logs nothing. A
 `filesystem.scope` grant would put the file in the work folder instead, where
 the capsule's own commands can edit it.
 
-`records: true` needs a `mur` released after v0.6.0. `mur` v0.6.0 and earlier
-warn `W-SEC-019` on the unrecognized `records` key, ignore it, and preopen
-nothing for the hook, so it logs nothing.
+`records: true` needs `mur` 0.7.0 or later. `mur` v0.6.0 and earlier warn
+`W-SEC-019` on the unrecognized `records` key, ignore it, and preopen nothing for
+the hook, so it logs nothing.
 
 ## Emitted lines
 
