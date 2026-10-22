@@ -103,8 +103,22 @@ fn linker(engine: &Engine) -> Linker<HostState> {
 /// is deliberately NOT inherited, so the component sees nothing of the test process's
 /// environment.
 fn store_for(engine: &Engine, workdir: &Path) -> Store<HostState> {
+    wasi_store(engine, workdir, false)
+}
+
+/// [`store_for`]'s Store with wasmtime-wasi's `allow_blocking_current_thread` set as given.
+/// When `true`, each guest filesystem call runs on the calling thread instead of being handed
+/// to a tokio `spawn_blocking` pool thread and awaited. The setter must precede
+/// `preopened_dir`: the preopen captures the flag when it is created. murmur's capsule runtime
+/// leaves the flag off (`false`, the builder default).
+fn wasi_store(
+    engine: &Engine,
+    workdir: &Path,
+    allow_blocking_current_thread: bool,
+) -> Store<HostState> {
     let mut builder = WasiCtxBuilder::new();
     builder
+        .allow_blocking_current_thread(allow_blocking_current_thread)
         .preopened_dir(workdir, ".", DirPerms::all(), FilePerms::all())
         .expect("preopen workdir");
     Store::new(
@@ -880,7 +894,8 @@ fn find_in_files_benchmark_no_orders_of_magnitude_regression() {
     // fair "latency of the walk" comparison; instantiation overhead is reported separately).
     let _ = tool_editor::logic::run(&envelope);
 
-    let mut store = store_for(&eng, &workdir);
+    // The sampled walks block on-thread; see the comment above the bound.
+    let mut store = wasi_store(&eng, &workdir, true);
     let tool = Tool::instantiate(&mut store, &component, &lnk).expect("instantiate");
     let input = ToolInput {
         data: Some(rel_payload.to_string()),
@@ -921,7 +936,8 @@ fn find_in_files_benchmark_no_orders_of_magnitude_regression() {
         wasm_walk_max = wasm_walk_max.max(wasm_walk);
     }
 
-    // Full instantiate+call, for the process-spawn analogue number.
+    // Full instantiate+call in the production WASI context, for the process-spawn analogue
+    // number.
     let t = Instant::now();
     let _ = run_editor(&eng, &component, &lnk, &workdir, rel_payload);
     let wasm_full = t.elapsed();
@@ -933,12 +949,16 @@ fn find_in_files_benchmark_no_orders_of_magnitude_regression() {
          wasm_walk_max={wasm_walk_max:?} wasm_instantiate+call={wasm_full:?} ratio={ratio:.2}x"
     );
 
-    // No order-of-magnitude regression. The bound compares the fastest of SAMPLES walks on
-    // each side: the minimum is what the code costs, the slower samples measure what else the
-    // machine was doing, so one scheduling stall on the long wasm walk cannot decide it. The
-    // 0.5s slack keeps a sub-millisecond host time from making the ratio explode. The bound
-    // only catches a catastrophic regression; the recorded numbers are the real engineering
-    // gate (see the build summary).
+    // No order-of-magnitude regression. The bound compares the guest walk, its WASI filesystem
+    // calls run on-thread, against the identical host-compiled logic. It leaves out
+    // wasmtime-wasi's per-call `spawn_blocking` dispatch, whose cost scales with runqueue
+    // depth and would make the bound measure the machine. murmur's capsule runtime does not
+    // set `allow_blocking_current_thread`, so capsules pay that dispatch;
+    // `wasm_instantiate+call` runs in the production context and is the figure that includes
+    // it. The fastest of SAMPLES absorbs a one-off stall, and the max shows it. The 0.5s slack
+    // keeps a sub-millisecond host time from making the ratio explode. The bound only catches
+    // an order-of-magnitude regression; the recorded numbers are the real engineering gate
+    // (see the build summary).
     assert!(
         wasm_walk_min.as_secs_f64() < host_walk_min.as_secs_f64() * MAX_RATIO + 0.5,
         "wasm find_in_files regressed by >{MAX_RATIO}x (fastest of {SAMPLES}): \
