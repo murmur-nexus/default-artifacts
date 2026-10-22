@@ -100,7 +100,7 @@ artifacts:
         records: true          # hook-debug.jsonl goes in the records directory (§4.3a)
 
   - name: murmur/skill-create-manifest
-    version: "0.3.0"
+    version: "0.4.0"
     runtime: skill
 ```
 
