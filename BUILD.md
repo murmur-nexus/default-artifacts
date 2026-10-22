@@ -52,13 +52,14 @@ cargo build -p tool-editor --target wasm32-wasip2 --release   # wasm
 cargo build --release -p tool-git                              # native
 ./scripts/validate-component.sh target/wasm32-wasip2/release/tool_editor.wasm
 ./scripts/package-artifact.sh tools/tool-editor release/       # → release/tool-editor-0.7.0.mur.zip
-./scripts/local-install.sh tool-editor /path/to/capsule
+./scripts/local-install.sh tool-editor /path/to/capsule-folder
 ```
 
 `validate-component.sh` checks a component's world-level imports and exports against its category
 at the exact interface version in `wit/`; run bare, it validates every `.wasm` in the build output.
 `local-install.sh` builds, packs and installs one artifact into a capsule, where it is
-`local/<name>` — reference it that way in the capsule's `artifacts:`.
+`local/<name>` — reference it that way in the capsule's `artifacts:`. The target must be a capsule
+folder holding `murmur.yaml`; any other folder is refused before anything is built.
 
 Cargo unifies dependency features across every crate one invocation builds, so the build scripts
 give each artifact its own invocation. `cargo build -p <name>`, `local-install.sh`, the

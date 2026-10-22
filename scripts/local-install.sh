@@ -18,6 +18,9 @@
 # Usage:
 #   scripts/local-install.sh <artifact-name> <target-capsule-dir>
 #
+# <target-capsule-dir> must be a capsule folder holding murmur.yaml; the install lands
+# in its .murmur/ and its murmur.lock. Any other folder is refused before anything is built.
+#
 # Example:
 #   scripts/local-install.sh hook-compact /path/to/capsule-folder
 #
@@ -25,10 +28,19 @@
 set -euo pipefail
 
 NAME="${1:?artifact name, e.g. hook-compact}"
-CAPSULE_DIR="${2:?target capsule dir (the folder whose .murmur/ receives the install)}"
+# Unquoted so the escaped apostrophe reads the same in every bash: inside "${2:?…}" a
+# bare ' opens a quote, and \' keeps its backslash in some shells.
+CAPSULE_DIR=${2:?target capsule folder (the folder holding the capsule\'s murmur.yaml)}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$SCRIPT_DIR/lib/common.sh"
+
+# `mur install` walks up to the nearest murmur.yaml, so from a folder without one it
+# either fails with E-IO-001 or installs into a parent capsule.
+if [ ! -f "$CAPSULE_DIR/murmur.yaml" ]; then
+  echo "error: $CAPSULE_DIR holds no murmur.yaml; the target must be a capsule folder holding murmur.yaml" >&2
+  exit 1
+fi
 
 require_mur
 export MUR_BIN="$MUR"
@@ -71,8 +83,7 @@ echo "→ [3/4] install into $CAPSULE_DIR"
 
 # The pin `mur install` wrote must be this zip's sha256, under the key its payload
 # shape takes: sha256.any for a wasm component or skill, sha256.platforms.<tag> for a
-# native tool (lock_version 3 refuses an entry carrying both). No lock is written
-# outside a project directory; the next `mur run` writes one.
+# native tool (lock_version 3 refuses an entry carrying both).
 echo "→ [4/4] check lock local/$NAME@$VERSION"
 SHA="$(sha256_of "$ZIP")"
 PLATFORM=""
@@ -80,9 +91,10 @@ if [ "$KIND" = "native" ]; then
   PLATFORM="$(basename "$ZIP" .mur.zip)"; PLATFORM="${PLATFORM#"$NAME-$VERSION-"}"
 fi
 if [ ! -f "$LOCK" ]; then
-  echo "    no murmur.lock present — next 'mur run' will generate one"
-else
-  python3 - "$LOCK" "local/$NAME" "$VERSION" "$SHA" "$PLATFORM" <<'PY'
+  echo "error: mur install wrote no murmur.lock in $CAPSULE_DIR" >&2
+  exit 1
+fi
+python3 - "$LOCK" "local/$NAME" "$VERSION" "$SHA" "$PLATFORM" <<'PY'
 import sys, yaml
 lock_path, name, version, sha, platform = sys.argv[1:6]
 doc = yaml.safe_load(open(lock_path)) or {}
@@ -97,7 +109,6 @@ if pinned != sha:
     sys.exit(1)
 print(f"    lock pins {name}@{version} {key}={sha[:12]}…")
 PY
-fi
 
 # Regeneration is driven by the manifest pin, so it must name this version, or the
 # next run re-locks the wrong one. Check read-only; never edit the manifest here
