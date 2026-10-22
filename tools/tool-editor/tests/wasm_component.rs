@@ -16,7 +16,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Once;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use wasmtime::component::{Component, Linker, ResourceTable};
@@ -853,6 +853,9 @@ fn build_tree(root: &Path, dirs: usize, files_per_dir: usize) -> usize {
 
 #[test]
 fn find_in_files_benchmark_no_orders_of_magnitude_regression() {
+    const SAMPLES: usize = 5;
+    const MAX_RATIO: f64 = 30.0;
+
     let eng = engine();
     let component = Component::from_file(&eng, component_path()).expect("load component");
     let lnk = linker(&eng);
@@ -876,11 +879,6 @@ fn find_in_files_benchmark_no_orders_of_magnitude_regression() {
     // Warm both paths once, then time the walk only (instantiation excluded — that is the
     // fair "latency of the walk" comparison; instantiation overhead is reported separately).
     let _ = tool_editor::logic::run(&envelope);
-    let t = Instant::now();
-    let host_out = tool_editor::logic::run(&envelope);
-    let host_walk = t.elapsed();
-    assert_eq!(host_out["ok"], true, "host find must succeed: {host_out}");
-    assert_eq!(host_out["matches"].as_array().map(|a| a.len()), Some(1));
 
     let mut store = store_for(&eng, &workdir);
     let tool = Tool::instantiate(&mut store, &component, &lnk).expect("instantiate");
@@ -889,41 +887,62 @@ fn find_in_files_benchmark_no_orders_of_magnitude_regression() {
         log_path: None,
     };
     let _ = tool.murmur_tool_run().call_run(&mut store, &input).unwrap(); // warm
-    let t = Instant::now();
-    let wasm_res = tool.murmur_tool_run().call_run(&mut store, &input).unwrap();
-    let wasm_walk = t.elapsed();
-    assert!(
-        matches!(wasm_res.status, Status::Passed),
-        "wasm find status: {:?}",
-        wasm_res.status
-    );
-    // ToolResult.data for find is the `data` field: `{"matches":[...]}`.
-    let wasm_payload: Value = serde_json::from_str(wasm_res.data.as_deref().unwrap()).unwrap();
-    assert_eq!(wasm_payload["matches"].as_array().map(|a| a.len()), Some(1));
-    assert!(
-        wasm_payload.get("capped").is_none(),
-        "3000 files stay under every limit"
-    );
-    assert!(!wasm_res.truncated);
+
+    // Interleaved rounds, one host walk then one wasm walk each, so both sides sample the
+    // same stretch of machine load.
+    let (mut host_walk_min, mut host_walk_max) = (Duration::MAX, Duration::ZERO);
+    let (mut wasm_walk_min, mut wasm_walk_max) = (Duration::MAX, Duration::ZERO);
+    for _ in 0..SAMPLES {
+        let t = Instant::now();
+        let host_out = tool_editor::logic::run(&envelope);
+        let host_walk = t.elapsed();
+        assert_eq!(host_out["ok"], true, "host find must succeed: {host_out}");
+        assert_eq!(host_out["matches"].as_array().map(|a| a.len()), Some(1));
+        host_walk_min = host_walk_min.min(host_walk);
+        host_walk_max = host_walk_max.max(host_walk);
+
+        let t = Instant::now();
+        let wasm_res = tool.murmur_tool_run().call_run(&mut store, &input).unwrap();
+        let wasm_walk = t.elapsed();
+        assert!(
+            matches!(wasm_res.status, Status::Passed),
+            "wasm find status: {:?}",
+            wasm_res.status
+        );
+        // ToolResult.data for find is the `data` field: `{"matches":[...]}`.
+        let wasm_payload: Value = serde_json::from_str(wasm_res.data.as_deref().unwrap()).unwrap();
+        assert_eq!(wasm_payload["matches"].as_array().map(|a| a.len()), Some(1));
+        assert!(
+            wasm_payload.get("capped").is_none(),
+            "3000 files stay under every limit"
+        );
+        assert!(!wasm_res.truncated);
+        wasm_walk_min = wasm_walk_min.min(wasm_walk);
+        wasm_walk_max = wasm_walk_max.max(wasm_walk);
+    }
 
     // Full instantiate+call, for the process-spawn analogue number.
     let t = Instant::now();
     let _ = run_editor(&eng, &component, &lnk, &workdir, rel_payload);
     let wasm_full = t.elapsed();
 
-    let ratio = wasm_walk.as_secs_f64() / host_walk.as_secs_f64().max(1e-9);
+    let ratio = wasm_walk_min.as_secs_f64() / host_walk_min.as_secs_f64().max(1e-9);
     eprintln!(
-        "BENCH find_in_files files={n_files} host_walk={host_walk:?} \
-         wasm_walk={wasm_walk:?} wasm_instantiate+call={wasm_full:?} ratio={ratio:.2}x"
+        "BENCH find_in_files files={n_files} samples={SAMPLES} host_walk_min={host_walk_min:?} \
+         host_walk_max={host_walk_max:?} wasm_walk_min={wasm_walk_min:?} \
+         wasm_walk_max={wasm_walk_max:?} wasm_instantiate+call={wasm_full:?} ratio={ratio:.2}x"
     );
 
-    // No order-of-magnitude regression. A generous 30x bound (plus a 0.5s floor slack so a
-    // sub-millisecond host time can't make the ratio explode on a loaded CI box) catches a
-    // catastrophic regression while staying non-flaky; the recorded numbers are the real
-    // engineering gate (see the build summary).
+    // No order-of-magnitude regression. The bound compares the fastest of SAMPLES walks on
+    // each side: the minimum is what the code costs, the slower samples measure what else the
+    // machine was doing, so one scheduling stall on the long wasm walk cannot decide it. The
+    // 0.5s slack keeps a sub-millisecond host time from making the ratio explode. The bound
+    // only catches a catastrophic regression; the recorded numbers are the real engineering
+    // gate (see the build summary).
     assert!(
-        wasm_walk.as_secs_f64() < host_walk.as_secs_f64() * 30.0 + 0.5,
-        "wasm find_in_files regressed by >30x: host={host_walk:?} wasm={wasm_walk:?}"
+        wasm_walk_min.as_secs_f64() < host_walk_min.as_secs_f64() * MAX_RATIO + 0.5,
+        "wasm find_in_files regressed by >{MAX_RATIO}x (fastest of {SAMPLES}): \
+         host={host_walk_min:?} wasm={wasm_walk_min:?}"
     );
 
     let _ = std::fs::remove_dir_all(&workdir);
