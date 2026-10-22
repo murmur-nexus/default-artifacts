@@ -243,6 +243,10 @@ so the task ends failed. A connection dropped before the final chunk is the
 common cause; text already streamed is not withdrawn, it is just not recorded as
 a finished reply.
 
+A stream that breaks off with a read error instead, such as a body cut short of
+its declared `content-length`, fails the turn on either surface with
+`driver: failed to read response stream: <error>`, returned the same way.
+
 A failed task status and a `task_failed` trace line with cause `driver_error`
 need a murmur runtime released after v0.4.0. On v0.4.0 and earlier the runtime
 records the error but still reports the task as `ok` and exits 0.
