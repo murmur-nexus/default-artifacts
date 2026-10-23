@@ -50,4 +50,13 @@ summary to restate the task. With `inference.compaction.dump_summaries: true`
 the runtime also keeps a copy of each committed summary, as described in
 murmur's context compaction guide.
 
+| `mur` | Pin |
+|---|---|
+| The release after 0.7.0, or later | `0.10.0` |
+| 0.7.0 or earlier | `0.9.0` |
+
+`mur` 0.7.0 and earlier do not keep the task message through a compaction.
+There, only the summary carries the task forward, and from 0.10.0 on the
+summary leaves it out, so the agent continues without its task.
+
 See [murmur.yaml](./murmur.yaml) for the full manifest and configuration.

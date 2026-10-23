@@ -85,7 +85,7 @@ entry into the project store.
 ```yaml
 artifacts:
   - name: murmur/tool-editor
-    version: "0.8.0"
+    version: "0.9.0"
     runtime: tool
 
   - name: murmur/driver-anthropic
@@ -100,7 +100,7 @@ artifacts:
         records: true          # hook-debug.jsonl goes in the records directory (§4.3a)
 
   - name: murmur/skill-create-manifest
-    version: "0.4.0"
+    version: "0.5.0"
     runtime: skill
 ```
 
@@ -482,7 +482,7 @@ description: "Simple file editing capsule — reads and writes files, exits on c
 
 artifacts:
   - name: murmur/tool-editor
-    version: "0.8.0"
+    version: "0.9.0"
     runtime: tool
   - name: murmur/driver-anthropic
     version: "0.12.0"
@@ -519,7 +519,7 @@ artifacts:
     version: "0.4.0"
     runtime: tool
   - name: murmur/tool-editor
-    version: "0.8.0"
+    version: "0.9.0"
     runtime: tool
   - name: murmur/driver-anthropic
     version: "0.12.0"
@@ -563,7 +563,7 @@ description: "Orchestrator that spawns sub-capsules for parallel task execution"
 
 artifacts:
   - name: murmur/tool-editor
-    version: "0.8.0"
+    version: "0.9.0"
     runtime: tool
   - name: murmur/driver-anthropic
     version: "0.12.0"
