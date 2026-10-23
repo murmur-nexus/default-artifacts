@@ -59,7 +59,8 @@ match reports.
 | `/**` at the end | everything below: `lib/**` |
 | any other character | itself |
 
-Files the glob excludes are never read and count against no limit. An absolute
+Files the glob excludes are never read, but they count toward the limit of
+files walked. An absolute
 `glob` is refused like an absolute `dir`.
 
 A search stops at the first limit it reaches:
@@ -67,7 +68,7 @@ A search stops at the first limit it reaches:
 | Limit | Value |
 |---|---|
 | Matches | 200 |
-| Files read | 5000 |
+| Files walked | 5000 |
 | Bytes read | 32 MiB |
 | Result size | 500 KB |
 
@@ -77,7 +78,7 @@ in `data`, and its summary ends in `(capped)`:
 
 ```json
 {
-  "capped": "Search stopped at the limit of 200 matches after searching 1 file; more matches may exist. Narrow the search with a dir (for example \"src\"), a glob (for example \"*.py\") or a more specific pattern.",
+  "capped": "Search stopped at the limit of 200 matches after reading 1 file.",
   "matches": [
     { "path": "big.py", "line": 1, "text": "def f1(): pass" },
     { "path": "big.py", "line": 2, "text": "def f2(): pass" }

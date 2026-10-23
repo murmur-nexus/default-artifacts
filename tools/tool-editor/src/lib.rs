@@ -25,7 +25,7 @@ pub mod logic {
     // returning the matches found so far with a `capped` note; see `cap_note`.
     const FIND_RESULT_SIZE_LIMIT: usize = 500 * 1024; // 500 KB ceiling for find_in_files output
     const FIND_MAX_MATCHES: usize = 200;
-    // Files read, counting only those the `glob` admits.
+    // Files walked: every file the walk reaches below `dir`, whether or not the `glob` admits it.
     const FIND_MAX_FILES: usize = 5_000;
     const FIND_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
@@ -360,7 +360,7 @@ pub mod logic {
     }
 
     /// Which limit stopped a search. A stopped search still succeeds, carrying the matches
-    /// found so far and a `capped` note built by [`cap_note`].
+    /// found so far and a `capped` note built by [`cap_note`] that names this limit.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum CapReason {
         Matches,
@@ -481,7 +481,14 @@ pub mod logic {
         let mut bytes_read: u64 = 0;
         let mut capped: Option<CapReason> = None;
 
-        'walk: for file_path in file_paths {
+        // `files_walked` counts the files the walk yielded before this one, whatever the glob,
+        // the read or the byte budget made of them; `files_searched` counts those actually read.
+        'walk: for (files_walked, file_path) in file_paths.enumerate() {
+            if files_walked >= limits.files {
+                capped = Some(CapReason::Files);
+                break;
+            }
+
             let relative = relative_path(root_path, &file_path);
             if let Some((glob_re, whole_path)) = &glob_filter {
                 let subject = if *whole_path {
@@ -496,10 +503,6 @@ pub mod logic {
 
             if matches.len() >= limits.matches {
                 capped = Some(CapReason::Matches);
-                break;
-            }
-            if files_searched >= limits.files {
-                capped = Some(CapReason::Files);
                 break;
             }
             let contents = match read_text_file(&file_path, &mut bytes_read, limits.bytes) {
@@ -635,24 +638,19 @@ pub mod logic {
         ok_with(summary.clone(), data, summary)
     }
 
-    /// The `capped` note: which limit stopped the search, how much was searched, and how to
-    /// narrow the next call.
-    fn cap_note(reason: CapReason, limits: Limits, files_searched: usize) -> String {
+    /// The `capped` note: which limit stopped the search and how many files it read.
+    fn cap_note(reason: CapReason, limits: Limits, files_read: usize) -> String {
         let limit = match reason {
             CapReason::Matches => format!("the limit of {} matches", limits.matches),
-            CapReason::Files => format!("the limit of {} files read", limits.files),
+            CapReason::Files => format!("the limit of {} files walked", limits.files),
             CapReason::Bytes => format!("the limit of {} read", format_bytes(limits.bytes)),
             CapReason::ResultSize => format!(
                 "the {} result size limit",
                 format_result_size(limits.result_size)
             ),
         };
-        let files = if files_searched == 1 { "file" } else { "files" };
-        format!(
-            "Search stopped at {limit} after searching {files_searched} {files}; more matches may \
-             exist. Narrow the search with a dir (for example \"src\"), a glob (for example \
-             \"*.py\") or a more specific pattern."
-        )
+        let files = if files_read == 1 { "file" } else { "files" };
+        format!("Search stopped at {limit} after reading {files_read} {files}.")
     }
 
     fn format_bytes(bytes: u64) -> String {
@@ -674,8 +672,7 @@ pub mod logic {
 
     fn size_exceeded_message(limits: Limits) -> String {
         format!(
-            "a single match exceeds the find_in_files result size limit of {} bytes ({}). \
-             Narrow the search with a dir, a glob or a more specific pattern.",
+            "a single match exceeds the find_in_files result size limit of {} bytes ({}).",
             limits.result_size,
             format_result_size(limits.result_size)
         )
@@ -684,10 +681,10 @@ pub mod logic {
     /// What [`read_text_file`] found.
     enum FileRead {
         Text(String),
-        /// A NUL in the first [`BINARY_SNIFF_BYTES`], or not UTF-8. Read, so it counts toward
-        /// the file and byte budgets, but never searched.
+        /// A NUL in the first [`BINARY_SNIFF_BYTES`], or not UTF-8. Read, so it counts as read
+        /// and toward the byte budget, but never searched.
         Binary,
-        /// Could not be opened or read; skipped without counting.
+        /// Could not be opened or read; skipped, counted as walked but not as read.
         Unreadable,
         /// Its length would take the search past the byte budget; nothing was read.
         OverBudget,
@@ -1531,8 +1528,10 @@ pub mod logic {
             assert_eq!(out["status"], "passed");
             let n = out["matches"].as_array().unwrap().len();
             assert!(n > 0 && n < 200, "got {n} matches");
-            let note = out["data"]["capped"].as_str().expect("a capped note");
-            assert!(note.contains("500 KB"), "{note}");
+            assert_eq!(
+                out["data"]["capped"],
+                "Search stopped at the 500 KB result size limit after reading 1 file."
+            );
             assert_eq!(out["summary"], format!("{n} matches in 1 files (capped)"));
             assert!(
                 serde_json::to_string(&out).unwrap().len() <= FIND_RESULT_SIZE_LIMIT,
@@ -1571,9 +1570,11 @@ pub mod logic {
             }));
             assert_eq!(out["ok"], false);
             assert_eq!(out["error_kind"], err::RESULT_SIZE_EXCEEDED);
-            let msg = out["message"].as_str().unwrap();
-            assert!(msg.contains("512000 bytes (500 KB)"), "{msg}");
-            assert!(msg.contains("glob"), "{msg}");
+            assert_eq!(
+                out["message"],
+                "a single match exceeds the find_in_files result size limit of 512000 bytes \
+                 (500 KB)."
+            );
 
             let _ = fs::remove_dir_all(&dir);
         }
@@ -2061,8 +2062,10 @@ pub mod logic {
             let without = no_ctx["matches"].as_array().unwrap().len();
             let with = with_ctx["matches"].as_array().unwrap().len();
             assert!(with < without, "with context {with}, without {without}");
-            let note = with_ctx["data"]["capped"].as_str().unwrap();
-            assert!(note.contains("500 KB"), "{note}");
+            assert_eq!(
+                with_ctx["data"]["capped"],
+                "Search stopped at the 500 KB result size limit after reading 1 file."
+            );
 
             let _ = fs::remove_dir_all(&dir);
         }
@@ -2316,26 +2319,23 @@ pub mod logic {
             assert_eq!(matched_paths(&out), ["f0", "f1", "f2"]);
             assert_eq!(
                 out["data"]["capped"],
-                "Search stopped at the limit of 3 files read after searching 3 files; more \
-                 matches may exist. Narrow the search with a dir (for example \"src\"), a glob \
-                 (for example \"*.py\") or a more specific pattern."
+                "Search stopped at the limit of 3 files walked after reading 3 files."
             );
             assert_eq!(out["summary"], "3 matches in 3 files (capped)");
             assert_eq!(out["message"], out["summary"]);
 
-            // Files the glob excludes count against no limit: with room for one file, the
-            // walk passes f0..f3 unread and still reaches f4.
+            // Files the glob excludes count toward the limit: the walk passes f0..f2 unread and
+            // stops before it reaches f4.
             let mut globbed = op.clone();
             globbed["glob"] = json!("f4");
-            let out = find_in_files(
-                &globbed,
-                Limits {
-                    files: 1,
-                    ..Limits::PRODUCTION
-                },
+            let out = find_in_files(&globbed, limits);
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert!(matched_paths(&out).is_empty(), "{out:?}");
+            assert_eq!(out["summary"], "0 matches in 0 files (capped)");
+            assert_eq!(
+                out["data"]["capped"],
+                "Search stopped at the limit of 3 files walked after reading 0 files."
             );
-            assert_eq!(matched_paths(&out), ["f4"]);
-            assert!(out["data"].get("capped").is_none(), "{out:?}");
 
             // A walk that ends on exactly the limit was not stopped by it.
             let out = find_in_files(
@@ -2351,6 +2351,44 @@ pub mod logic {
                 "no capped key"
             );
             assert_eq!(out["summary"], "5 matches in 5 files");
+
+            // The same holds when the glob admits only the last file walked.
+            let out = find_in_files(
+                &globbed,
+                Limits {
+                    files: 5,
+                    ..Limits::PRODUCTION
+                },
+            );
+            assert_eq!(matched_paths(&out), ["f4"]);
+            assert!(out["data"].get("capped").is_none(), "{out:?}");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn find_in_files_non_recursive_walk_counts_files_the_glob_excludes() {
+            let dir = write_five_needles("find_file_limit_flat");
+            let out = find_in_files(
+                &json!({
+                    "operation": "find_in_files",
+                    "pattern": "needle",
+                    "dir": dir.to_str().unwrap(),
+                    "recursive": false,
+                    "glob": "f4",
+                }),
+                Limits {
+                    files: 3,
+                    ..Limits::PRODUCTION
+                },
+            );
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert!(matched_paths(&out).is_empty(), "{out:?}");
+            assert_eq!(out["summary"], "0 matches in 0 files (capped)");
+            assert_eq!(
+                out["data"]["capped"],
+                "Search stopped at the limit of 3 files walked after reading 0 files."
+            );
 
             let _ = fs::remove_dir_all(&dir);
         }
@@ -2369,12 +2407,9 @@ pub mod logic {
             );
             assert_eq!(out["ok"], true, "{out:?}");
             assert_eq!(matched_paths(&out), ["f0", "f1"]);
-            let note = out["data"]["capped"].as_str().unwrap();
-            assert!(
-                note.starts_with(
-                    "Search stopped at the limit of 20 bytes read after searching 2 files;"
-                ),
-                "{note}"
+            assert_eq!(
+                out["data"]["capped"],
+                "Search stopped at the limit of 20 bytes read after reading 2 files."
             );
 
             let _ = fs::remove_dir_all(&dir);
@@ -2395,12 +2430,9 @@ pub mod logic {
             );
             assert_eq!(matched_paths(&out), ["f0", "f1", "f1"]);
             assert_eq!(out["matches"][2]["line"], 2);
-            let note = out["data"]["capped"].as_str().unwrap();
-            assert!(
-                note.starts_with(
-                    "Search stopped at the limit of 3 matches after searching 2 files;"
-                ),
-                "{note}"
+            assert_eq!(
+                out["data"]["capped"],
+                "Search stopped at the limit of 3 matches after reading 2 files."
             );
 
             let _ = fs::remove_dir_all(&dir);
@@ -2411,18 +2443,14 @@ pub mod logic {
             let limits = Limits::PRODUCTION;
             for (reason, named) in [
                 (CapReason::Matches, "the limit of 200 matches"),
-                (CapReason::Files, "the limit of 5000 files read"),
+                (CapReason::Files, "the limit of 5000 files walked"),
                 (CapReason::Bytes, "the limit of 32 MiB read"),
                 (CapReason::ResultSize, "the 500 KB result size limit"),
             ] {
                 let note = cap_note(reason, limits, 1);
                 assert_eq!(
                     note,
-                    format!(
-                        "Search stopped at {named} after searching 1 file; more matches may \
-                         exist. Narrow the search with a dir (for example \"src\"), a glob (for \
-                         example \"*.py\") or a more specific pattern."
-                    )
+                    format!("Search stopped at {named} after reading 1 file.")
                 );
             }
         }

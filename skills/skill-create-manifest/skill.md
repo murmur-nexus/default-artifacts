@@ -63,11 +63,11 @@ the agent. Declared in the capsule `artifacts:` block with `runtime: hook`.
 ### `skill`
 
 Documentation artifact — no binary or WASM component. Its `skill.md` is installed to
-`tools/<name>/skill.md` in the session's runtime directory before the agent loop starts:
-`$MURMUR_RUNTIME_DIR/tools/<name>/skill.md` in a shell command,
-`murmur-runtime/tools/<name>/skill.md` in a file tool. The agent can read it there and cannot
-change it. Skills are listed in MURMUR.md `## Installed Skills` with their path in that
-directory, and MURMUR.md is in the same directory (`$MURMUR_RUNTIME_DIR/MURMUR.md`).
+`tools/<name>/skill.md` in the session's runtime directory before the agent loop starts. That
+directory is read-only: the agent can read the file there and cannot change it. MURMUR.md is in
+the same directory. MURMUR.md's `- Runtime directory:` entry gives the directory's path and the
+name each of the session's tools opens it by, and its `## Installed Skills` section lists each
+skill.
 
 Every skill is also offered to the model as a tool with no input parameters: calling it by name
 returns its `skill.md`. The one exception is the skill named in `inference.system_prompt_artifact`
@@ -381,7 +381,8 @@ On the driver's `artifacts:` entry:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `gateway.endpoint` | string | yes | Base URL for the inference API. The driver appends its own request path (e.g. `driver-anthropic` appends `/v1/messages`; `driver-openai` appends `/chat/completions`) — include any version segment the provider requires (e.g. `/v1`) in `endpoint` itself. |
-| `gateway.api_key` | string | yes | The key, as a `${NAME}` credential reference. Never inline a literal key. |
+| `gateway.api_key` | string | yes, unless `keyless: true` | The key, as a `${NAME}` credential reference. Never inline a literal key. |
+| `gateway.keyless` | boolean | no | `true` declares an upstream that takes no key, such as a local server: requests go out with no credential header. Writing it with `api_key` fails with `E-MAN-003`. A gateway with neither a non-blank `api_key` nor `keyless: true` fails with `E-CAP-018`. |
 
 **`${NAME}` references:** only `${UPPER_SNAKE_CASE}` is a reference; anything else is a literal
 value. `mur run` resolves it before the session starts, and fails naming the variable when it
@@ -406,10 +407,11 @@ inference:
       temperature: 0.2
 ```
 
-`driver-openai` implements the OpenAI Chat Completions protocol, so it also works with
-any OpenAI-compatible provider (e.g. GLM/Zhipu) — just point `gateway.endpoint` at that
-provider's own base URL, including whatever version segment it requires. For example, GLM's base
-URL is `https://open.bigmodel.cn/api/paas/v4` (no `/v1`).
+`driver-openai` speaks the OpenAI Chat Completions protocol, so it works with an
+OpenAI-compatible provider when `gateway.endpoint` is that provider's base URL, including any
+version segment it requires. For Z.ai's GLM, use `murmur/driver-zai` with
+`gateway.endpoint: https://api.z.ai/api/paas/v4` and `inference.model: glm-5.3`; see its row in
+§10.
 
 ---
 

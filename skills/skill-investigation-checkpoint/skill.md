@@ -1,7 +1,7 @@
 # Investigation Checkpoint Convention — recording what you've ruled out
 
-This skill teaches you an **additive, documentation-only convention** for the checkpoint file
-`checkpoints/decisions.json`: a second top-level array, `investigations`, that records the verdicts
+This skill teaches you an **additive, documentation-only convention** for the file
+`checkpoints/decisions.json`: a top-level array, `investigations`, that records the verdicts
 of investigative leads you've chased during a session (a hypothesis confirmed, a suspect ruled out,
 a lead still uncertain) so that neither you-after-a-compaction nor a later agent re-treads ground
 that's already been settled.
@@ -11,16 +11,17 @@ want to leave a durable-within-the-session trail of what you've checked and conc
 **prose convention, not a validated file format** — nothing in the murmur runtime parses
 `decisions.json` as JSON (see §1), so the discipline below is enforced by you following it, not by a
 schema checker. Read the whole skill before writing your first `investigations` entry, and read §8
-(the compaction-survival limitation) so you don't mistake this for a persistence guarantee.
+(what a compaction does to the file) before relying on an entry after one.
 
 ---
 
 ## 1. The file and its existing shape
 
-`checkpoints/decisions.json` is one of three checkpoint files (`summary.md`, `plan.json`,
-`decisions.json`) in the accessible workdir. **You write them and you read them** — no murmur-side
-component reads or writes them, and nothing parses their contents. Today `decisions.json` carries
-exactly one documented top-level array, `decisions`, holding free-form key-decision/rationale pairs:
+`checkpoints/decisions.json` is a file in the work folder that this convention has you create.
+**You write it and you read it.** The runtime does not create `checkpoints/`, and no runtime
+component reads, writes or overwrites the file; nothing parses its contents. The file is a JSON
+object. This convention owns its `investigations` key and leaves every other top-level key as it
+found it, such as a free-form `decisions` array of `{decision, rationale}` pairs:
 
 ```json
 {
@@ -33,14 +34,14 @@ exactly one documented top-level array, `decisions`, holding free-form key-decis
 }
 ```
 
-This existing shape is untouched by this convention. Everything below **adds a sibling key** next to
-`decisions`; it never modifies, wraps, or renames the `decisions` array or its entries.
+Such a key is untouched by this convention. Everything below **adds a sibling key** next to it; it
+never modifies, wraps, or renames the `decisions` array or its entries.
 
 ---
 
 ## 2. The extension: an `investigations` array
 
-The convention adds a second, optional, sibling top-level array named `investigations`. Each entry
+The convention adds an optional, sibling top-level array named `investigations`. Each entry
 records one investigative lead and its current verdict. The full shape becomes:
 
 ```json
@@ -75,7 +76,7 @@ reader can't act on the entry.)
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `stable_id` | string | yes | The join key identifying the lead. When the lead is an indexed Rust symbol, this is **byte-identical** to `tool-code-graph`'s `symbol_id` (see §4). Otherwise it's a freeform token you mint once and reuse (see §4). |
+| `stable_id` | string | yes | The join key identifying the lead. When the lead is an indexed Rust or Python symbol, this is **byte-identical** to `tool-code-graph`'s `symbol_id` (see §4). Otherwise it's a freeform token you mint once and reuse (see §4). |
 | `verdict` | string enum | yes | One of `ruled-out`, `confirmed`, `uncertain` — nothing else. |
 | `confidence` | number | yes | Your subjective 0.0–1.0 confidence in `verdict`. **Not** code-graph's categorical edge confidence — see §5. |
 | `rationale` | string | yes | Prose explaining how you reached the verdict — same name and spirit as a `decisions` entry's `rationale`. Cite the evidence (a tool you ran, a call path you traced, a test you read). |
@@ -96,15 +97,16 @@ reader can't act on the entry.)
 (see §6). It is *not* required to be unique per write — the opposite: reuse it so successive verdicts
 for the same lead collapse onto one another.
 
-**When the lead is an indexed Rust symbol**, reuse `tool-code-graph`'s `symbol_id` verbatim.
-That identifier's format is:
+**When the lead is an indexed Rust or Python symbol**, reuse `tool-code-graph`'s `symbol_id`
+verbatim. That identifier's format is:
 
 ```
-rust://<package>/<module>#<qualified_name>(<signature_body>)
+<scheme>://<package>/<module>#<qualified_name>(<signature_body>)
 ```
 
-minted by `parse::make_symbol_id` in `tools/tool-code-graph/src/parse.rs` and stored as the
-`symbols.symbol_id` column in `.murmur/code-graph.sqlite3`. Real examples of that exact format:
+where `<scheme>` is `rust` or `python`. It is minted by `parse::make_symbol_id` in
+`tools/tool-code-graph/src/parse.rs` and stored as the `symbols.symbol_id` column in
+`<repo_path>/.murmur/code-graph.db`. Real examples of that exact format:
 
 ```
 rust://fixture_crate/#add(i64,i64->i64)
@@ -143,7 +145,7 @@ There are **two unrelated fields named `confidence` in this codebase**. Do not c
 |---|---|---|
 | Type | number, `0.0`–`1.0` | string enum |
 | Values | any float in range, e.g. `0.9` | `definite` \| `possible` \| `heuristic` \| `unresolved` |
-| Where | `checkpoints/decisions.json` (this convention) | `edges` table in `.murmur/code-graph.sqlite3`, assigned by `db::assign_confidence` in `tools/tool-code-graph/src/db.rs` |
+| Where | `checkpoints/decisions.json` (this convention) | `edges` table in `<repo_path>/.murmur/code-graph.db`, assigned by `db::assign_confidence` in `tools/tool-code-graph/src/db.rs` |
 | Meaning | *Your* subjective judgment in a verdict | Static-analysis certainty that a call edge is real |
 
 `edges.confidence` is a property of an automatically-derived call-graph edge (how sure the parser is
@@ -205,28 +207,22 @@ convention:
 ```
 
 The example above is valid **with no `investigations` key present** — that is the whole point of the
-additive design. Any consumer that only knows the old shape simply never sees the new key; any
+additive design. A reader that does not know `investigations` simply never sees the key; any
 existing free-form `decisions` entry is untouched. There is no version bump, no migration, and no
 parser change anywhere — this is additive **by construction**, because (as §1 notes) nothing in the
 runtime reads this file's JSON structure at all.
 
 ---
 
-## 8. Known limitation — an entry is not guaranteed to survive a compaction
+## 8. What a compaction does to the file
 
-**Read this before relying on anything you write here surviving.** No murmur-side component reads or
-writes `checkpoints/decisions.json`: nothing merges it, and nothing carries it across a compaction on
-your behalf. The `MURMUR.md` the runtime generates in the session's runtime directory
-(`$MURMUR_RUNTIME_DIR/MURMUR.md` in a shell command, `murmur-runtime/MURMUR.md` in a file tool)
-points the other way from durability — it lists `decisions.json` as *"key decisions (overwritten on
-each compaction)"* and tells you to read the checkpoint files at the start of a new context window
-to reconstruct state.
+A compaction replaces the conversation, not files. No runtime component reads or writes
+`checkpoints/decisions.json`, so what you wrote is still in the file after a compaction unless
+something in the session changed it, such as a tool call or another agent writing the same path.
 
-So nothing guarantees that an `investigations` entry you wrote before a compaction is still there
-after one. Treat this convention as **within-a-session working memory**: right after any compaction,
-re-read `checkpoints/decisions.json` and act on what the file actually holds rather than on what you
-remember writing into it. If the entries you expected are gone, re-record the verdicts that still
-matter; if they're intact, build on them. Either way read first — don't assume, in either direction.
+The compaction summary that replaces the conversation may not mention the file or its entries. The
+file, not your memory of the conversation, holds the verdicts you recorded: right after a
+compaction, re-read `checkpoints/decisions.json` and act on what it actually holds.
 
 ---
 
@@ -239,4 +235,4 @@ matter; if they're intact, build on them. Either way read first — don't assume
 - [ ] `stable_id` reuses code-graph's `symbol_id` verbatim for indexed symbols; otherwise a stable freeform token reused per lead (§4).
 - [ ] Overwrite the existing entry for a `stable_id` when its verdict changes — don't append a duplicate (§6).
 - [ ] Keep the `decisions` array intact; `investigations` is a peer, and it's optional (§7).
-- [ ] After a compaction, re-read the file rather than assuming your entries are still there (§8).
+- [ ] After a compaction, re-read the file: it holds what you wrote, and the summary may not mention it (§8).

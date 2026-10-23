@@ -5,13 +5,11 @@ capsule manifests from plain-language task descriptions.
 
 Skill artifact (`runtime: skill`): no binary or WASM component, just the
 [skill.md](./skill.md) guidance file, which the runtime installs to
-`tools/<name>/skill.md` in the session's runtime directory
-(`$MURMUR_RUNTIME_DIR`, read-only to the capsule) before the agent loop starts.
+`tools/<name>/skill.md` in the session's runtime directory, read-only to the
+capsule, before the agent loop starts.
 
-`skill.md` gives the paths `mur` 0.7.0 or later uses:
-`$MURMUR_RUNTIME_DIR/tools/<name>/skill.md` and `$MURMUR_RUNTIME_DIR/MURMUR.md`, or
-`murmur-runtime/…` in a file tool. `mur` v0.6.0 and earlier put both in the capsule workdir,
-which is the layout 0.1.0 of this skill describes.
+MURMUR.md is in the same directory. Its `- Runtime directory:` entry gives the
+directory's path and the name each of the session's tools opens it by.
 
 0.2.0 also teaches the records layout of `mur` 0.7.0 or later:
 
@@ -32,3 +30,11 @@ which is the layout 0.1.0 of this skill describes.
 | The `task_io.read: true` hook grant, a host import (`murmur:task-io/read`) rather than a directory | §4.3a |
 | A catalog row for each of the 27 default artifacts, with what its entry needs | §10 |
 | Pins that each equal the pinned artifact's current version | §3, §7, §8, §10 |
+
+0.5.0 also teaches:
+
+| What | Where `skill.md` teaches it |
+|---|---|
+| `murmur/driver-zai` for Z.ai's GLM, with `gateway.endpoint: https://api.z.ai/api/paas/v4` and `inference.model: glm-5.3` | §7 |
+| `gateway.keyless: true` for an upstream that takes no key, and its `E-MAN-003` and `E-CAP-018` refusals | §7 |
+| Finding the runtime directory, and each skill's `skill.md` in it, through MURMUR.md's `- Runtime directory:` entry | §2 |
