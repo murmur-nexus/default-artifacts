@@ -1,5 +1,5 @@
 name: driver-anthropic
-version: 0.13.0
+version: 0.14.0
 runtime: driver
 description: |
   Anthropic Messages API inference driver for Murmur agent capsules. Translates the Murmur
@@ -31,3 +31,57 @@ requires_files:
 upstream_auth:
   header: x-api-key
   value: "{key}"
+
+# The limits of each model this driver serves, from the provider's documentation; README.md cites each number.
+models:
+  claude-fable-5-1:
+    max_output_tokens: 128000
+    context_window: 1000000
+  claude-opus-5-5:
+    max_output_tokens: 128000
+    context_window: 1000000
+  claude-sonnet-5-5:
+    max_output_tokens: 128000
+    context_window: 1000000
+  claude-haiku-5-5:
+    max_output_tokens: 128000
+    context_window: 1000000
+  claude-fable-5:
+    max_output_tokens: 128000
+    context_window: 1000000
+  claude-opus-5:
+    max_output_tokens: 128000
+    context_window: 1000000
+  claude-sonnet-5:
+    max_output_tokens: 128000
+    context_window: 1000000
+  claude-opus-4-8:
+    max_output_tokens: 128000
+    context_window: 1000000
+  claude-opus-4-7:
+    max_output_tokens: 128000
+    context_window: 1000000
+  claude-opus-4-6:
+    max_output_tokens: 128000
+    context_window: 1000000
+  claude-sonnet-4-6:
+    max_output_tokens: 128000
+    context_window: 1000000
+  claude-opus-4-5-20251101:
+    max_output_tokens: 64000
+    context_window: 200000
+  claude-opus-4-5:
+    max_output_tokens: 64000
+    context_window: 200000
+  claude-sonnet-4-5-20250929:
+    max_output_tokens: 64000
+    context_window: 200000
+  claude-sonnet-4-5:
+    max_output_tokens: 64000
+    context_window: 200000
+  claude-haiku-4-5-20251001:
+    max_output_tokens: 64000
+    context_window: 200000
+  claude-haiku-4-5:
+    max_output_tokens: 64000
+    context_window: 200000

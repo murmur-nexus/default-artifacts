@@ -1,5 +1,5 @@
 name: driver-openai
-version: 0.13.0
+version: 0.14.0
 runtime: driver
 description: OpenAI inference driver for Murmur agent capsules — Chat Completions, with Responses API for gpt-5 and later models. Reads store, thinking, reasoning_effort and verbosity from inference.driver.config and rejects any other key; store grants server-side retention and with it stateful continuation via previous_response_id.
 requires_files:
@@ -9,3 +9,69 @@ requires_files:
 upstream_auth:
   header: Authorization
   value: "Bearer {key}"
+
+# The limits of each model this driver serves, from the provider's documentation; README.md cites each number.
+models:
+  gpt-6-astra:
+    max_output_tokens: 128000
+    context_window: 1050000
+  gpt-6.1-sol:
+    max_output_tokens: 128000
+    context_window: 1050000
+  gpt-6-luna:
+    max_output_tokens: 128000
+    context_window: 1050000
+  gpt-5.6-cyber:
+    max_output_tokens: 128000
+    context_window: 400000
+  gpt-6-sol:
+    max_output_tokens: 128000
+    context_window: 1050000
+  gpt-5.6-sol:
+    max_output_tokens: 128000
+    context_window: 1050000
+  gpt-5.6-terra:
+    max_output_tokens: 128000
+    context_window: 1050000
+  gpt-5.6-luna:
+    max_output_tokens: 128000
+    context_window: 1050000
+  gpt-5.5:
+    max_output_tokens: 128000
+    context_window: 1050000
+  gpt-5.5-pro:
+    max_output_tokens: 128000
+    context_window: 1050000
+  gpt-5.4:
+    max_output_tokens: 128000
+    context_window: 1050000
+  gpt-5.4-pro:
+    max_output_tokens: 128000
+    context_window: 1050000
+  gpt-5.4-mini:
+    max_output_tokens: 128000
+    context_window: 400000
+  gpt-5.2:
+    max_output_tokens: 128000
+    context_window: 400000
+  gpt-5.2-pro:
+    max_output_tokens: 128000
+    context_window: 400000
+  gpt-5:
+    max_output_tokens: 128000
+    context_window: 400000
+  gpt-5-mini:
+    max_output_tokens: 128000
+    context_window: 400000
+  gpt-5-nano:
+    max_output_tokens: 128000
+    context_window: 400000
+  gpt-5-pro:
+    max_output_tokens: 272000
+    context_window: 400000
+  o3:
+    max_output_tokens: 100000
+    context_window: 200000
+  chat-latest:
+    max_output_tokens: 128000
+    context_window: 400000

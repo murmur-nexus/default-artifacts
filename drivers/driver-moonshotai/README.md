@@ -47,16 +47,66 @@ inference:
 | `inference.model` | yes | — (must be `kimi-k3`) |
 | `gateway.endpoint` | yes | — |
 | `gateway.api_key` | yes, unless the entry declares `keyless: true` | — without either, the launch fails with `E-CAP-018` |
-| `inference.max_tokens` | no | `8192`, from the host; ceiling `1048576` |
+| `inference.max_tokens` | no | `1048576`, from `models:` — see [Model limits](#model-limits); ceiling `1048576` |
+| `context.max_tokens` | no | `1048576`, from `models:` |
 | `inference.driver.config` | no | `{}` — see below |
 
 ## Model scope
 
 `kimi-k3` is the only model this driver accepts, and the check runs before a
 request body is built, so an unsupported model costs no HTTP call. Moonshot also
-ships `kimi-k2.7-code`, `kimi-k2.7-code-highspeed` and `kimi-k2.6`; none of them
-are implemented here. Adding one means extending `SUPPORTED_MODELS` — nothing
-else in the crate branches on the model name.
+ships `kimi-k3.1-pro`, `kimi-k3.1-pro-highspeed`, `kimi-k2.7-code` and
+`kimi-k2.6`; none of them are implemented here. Adding one means one entry in
+`SUPPORTED_MODELS`, with its limits, one entry under `models:` in
+`murmur.yaml`, and one row in the table below — nothing else in the crate
+branches on the model name.
+
+## Model limits
+
+| Model | max_output_tokens | context_window | Source |
+|---|---|---|---|
+| `kimi-k3` | 1048576 | 1048576 | Read 2026-10-23. Output: <https://platform.kimi.ai/docs/api/chat>, `max_completion_tokens`: "for Kimi K3-series models (kimi-k3.1-pro, kimi-k3.1-pro-highspeed, kimi-k3) it defaults to 131072 and can be set up to 1048576". Window: <https://platform.kimi.ai/docs/pricing/chat>, "All K3 series models support a 1,048,576-token context window." The input alone "must be less than the model context window size" |
+
+The limits live in one table, `SUPPORTED_MODELS` in `src/lib.rs`, and
+`murmur.yaml` declares the same numbers under `models:`. A test fails if the two
+disagree, or if this table disagrees with `murmur.yaml`.
+
+`max_output_tokens` equals the whole window, and that is safe as the default
+cap: when `prompt_tokens` plus `max_completion_tokens` exceeds the window,
+Moonshot lowers the generation limit for that request to fit the remaining
+context and serves it.
+
+Compaction fires when occupancy crosses `inference.compaction.threshold`
+(default `0.98`) of the window. Moonshot refuses a prompt that alone fills the
+window, so a session that would reach that limit before compaction fires sets
+`inference.compaction.threshold` or `context.max_tokens` lower.
+
+Whether the runtime reads `models:` depends on the murmur release:
+
+| murmur | What it does with `models:` | What the capsule sets |
+|---|---|---|
+| v0.7.0 and earlier | ignores it; an unknown manifest key is a `W-SEC-019` warning, never a refusal | `inference.max_tokens` and `context.max_tokens`; left unset, the runtime's own defaults apply, not `kimi-k3`'s limits |
+| the first release after v0.7.0 | defaults the output cap and context window from it when the capsule leaves them unset, and caps a hook's `run-inference` (e.g. `hook-compact`) at its `max_output_tokens` | nothing, unless it wants tighter limits than the table |
+
+A capsule value always wins: the runtime never clamps or raises
+`inference.max_tokens` or `context.max_tokens` to the table.
+
+## Models without declared limits
+
+None. `SUPPORTED_MODELS` and `models:` hold the same ids, so every model this
+driver accepts has declared limits.
+
+Any other id, such as `kimi-k3.1-pro`, has no entry. The runtime checks for one at
+launch, before the driver sees a request:
+
+| Capsule sets | Result |
+|---|---|
+| neither `inference.max_tokens` nor `context.max_tokens` | the launch is refused with `E-RUN-052` |
+| only `inference.max_tokens` | it launches with `W-RUN-009`, and compaction does not run |
+| both | it launches |
+
+In each case that launches, the driver then refuses the first inference call:
+`driver: model '<m>' is not supported by driver-moonshotai. Supported models: kimi-k3.`
 
 ## Config keys
 
@@ -143,11 +193,13 @@ consulted by the one `params` pass-through loop.
 
 The canonical envelope's `max_tokens` is written to the body as
 `max_completion_tokens`, which is what Moonshot's Chat Completions surface
-spells it; no `max_tokens` member is emitted. Moonshot's ceiling is `1048576`,
-and a larger `inference.max_tokens` is refused pre-flight, naming the field and
-the ceiling, rather than clamped silently or spent on a provider 400. Moonshot's
-own default is `131072`, but the host always supplies a value (default `8192`),
-so the driver never substitutes one.
+spells it; no `max_tokens` member is emitted. The ceiling is the model's
+`max_output_tokens` in `SUPPORTED_MODELS`, `1048576` for `kimi-k3`, and a larger
+`inference.max_tokens` is refused pre-flight, naming the field and the ceiling,
+rather than clamped silently or spent on a provider 400. Moonshot's own default
+is `131072`, but the runtime always sends a cap — the capsule's
+`inference.max_tokens`, or else the `max_output_tokens` under `models:` — so the
+driver never substitutes one.
 
 ## Preserved reasoning across turns
 

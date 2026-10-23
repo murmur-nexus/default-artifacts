@@ -14,9 +14,11 @@ wit-bindgen.workspace = true
 murmur-driver-env = { path = "../../libs/murmur-driver-env" }
 murmur-driver-stream = { path = "../../libs/murmur-driver-stream" }
 
-# tempfile gives tests/mur_run_tool_call_limit.rs scratch directories. A
-# `[dev-dependencies]` entry is excluded from the cdylib the component is built from.
+# tempfile gives tests/mur_run_tool_call_limit.rs scratch directories, and serde_norway parses
+# murmur.yaml in a test, as murmur does. A `[dev-dependencies]` entry is excluded from the cdylib
+# the component is built from.
 [dev-dependencies]
+serde_norway = "0.9.42"
 tempfile = "3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
