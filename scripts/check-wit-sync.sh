@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# Check that artifact-facing WIT files (guest/, hook/ and process-driver/) are in sync with
-# murmur/capsule-runtime.
+# Check that the artifact-facing WIT files (wit/guest, wit/hook and wit/process-driver) are a
+# byte-identical copy of murmur's crates/capsule-runtime/wit at the pinned murmur commit.
 #
-# Only guest/, hook/ and process-driver/ are compared — those are the subdirectories used by
-# wit_bindgen::generate! in every WASM artifact. Top-level files (host/, runtime/, worlds.wit,
-# process-driver.wit) are trimmed reference copies that intentionally omit runtime-internal
-# interfaces and are not compared here.
+# Only those subtrees (WIT_SUBTREES in lib/common.sh) are compared — they are the directories
+# wit_bindgen::generate! reads in every WASM artifact. murmur's other top-level WIT files (host/,
+# host.wit, worlds.wit, VERSIONING.md, ...) are not mirrored.
 #
 # The vendored subtrees are not a freely-trimmable subset: each one must be closed under the
 # imports and exports its own world declarations name. A world that references an interface no
@@ -18,59 +17,70 @@
 # Run from anywhere inside a default-artifacts checkout or one of its worktrees. The compared
 # mirror is always the wit/ of the checkout this script belongs to.
 #
-# The murmur it compares against is found by one rule:
+# The pinned commit is MURMUR_REV in .github/workflows/build.yml, read with murmur-pin.sh. Its
+# WIT is read with `git archive` from a murmur git checkout, whatever that checkout has checked
+# out. The checkout is found by one rule:
 #   MURMUR_DIR set and non-empty — that directory is the murmur root, and the only place looked.
 #   otherwise                    — the directory `murmur` beside the main checkout, where the
 #                                  main checkout is the parent of `git rev-parse --git-common-dir`.
 #                                  A plain checkout and each of its worktrees share that answer,
 #                                  and so does CI's $GITHUB_WORKSPACE/{default-artifacts,murmur}.
-# Either way, murmur's WIT is read from <murmur root>/crates/capsule-runtime/wit.
+# The root must be the toplevel of a git checkout that holds the pinned commit; an exported tree
+# is refused. This script never fetches: run `git -C <murmur root> fetch origin <commit>`.
+#
+# To move the pin and the mirror together, run ./scripts/murmur-pin.sh --set <commit>.
 #
 # Exit codes:
 #   0 — all shared files match and every vendored world resolves
 #   1 — a shared file has drifted, default-artifacts has a file murmur does not, or a vendored
 #       world references an interface no vendored file defines
-#   2 — murmur's WIT directory was not found; nothing was compared
+#   2 — the pin could not be read, murmur was not found or is not a git checkout, the pinned
+#       commit is not in it, or it has no crates/capsule-runtime/wit; nothing was compared
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DA_WIT="$(cd "$SCRIPT_DIR/.." && pwd)/wit"
+. "$SCRIPT_DIR/lib/common.sh"
 
-# Exit 2 with what was tried and why; nothing else is printed.
-not_found() {
-    {
-        echo "error: $1"
-        echo "  $2"
-        echo "  To compare against a murmur checkout elsewhere, set MURMUR_DIR to its root."
-    } >&2
+case "${1:-}" in
+    -h | --help)
+        awk 'NR > 1 { if (!/^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
+        exit 0
+        ;;
+    "") ;;
+    *)
+        echo "error: unknown argument '$1'" >&2
+        exit 2
+        ;;
+esac
+
+MURMUR_REV="$("$SCRIPT_DIR/murmur-pin.sh")" || {
+    echo "error: could not read the murmur pin; nothing was compared" >&2
     exit 2
 }
 
-if [ -n "${MURMUR_DIR:-}" ]; then
-    case "$MURMUR_DIR" in
-        /*) MURMUR_ROOT="$MURMUR_DIR" ;;
-        *) MURMUR_ROOT="$PWD/$MURMUR_DIR" ;;
-    esac
-    why="Looked there because MURMUR_DIR=$MURMUR_DIR."
-else
-    common="$(git -C "$SCRIPT_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ||
-        not_found "murmur not found: no path to try, because MURMUR_DIR is unset and \`git rev-parse --git-common-dir\` failed in $SCRIPT_DIR" \
-            "Without MURMUR_DIR, murmur is looked for in the directory beside the main checkout, which git names."
-    main_checkout="$(dirname "$common")"
-    MURMUR_ROOT="$(dirname "$main_checkout")/murmur"
-    why="Looked there because it is the directory beside the main checkout $main_checkout, found with \`git rev-parse --git-common-dir\`."
+locate_murmur_root "$SCRIPT_DIR"
+require_murmur_checkout
+if ! git -C "$MURMUR_ROOT" cat-file -e "$MURMUR_REV^{commit}" 2>/dev/null; then
+    {
+        echo "error: murmur commit $MURMUR_REV (MURMUR_REV in .github/workflows/build.yml) is not in $MURMUR_ROOT"
+        echo "  $MURMUR_ROOT_WHY"
+        echo "  Fetch it with: git -C $MURMUR_ROOT fetch origin $MURMUR_REV"
+    } >&2
+    exit 2
 fi
-MURMUR_WIT="$MURMUR_ROOT/crates/capsule-runtime/wit"
-[ -d "$MURMUR_WIT" ] || not_found "murmur WIT directory not found at $MURMUR_WIT" "$why"
+MURMUR_SHORT="$(git -C "$MURMUR_ROOT" rev-parse --short "$MURMUR_REV")"
 
-# An exported tree (`git archive`) has no commit to name; neither does a directory that is merely
-# inside some other repository.
-if murmur_top="$(git -C "$MURMUR_ROOT" rev-parse --show-toplevel 2>/dev/null)" &&
-    [ "$(cd "$murmur_top" && pwd -P)" = "$(cd "$MURMUR_ROOT" && pwd -P)" ]; then
-    echo "Comparing against $MURMUR_WIT (murmur $(git -C "$MURMUR_ROOT" rev-parse --short HEAD))"
-else
-    echo "Comparing against $MURMUR_WIT"
+EXPORT_DIR="$(mktemp -d)"
+trap 'rm -rf "$EXPORT_DIR"' EXIT
+if [ -z "$(git -C "$MURMUR_ROOT" ls-tree -d --name-only "$MURMUR_REV" "$MURMUR_WIT_PATH")" ]; then
+    echo "error: murmur $MURMUR_SHORT has no $MURMUR_WIT_PATH; nothing was compared" >&2
+    exit 2
 fi
+git -C "$MURMUR_ROOT" archive "$MURMUR_REV" "$MURMUR_WIT_PATH" | tar -x -C "$EXPORT_DIR"
+MURMUR_WIT="$EXPORT_DIR/$MURMUR_WIT_PATH"
+
+echo "Comparing against murmur $MURMUR_SHORT (MURMUR_REV in .github/workflows/build.yml) from $MURMUR_ROOT"
 
 drift=0
 only_da=0
@@ -225,22 +235,23 @@ check_interface_ref() {
     find_interface_file "$da_root" "$pkg" "$name" > /dev/null && return 0
 
     if murmur_rel="$(find_interface_file "$MURMUR_WIT/$subtree" "$pkg" "$name")"; then
-        hint="copy $MURMUR_WIT/$subtree/$murmur_rel -> wit/$subtree/$murmur_rel"
+        hint="copy murmur $MURMUR_SHORT:$MURMUR_WIT_PATH/$subtree/$murmur_rel -> wit/$subtree/$murmur_rel"
+        hint="$hint (git -C $MURMUR_ROOT show $MURMUR_SHORT:$MURMUR_WIT_PATH/$subtree/$murmur_rel > wit/$subtree/$murmur_rel),"
+        hint="$hint or re-mirror every subtree with ./scripts/murmur-pin.sh --set $MURMUR_REV"
     else
-        hint="no file under $MURMUR_WIT/$subtree/ defines it either — check the reference"
+        hint="no file under $MURMUR_WIT_PATH/$subtree/ at murmur $MURMUR_SHORT defines it either — check the reference"
     fi
     echo "UNRESOLVED   $subtree/$rel: world '$world' references '$ref', which no vendored file defines"
     echo "             $hint"
     unresolved=$((unresolved + 1))
 }
 
-compare_subtree "guest"
-compare_subtree "hook"
-compare_subtree "process-driver"
-
-check_subtree_closure "guest"
-check_subtree_closure "hook"
-check_subtree_closure "process-driver"
+for subtree in $WIT_SUBTREES; do
+    compare_subtree "$subtree"
+done
+for subtree in $WIT_SUBTREES; do
+    check_subtree_closure "$subtree"
+done
 
 echo ""
 echo "Results:"

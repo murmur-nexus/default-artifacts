@@ -28,7 +28,7 @@ set but empty`. Neither reaches the network. Requests go to
 ```yaml
 artifacts:
   - name: murmur/driver-zai
-    version: "0.1.0"
+    version: "0.2.0"
     runtime: driver
     gateway:
       endpoint: https://api.z.ai/api/paas/v4

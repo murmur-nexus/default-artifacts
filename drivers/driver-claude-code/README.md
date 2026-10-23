@@ -35,7 +35,7 @@ at `@0.2.0` refuses this release. Pick the driver by the murmur you run:
 |---|---|---|
 | `v0.3.0` and earlier | none | none: `transport: process` is not supported |
 | `v0.4.0`, `v0.5.0` | `murmur:driver/process@0.2.0` | `0.3.0` |
-| `v0.6.0` and later | `murmur:driver/process@0.3.0` | `0.4.0` |
+| `v0.6.0` and later | `murmur:driver/process@0.3.0` | `0.4.0` and later |
 
 A murmur without the runner at all refuses the manifest before the driver is loaded, with
 `E-MAN-003` naming `inference.driver.artifact`.
@@ -58,7 +58,7 @@ capabilities:
 artifacts:
   - name: murmur/driver-claude-code
     runtime: driver
-    version: "0.4.0"
+    version: "0.5.0"
 ```
 
 The harness starts from an **empty** environment and sees exactly the variables

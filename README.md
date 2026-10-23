@@ -194,10 +194,11 @@ needs one has to detect the refusal itself and say so.
 [`hook-memory`](./hooks/hook-memory/) calls all three of
 `murmur:conversation/read`, `murmur:runtime/tokens` and `murmur:task-io/read`.
 
-The `wit-sync` CI job verifies the mirror stays byte-identical to the murmur commit pinned in
-[.github/workflows/ci.yml](./.github/workflows/ci.yml); the mirror and the pin always move together.
+The `wit-sync` CI job verifies the mirror stays byte-identical to the murmur commit pinned by
+`MURMUR_REV` in [.github/workflows/build.yml](./.github/workflows/build.yml); the mirror and the
+pin always move together, with `./scripts/murmur-pin.sh --set <commit>`.
 
-See [BUILD.md](./BUILD.md) for exact build and copy commands.
+See [BUILD.md](./BUILD.md) for exact build and re-pin commands.
 
 ## License
 
