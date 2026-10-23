@@ -94,6 +94,20 @@ reference, and `tool-create`'s hook arm scaffolds that shape.
 For a tool's write destinations (`format: murmur-destination`) and a driver's `upstream_auth:`
 block, see murmur's [manifest reference](https://docs.murmur.nexus/reference/manifest/).
 
+An HTTP driver also declares a top-level `models:` block in its `murmur.yaml`: one entry per
+exact model id, holding exactly `max_output_tokens` and `context_window`, each an integer from 1
+to 4294967295. A crate test fails until that block agrees with the driver's README and with any
+`SUPPORTED_MODELS` table in `src/lib.rs`. To add a model to a driver:
+
+| Driver | Add |
+|---|---|
+| `driver-openai`, `driver-anthropic` | a `models:` entry and a row in the README's "Model limits" table |
+| `driver-deepseek` | the id in `SUPPORTED_MODELS`, a `models:` entry and a "Model limits" row |
+| `driver-moonshotai` | a `SUPPORTED_MODELS` entry with its limits, a `models:` entry and a "Model limits" row |
+| `driver-zai` | a `SUPPORTED_MODELS` entry with its limits and a `models:` entry; its README states the limits under "Model scope" |
+
+Then bump the driver's minor version.
+
 ## Release
 
 1. Bump `version:` in the `murmur.yaml` of every artifact whose payload changed — a minor bump

@@ -72,6 +72,21 @@ Completions only). A stream naming index 1024 or more fails the turn with a `dri
 names the index and the limit, before anything is stored for it. Each driver's README gives the
 exact message.
 
+All five declare the output cap and context window of the models they serve, under `models:` in
+their `murmur.yaml`. A murmur release after v0.7.0 takes a capsule's `inference.max_tokens` and
+`context.max_tokens` from that table when the capsule leaves them unset. A model a driver does not
+list still needs `inference.max_tokens`, or the launch is refused with `E-RUN-052`, and needs
+`context.max_tokens` for compaction to run. Each driver's README lists its models, the numbers and
+their sources, and the models it accepts without declaring:
+
+| Artifact | First release with `models:` | README section |
+|---|---|---|
+| `driver-anthropic` | 0.14.0 | "Model limits", "Models without declared limits" |
+| `driver-deepseek` | 0.13.0 | "Model limits", "Models without declared limits" |
+| `driver-moonshotai` | 0.12.0 | "Model limits", "Models without declared limits" |
+| `driver-openai` | 0.14.0 | "Model limits", "Models without declared limits" |
+| `driver-zai` | 0.1.0 | "Model scope" |
+
 ## Hooks
 
 WASM components (`runtime: hook`) that attach to lifecycle events. Each hook declares its `binding`, `execution_mode`, and `commit_policy` in its own `murmur.yaml`; where a field is omitted the runtime defaults apply (all events, async, no commit).

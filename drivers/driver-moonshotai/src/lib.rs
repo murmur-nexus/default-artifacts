@@ -1687,14 +1687,14 @@ mod tests {
 
         let oversized = request_from(json!({
             "model": "kimi-k3",
-            "max_tokens": 2_000_000u64,
+            "max_tokens": 1_048_577u64,
             "messages": []
         }));
         let err = build_provider_request(&oversized, &DriverConfig::default())
             .expect_err("a cap above the ceiling must be refused pre-flight");
         assert_eq!(
             err,
-            "driver: inference.max_tokens 2000000 exceeds the Moonshot max_completion_tokens \
+            "driver: inference.max_tokens 1048577 exceeds the Moonshot max_completion_tokens \
              ceiling of 1048576"
         );
 
