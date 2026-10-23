@@ -137,6 +137,20 @@ pins artifacts too, and it is that skill's payload: bumping an artifact it pins 
 pin, which changes the skill, so the skill needs a bump as well unless it has already moved since
 the last tag.
 
+The check scans every `*.md` outside `.nexus/`, tracked or untracked but not ignored, and counts
+three forms as a pin:
+
+| Form | Example | Reported on |
+|---|---|---|
+| inline | `mur install -g murmur/<name>@<x.y.z>` | that line |
+| manifest entry | a YAML mapping holding `name: murmur/<name>` and `version: <x.y.z>` at the same indent | the `version:` line |
+| zip name | `release/<name>-<x.y.z>.mur.zip`, when `<name>` is an artifact here; other names are ignored | that line |
+
+An inline or manifest pin naming no artifact of this repository fails too. Prose version floors
+such as ``needs `mur` 0.7.0 or later``, WIT package names (`murmur:driver/process@0.3.0`) and
+entries without a `version:` are not pins. Run `./scripts/check-readme-pins.sh <file.md>` to check
+one file.
+
 **A version is a promise about bytes.** `mur install` writes a payload's sha256 into the
 consumer's `murmur.lock`, and a store that holds `<name>/<version>` never fetches it again.
 Different bytes republished at a version someone has resolved do not upgrade them; they fail their
