@@ -96,8 +96,11 @@ jobs:
         run: ./scripts/check-version-drift.sh
 
   # Verify the artifact-facing WIT trees (wit/guest, wit/hook, wit/process-driver) stay
-  # byte-identical to murmur/crates/capsule-runtime/wit. murmur is pinned to a literal SHA so an
-  # unrelated murmur merge can't turn this repo's CI red without a deliberate bump here.
+  # byte-identical to murmur/crates/capsule-runtime/wit at the one murmur commit this repo pins:
+  # MURMUR_REV in build.yml, the commit the release builds `mur` from. build.yml keeps it a literal
+  # SHA, so an unrelated murmur merge cannot turn this job red. The mirror and the pin move
+  # together, in one commit, with `./scripts/murmur-pin.sh --set <commit>`; moving one without the
+  # other is what turns this job red.
   #
   # Both repos are checked out into sibling subdirectories of $GITHUB_WORKSPACE
   # (default-artifacts/, murmur/). check-wit-sync.sh looks for murmur in the directory
@@ -113,24 +116,38 @@ jobs:
         with:
           path: default-artifacts
 
-      - name: Check out murmur (pinned) as a sibling directory
+      # murmur-pin.sh fails on no `  MURMUR_REV: <40-hex SHA>` line in build.yml, or on more
+      # than one. `rev=` on its own line, so that failure fails the step.
+      - name: Read MURMUR_REV from build.yml
+        id: murmur-rev
+        working-directory: default-artifacts
+        run: |
+          rev=$(./scripts/murmur-pin.sh)
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+          echo "$rev"
+
+      - name: Check out murmur at build.yml's MURMUR_REV as a sibling directory
         uses: actions/checkout@v4
         with:
           repository: murmur-nexus/murmur
-          # Always a literal SHA — never main/HEAD/a branch ref — so an unrelated
-          # murmur merge cannot turn this repo's CI red without a deliberate bump.
-          #
-          # To re-pin after a WIT change: check out the new murmur beside this
-          # repo, copy its wit/{guest,hook,process-driver} over this repo's wit/,
-          # run ./scripts/check-wit-sync.sh until it exits 0, then set `ref:` to
-          # that same commit. The mirror and the pin must always move together —
-          # moving one without the other is what turns this job red.
-          ref: 503811b0441dbfd774a16ef9de5e99fd0ed7d367
+          ref: ${{ steps.murmur-rev.outputs.rev }}
           path: murmur
 
       - name: Check artifact-facing WIT files are in sync with murmur
         working-directory: default-artifacts
         run: ./scripts/check-wit-sync.sh
+
+  # Hold every artifact version a README, skill or BUILD.md copies to the `version:` in that
+  # artifact's murmur.yaml. Copies are written by hand and a bump leaves them behind: three
+  # reviews in a row found stale ones, each telling a reader to install a version other than
+  # the one documented beside it.
+  readme-pins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check every doc pin matches its artifact's murmur.yaml version
+        run: ./scripts/check-readme-pins.sh
 
   # Prove that every compiled artifact (wasm and native) packs the same bytes built
   # alone as it does in the release build. A crate's bytes can depend on which other
@@ -140,9 +157,9 @@ jobs:
   # zip that differs.
   #
   # Packing needs the `mur` the release packs with, so this job builds it the way
-  # build.yml's release job does. MURMUR_REV is read out of build.yml rather than
-  # written here, so the release and this check cannot pin two different murmurs:
-  # moving the pin means editing build.yml only.
+  # build.yml's release job does. MURMUR_REV is read out of build.yml by
+  # ./scripts/murmur-pin.sh rather than written here, so the release and this check
+  # cannot pin two different murmurs: moving the pin means editing build.yml only.
   build-isolation:
     runs-on: ubuntu-latest
     env:
@@ -159,25 +176,16 @@ jobs:
         with:
           path: default-artifacts
 
-      # Exactly one `  MURMUR_REV: <40-hex SHA>` line under build.yml's top-level
-      # `env:`. None, or more than one, fails here rather than building some other mur.
+      # murmur-pin.sh fails on no `  MURMUR_REV: <40-hex SHA>` line under build.yml's
+      # top-level `env:`, or on more than one, rather than building some other mur.
+      # `rev=` on its own line, so that failure fails the step.
       - name: Read MURMUR_REV from build.yml
         id: murmur-rev
         working-directory: default-artifacts
         run: |
-          workflow=.github/workflows/build.yml
-          revs=$(sed -n 's/^  MURMUR_REV: *\([0-9a-f]\{40\}\)[[:space:]]*$/\1/p' "$workflow")
-          count=$(printf '%s' "$revs" | grep -c . || true)
-          if [ "$count" -eq 0 ]; then
-            echo "::error::$workflow has no '  MURMUR_REV: <40-hex SHA>' line; build-isolation builds mur from it"
-            exit 1
-          fi
-          if [ "$count" -ne 1 ]; then
-            echo "::error::$workflow has $count '  MURMUR_REV: <40-hex SHA>' lines ($(printf '%s' "$revs" | paste -sd ' ' -)); expected exactly one"
-            exit 1
-          fi
-          echo "rev=$revs" >> "$GITHUB_OUTPUT"
-          echo "$revs"
+          rev=$(./scripts/murmur-pin.sh)
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+          echo "$rev"
 
       - name: Check out murmur at build.yml's MURMUR_REV
         uses: actions/checkout@v4

@@ -11,14 +11,14 @@ this page covers what is particular to this repository.
 |---|---|---|
 | Rust | the `channel` in `rust-toolchain.toml`, with `wasm32-wasip2` | `rustup` reads the file at every cargo call; never `rustup target add` by hand |
 | `wasm-tools` | `1.247.0` | the `Install wasm-tools` steps in `.github/workflows/` |
-| `mur` with the `index` subcommand | murmur at `MURMUR_REV` | `env:` in `.github/workflows/build.yml`; `ci.yml`'s `build-isolation` job reads it from there |
+| `mur` with the `index` subcommand | murmur at `MURMUR_REV` | `env:` in `.github/workflows/build.yml`; `ci.yml`'s `build-isolation` and `wit-sync` jobs read it through `./scripts/murmur-pin.sh` |
 
 Build `mur` from a murmur checkout, from inside it so this repository's toolchain file is not
 picked up, and point `MUR_BIN` at it. Every script below reads `MUR_BIN`, else `mur` on `PATH`,
 and refuses one without `index`:
 
 ```bash
-git -C ../murmur checkout <MURMUR_REV>
+git -C ../murmur checkout "$(./scripts/murmur-pin.sh)"
 (cd ../murmur && cargo build -p murmur-cli)
 export MUR_BIN=$PWD/../murmur/target/debug/mur
 ```
@@ -51,7 +51,7 @@ own manifest, and is what excludes native and internal crates from the wasm buil
 cargo build -p tool-editor --target wasm32-wasip2 --release   # wasm
 cargo build --release -p tool-git                              # native
 ./scripts/validate-component.sh target/wasm32-wasip2/release/tool_editor.wasm
-./scripts/package-artifact.sh tools/tool-editor release/       # → release/tool-editor-0.7.0.mur.zip
+./scripts/package-artifact.sh tools/tool-editor release/       # → release/tool-editor-0.9.0.mur.zip
 ./scripts/local-install.sh tool-editor /path/to/capsule-folder
 ```
 
@@ -116,15 +116,26 @@ Then bump the driver's minor version.
 2. Bump `[workspace.package] version` in `Cargo.toml` to the next minor. It names the release
    only: every crate pins `version = "0.0.0"`, so neither `Cargo.lock` nor any artifact's bytes
    change with it.
-3. Merge, then tag the merge commit `v<workspace version>` and push the tag.
-4. The `build` workflow runs. `verify` checks that the tag is `v` + the workspace version and the
+3. When murmur has moved and this repository should follow it, run
+   `./scripts/murmur-pin.sh --set <commit>` (see [WIT mirror](#wit-mirror)). It rewrites the
+   `MURMUR_REV` line in `build.yml`, re-mirrors the WIT and lists the artifacts that need a bump.
+   Bump those, and commit the `MURMUR_REV` line, the mirror and the bumps together.
+4. Merge, then tag the merge commit `v<workspace version>` and push the tag.
+5. The `build` workflow runs. `verify` checks that the tag is `v` + the workspace version and the
    newest `v*` tag, and that no artifact drifted. `native` runs `./scripts/build-native.sh` on each
    platform runner. `release` builds `mur` at `MURMUR_REV` and the wasm artifacts, validates them, packs
    every artifact with `./scripts/package-release.sh`, and writes `artifacts-index.json` with
    `./scripts/index-release.sh`, merged with the latest release's index. Then
    `./scripts/check-release-installs.sh` installs every new version through `mur` against a
    loopback copy of the release, and only then is anything uploaded.
-5. Afterwards, `mur install -g murmur/<name>@<version>` resolves from the new release.
+6. Afterwards, `mur install -g murmur/<name>@<version>` resolves from the new release.
+
+**Docs pin the current version.** READMEs, skills and this page copy artifact versions into
+install lines and example manifests. `./scripts/check-readme-pins.sh` holds every copy to the
+artifact's `murmur.yaml`, and CI runs it on every push. `skills/skill-create-manifest/skill.md`
+pins artifacts too, and it is that skill's payload: bumping an artifact it pins means updating the
+pin, which changes the skill, so the skill needs a bump as well unless it has already moved since
+the last tag.
 
 **A version is a promise about bytes.** `mur install` writes a payload's sha256 into the
 consumer's `murmur.lock`, and a store that holds `<name>/<version>` never fetches it again.
@@ -156,13 +167,25 @@ packs identical bytes, and a re-run over one commit writes the same index.
 ## WIT mirror
 
 `wit/guest/`, `wit/hook/` and `wit/process-driver/` are a byte-identical copy of
-`murmur/crates/capsule-runtime/wit/`, pinned to a murmur commit by `ref:` in `ci.yml`'s `wit-sync`
-job. The mirror and the pin move together. To re-pin after a WIT change in murmur: check murmur
-out beside this repository, copy its `wit/{guest,hook,process-driver}` over this repository's
-`wit/`, run `./scripts/check-wit-sync.sh` until it exits 0, set `ref:` to that commit, and commit
-both. Every artifact rebuilt against a new interface version ships different bytes, so bump each
-one. The script looks for murmur beside the main checkout, from a worktree too; to compare
-against a murmur checkout elsewhere, set `MURMUR_DIR` to its root.
+`murmur/crates/capsule-runtime/wit/` at `MURMUR_REV` in `.github/workflows/build.yml`, the commit
+the release builds `mur` from. No other workflow or script names a murmur commit. The mirror and
+the pin move together:
+
+```bash
+./scripts/murmur-pin.sh                    # print the pinned commit
+git ls-remote https://github.com/murmur-nexus/murmur.git refs/tags/v<x.y.z>
+./scripts/murmur-pin.sh --set <commit>     # move the pin and the mirror to <commit>
+```
+
+`--set` takes a commit, or an annotated tag's object name and writes the commit it points at. It
+refuses uncommitted changes under `wit/` or to `build.yml`. It rewrites the `MURMUR_REV` line,
+replaces the three subtrees with murmur's at that commit and stages them, then runs
+`./scripts/check-wit-sync.sh` and `./scripts/check-version-drift.sh`. Every artifact rebuilt
+against a new interface version ships different bytes, so bump each one it lists.
+
+`./scripts/check-wit-sync.sh` reads murmur's WIT at the pinned commit, whatever the murmur
+checkout has checked out. It looks for murmur beside the main checkout, from a worktree too, or
+at `MURMUR_DIR`. Either must be a git checkout that holds the commit; the script never fetches.
 
 ## Tests
 
