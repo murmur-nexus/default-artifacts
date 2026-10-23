@@ -1,5 +1,5 @@
 name: driver-deepseek
-version: 0.12.0
+version: 0.13.0
 runtime: driver
 description: "DeepSeek inference driver — deepseek-v4-flash and deepseek-v4-pro with thinking mode"
 requires_files:
@@ -9,3 +9,12 @@ requires_files:
 upstream_auth:
   header: Authorization
   value: "Bearer {key}"
+
+# The limits of each model this driver serves, from the provider's documentation; README.md cites each number.
+models:
+  deepseek-v4-flash:
+    max_output_tokens: 393216
+    context_window: 1048576
+  deepseek-v4-pro:
+    max_output_tokens: 393216
+    context_window: 1048576

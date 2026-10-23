@@ -25,6 +25,91 @@ that arrives empty or whitespace-only with `driver: MURMUR_INFERENCE_ENDPOINT is
 set but empty`. Neither reaches the network. Requests go to
 `<endpoint>/v1/messages`.
 
+## Model limits
+
+The driver accepts any model string; the model only picks the Claude 3 or
+Claude 4+ request rules. `murmur.yaml` declares limits under `models:` for every
+current and legacy model on Anthropic's
+[models overview](https://platform.claude.com/docs/en/about-claude/models/overview),
+under each "Claude API ID" it lists and under the "Claude API alias" where that
+differs. Models before the 4.6 generation have both a dated ID and a dateless
+alias, and both are declared; from 4.6 on, the dateless ID is the snapshot and
+there is no dated one. Each id is matched exactly.
+
+The numbers are the synchronous Messages API limits, which need no beta header.
+
+| Model | max_output_tokens | context_window | Source |
+|---|---|---|---|
+| `claude-fable-5-1` | 128000 | 1000000 | <https://platform.claude.com/docs/en/about-claude/models/overview>, read 2026-10-23: "Claude API ID claude-fable-5-1", "Context window 1M tokens", "Max output 128K tokens". Exact integers: Models API (`GET /v1/models`, 2026-10-23): `max_input_tokens: 1000000`, `max_tokens: 128000` |
+| `claude-opus-5-5` | 128000 | 1000000 | <https://platform.claude.com/docs/en/about-claude/models/overview>, read 2026-10-23: "Claude API ID claude-opus-5-5", "Context window 1M tokens", "Max output 128K tokens". Exact integers: Models API (`GET /v1/models`, 2026-10-23): `max_input_tokens: 1000000`, `max_tokens: 128000` |
+| `claude-sonnet-5-5` | 128000 | 1000000 | <https://platform.claude.com/docs/en/about-claude/models/overview>, read 2026-10-23: "Claude API ID claude-sonnet-5-5", "Context window 1M tokens", "Max output 128K tokens". Exact integers: Models API (`GET /v1/models`, 2026-10-23): `max_input_tokens: 1000000`, `max_tokens: 128000` |
+| `claude-haiku-5-5` | 128000 | 1000000 | <https://platform.claude.com/docs/en/about-claude/models/overview>, read 2026-10-23: "Claude API ID claude-haiku-5-5", "Context window 1M tokens", "Max output 128K tokens". Exact integers: Models API (`GET /v1/models`, 2026-10-23): `max_input_tokens: 1000000`, `max_tokens: 128000` |
+| `claude-fable-5` | 128000 | 1000000 | Legacy model. <https://platform.claude.com/docs/en/models/fable-5/overview>, read 2026-10-23: "Context window 1M tokens", "Max output 128K tokens". Exact integers: Models API (`GET /v1/models`, 2026-10-23): `max_input_tokens: 1000000`, `max_tokens: 128000` |
+| `claude-opus-5` | 128000 | 1000000 | Legacy model. <https://platform.claude.com/docs/en/models/opus-5/overview>, read 2026-10-23: "Context window 1M tokens", "Max output 128K tokens". Exact integers: Models API (`GET /v1/models`, 2026-10-23): `max_input_tokens: 1000000`, `max_tokens: 128000` |
+| `claude-sonnet-5` | 128000 | 1000000 | Legacy model. <https://platform.claude.com/docs/en/models/sonnet-5/overview>, read 2026-10-23: "Context window 1M tokens", "Max output 128K tokens". Exact integers: Models API (`GET /v1/models`, 2026-10-23): `max_input_tokens: 1000000`, `max_tokens: 128000` |
+| `claude-opus-4-8` | 128000 | 1000000 | Legacy model. <https://platform.claude.com/docs/en/models/opus-4-8/overview>, read 2026-10-23: "Context window 1M tokens", "Max output 128K tokens". Exact integers: Models API (`GET /v1/models`, 2026-10-23): `max_input_tokens: 1000000`, `max_tokens: 128000` |
+| `claude-opus-4-7` | 128000 | 1000000 | Legacy model. <https://platform.claude.com/docs/en/models/opus-4-7/overview>, read 2026-10-23: "Context window 1M tokens", "Max output 128K tokens". Exact integers: Models API (`GET /v1/models`, 2026-10-23): `max_input_tokens: 1000000`, `max_tokens: 128000` |
+| `claude-opus-4-6` | 128000 | 1000000 | Legacy model. <https://platform.claude.com/docs/en/models/opus-4-6/overview>, read 2026-10-23: "Context window 1M tokens", "Max output 128K tokens". Exact integers: Models API (`GET /v1/models`, 2026-10-23): `max_input_tokens: 1000000`, `max_tokens: 128000` |
+| `claude-sonnet-4-6` | 128000 | 1000000 | Legacy model. <https://platform.claude.com/docs/en/models/sonnet-4-6/overview>, read 2026-10-23: "Context window 1M tokens", "Max output 128K tokens". Exact integers: Models API (`GET /v1/models`, 2026-10-23): `max_input_tokens: 1000000`, `max_tokens: 128000` |
+| `claude-opus-4-5-20251101` | 64000 | 200000 | Legacy model. <https://platform.claude.com/docs/en/models/opus-4-5/overview>, read 2026-10-23: "Context window 200K tokens", "Max output 64K tokens". Exact integers: Models API (`GET /v1/models`, 2026-10-23): `max_input_tokens: 200000`, `max_tokens: 64000` |
+| `claude-opus-4-5` | 64000 | 200000 | The "Claude API alias" for `claude-opus-4-5-20251101` on <https://platform.claude.com/docs/en/models/opus-4-5/overview>, read 2026-10-23, which resolves to that snapshot: "Context window 200K tokens", "Max output 64K tokens"; the Models API (`GET /v1/models`, 2026-10-23) entry for `claude-opus-4-5-20251101` gives `max_input_tokens: 200000`, `max_tokens: 64000` |
+| `claude-sonnet-4-5-20250929` | 64000 | 200000 | Legacy model. Deprecated; retires 2026-11-30 (<https://platform.claude.com/docs/en/about-claude/model-deprecations>). <https://platform.claude.com/docs/en/models/sonnet-4-5/overview>, read 2026-10-23: "Context window 200K tokens", "Max output 64K tokens". Exact integers: Models API (`GET /v1/models`, 2026-10-23): `max_input_tokens: 200000`, `max_tokens: 64000` |
+| `claude-sonnet-4-5` | 64000 | 200000 | The "Claude API alias" for `claude-sonnet-4-5-20250929` on <https://platform.claude.com/docs/en/models/sonnet-4-5/overview>, read 2026-10-23, which resolves to that snapshot: "Context window 200K tokens", "Max output 64K tokens"; the Models API (`GET /v1/models`, 2026-10-23) entry for `claude-sonnet-4-5-20250929` gives `max_input_tokens: 200000`, `max_tokens: 64000` |
+| `claude-haiku-4-5-20251001` | 64000 | 200000 | Legacy model. <https://platform.claude.com/docs/en/models/haiku-4-5/overview>, read 2026-10-23: "Context window 200K tokens", "Max output 64K tokens". Exact integers: Models API (`GET /v1/models`, 2026-10-23): `max_input_tokens: 200000`, `max_tokens: 64000` |
+| `claude-haiku-4-5` | 64000 | 200000 | The "Claude API alias" for `claude-haiku-4-5-20251001` on <https://platform.claude.com/docs/en/models/haiku-4-5/overview>, read 2026-10-23, which resolves to that snapshot: "Context window 200K tokens", "Max output 64K tokens"; the Models API (`GET /v1/models`, 2026-10-23) entry for `claude-haiku-4-5-20251001` gives `max_input_tokens: 200000`, `max_tokens: 64000` |
+
+`murmur.yaml` declares the same ids and numbers under `models:`, and a test
+fails if the two disagree.
+
+Several of these models' pages also give "Max output (Batch API, beta) 300K
+tokens", with the `output-300k-2026-03-24` beta header. That limit applies to the
+Message Batches API only. This driver calls the Messages API, so it is not
+reachable here at any `inference.max_tokens`.
+
+Anthropic counts output against the window: "The output Claude generates for the
+turn, including its extended thinking, counts too." On Claude 4.5 models and
+newer, a request whose input plus `max_tokens` exceeds the window is accepted,
+and a reply that reaches the window stops with `model_context_window_exceeded`,
+which this driver refuses as an unsupported stop reason (see
+[Stop reasons](#stop-reasons)). With the default cap of `128000` on a `1000000`
+window, that can happen once the input passes `872000` tokens. Compaction fires
+when occupancy crosses `inference.compaction.threshold` (default `0.98`) of the
+window, `980000` tokens here, so at the default a long session can reach that
+point first. A capsule that runs that long sets
+`inference.compaction.threshold` or `context.max_tokens` lower. The driver does
+not shrink the window to compensate.
+
+Whether the runtime reads `models:` depends on the murmur release:
+
+| murmur | What it does with `models:` | What the capsule sets |
+|---|---|---|
+| v0.7.0 and earlier | ignores it; an unknown manifest key is a `W-SEC-019` warning, never a refusal | `inference.max_tokens` and `context.max_tokens`; left unset, the runtime's own defaults apply, not the model's limits |
+| the first release after v0.7.0 | defaults the output cap and context window from it when the capsule leaves them unset, and caps a hook's `run-inference` (e.g. `hook-compact`) at its `max_output_tokens` | nothing, unless it wants tighter limits than the table |
+
+A capsule value always wins: the runtime never clamps or raises
+`inference.max_tokens` or `context.max_tokens` to the table.
+
+## Models without declared limits
+
+These ids are accepted by the driver but have no entry under `models:`:
+
+| Model | Why it has no entry |
+|---|---|
+| `claude-mythos-5-1`, `claude-mythos-5` | listed under "Specialized models", not on the overview's current or legacy list; available only to organizations verified through Anthropic's verification programs |
+| `claude-mythos-preview` | deprecated, and not on the overview |
+| retired models, such as `claude-opus-4-1-20250805` or `claude-3-7-sonnet-20250219` | retired: Anthropic fails every request to them |
+| dated snapshot ids for the 4.6 generation and later | none exist: from 4.6 on, the dateless ID is the snapshot |
+| any other id | not on the overview |
+
+A capsule on one of these sets `inference.max_tokens` and `context.max_tokens`
+itself:
+
+| Capsule sets | Result |
+|---|---|
+| neither | the launch is refused with `E-RUN-052`, naming the driver and the model, before any HTTP call |
+| only `inference.max_tokens` | it launches with `W-RUN-009`, and compaction does not run |
+| both | it launches |
+
 ## Prompt caching
 
 Anthropic caches a prompt prefix only where the request carries a

@@ -24,6 +24,61 @@ that arrives empty or whitespace-only with `driver: MURMUR_INFERENCE_ENDPOINT is
 set but empty`. Neither reaches the network. Requests go to
 `<endpoint>/chat/completions`.
 
+## Model scope
+
+The driver accepts exactly `deepseek-v4-flash` and `deepseek-v4-pro`
+(`SUPPORTED_MODELS` in `src/lib.rs`). `deepseek-chat` and `deepseek-reasoner`
+are refused as deprecated, and every other id as unsupported, before a request
+is built. DeepSeek now names its flash model `deepseek-flash`; it still accepts
+`deepseek-v4-flash`, a retired name whose requests DeepSeek serves with
+DeepSeek-V4.1-Flash. The driver does not accept `deepseek-flash`.
+
+## Model limits
+
+| Model | max_output_tokens | context_window | Source |
+|---|---|---|---|
+| `deepseek-v4-flash` | 393216 | 1048576 | Read 2026-10-23. <https://api-docs.deepseek.com/quick_start/pricing> gives "CONTEXT LENGTH 1M" and "MAX OUTPUT MAXIMUM: 384K", and says `deepseek-v4-flash` requests "are served by the DeepSeek-V4.1-Flash-1017 model". Exact integers: <https://api-docs.deepseek.com/api/create-chat-completion>, `max_tokens`: "The value must be between 1 and 384K (393216)"; <https://api-docs.deepseek.com/api/list-models>, example response for DeepSeek-V4.1-Flash: `"context_window": 1048576`, `"max_output_tokens": 393216`. The window counts input and output together |
+| `deepseek-v4-pro` | 393216 | 1048576 | Read 2026-10-23. <https://api-docs.deepseek.com/quick_start/pricing> gives "CONTEXT LENGTH 1M" and "MAX OUTPUT MAXIMUM: 384K". Exact integers: <https://api-docs.deepseek.com/api/create-chat-completion>, `max_tokens`: "The value must be between 1 and 384K (393216)"; <https://api-docs.deepseek.com/api/list-models>, example response for `deepseek-v4-pro`: `"context_window": 1048576`, `"max_output_tokens": 393216`. The window counts input and output together |
+
+`murmur.yaml` declares the same numbers under `models:`, and a test fails if the
+two disagree or if `models:` holds any id other than those in `SUPPORTED_MODELS`.
+The driver itself keeps no limits and checks no ceiling.
+
+DeepSeek counts output against the window: "The total length of input tokens and
+generated tokens is limited by the model's context length." With the default cap
+of `393216`, the input that still leaves room for a full-length reply is
+`1048576 − 393216 = 655360` tokens. Compaction fires when occupancy crosses
+`inference.compaction.threshold` (default `0.98`) of the window, so at the
+default a long session can reach DeepSeek's limit first. A capsule that runs
+that long sets `inference.compaction.threshold` or `context.max_tokens` lower.
+
+Whether the runtime reads `models:` depends on the murmur release:
+
+| murmur | What it does with `models:` | What the capsule sets |
+|---|---|---|
+| v0.7.0 and earlier | ignores it; an unknown manifest key is a `W-SEC-019` warning, never a refusal | `inference.max_tokens` and `context.max_tokens`; left unset, the runtime's own defaults apply, not the models' limits |
+| the first release after v0.7.0 | defaults the output cap and context window from it when the capsule leaves them unset, and caps a hook's `run-inference` (e.g. `hook-compact`) at its `max_output_tokens` | nothing, unless it wants tighter limits than the table |
+
+A capsule value always wins: the runtime never clamps or raises
+`inference.max_tokens` or `context.max_tokens` to the table.
+
+## Models without declared limits
+
+None. `SUPPORTED_MODELS` and `models:` hold the same ids, so every model this
+driver accepts has declared limits.
+
+Any other id, such as `deepseek-flash`, has no entry. The runtime checks for one
+at launch, before the driver sees a request:
+
+| Capsule sets | Result |
+|---|---|
+| neither `inference.max_tokens` nor `context.max_tokens` | the launch is refused with `E-RUN-052` |
+| only `inference.max_tokens` | it launches with `W-RUN-009`, and compaction does not run |
+| both | it launches |
+
+In each case that launches, the driver then refuses the first inference call as
+an unsupported or deprecated model.
+
 ## Stop reasons
 
 | DeepSeek `finish_reason` | Murmur `stop_reason` |

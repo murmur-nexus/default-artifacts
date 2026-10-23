@@ -1850,6 +1850,94 @@ mod tests {
     }
 
     #[test]
+    fn manifest_models_cover_every_accepted_model() {
+        use std::collections::BTreeMap;
+
+        #[derive(serde::Deserialize)]
+        struct Manifest {
+            models: BTreeMap<String, Limits>,
+        }
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Limits {
+            max_output_tokens: u32,
+            context_window: u32,
+        }
+
+        // Parsed with the crate murmur parses the bundled manifest with.
+        let models = serde_norway::from_str::<Manifest>(include_str!("../murmur.yaml"))
+            .expect("murmur.yaml's models: block must parse")
+            .models;
+        assert!(!models.is_empty(), "murmur.yaml's models: block is empty");
+        for (id, limits) in &models {
+            assert!(
+                limits.max_output_tokens >= 1
+                    && limits.context_window >= 1
+                    && limits.max_output_tokens <= limits.context_window,
+                "models.{id}: {limits:?} must satisfy 1 <= max_output_tokens <= context_window"
+            );
+        }
+
+        // README.md's "Model limits" table: | `<id>` | <max_output_tokens> | <context_window> | …
+        let readme = include_str!("../README.md");
+        let section = readme
+            .split("\n## ")
+            .find(|section| section.starts_with("Model limits\n"))
+            .expect("README.md must have a ## Model limits section");
+        let mut documented = BTreeMap::new();
+        for row in section.lines() {
+            let cells: Vec<&str> = row.split('|').map(str::trim).collect();
+            let [_, id, out, ctx, ..] = cells[..] else {
+                continue;
+            };
+            let Some(id) = id.strip_prefix('`').and_then(|id| id.strip_suffix('`')) else {
+                continue;
+            };
+            let number = |cell: &str| -> u32 {
+                cell.parse()
+                    .unwrap_or_else(|_| panic!("README.md row '{id}': '{cell}' is not an integer"))
+            };
+            let limits = Limits {
+                max_output_tokens: number(out),
+                context_window: number(ctx),
+            };
+            assert!(
+                documented.insert(id.to_string(), limits).is_none(),
+                "README.md's Model limits table lists '{id}' twice"
+            );
+        }
+
+        // The accepted set is SUPPORTED_MODELS.
+        let accepted: Vec<&str> = super::SUPPORTED_MODELS.to_vec();
+
+        for id in &accepted {
+            assert!(
+                models.contains_key(*id),
+                "murmur.yaml's models: block lacks '{id}'"
+            );
+        }
+        for id in models.keys() {
+            assert!(
+                accepted.contains(&id.as_str()),
+                "murmur.yaml's models: block declares '{id}', which is outside the accepted set"
+            );
+        }
+        for (id, limits) in &models {
+            assert_eq!(
+                documented.get(id),
+                Some(limits),
+                "README.md's Model limits table disagrees with murmur.yaml on '{id}'"
+            );
+        }
+        for id in documented.keys() {
+            assert!(
+                models.contains_key(id),
+                "README.md's Model limits table lists '{id}', which murmur.yaml does not declare"
+            );
+        }
+    }
+
+    #[test]
     fn the_driver_neither_reads_a_credential_nor_builds_an_auth_header() {
         // The runtime attaches the header declared under `upstream_auth:`, so a driver-side
         // credential read would put the key back in the guest.

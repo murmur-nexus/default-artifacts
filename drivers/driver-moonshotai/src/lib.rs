@@ -5,37 +5,60 @@
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-// ── Model validation ──────────────────────────────────────────────────────────
+// ── Model table ───────────────────────────────────────────────────────────────
 
-/// The one model family this driver speaks. Moonshot also ships `kimi-k2.7-code`,
-/// `kimi-k2.7-code-highspeed` and `kimi-k2.6`; none of them are implemented here. This constant
-/// is the classification seam a second family would be added at — nothing else in the crate
-/// branches on the model name.
-const SUPPORTED_MODELS: &[&str] = &["kimi-k3"];
-
-/// Reject an unsupported model before a request body is built, so it costs no HTTP call.
-fn validate_model(model: &str) -> Result<(), String> {
-    if !SUPPORTED_MODELS.contains(&model) {
-        return Err(format!(
-            "driver: model '{model}' is not supported by driver-moonshotai. \
-             Supported models: {}.",
-            SUPPORTED_MODELS.join(", ")
-        ));
-    }
-    Ok(())
+/// The limits Moonshot publishes for one model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ModelLimits {
+    /// The largest `max_completion_tokens` Moonshot accepts for the model. A larger value is
+    /// refused here rather than clamped silently or spent on a provider 400.
+    max_output_tokens: u64,
+    /// The model's context window in tokens. No request path reads it: it is the number
+    /// `murmur.yaml` declares under `models:`, and a test keeps the two in step.
+    #[cfg_attr(not(test), allow(dead_code))]
+    context_window: u64,
 }
 
-// ── Output-token ceiling ──────────────────────────────────────────────────────
+/// Every model this driver serves, with its limits. Moonshot also ships `kimi-k3.1-pro`,
+/// `kimi-k3.1-pro-highspeed`, `kimi-k2.7-code` and `kimi-k2.6`; none of them are implemented
+/// here. This table is the classification seam a second model would be added at — nothing else
+/// in the crate branches on the model name — and `murmur.yaml`'s `models:` block must declare
+/// the same numbers for each entry.
+const SUPPORTED_MODELS: &[(&str, ModelLimits)] = &[(
+    "kimi-k3",
+    ModelLimits {
+        max_output_tokens: 1_048_576,
+        context_window: 1_048_576,
+    },
+)];
 
-/// Moonshot's ceiling for `max_completion_tokens`. A larger value is refused here rather than
-/// clamped silently or spent on a provider 400.
-const MAX_COMPLETION_TOKENS_CEILING: u64 = 1_048_576;
+/// Look the model up by its exact id before a request body is built, so an unsupported model
+/// costs no HTTP call.
+fn validate_model(model: &str) -> Result<&'static ModelLimits, String> {
+    SUPPORTED_MODELS
+        .iter()
+        .find(|(id, _)| *id == model)
+        .map(|(_, limits)| limits)
+        .ok_or_else(|| {
+            format!(
+                "driver: model '{model}' is not supported by driver-moonshotai. \
+                 Supported models: {}.",
+                SUPPORTED_MODELS
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+}
 
-fn validate_max_tokens(max_tokens: u64) -> Result<(), String> {
-    if max_tokens > MAX_COMPLETION_TOKENS_CEILING {
+/// Refuse an output cap above the model's ceiling rather than clamping it silently.
+fn validate_max_tokens(limits: &ModelLimits, max_tokens: u64) -> Result<(), String> {
+    if max_tokens > limits.max_output_tokens {
         return Err(format!(
             "driver: inference.max_tokens {max_tokens} exceeds the Moonshot \
-             max_completion_tokens ceiling of {MAX_COMPLETION_TOKENS_CEILING}"
+             max_completion_tokens ceiling of {}",
+            limits.max_output_tokens
         ));
     }
     Ok(())
@@ -329,8 +352,8 @@ fn thinking_text(content: &[MurmurContentBlock]) -> Option<String> {
 
 /// Every check that can be made without building a body or touching the network.
 fn preflight_request(request: &MurmurRequest) -> Result<(), String> {
-    validate_model(&request.model)?;
-    validate_max_tokens(request.max_tokens)?;
+    let limits = validate_model(&request.model)?;
+    validate_max_tokens(limits, request.max_tokens)?;
     Ok(())
 }
 
@@ -1664,14 +1687,14 @@ mod tests {
 
         let oversized = request_from(json!({
             "model": "kimi-k3",
-            "max_tokens": 2_000_000u64,
+            "max_tokens": 1_048_577u64,
             "messages": []
         }));
         let err = build_provider_request(&oversized, &DriverConfig::default())
             .expect_err("a cap above the ceiling must be refused pre-flight");
         assert_eq!(
             err,
-            "driver: inference.max_tokens 2000000 exceeds the Moonshot max_completion_tokens \
+            "driver: inference.max_tokens 1048577 exceeds the Moonshot max_completion_tokens \
              ceiling of 1048576"
         );
 
@@ -2479,6 +2502,106 @@ mod tests {
             include_str!("../murmur.yaml").contains(BLOCK),
             "drivers/driver-moonshotai/murmur.yaml must contain verbatim:\n{BLOCK}"
         );
+    }
+
+    #[test]
+    fn manifest_models_cover_every_accepted_model() {
+        use std::collections::BTreeMap;
+
+        #[derive(serde::Deserialize)]
+        struct Manifest {
+            models: BTreeMap<String, Limits>,
+        }
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Limits {
+            max_output_tokens: u32,
+            context_window: u32,
+        }
+
+        // Parsed with the crate murmur parses the bundled manifest with.
+        let models = serde_norway::from_str::<Manifest>(include_str!("../murmur.yaml"))
+            .expect("murmur.yaml's models: block must parse")
+            .models;
+        assert!(!models.is_empty(), "murmur.yaml's models: block is empty");
+        for (id, limits) in &models {
+            assert!(
+                limits.max_output_tokens >= 1
+                    && limits.context_window >= 1
+                    && limits.max_output_tokens <= limits.context_window,
+                "models.{id}: {limits:?} must satisfy 1 <= max_output_tokens <= context_window"
+            );
+        }
+
+        // README.md's "Model limits" table: | `<id>` | <max_output_tokens> | <context_window> | …
+        let readme = include_str!("../README.md");
+        let section = readme
+            .split("\n## ")
+            .find(|section| section.starts_with("Model limits\n"))
+            .expect("README.md must have a ## Model limits section");
+        let mut documented = BTreeMap::new();
+        for row in section.lines() {
+            let cells: Vec<&str> = row.split('|').map(str::trim).collect();
+            let [_, id, out, ctx, ..] = cells[..] else {
+                continue;
+            };
+            let Some(id) = id.strip_prefix('`').and_then(|id| id.strip_suffix('`')) else {
+                continue;
+            };
+            let number = |cell: &str| -> u32 {
+                cell.parse()
+                    .unwrap_or_else(|_| panic!("README.md row '{id}': '{cell}' is not an integer"))
+            };
+            let limits = Limits {
+                max_output_tokens: number(out),
+                context_window: number(ctx),
+            };
+            assert!(
+                documented.insert(id.to_string(), limits).is_none(),
+                "README.md's Model limits table lists '{id}' twice"
+            );
+        }
+
+        // The accepted set is SUPPORTED_MODELS, and the manifest repeats its numbers.
+        let accepted: Vec<&str> = super::SUPPORTED_MODELS.iter().map(|(id, _)| *id).collect();
+        for (id, source) in super::SUPPORTED_MODELS {
+            if let Some(limits) = models.get(*id) {
+                assert_eq!(
+                    (
+                        u64::from(limits.max_output_tokens),
+                        u64::from(limits.context_window)
+                    ),
+                    (source.max_output_tokens, source.context_window),
+                    "murmur.yaml's models.{id} disagrees with SUPPORTED_MODELS"
+                );
+            }
+        }
+
+        for id in &accepted {
+            assert!(
+                models.contains_key(*id),
+                "murmur.yaml's models: block lacks '{id}'"
+            );
+        }
+        for id in models.keys() {
+            assert!(
+                accepted.contains(&id.as_str()),
+                "murmur.yaml's models: block declares '{id}', which is outside the accepted set"
+            );
+        }
+        for (id, limits) in &models {
+            assert_eq!(
+                documented.get(id),
+                Some(limits),
+                "README.md's Model limits table disagrees with murmur.yaml on '{id}'"
+            );
+        }
+        for id in documented.keys() {
+            assert!(
+                models.contains_key(id),
+                "README.md's Model limits table lists '{id}', which murmur.yaml does not declare"
+            );
+        }
     }
 
     #[test]

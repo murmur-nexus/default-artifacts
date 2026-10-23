@@ -27,6 +27,89 @@ set but empty`. Neither reaches the network. Requests go to
 `<endpoint>/chat/completions`, or to `<endpoint>/responses` for `gpt-5` and later
 models.
 
+## Model limits
+
+The driver accepts any model string; the model only picks the API surface.
+`murmur.yaml` declares limits under `models:` for every model on OpenAI's
+[all-models page](https://developers.openai.com/api/docs/models/all) that is not
+marked deprecated, generates text, and lists the endpoint this driver routes it
+to on its own model page: Responses for `gpt-<N≥5>`, Chat Completions for the
+o-series and every other id. Each model's own id is declared, matched exactly.
+
+| Model | max_output_tokens | context_window | Source |
+|---|---|---|---|
+| `gpt-6-astra` | 128000 | 1050000 | <https://developers.openai.com/api/docs/models/gpt-6-astra>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens", "Maximum input tokens: 922,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-6.1-sol` | 128000 | 1050000 | <https://developers.openai.com/api/docs/models/gpt-6.1-sol>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens", "Maximum input tokens: 922,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-6-luna` | 128000 | 1050000 | <https://developers.openai.com/api/docs/models/gpt-6-luna>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens", "Maximum input tokens: 922,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-5.6-cyber` | 128000 | 400000 | <https://developers.openai.com/api/docs/models/gpt-5.6-cyber>, read 2026-10-23: "400,000 context window", "128,000 max output tokens", "Maximum input tokens: 272,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-6-sol` | 128000 | 1050000 | <https://developers.openai.com/api/docs/models/gpt-6-sol>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens", "Maximum input tokens: 922,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-5.6-sol` | 128000 | 1050000 | <https://developers.openai.com/api/docs/models/gpt-5.6-sol>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens", "Maximum input tokens: 922,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-5.6-terra` | 128000 | 1050000 | <https://developers.openai.com/api/docs/models/gpt-5.6-terra>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens", "Maximum input tokens: 922,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-5.6-luna` | 128000 | 1050000 | <https://developers.openai.com/api/docs/models/gpt-5.6-luna>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens", "Maximum input tokens: 922,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-5.5` | 128000 | 1050000 | <https://developers.openai.com/api/docs/models/gpt-5.5>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens"; Responses (`v1/responses`): "Supported" |
+| `gpt-5.5-pro` | 128000 | 1050000 | <https://developers.openai.com/api/docs/models/gpt-5.5-pro>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens"; Responses (`v1/responses`): "Supported" |
+| `gpt-5.4` | 128000 | 1050000 | <https://developers.openai.com/api/docs/models/gpt-5.4>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens"; Responses (`v1/responses`): "Supported" |
+| `gpt-5.4-pro` | 128000 | 1050000 | <https://developers.openai.com/api/docs/models/gpt-5.4-pro>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens"; Responses (`v1/responses`): "Supported" |
+| `gpt-5.4-mini` | 128000 | 400000 | <https://developers.openai.com/api/docs/models/gpt-5.4-mini>, read 2026-10-23: "400,000 context window", "128,000 max output tokens", "Maximum input tokens: 272,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-5.2` | 128000 | 400000 | <https://developers.openai.com/api/docs/models/gpt-5.2>, read 2026-10-23: "400,000 context window", "128,000 max output tokens"; Responses (`v1/responses`): "Supported" |
+| `gpt-5.2-pro` | 128000 | 400000 | <https://developers.openai.com/api/docs/models/gpt-5.2-pro>, read 2026-10-23: "400,000 context window", "128,000 max output tokens"; Responses (`v1/responses`): "Supported" |
+| `gpt-5` | 128000 | 400000 | <https://developers.openai.com/api/docs/models/gpt-5>, read 2026-10-23: "400,000 context window", "128,000 max output tokens", "Maximum input tokens: 272,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-5-mini` | 128000 | 400000 | <https://developers.openai.com/api/docs/models/gpt-5-mini>, read 2026-10-23: "400,000 context window", "128,000 max output tokens", "Maximum input tokens: 272,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-5-nano` | 128000 | 400000 | <https://developers.openai.com/api/docs/models/gpt-5-nano>, read 2026-10-23: "400,000 context window", "128,000 max output tokens", "Maximum input tokens: 272,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-5-pro` | 272000 | 400000 | <https://developers.openai.com/api/docs/models/gpt-5-pro>, read 2026-10-23: "400,000 context window", "272,000 max output tokens"; Responses (`v1/responses`): "Supported" |
+| `o3` | 100000 | 200000 | <https://developers.openai.com/api/docs/models/o3>, read 2026-10-23: "200,000 context window", "100,000 max output tokens"; Chat Completions (`v1/chat/completions`): "Supported" |
+| `chat-latest` | 128000 | 400000 | <https://developers.openai.com/api/docs/models/chat-latest>, read 2026-10-23: "400,000 context window", "128,000 max output tokens", "Maximum input tokens: 272,000" (input ceiling below the window); Chat Completions (`v1/chat/completions`): "Supported" |
+
+`murmur.yaml` declares the same ids and numbers under `models:`, and a test
+fails if the two disagree.
+
+OpenAI documents "Maximum input tokens" below the context window for several of
+these models: `922000` against a `1050000` window for the `gpt-6` and
+`gpt-5.6-sol`/`-terra`/`-luna` models, and `272000` against `400000` for
+`gpt-5.6-cyber`, `gpt-5.4-mini`, `gpt-5`, `gpt-5-mini`, `gpt-5-nano` and
+`chat-latest`. A request whose input exceeds that ceiling is refused even though
+the window has room. `context_window` is still the documented window.
+
+Compaction fires when occupancy crosses `inference.compaction.threshold`
+(default `0.98`) of the window. On `gpt-5.6-luna` that is `1029000` tokens,
+above the `922000` input ceiling, so at the default a long session reaches
+OpenAI's input limit before compaction fires. A capsule that runs that long sets
+`inference.compaction.threshold` (`0.87` keeps `gpt-5.6-luna` under `922000`) or
+`context.max_tokens` lower. The driver does not shrink the window to compensate.
+
+Whether the runtime reads `models:` depends on the murmur release:
+
+| murmur | What it does with `models:` | What the capsule sets |
+|---|---|---|
+| v0.7.0 and earlier | ignores it; an unknown manifest key is a `W-SEC-019` warning, never a refusal | `inference.max_tokens` and `context.max_tokens`; left unset, the runtime's own defaults apply, not the model's limits |
+| the first release after v0.7.0 | defaults the output cap and context window from it when the capsule leaves them unset, and caps a hook's `run-inference` (e.g. `hook-compact`) at its `max_output_tokens` | nothing, unless it wants tighter limits than the table |
+
+A capsule value always wins: the runtime never clamps or raises
+`inference.max_tokens` or `context.max_tokens` to the table.
+
+## Models without declared limits
+
+These ids are accepted by the driver but have no entry under `models:`:
+
+| Model | Why it has no entry |
+|---|---|
+| `o3-pro` | its page lists Responses only ("o3-pro is available in the Responses API only"), and this driver sends every o-series model to Chat Completions |
+| `gpt-oss-120b`, `gpt-oss-20b` | their pages list Responses only, and this driver sends an id without a `gpt-<N>` prefix to Chat Completions |
+| `gpt-rosalind-research` | it has no model page giving its limits or endpoints; the pricing page limits access to a trusted-access program |
+| dated snapshot ids, such as `gpt-5.2-2025-12-11` or `o3-2025-04-16` | only each model's own id is declared; a snapshot is matched exactly, never mapped to its model |
+| every model the all-models page marks "Deprecated", such as `gpt-5.1`, `gpt-4.1`, `gpt-4o` or `o4-mini` | deprecated |
+| audio, realtime, transcription, speech, image, embedding and moderation models, such as `gpt-audio-1.5` or `gpt-realtime-2.1` | not text-generation models |
+| any other id | not on the all-models page |
+
+A capsule on one of these sets `inference.max_tokens` and `context.max_tokens`
+itself:
+
+| Capsule sets | Result |
+|---|---|
+| neither | the launch is refused with `E-RUN-052`, naming the driver and the model, before any HTTP call |
+| only `inference.max_tokens` | it launches with `W-RUN-009`, and compaction does not run |
+| both | it launches |
+
 ## Inference dials
 
 `inference.driver.config` is this driver's operator surface. Four keys are read; any other key
