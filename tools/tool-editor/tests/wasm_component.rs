@@ -825,10 +825,10 @@ fn find_in_files_root_search_caps_at_200_matches() {
     );
 
     let data: Value = serde_json::from_str(raw).unwrap();
-    let note = data["capped"].as_str().expect("capped is a string");
-    for word in ["200", "dir", "glob"] {
-        assert!(note.contains(word), "note lacks {word:?}: {note}");
-    }
+    assert_eq!(
+        data["capped"],
+        "Search stopped at the limit of 200 matches after reading 1 file."
+    );
     let lines: Vec<i64> = data["matches"]
         .as_array()
         .unwrap()
@@ -836,6 +836,50 @@ fn find_in_files_root_search_caps_at_200_matches() {
         .map(|m| m["line"].as_i64().unwrap())
         .collect();
     assert_eq!(lines, (1..=200).collect::<Vec<i64>>());
+
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn find_in_files_glob_search_stops_at_5000_files_walked() {
+    let eng = engine();
+    let component = Component::from_file(&eng, component_path()).expect("load component");
+    let lnk = linker(&eng);
+    let workdir = unique_workdir("find_walk_cap");
+    // 5001 text files the `*.py` glob excludes: 10 directories of 500 and one of 1.
+    for i in 0..5001 {
+        let dir = workdir.join("walk").join(format!("d{:02}", i / 500));
+        if i % 500 == 0 {
+            std::fs::create_dir_all(&dir).unwrap();
+        }
+        std::fs::write(dir.join(format!("f{i:04}.txt")), "needle\n").unwrap();
+    }
+
+    let result = run_editor_raw(
+        &eng,
+        &component,
+        &lnk,
+        &workdir,
+        &find_payload(serde_json::json!({ "pattern": "needle", "dir": "walk", "glob": "*.py" })),
+    );
+    assert!(
+        matches!(result.status, Status::Passed),
+        "status: {:?}",
+        result.status
+    );
+    assert!(
+        result.truncated,
+        "a capped search sets ToolResult.truncated"
+    );
+    assert_eq!(
+        result.summary.as_deref(),
+        Some("0 matches in 0 files (capped)")
+    );
+    let data: Value = serde_json::from_str(result.data.as_deref().expect("data")).unwrap();
+    assert_eq!(
+        data["capped"],
+        "Search stopped at the limit of 5000 files walked after reading 0 files."
+    );
 
     let _ = std::fs::remove_dir_all(&workdir);
 }

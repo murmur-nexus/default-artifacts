@@ -24,13 +24,14 @@ pub mod logic {
     /// concatenation).
     pub const DEFAULT_SYSTEM_PROMPT: &str = "You are compacting an agent session so it can \
         continue in a fresh, smaller context window. Read the conversation transcript and \
-        write a summary that lets the agent resume without re-reading any of it.\n\n\
+        write a summary that lets the agent resume without re-reading any of it. The message \
+        that opened the agent's current task stays in its context next to this summary, so \
+        the summary does not need to repeat it.\n\n\
         Cover, in this order and only where the transcript supports it:\n\
-        1. The task the agent was given, in the user's own terms.\n\
-        2. What has already been done, including files created or modified and commands run.\n\
-        3. Decisions taken and the reasons for them, so they are not re-litigated.\n\
-        4. Facts discovered about the codebase or environment that were expensive to find.\n\
-        5. What is still outstanding, and the immediate next step.\n\n\
+        1. What has already been done, including files created or modified and commands run.\n\
+        2. Decisions taken and the reasons for them, so they are not re-litigated.\n\
+        3. Facts discovered about the codebase or environment that were expensive to find.\n\
+        4. What is still outstanding, and the immediate next step.\n\n\
         Be specific: name files, symbols, commands and identifiers exactly as they appeared. \
         Do not invent anything the transcript does not state, and do not address the user — \
         write it as notes for the agent's own future self.";
@@ -421,6 +422,26 @@ mod tests {
     }
 
     // ── request shape ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn default_system_prompt_leaves_the_task_to_the_runtime() {
+        let expected = "You are compacting an agent session so it can continue in a fresh, \
+smaller context window. Read the conversation transcript and write a summary that lets the agent \
+resume without re-reading any of it. The message that opened the agent's current task stays in \
+its context next to this summary, so the summary does not need to repeat it.
+
+Cover, in this order and only where the transcript supports it:
+1. What has already been done, including files created or modified and commands run.
+2. Decisions taken and the reasons for them, so they are not re-litigated.
+3. Facts discovered about the codebase or environment that were expensive to find.
+4. What is still outstanding, and the immediate next step.
+
+Be specific: name files, symbols, commands and identifiers exactly as they appeared. Do not \
+invent anything the transcript does not state, and do not address the user — write it as notes \
+for the agent's own future self.";
+        assert_eq!(DEFAULT_SYSTEM_PROMPT, expected);
+        assert!(!DEFAULT_SYSTEM_PROMPT.contains("The task the agent was given"));
+    }
 
     #[test]
     fn system_prompt_override_absent_uses_the_built_in_default_on_both_attempts() {
