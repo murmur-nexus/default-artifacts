@@ -81,8 +81,8 @@ takes a capsule's `inference.max_tokens` and `context.max_tokens` from that tabl
 leaves them unset, and compacts against the input budget,
 `min(max_input_tokens, context_window − output cap)`. A model a driver does not list still needs
 `inference.max_tokens`, or the launch is refused with `E-RUN-052`, and needs `context.max_tokens`
-for compaction to run; `driver-deepseek`, `driver-moonshotai` and `driver-openai` then refuse it on
-the first inference call. Each driver's README lists its models, the numbers and their sources,
+for compaction to run; `driver-baseten`, `driver-deepseek`, `driver-moonshotai`, `driver-openai`
+and `driver-zai` then refuse it on the first inference call. Each driver's README lists its models, the numbers and their sources,
 and the models it accepts without declaring or refuses:
 
 | Artifact | First release with `models:` | README section |

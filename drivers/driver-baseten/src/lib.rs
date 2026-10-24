@@ -17,7 +17,7 @@ struct ModelLimits {
     max_output_tokens: u64,
     /// The model's context window in tokens. No request path reads it: it is the number
     /// `murmur.yaml` declares under `models:`, and a test keeps the two in step.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     context_window: u64,
 }
 
@@ -28,6 +28,7 @@ const SUPPORTED_MODELS: &[(&str, ModelLimits)] = &[(
     "zai-org/GLM-5.3",
     ModelLimits {
         max_output_tokens: 262_144,
+        #[cfg(test)]
         context_window: 1_048_576,
     },
 )];
