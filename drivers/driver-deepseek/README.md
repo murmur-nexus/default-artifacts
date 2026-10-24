@@ -1,6 +1,6 @@
 # driver-deepseek
 
-DeepSeek inference driver for Murmur agent capsules — `deepseek-v4-flash` and
+DeepSeek inference driver for Murmur agent capsules — `deepseek-flash` and
 `deepseek-v4-pro`, with thinking mode.
 
 WASM component (`runtime: driver`, world `driver`, exports `murmur:tool/run`).
@@ -26,19 +26,26 @@ set but empty`. Neither reaches the network. Requests go to
 
 ## Model scope
 
-The driver accepts exactly `deepseek-v4-flash` and `deepseek-v4-pro`
-(`SUPPORTED_MODELS` in `src/lib.rs`). `deepseek-chat` and `deepseek-reasoner`
-are refused as deprecated, and every other id as unsupported, before a request
-is built. DeepSeek now names its flash model `deepseek-flash`; it still accepts
-`deepseek-v4-flash`, a retired name whose requests DeepSeek serves with
-DeepSeek-V4.1-Flash. The driver does not accept `deepseek-flash`.
+The driver accepts exactly the models DeepSeek lists on its pricing page
+without marking them retired: `deepseek-flash` and `deepseek-v4-pro`
+(`SUPPORTED_MODELS` in `src/lib.rs`). Any other id is refused before a request
+is built, with one message naming the model and the accepted ones:
+
+```text
+driver: model 'deepseek-v4-flash' is not supported by driver-deepseek. Supported models: deepseek-flash, deepseek-v4-pro.
+```
+
+| Refused id | Why, as DeepSeek documents it (read 2026-10-24) |
+|---|---|
+| `deepseek-v4-flash`, `deepseek-v4-flash-vision-exp` | retired. <https://api-docs.deepseek.com/quick_start/pricing>: "The legacy names deepseek-v4-flash and deepseek-v4-flash-vision-exp are still accepted, but the corresponding models have been retired". <https://api-docs.deepseek.com/updates>: "for compatibility, the model names deepseek-v4-flash and deepseek-v4-flash-vision-exp are temporarily routed to V4.1 Flash" |
+| `deepseek-chat`, `deepseek-reasoner` | no longer listed. <https://api-docs.deepseek.com/api/create-chat-completion>, `model`: "Possible values: [ deepseek-flash , deepseek-v4-pro ]" |
 
 ## Model limits
 
 | Model | max_output_tokens | context_window | max_input_tokens | Source |
 |---|---|---|---|---|
-| `deepseek-v4-flash` | 393216 | 1048576 | none | Read 2026-10-23. <https://api-docs.deepseek.com/quick_start/pricing> gives "CONTEXT LENGTH 1M" and "MAX OUTPUT MAXIMUM: 384K", and says `deepseek-v4-flash` requests "are served by the DeepSeek-V4.1-Flash-1017 model". Exact integers: <https://api-docs.deepseek.com/api/create-chat-completion>, `max_tokens`: "The value must be between 1 and 384K (393216)"; <https://api-docs.deepseek.com/api/list-models>, example response for DeepSeek-V4.1-Flash: `"context_window": 1048576`, `"max_output_tokens": 393216`. The window counts input and output together |
-| `deepseek-v4-pro` | 393216 | 1048576 | none | Read 2026-10-23. <https://api-docs.deepseek.com/quick_start/pricing> gives "CONTEXT LENGTH 1M" and "MAX OUTPUT MAXIMUM: 384K". Exact integers: <https://api-docs.deepseek.com/api/create-chat-completion>, `max_tokens`: "The value must be between 1 and 384K (393216)"; <https://api-docs.deepseek.com/api/list-models>, example response for `deepseek-v4-pro`: `"context_window": 1048576`, `"max_output_tokens": 393216`. The window counts input and output together |
+| `deepseek-flash` | 393216 | 1048576 | none | Read 2026-10-24. <https://api-docs.deepseek.com/quick_start/pricing> gives "CONTEXT LENGTH 1M" and "MAX OUTPUT MAXIMUM: 384K", and "Use deepseek-flash as the model name". Exact integers: <https://api-docs.deepseek.com/api/create-chat-completion>, `max_tokens`: "The value must be between 1 and 384K (393216)"; <https://api-docs.deepseek.com/api/list-models>, example response for `deepseek-flash`: `"context_window": 1048576`, `"max_output_tokens": 393216`. The window counts input and output together |
+| `deepseek-v4-pro` | 393216 | 1048576 | none | Read 2026-10-24. <https://api-docs.deepseek.com/quick_start/pricing> gives "CONTEXT LENGTH 1M" and "MAX OUTPUT MAXIMUM: 384K". Exact integers: <https://api-docs.deepseek.com/api/create-chat-completion>, `max_tokens`: "The value must be between 1 and 384K (393216)"; <https://api-docs.deepseek.com/api/list-models>, example response for `deepseek-v4-pro`: `"context_window": 1048576`, `"max_output_tokens": 393216`. The window counts input and output together |
 
 `murmur.yaml` declares the same numbers under `models:`, each `none` as no
 `max_input_tokens` key, and a test fails if the two disagree or if `models:`
@@ -66,13 +73,13 @@ Whether the runtime reads `models:` depends on the murmur release:
 A capsule value always wins: the runtime never clamps or raises
 `inference.max_tokens` or `context.max_tokens` to the table.
 
-## Models without declared limits
+## Models this driver refuses
 
-None. `SUPPORTED_MODELS` and `models:` hold the same ids, so every model this
-driver accepts has declared limits.
-
-Any other id, such as `deepseek-flash`, has no entry. The runtime checks for one
-at launch, before the driver sees a request:
+The driver refuses every id outside `SUPPORTED_MODELS`: the retired and
+unlisted ids in [Model scope](#model-scope), and any other id. None of them
+has a `models:` entry. A murmur release after v0.7.0 checks for one at launch,
+before the driver sees a request; on v0.7.0 and earlier every row launches and
+the driver refuses the first inference call:
 
 | Capsule sets | Result |
 |---|---|
@@ -80,8 +87,9 @@ at launch, before the driver sees a request:
 | only `inference.max_tokens` | it launches with `W-RUN-009`, and compaction does not run |
 | both | it launches |
 
-In each case that launches, the driver then refuses the first inference call as
-an unsupported or deprecated model.
+In each case that launches, the driver refuses the first inference call with
+`driver: model '<id>' is not supported by driver-deepseek. Supported models:
+deepseek-flash, deepseek-v4-pro.` No request reaches DeepSeek.
 
 ## Stop reasons
 

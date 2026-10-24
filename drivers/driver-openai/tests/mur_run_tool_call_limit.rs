@@ -170,8 +170,8 @@ impl Staging {
         self.project.path().join("murmur.yaml")
     }
 
-    /// The capsule manifest. `gpt-4.1` is not a gpt-5 model, so the driver takes the Chat
-    /// Completions surface.
+    /// The capsule manifest. `MODEL_ROUTES` sends `chat-latest` to the Chat Completions
+    /// surface.
     fn write_manifest(&self, endpoint: &str) {
         fs::write(
             self.manifest(),
@@ -179,7 +179,7 @@ impl Staging {
                 "name: tool-call-limit-proof\nversion: 0.1.0\nartifacts:\n\
                  \x20 - name: local/driver-openai\n    version: {}\n    runtime: driver\n    \
                  gateway:\n      endpoint: {endpoint}\n      api_key: test-key\n\
-                 inference:\n  transport: http\n  model: gpt-4.1\n  max_tokens: 4000\n  \
+                 inference:\n  transport: http\n  model: chat-latest\n  max_tokens: 4000\n  \
                  driver:\n    artifact: local/driver-openai\n",
                 self.version
             ),

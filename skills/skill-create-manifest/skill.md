@@ -380,7 +380,7 @@ On the driver's `artifacts:` entry:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `gateway.endpoint` | string | yes | Base URL for the inference API. The driver appends its own request path (e.g. `driver-anthropic` appends `/v1/messages`; `driver-openai` appends `/chat/completions`) — include any version segment the provider requires (e.g. `/v1`) in `endpoint` itself. |
+| `gateway.endpoint` | string | yes | Base URL for the inference API. The driver appends its own request path (e.g. `driver-anthropic` appends `/v1/messages`; `driver-openai` appends `/responses` or `/chat/completions`, by model) — include any version segment the provider requires (e.g. `/v1`) in `endpoint` itself. |
 | `gateway.api_key` | string | yes, unless `keyless: true` | The key, as a `${NAME}` credential reference. Never inline a literal key. |
 | `gateway.keyless` | boolean | no | `true` declares an upstream that takes no key, such as a local server: requests go out with no credential header. Writing it with `api_key` fails with `E-MAN-003`. A gateway with neither a non-blank `api_key` nor `keyless: true` fails with `E-CAP-018`. |
 
@@ -400,16 +400,15 @@ artifacts:
       api_key: ${OPENAI_API_KEY}
 
 inference:
-  model: gpt-4o
+  model: gpt-5.6-luna
   driver:
     artifact: murmur/driver-openai
     config:
-      temperature: 0.2
+      reasoning_effort: high
 ```
 
-`driver-openai` speaks the OpenAI Chat Completions protocol, so it works with an
-OpenAI-compatible provider when `gateway.endpoint` is that provider's base URL, including any
-version segment it requires. For Z.ai's GLM, use `murmur/driver-zai` with
+`driver-openai` accepts only the OpenAI models its README lists, and refuses any other id,
+including an OpenAI-compatible provider's. For Z.ai's GLM, use `murmur/driver-zai` with
 `gateway.endpoint: https://api.z.ai/api/paas/v4` and `inference.model: glm-5.3`; see its row in
 §10.
 
@@ -630,9 +629,9 @@ name its `artifacts:` entry uses. For live discovery, use `mur search <keyword>`
 |---|---|---|
 | `murmur/driver-anthropic` | driver | Anthropic Messages API inference driver. Use with `gateway.endpoint: https://api.anthropic.com` |
 | `murmur/driver-claude-code` | driver | Process driver for the `claude` CLI (Claude Code). The harness authenticates itself, so a turn spends a Claude subscription rather than an API key; the driver holds no credential and is granted nothing. Use with `inference.transport: process` and `capabilities.env.allow: [HOME, PATH]`; its entry takes no `gateway:`. |
-| `murmur/driver-deepseek` | driver | DeepSeek inference driver: `deepseek-v4-flash` and `deepseek-v4-pro`, with thinking mode. Use with `gateway.endpoint` set to DeepSeek's API base URL; it appends `/chat/completions`. |
-| `murmur/driver-moonshotai` | driver | Moonshot AI inference driver: `kimi-k3` only, on the Chat Completions surface, with `reasoning_effort` and `response_format` config keys. Use with `gateway.endpoint: https://api.moonshot.ai/v1` |
-| `murmur/driver-openai` | driver | OpenAI Chat Completions inference driver (also works with OpenAI-compatible providers). Use with `gateway.endpoint: https://api.openai.com/v1` |
+| `murmur/driver-deepseek` | driver | DeepSeek inference driver: `deepseek-flash` and `deepseek-v4-pro`, with thinking mode; any other model is refused. Use with `gateway.endpoint` set to DeepSeek's API base URL; it appends `/chat/completions`. |
+| `murmur/driver-moonshotai` | driver | Moonshot AI inference driver: `kimi-k3.1-pro`, `kimi-k3.1-pro-highspeed` and `kimi-k3` with a `reasoning_effort` config key, and `kimi-k2.7-code`, `kimi-k2.7-code-highspeed` and `kimi-k2.6` (Moonshot retires K2 by the end of December 2026), on the Chat Completions surface; `kimi-k2.6` takes a `thinking` config key, and every model takes `response_format`. Use with `gateway.endpoint: https://api.moonshot.ai/v1` |
+| `murmur/driver-openai` | driver | OpenAI inference driver: sends each OpenAI model its README lists to the Responses or Chat Completions endpoint that model's page lists, and refuses any other model, an OpenAI-compatible provider's included. Use with `gateway.endpoint: https://api.openai.com/v1` |
 | `murmur/driver-zai` | driver | Z.ai inference driver: `glm-5.3` only, on the Chat Completions surface, with `reasoning_effort` and `thinking` config keys; its reasoning goes back to Z.ai on every later turn. Use with `gateway.endpoint: https://api.z.ai/api/paas/v4` |
 | `murmur/hook-compact` | hook | Context compaction hook. Fires when token usage crosses the compaction threshold; replaces conversation history with a summary. Declared as a `runtime: hook` entry; it binds `on-compaction`. |
 | `murmur/hook-debug` | hook | Debug event logger. Writes every lifecycle event (session start, inference, tool call, shell, session end) to `hooks/hook-debug.jsonl` in the session records directory. Needs `filesystem.records: true`. |

@@ -1,7 +1,7 @@
 name: driver-deepseek
 version: 0.14.0
 runtime: driver
-description: "DeepSeek inference driver — deepseek-v4-flash and deepseek-v4-pro with thinking mode"
+description: "DeepSeek inference driver — deepseek-flash and deepseek-v4-pro with thinking mode"
 requires_files:
   - driver_deepseek.wasm
 
@@ -12,7 +12,7 @@ upstream_auth:
 
 # The limits of each model this driver serves, from the provider's documentation; README.md cites each number.
 models:
-  deepseek-v4-flash:
+  deepseek-flash:
     max_output_tokens: 393216
     context_window: 1048576
   deepseek-v4-pro:

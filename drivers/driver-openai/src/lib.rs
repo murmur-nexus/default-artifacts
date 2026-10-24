@@ -20,66 +20,69 @@ const CONTINUATION_ID_KEY: &str = "continuation_id";
 /// provider body, which both the Chat Completions and the Responses API define.
 const PROMPT_CACHE_KEY: &str = "prompt_cache_key";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ModelFamily {
-    GptClassic,
-    OSeriesReasoning,
-}
-
-// Parameters that cause a 400 error on o-series reasoning models.
-const O_SERIES_UNSUPPORTED_PARAMS: &[&str] = &[
-    "temperature",
-    "top_p",
-    "presence_penalty",
-    "frequency_penalty",
-    "logprobs",
-    "top_logprobs",
-    "logit_bias",
-    "n",
-];
-
-fn classify_model(model: &str) -> ModelFamily {
-    // o-series: model string starts with 'o' followed immediately by a digit.
-    // Covers o1, o1-mini, o3, o3-mini, o4-mini, etc.
-    let bytes = model.trim().as_bytes();
-    if matches!(bytes.first(), Some(b'o')) && matches!(bytes.get(1), Some(b) if b.is_ascii_digit())
-    {
-        return ModelFamily::OSeriesReasoning;
-    }
-    ModelFamily::GptClassic
-}
-
+/// The OpenAI HTTP API, and so the JSON shape, a request is sent to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApiSurface {
     ChatCompletions,
     Responses,
 }
 
-/// Major version following a `gpt-` prefix, e.g. "gpt-5.2-codex" -> Some(5),
-/// "gpt-4.1" -> Some(4), "o3" -> None (no `gpt-` prefix), "gpt-turbo" -> None.
-fn gpt_major_version(model: &str) -> Option<u32> {
-    let rest = model.trim().strip_prefix("gpt-")?;
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() {
-        return None;
+impl ApiSurface {
+    /// The path appended to `MURMUR_INFERENCE_ENDPOINT` for this surface.
+    fn path(self) -> &'static str {
+        match self {
+            ApiSurface::ChatCompletions => "chat/completions",
+            ApiSurface::Responses => "responses",
+        }
     }
-    digits.parse::<u32>().ok()
 }
 
-/// Selects which OpenAI HTTP API/JSON shape to target.
-///
-/// o-series reasoning models always use Chat Completions, independent of any
-/// version-like number in the name. Otherwise, gpt-<N> with N >= 5 uses the
-/// Responses API; everything else (gpt-4.x, gpt-3.5-*, unknown/non-numbered
-/// names) uses Chat Completions.
-fn classify_api_surface(model: &str, family: ModelFamily) -> ApiSurface {
-    if family == ModelFamily::OSeriesReasoning {
-        return ApiSurface::ChatCompletions;
-    }
-    match gpt_major_version(model) {
-        Some(major) if major >= 5 => ApiSurface::Responses,
-        _ => ApiSurface::ChatCompletions,
-    }
+/// Every model this driver accepts, in the order OpenAI's model catalogue lists them, with the
+/// surface it is sent to. Each surface is an endpoint the model's page lists as Supported: a
+/// model that lists only Responses goes there, and of the models that list both, `chat-latest`
+/// goes to Chat Completions and the rest to Responses. This table is the one place the crate
+/// branches on a model id. `murmur.yaml`'s `models:` block, README.md's "Model limits" table and README.md's
+/// "Endpoints" table hold the same ids, and a test keeps all four in step.
+const MODEL_ROUTES: &[(&str, ApiSurface)] = &[
+    ("gpt-6-astra", ApiSurface::Responses),
+    ("gpt-6.1-sol", ApiSurface::Responses),
+    ("gpt-6-luna", ApiSurface::Responses),
+    ("gpt-5.6-cyber", ApiSurface::Responses),
+    ("gpt-oss-120b", ApiSurface::Responses),
+    ("gpt-oss-20b", ApiSurface::Responses),
+    ("gpt-6-sol", ApiSurface::Responses),
+    ("gpt-5.6-sol", ApiSurface::Responses),
+    ("gpt-5.6-terra", ApiSurface::Responses),
+    ("gpt-5.6-luna", ApiSurface::Responses),
+    ("gpt-5.5", ApiSurface::Responses),
+    ("gpt-5.5-pro", ApiSurface::Responses),
+    ("gpt-5.4", ApiSurface::Responses),
+    ("gpt-5.4-pro", ApiSurface::Responses),
+    ("gpt-5.4-mini", ApiSurface::Responses),
+    ("gpt-5.2", ApiSurface::Responses),
+    ("gpt-5.2-pro", ApiSurface::Responses),
+    ("chat-latest", ApiSurface::ChatCompletions),
+];
+
+/// The surface `model` is sent to, looked up by its exact id. Anything else — a dated
+/// snapshot, a model OpenAI marks Deprecated, another provider's id — is refused before a
+/// request body is built, so it costs no HTTP call.
+fn route(model: &str) -> Result<ApiSurface, String> {
+    MODEL_ROUTES
+        .iter()
+        .find(|(id, _)| *id == model)
+        .map(|(_, surface)| *surface)
+        .ok_or_else(|| {
+            format!(
+                "driver: model '{model}' is not supported by driver-openai. \
+                 Supported models: {}.",
+                MODEL_ROUTES
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
 }
 
 #[derive(Debug, Deserialize)]
@@ -302,32 +305,22 @@ fn verbatim_string_key(config: &Map<String, Value>, key: &str) -> Result<Option<
 
 // ── Provider-field incompatibility ────────────────────────────────────────────
 
-/// Fields the Chat Completions surface does not define at all. Both are Responses-only
+/// Fields this driver keeps off Chat Completions. `reasoning` and `text` are Responses-only
 /// containers: `reasoning` holds the effort and summary dials, `text` holds `verbosity`.
-const CHAT_COMPLETIONS_UNSUPPORTED_FIELDS: &[&str] = &["reasoning", "text"];
+/// `reasoning_effort` is a reasoning model's dial, and the one model routed to Chat
+/// Completions, `chat-latest`, documents no reasoning.
+const CHAT_COMPLETIONS_UNSUPPORTED_FIELDS: &[&str] = &["reasoning", "text", "reasoning_effort"];
 
-/// Fields a non-reasoning gpt model rejects on Chat Completions. `reasoning_effort` is the
-/// o-series' dial; gpt-4.x and earlier 400 on it.
-const GPT_CLASSIC_UNSUPPORTED_FIELDS: &[&str] = &["reasoning_effort"];
-
-/// Whether a provider request field may appear in the body for this model family and API
-/// surface. The one incompatibility rule in this driver: the `params` pass-through loop on each
-/// surface and the config-derived dials all ask this, so a field is refused in exactly one
-/// place and the answer cannot drift between the two channels.
-fn provider_field_supported(field: &str, family: ModelFamily, surface: ApiSurface) -> bool {
+/// Whether a provider request field may appear in the body on this API surface. The one
+/// incompatibility rule in this driver: the `params` pass-through loop on each surface and the
+/// config-derived dials all ask this, so a field is refused in exactly one place and the answer
+/// cannot drift between the two channels.
+fn provider_field_supported(field: &str, surface: ApiSurface) -> bool {
     match surface {
-        // The Responses surface has no unsupported-field row yet: it is reached only by
-        // gpt-<N>=5, which accepts every field either channel can put on the body.
+        // The Responses surface has no unsupported-field row: every `MODEL_ROUTES` row routed
+        // there accepts every field either channel can put on the body.
         ApiSurface::Responses => true,
-        ApiSurface::ChatCompletions => {
-            if CHAT_COMPLETIONS_UNSUPPORTED_FIELDS.contains(&field) {
-                return false;
-            }
-            match family {
-                ModelFamily::OSeriesReasoning => !O_SERIES_UNSUPPORTED_PARAMS.contains(&field),
-                ModelFamily::GptClassic => !GPT_CLASSIC_UNSUPPORTED_FIELDS.contains(&field),
-            }
-        }
+        ApiSurface::ChatCompletions => !CHAT_COMPLETIONS_UNSUPPORTED_FIELDS.contains(&field),
     }
 }
 
@@ -336,8 +329,8 @@ fn provider_field_supported(field: &str, family: ModelFamily, surface: ApiSurfac
 /// is also what `provider_field_supported` is asked about — so the table below and the filter
 /// speak the same vocabulary.
 ///
-/// Chat Completions returns no reasoning content, only an effort parameter, so `thinking`
-/// contributes nothing there; on an o-series model it is accepted and has no effect.
+/// Chat Completions returns no reasoning content, so `thinking` contributes nothing there and
+/// is accepted with no effect.
 fn config_dial_fields(config: &DriverConfig, surface: ApiSurface) -> Vec<(&'static str, Value)> {
     let mut fields = Vec::new();
     match surface {
@@ -370,22 +363,17 @@ fn config_dial_fields(config: &DriverConfig, surface: ApiSurface) -> Vec<(&'stat
     fields
 }
 
-/// Stamps the config-derived dials onto a translated body, dropping each field the surface or
-/// model family does not accept. Applied after translation and before `stamp_streaming_flags`,
-/// so a dial overwrites a same-named `params` key rather than losing to it — the same
-/// precedence the host-supplied `prompt_cache_key` has. A `reasoning` object arriving through
+/// Stamps the config-derived dials onto a translated body, dropping each field the surface does
+/// not accept. Applied after translation and before `stamp_streaming_flags`, so a dial
+/// overwrites a same-named `params` key rather than losing to it — the same precedence the
+/// host-supplied `prompt_cache_key` has. A `reasoning` object arriving through
 /// `params` is replaced wholesale, never merged.
-fn apply_config_dials(
-    body: &mut Value,
-    config: &DriverConfig,
-    family: ModelFamily,
-    surface: ApiSurface,
-) {
+fn apply_config_dials(body: &mut Value, config: &DriverConfig, surface: ApiSurface) {
     let Some(obj) = body.as_object_mut() else {
         return;
     };
     for (field, value) in config_dial_fields(config, surface) {
-        if provider_field_supported(field, family, surface) {
+        if provider_field_supported(field, surface) {
             obj.insert(field.to_string(), value);
         }
     }
@@ -398,14 +386,13 @@ fn build_provider_request(
     request: &MurmurRequest,
     config: &DriverConfig,
     store: bool,
-    family: ModelFamily,
     surface: ApiSurface,
 ) -> Result<Value, String> {
     let mut body = match surface {
-        ApiSurface::ChatCompletions => translate_murmur_request_to_openai(request, family)?,
+        ApiSurface::ChatCompletions => translate_murmur_request_to_openai(request)?,
         ApiSurface::Responses => translate_murmur_request_to_responses(request, store)?,
     };
-    apply_config_dials(&mut body, config, family, surface);
+    apply_config_dials(&mut body, config, surface);
     stamp_streaming_flags(&mut body, surface);
     Ok(body)
 }
@@ -420,10 +407,7 @@ fn prompt_cache_key(request: &MurmurRequest) -> Option<&str> {
         .filter(|key| !key.is_empty())
 }
 
-fn translate_murmur_request_to_openai(
-    request: &MurmurRequest,
-    family: ModelFamily,
-) -> Result<Value, String> {
+fn translate_murmur_request_to_openai(request: &MurmurRequest) -> Result<Value, String> {
     let mut messages = Vec::new();
 
     if let Some(system) = request
@@ -495,7 +479,7 @@ fn translate_murmur_request_to_openai(
         if body.contains_key(key) {
             continue;
         }
-        if !provider_field_supported(key, family, ApiSurface::ChatCompletions) {
+        if !provider_field_supported(key, ApiSurface::ChatCompletions) {
             continue;
         }
         body.insert(key.clone(), value.clone());
@@ -724,12 +708,11 @@ fn translate_murmur_request_to_responses(
         body.insert(PROMPT_CACHE_KEY.to_string(), Value::String(key.to_string()));
     }
 
-    let family = classify_model(&request.model);
     for (key, value) in &request.params {
         if body.contains_key(key) {
             continue;
         }
-        if !provider_field_supported(key, family, ApiSurface::Responses) {
+        if !provider_field_supported(key, ApiSurface::Responses) {
             continue;
         }
         body.insert(key.clone(), value.clone());
@@ -1898,11 +1881,10 @@ fn assemble_responses_streaming_response(
 mod wasm_driver {
     use super::{
         assemble_openai_streaming_response, assemble_responses_streaming_response,
-        build_provider_request, classify_api_surface, classify_model, error_payload,
-        parse_driver_config, process_openai_sse_line, process_responses_sse_line, store_opt_in,
-        translate_openai_response_to_murmur, translate_responses_to_murmur, ApiSurface,
-        MurmurRequest, ThinkingState, ToolCallSignal, ToolCallState, UsageTokens,
-        CONTINUATION_ID_KEY,
+        build_provider_request, error_payload, parse_driver_config, process_openai_sse_line,
+        process_responses_sse_line, route, store_opt_in, translate_openai_response_to_murmur,
+        translate_responses_to_murmur, ApiSurface, MurmurRequest, ThinkingState, ToolCallSignal,
+        ToolCallState, UsageTokens, CONTINUATION_ID_KEY,
     };
     use serde_json::Value;
     use std::collections::HashMap;
@@ -2007,20 +1989,16 @@ mod wasm_driver {
         let murmur_request: MurmurRequest = serde_json::from_str(&raw)
             .map_err(|err| format!("driver: failed to parse tool-input.data: {err}"))?;
 
-        let family = classify_model(&murmur_request.model);
-        let surface = classify_api_surface(&murmur_request.model, family);
+        // A model outside MODEL_ROUTES is refused here, before a body is built: it costs no
+        // HTTP call.
+        let surface = route(&murmur_request.model)?;
 
-        let provider_request =
-            build_provider_request(&murmur_request, &config, store, family, surface)?;
-        let url_suffix = match surface {
-            ApiSurface::ChatCompletions => "chat/completions",
-            ApiSurface::Responses => "responses",
-        };
+        let provider_request = build_provider_request(&murmur_request, &config, store, surface)?;
 
         let body = serde_json::to_vec(&provider_request)
             .map_err(|err| format!("driver: failed to encode request body: {err}"))?;
 
-        let url = format!("{}/{}", endpoint.trim_end_matches('/'), url_suffix);
+        let url = format!("{}/{}", endpoint.trim_end_matches('/'), surface.path());
 
         let headers = vec![
             ("content-type", "application/json".to_string()),
@@ -2491,12 +2469,12 @@ mod wasm_driver {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_provider_request, classify_api_surface, classify_model, gpt_major_version,
-        parse_driver_config, parse_openai_sse_body, parse_responses_sse_body,
-        process_responses_sse_line, provider_field_supported, stamp_streaming_flags, store_opt_in,
-        translate_murmur_request_to_openai, translate_murmur_request_to_responses,
-        translate_openai_response_to_murmur, translate_responses_to_murmur, ApiSurface,
-        DriverConfig, ModelFamily, MurmurRequest, ToolCallState, UsageTokens,
+        build_provider_request, parse_driver_config, parse_openai_sse_body,
+        parse_responses_sse_body, process_responses_sse_line, provider_field_supported, route,
+        stamp_streaming_flags, store_opt_in, translate_murmur_request_to_openai,
+        translate_murmur_request_to_responses, translate_openai_response_to_murmur,
+        translate_responses_to_murmur, ApiSurface, DriverConfig, MurmurRequest, ToolCallState,
+        UsageTokens, MODEL_ROUTES,
     };
     use serde_json::{json, Value};
     use std::collections::HashMap;
@@ -2504,7 +2482,7 @@ mod tests {
     #[test]
     fn translates_murmur_request_to_openai_chat_completions() {
         let request: MurmurRequest = serde_json::from_value(json!({
-            "model": "gpt-4.1",
+            "model": "chat-latest",
             "max_tokens": 512,
             "system": "You are helpful",
             "messages": [
@@ -2530,8 +2508,7 @@ mod tests {
         }))
         .unwrap();
 
-        let translated =
-            translate_murmur_request_to_openai(&request, ModelFamily::GptClassic).unwrap();
+        let translated = translate_murmur_request_to_openai(&request).unwrap();
 
         assert_eq!(translated["messages"][0]["role"], "system");
         assert_eq!(translated["messages"][1]["role"], "assistant");
@@ -2608,77 +2585,9 @@ mod tests {
     }
 
     #[test]
-    fn classifies_gpt_models_as_classic() {
-        for model in &[
-            "gpt-4o",
-            "gpt-4o-mini",
-            "gpt-4.1",
-            "gpt-4.1-mini",
-            "gpt-4.1-nano",
-            "gpt-4-turbo",
-            "gpt-3.5-turbo",
-            "gpt-5",
-        ] {
-            assert_eq!(
-                classify_model(model),
-                ModelFamily::GptClassic,
-                "expected GptClassic for {model}"
-            );
-        }
-    }
-
-    #[test]
-    fn classifies_o_series_as_reasoning() {
-        for model in &["o1", "o1-mini", "o1-preview", "o3", "o3-mini", "o4-mini"] {
-            assert_eq!(
-                classify_model(model),
-                ModelFamily::OSeriesReasoning,
-                "expected OSeriesReasoning for {model}"
-            );
-        }
-    }
-
-    #[test]
-    fn o_series_strips_unsupported_params() {
+    fn chat_completions_passes_temperature_through() {
         let request: MurmurRequest = serde_json::from_value(json!({
-            "model": "o3-mini",
-            "max_tokens": 1024,
-            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
-            "params": {
-                "temperature": 0.7,
-                "top_p": 0.9,
-                "presence_penalty": 0.5,
-                "frequency_penalty": 0.3,
-                "reasoning_effort": "high",
-                "stream": false
-            }
-        }))
-        .unwrap();
-
-        let translated =
-            translate_murmur_request_to_openai(&request, ModelFamily::OSeriesReasoning).unwrap();
-
-        assert!(
-            translated.get("temperature").is_none(),
-            "temperature must be stripped"
-        );
-        assert!(translated.get("top_p").is_none(), "top_p must be stripped");
-        assert!(
-            translated.get("presence_penalty").is_none(),
-            "presence_penalty must be stripped"
-        );
-        assert!(
-            translated.get("frequency_penalty").is_none(),
-            "frequency_penalty must be stripped"
-        );
-        assert_eq!(translated["reasoning_effort"], "high");
-        assert_eq!(translated["stream"], false);
-    }
-
-    #[test]
-    fn gpt_classic_passes_temperature_through() {
-        let request: MurmurRequest = serde_json::from_value(json!({
-            "model": "gpt-4o",
+            "model": "chat-latest",
             "max_tokens": 512,
             "messages": [],
             "params": {
@@ -2688,8 +2597,7 @@ mod tests {
         }))
         .unwrap();
 
-        let translated =
-            translate_murmur_request_to_openai(&request, ModelFamily::GptClassic).unwrap();
+        let translated = translate_murmur_request_to_openai(&request).unwrap();
 
         assert_eq!(translated["temperature"], 0.5);
         assert_eq!(translated["top_p"], 0.9);
@@ -2851,64 +2759,59 @@ mod tests {
         assert_eq!(result["content"][1]["text"], "reply");
     }
 
-    // ── Responses API: model routing ─────────────────────────────────────────
+    // ── Model routing ────────────────────────────────────────────────────────
 
     #[test]
-    fn gpt_major_version_extracts_leading_digits() {
-        assert_eq!(gpt_major_version("gpt-5"), Some(5));
-        assert_eq!(gpt_major_version("gpt-5-mini"), Some(5));
-        assert_eq!(gpt_major_version("gpt-5.1"), Some(5));
-        assert_eq!(gpt_major_version("gpt-5.2-codex"), Some(5));
-        assert_eq!(gpt_major_version("gpt-4.1"), Some(4));
-        assert_eq!(gpt_major_version("gpt-4o"), Some(4));
-        assert_eq!(gpt_major_version("gpt-3.5-turbo"), Some(3));
-        assert_eq!(gpt_major_version("gpt-turbo"), None);
-        assert_eq!(gpt_major_version("gpt-"), None);
-        assert_eq!(gpt_major_version("o3"), None);
-        assert_eq!(gpt_major_version(""), None);
+    fn route_places_every_model_routes_id_on_its_row_surface() {
+        for (id, surface) in MODEL_ROUTES {
+            assert_eq!(route(id), Ok(*surface), "route('{id}')");
+        }
+        assert_eq!(route("gpt-oss-120b"), Ok(ApiSurface::Responses));
+        assert_eq!(route("gpt-oss-20b"), Ok(ApiSurface::Responses));
+        assert_eq!(route("chat-latest"), Ok(ApiSurface::ChatCompletions));
     }
 
     #[test]
-    fn classifies_gpt5_and_above_as_responses() {
-        for model in &["gpt-5", "gpt-5-mini", "gpt-5.1", "gpt-5.2-codex"] {
+    fn route_refuses_every_id_outside_the_table_naming_it() {
+        let supported = MODEL_ROUTES
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>()
+            .join(", ");
+        for model in [
+            "o3-pro",
+            "o3",
+            "gpt-5",
+            "gpt-4o",
+            "gpt-5.2-2025-12-11",
+            "llama3.1:8b",
+            "",
+        ] {
             assert_eq!(
-                classify_api_surface(model, ModelFamily::GptClassic),
-                ApiSurface::Responses,
-                "expected Responses for {model}"
+                route(model),
+                Err(format!(
+                    "driver: model '{model}' is not supported by driver-openai. \
+                     Supported models: {supported}."
+                ))
             );
         }
     }
 
     #[test]
-    fn classifies_below_gpt5_as_chat_completions() {
-        for model in &["gpt-4.1", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"] {
-            assert_eq!(
-                classify_api_surface(model, ModelFamily::GptClassic),
-                ApiSurface::ChatCompletions,
-                "expected ChatCompletions for {model}"
-            );
-        }
+    fn api_surface_paths_are_the_openai_endpoints() {
+        assert_eq!(ApiSurface::Responses.path(), "responses");
+        assert_eq!(ApiSurface::ChatCompletions.path(), "chat/completions");
     }
 
     #[test]
-    fn o_series_always_chat_completions_even_if_version_like() {
-        for model in &["o1", "o3", "o4-mini"] {
-            assert_eq!(
-                classify_api_surface(model, ModelFamily::OSeriesReasoning),
-                ApiSurface::ChatCompletions,
-                "expected ChatCompletions for {model}"
-            );
-        }
-    }
-
-    #[test]
-    fn unknown_model_name_defaults_to_chat_completions() {
-        for model in &["custom-model-x", ""] {
-            assert_eq!(
-                classify_api_surface(model, ModelFamily::GptClassic),
-                ApiSurface::ChatCompletions,
-                "expected ChatCompletions for {model}"
-            );
+    fn gpt_oss_bodies_are_responses_shaped() {
+        for model in ["gpt-oss-120b", "gpt-oss-20b"] {
+            let body = provider_body(&request(model), &DriverConfig::default(), false);
+            assert_eq!(body["model"], json!(model));
+            assert!(body.get("input").is_some(), "{model}: {body}");
+            assert_eq!(body["max_output_tokens"], json!(1024), "{model}: {body}");
+            assert_eq!(body["store"], json!(false), "{model}: {body}");
+            assert!(body.get("messages").is_none(), "{model}: {body}");
         }
     }
 
@@ -3536,20 +3439,18 @@ mod tests {
 
     #[test]
     fn chat_completions_forwards_prompt_cache_key() {
-        let request = request_with_cache_key("gpt-4o", json!({}));
-        let translated =
-            translate_murmur_request_to_openai(&request, ModelFamily::GptClassic).unwrap();
+        let request = request_with_cache_key("chat-latest", json!({}));
+        let translated = translate_murmur_request_to_openai(&request).unwrap();
         assert_eq!(translated["prompt_cache_key"], "demo-capsule:1.0.0:ctx-7");
     }
 
     #[test]
     fn chat_completions_host_key_wins_over_a_same_named_param() {
         let request = request_with_cache_key(
-            "gpt-4o",
+            "chat-latest",
             json!({"params": {"prompt_cache_key": "from-params"}}),
         );
-        let translated =
-            translate_murmur_request_to_openai(&request, ModelFamily::GptClassic).unwrap();
+        let translated = translate_murmur_request_to_openai(&request).unwrap();
         assert_eq!(translated["prompt_cache_key"], "demo-capsule:1.0.0:ctx-7");
     }
 
@@ -3579,7 +3480,7 @@ mod tests {
             Some(json!(7)),
         ] {
             let mut payload = json!({
-                "model": "gpt-4o",
+                "model": "chat-latest",
                 "max_tokens": 256,
                 "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
             });
@@ -3588,8 +3489,7 @@ mod tests {
             }
             let request: MurmurRequest = serde_json::from_value(payload).unwrap();
 
-            let chat =
-                translate_murmur_request_to_openai(&request, ModelFamily::GptClassic).unwrap();
+            let chat = translate_murmur_request_to_openai(&request).unwrap();
             assert!(
                 chat.get("prompt_cache_key").is_none(),
                 "chat body carried a key for {hint:?}: {chat}"
@@ -3949,7 +3849,7 @@ mod tests {
 
     #[test]
     fn streaming_flags_include_usage_only_on_chat_completions() {
-        let mut chat = json!({"model": "gpt-4o", "stream": false});
+        let mut chat = json!({"model": "chat-latest", "stream": false});
         stamp_streaming_flags(&mut chat, ApiSurface::ChatCompletions);
         assert_eq!(chat["stream"], json!(true));
         assert_eq!(chat["stream_options"], json!({"include_usage": true}));
@@ -3962,12 +3862,11 @@ mod tests {
 
     // ── `inference.driver.config` vocabulary ──────────────────────────────────
 
-    /// The body `run_inner` would put on the wire: classify, translate, stamp the dials, stamp
+    /// The body `run_inner` would put on the wire: route, translate, stamp the dials, stamp
     /// the streaming flags. Tests assert on this rather than on a bare translation.
     fn provider_body(request: &MurmurRequest, config: &DriverConfig, store: bool) -> Value {
-        let family = classify_model(&request.model);
-        let surface = classify_api_surface(&request.model, family);
-        build_provider_request(request, config, store, family, surface).unwrap()
+        let surface = route(&request.model).unwrap();
+        build_provider_request(request, config, store, surface).unwrap()
     }
 
     fn config(raw: &str) -> DriverConfig {
@@ -3987,13 +3886,13 @@ mod tests {
     #[test]
     fn responses_body_with_reasoning_dials_matches_golden_fixture() {
         let body = provider_body(
-            &request("gpt-5"),
+            &request("gpt-5.6-luna"),
             &config(r#"{"thinking":"enabled","reasoning_effort":"high"}"#),
             false,
         );
         assert_eq!(
             format!("{}\n", serde_json::to_string_pretty(&body).unwrap()),
-            include_str!("../tests/fixtures/responses_gpt5_reasoning_effort_high.json"),
+            include_str!("../tests/fixtures/responses_reasoning_effort_high.json"),
         );
         // The effort dial nests under `reasoning` on this surface; the Chat Completions
         // spelling must not leak onto it.
@@ -4003,7 +3902,7 @@ mod tests {
     #[test]
     fn verbosity_lands_under_text_and_asks_for_no_reasoning() {
         let body = provider_body(
-            &request("gpt-5.1"),
+            &request("gpt-5.5"),
             &config(r#"{"verbosity":"low"}"#),
             false,
         );
@@ -4096,7 +3995,7 @@ mod tests {
 
         // A tier this driver has never heard of is the provider's business, not its own.
         let body = provider_body(
-            &request("gpt-5"),
+            &request("gpt-5.6-luna"),
             &config(r#"{"reasoning_effort":"xhigh"}"#),
             false,
         );
@@ -4114,39 +4013,26 @@ mod tests {
     }
 
     #[test]
-    fn o_series_gets_the_effort_dial_and_no_reasoning_request() {
+    fn chat_completions_drops_the_effort_dial_through_the_incompatibility_predicate() {
         let body = provider_body(
-            &request("o3-mini"),
+            &request("chat-latest"),
             &config(r#"{"thinking":"enabled","reasoning_effort":"high","verbosity":"low"}"#),
             false,
         );
-        assert_eq!(body["reasoning_effort"], "high");
+        assert!(body.get("reasoning_effort").is_none());
         // Chat Completions defines neither container, so `thinking` and `verbosity` ask for
-        // nothing here — an o-series capsule cannot display reasoning at all.
+        // nothing here.
         assert!(body.get("reasoning").is_none());
         assert!(body.get("text").is_none());
         assert!(body.get("verbosity").is_none());
-    }
-
-    #[test]
-    fn gpt_classic_drops_the_effort_dial_through_the_incompatibility_predicate() {
-        let body = provider_body(
-            &request("gpt-4o"),
-            &config(r#"{"reasoning_effort":"high"}"#),
-            false,
-        );
-        assert!(body.get("reasoning_effort").is_none());
         // Dropped by the one predicate both the dials and the `params` loop consult.
-        assert!(!provider_field_supported(
-            "reasoning_effort",
-            ModelFamily::GptClassic,
-            ApiSurface::ChatCompletions
-        ));
-        assert!(provider_field_supported(
-            "reasoning_effort",
-            ModelFamily::OSeriesReasoning,
-            ApiSurface::ChatCompletions
-        ));
+        for field in ["reasoning_effort", "reasoning", "text"] {
+            assert!(!provider_field_supported(
+                field,
+                ApiSurface::ChatCompletions
+            ));
+            assert!(provider_field_supported(field, ApiSurface::Responses));
+        }
     }
 
     #[test]
@@ -4155,12 +4041,12 @@ mod tests {
             let parsed = parse_driver_config(raw).unwrap();
             assert_eq!(parsed, DriverConfig::default());
 
-            let responses = provider_body(&request("gpt-5"), &parsed, false);
+            let responses = provider_body(&request("gpt-5.6-luna"), &parsed, false);
             assert!(responses.get("reasoning").is_none());
             assert!(responses.get("text").is_none());
             assert_eq!(responses["store"], false);
 
-            let chat = provider_body(&request("gpt-4o"), &parsed, false);
+            let chat = provider_body(&request("chat-latest"), &parsed, false);
             assert!(chat.get("reasoning_effort").is_none());
             assert!(chat.get("text").is_none());
         }
@@ -4177,7 +4063,7 @@ mod tests {
     #[test]
     fn a_config_dial_overwrites_a_same_named_params_key_wholesale() {
         let request: MurmurRequest = serde_json::from_value(json!({
-            "model": "gpt-5",
+            "model": "gpt-5.6-luna",
             "max_tokens": 256,
             "messages": [],
             "params": {"reasoning": {"effort": "low", "generate_summary": "concise"}}
@@ -4576,12 +4462,56 @@ mod tests {
             );
         }
 
-        // The driver accepts any model string, so the declared set is the README's table.
-        let accepted: Vec<&str> = documented.keys().map(String::as_str).collect();
+        // The accepted set is MODEL_ROUTES.
+        let accepted: Vec<&str> = super::MODEL_ROUTES.iter().map(|(id, _)| *id).collect();
         assert!(
             accepted.contains(&"gpt-5.6-luna"),
-            "README.md's Model limits table lacks 'gpt-5.6-luna'"
+            "MODEL_ROUTES lacks 'gpt-5.6-luna'"
         );
+
+        // README.md's "Endpoints" table: | `<id>` | `responses` or `chat/completions` |
+        let section = readme
+            .split("\n## ")
+            .find(|section| section.starts_with("Endpoints\n"))
+            .expect("README.md must have a ## Endpoints section");
+        let mut endpoints = BTreeMap::new();
+        for row in section.lines() {
+            let cells: Vec<&str> = row.split('|').map(str::trim).collect();
+            let [_, id, endpoint, ..] = cells[..] else {
+                continue;
+            };
+            let Some(id) = id.strip_prefix('`').and_then(|id| id.strip_suffix('`')) else {
+                continue;
+            };
+            let endpoint = endpoint
+                .strip_prefix('`')
+                .and_then(|endpoint| endpoint.strip_suffix('`'))
+                .filter(|endpoint| ["responses", "chat/completions"].contains(endpoint))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "README.md's Endpoints row '{id}': '{endpoint}' is not `responses` or \
+                         `chat/completions`"
+                    )
+                });
+            assert!(
+                endpoints.insert(id, endpoint).is_none(),
+                "README.md's Endpoints table lists '{id}' twice"
+            );
+        }
+        for id in &accepted {
+            let path = super::route(id).unwrap().path();
+            assert_eq!(
+                endpoints.get(id).copied(),
+                Some(path),
+                "README.md's Endpoints table disagrees with MODEL_ROUTES on '{id}'"
+            );
+        }
+        for id in endpoints.keys() {
+            assert!(
+                accepted.contains(id),
+                "README.md's Endpoints table lists '{id}', which MODEL_ROUTES does not hold"
+            );
+        }
 
         for id in &accepted {
             assert!(

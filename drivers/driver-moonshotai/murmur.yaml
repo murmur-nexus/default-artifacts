@@ -1,7 +1,7 @@
 name: driver-moonshotai
 version: 0.13.0
 runtime: driver
-description: "Moonshot AI inference driver — kimi-k3 on the Chat Completions surface, with reasoning_effort and response_format config keys"
+description: "Moonshot AI inference driver — kimi-k3.1-pro, kimi-k3.1-pro-highspeed and kimi-k3 (K3), kimi-k2.7-code, kimi-k2.7-code-highspeed and kimi-k2.6 (K2) on the Chat Completions surface, with reasoning_effort, thinking and response_format config keys"
 requires_files:
   - driver_moonshotai.wasm
 
@@ -12,6 +12,21 @@ upstream_auth:
 
 # The limits of each model this driver serves; src/lib.rs's SUPPORTED_MODELS holds the same numbers.
 models:
+  kimi-k3.1-pro:
+    max_output_tokens: 1048576
+    context_window: 1048576
+  kimi-k3.1-pro-highspeed:
+    max_output_tokens: 1048576
+    context_window: 1048576
   kimi-k3:
     max_output_tokens: 1048576
     context_window: 1048576
+  kimi-k2.7-code:
+    max_output_tokens: 262144
+    context_window: 262144
+  kimi-k2.7-code-highspeed:
+    max_output_tokens: 262144
+    context_window: 262144
+  kimi-k2.6:
+    max_output_tokens: 262144
+    context_window: 262144
