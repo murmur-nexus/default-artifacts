@@ -125,11 +125,6 @@ impl Store {
         self.root.join(REPORTS_DIR)
     }
 
-    /// The session id this store writes for, which is also its report file's stem.
-    pub fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
     /// This session's report file: `<state>/reports/<session_id>.json`.
     pub fn report_path(&self) -> PathBuf {
         self.reports_dir().join(report_file_name(&self.session_id))

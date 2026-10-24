@@ -72,9 +72,10 @@ description: |
 
   Without the state grant every operation returns `state_unavailable`; the tool never falls
   back to the workdir. A session id that is absent, empty, over 128 characters or holds a
-  character outside A-Z a-z 0-9 _ - returns `session_unavailable` and nothing is written. All responses: {ok: bool, operation: string, concluded: bool,
-  outcome: string|null, revision: int, superseded_count: int, progress_count: int,
-  report_path: string, error_kind?: string, message?: string}. error_kind is one of
+  character outside A-Z a-z 0-9 _ - returns `session_unavailable` and nothing is written.
+  All responses: {ok: bool, operation: string, concluded: bool, outcome: string|null,
+  revision: int, superseded_count: int, progress_count: int, report_path: string,
+  error_kind?: string, message?: string}. error_kind is one of
   invalid_input, unknown_operation, unknown_outcome, inline_payload_refused,
   undeclared_kind, undeclared_stage, state_unavailable, session_unavailable, config_invalid,
   io_error.
