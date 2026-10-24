@@ -239,6 +239,61 @@ fn component_loads_and_runs_read_file() {
         "expected state_effect=read, got {meta:?}"
     );
 
+    let result = run_editor_raw(
+        &eng,
+        &component,
+        &lnk,
+        &workdir,
+        r#"{"operation":"read_file","path":"hello.txt"}"#,
+    );
+    assert!(
+        !result.truncated,
+        "a read within every limit is not truncated"
+    );
+
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn a_read_with_no_range_of_a_large_file_stops_at_the_line_limit() {
+    let eng = engine();
+    let component = Component::from_file(&eng, component_path()).expect("load component");
+    let lnk = linker(&eng);
+    let workdir = unique_workdir("read_line_limit");
+    let body: String = (1..=5000).map(|i| format!("line {i}\n")).collect();
+    std::fs::write(workdir.join("big.txt"), body).unwrap();
+
+    let result = run_editor_raw(
+        &eng,
+        &component,
+        &lnk,
+        &workdir,
+        r#"{"operation":"read_file","path":"big.txt"}"#,
+    );
+    assert!(
+        matches!(result.status, Status::Passed),
+        "status: {:?}",
+        result.status
+    );
+    assert!(result.truncated, "a cut read sets ToolResult.truncated");
+
+    let payload: Value = serde_json::from_str(result.data.as_deref().expect("data")).unwrap();
+    assert_eq!(
+        payload["truncated"],
+        "Read stopped at the limit of 2000 lines. Lines 1-2000 of 5000 are returned; start_line 2001 continues the read."
+    );
+    assert_eq!(payload["start_line"], 1);
+    assert_eq!(payload["end_line"], 2000);
+    assert_eq!(payload["total_lines"], 5000);
+    assert!(
+        payload["content"]
+            .as_str()
+            .unwrap()
+            .ends_with("\nline 2000"),
+        "{:.200}",
+        payload["content"]
+    );
+
     let _ = std::fs::remove_dir_all(&workdir);
 }
 

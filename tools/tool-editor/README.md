@@ -23,6 +23,52 @@ workdir (the component's CWD at dispatch time); an absolute value is
 The two writing operations name their target `dest_path`; the two reading
 operations take `path` and `dir`. The split is not cosmetic — see below.
 
+## Reading with `read_file`
+
+`start_line` and `end_line` are 1-based and inclusive, and both are optional.
+Every read, with or without them, is held to three limits:
+
+| Limit | Value |
+|---|---|
+| Lines per read | 2000 |
+| Content per read | 100 KB (102,400 bytes) |
+| Characters per line | 2000 |
+
+A line longer than 2000 characters comes back as its first 2000 characters. A
+read with no range starts at line 1, and an omitted `end_line` reads to the end
+of the file or to the first limit reached. An explicit `start_line`/`end_line`
+span over 2000 lines is refused with `error_kind: "range_too_large"`; a
+`start_line` below 1 or past the end of the file, or an inverted range, is
+refused with `error_kind: "invalid_range"`. An `end_line` past the end clamps
+to the file's line count.
+
+| Read | `data` keys | `message` |
+|---|---|---|
+| No range, file within every limit | `content` (the file verbatim), `total_lines` | `read <path>` |
+| With a range, within every limit | `content`, `total_lines`, `start_line`, `end_line` | `read <path> lines <s>-<e>` |
+| Cut by a limit, with or without a range | `content`, `total_lines`, `start_line`, `end_line`, `truncated` | `read <path> lines <s>-<e>` |
+
+Every response but the verbatim one returns the lines joined with `\n`, with no
+trailing newline, and `start_line`/`end_line` as resolved. A cut read still
+succeeds: its summary ends in `, truncated)` and the result's `truncated` flag
+is set. The `truncated` note names the limit that stopped the read and, when
+the read stopped before the requested lines ran out, the `start_line` that
+continues it. A 5000-line file read with no range returns:
+
+```json
+{
+  "content": "line 1\nline 2\n...\nline 2000",
+  "end_line": 2000,
+  "start_line": 1,
+  "total_lines": 5000,
+  "truncated": "Read stopped at the limit of 2000 lines. Lines 1-2000 of 5000 are returned; start_line 2001 continues the read."
+}
+```
+
+A read that cuts long lines says so in a second sentence, after the first when
+both apply: `Lines longer than 2000 characters are cut to their first 2000
+characters: 1 in this read, the first at line 10.`
+
 ## Searching with `find_in_files`
 
 `find_in_files` matches `pattern`, a regular expression, against each line of
@@ -174,6 +220,17 @@ have made every read under that subtree a refusal.
 
 `find_in_files` results carry a `path` key per match. That is an output, not an
 input — the runtime scans tool input only.
+
+## Breaking change in 0.10.0
+
+- A `read_file` with no range of a file over a limit now returns only the
+  lines that fit, with `start_line`, `end_line` and a `truncated` note, where
+  it used to return the whole file as `content` and `total_lines`.
+- A `read_file` with only `start_line` whose remaining lines exceed 2000 now
+  succeeds with the first 2000 of them, where it used to return
+  `range_too_large`.
+- A line longer than 2000 characters now comes back as its first 2000
+  characters.
 
 ## Breaking change in 0.8.0
 
