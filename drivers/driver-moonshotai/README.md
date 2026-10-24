@@ -37,6 +37,7 @@ artifacts:
 inference:
   transport: http
   model: kimi-k3
+  max_tokens: 131072     # Moonshot's default; left unset, murmur after v0.7.0 refuses the launch (E-RUN-055)
   driver:
     artifact: murmur/driver-moonshotai
 ```
