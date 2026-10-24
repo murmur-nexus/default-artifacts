@@ -12,7 +12,7 @@
   ],
   "instructions": "You are a careful assistant.",
   "max_output_tokens": 1024,
-  "model": "gpt-5",
+  "model": "gpt-5.6-luna",
   "reasoning": {
     "effort": "high",
     "summary": "auto"

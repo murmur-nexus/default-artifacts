@@ -7,10 +7,10 @@ use serde_json::{json, Map, Value};
 
 // ── Model table ───────────────────────────────────────────────────────────────
 
-/// The limits Moonshot publishes for one model.
+/// The limits of one model, from Moonshot's documentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ModelLimits {
-    /// The largest `max_completion_tokens` Moonshot accepts for the model. A larger value is
+    /// The largest `max_completion_tokens` this driver sends for the model. A larger value is
     /// refused here rather than clamped silently or spent on a provider 400.
     max_output_tokens: u64,
     /// The model's context window in tokens. No request path reads it: it is the number
@@ -19,33 +19,70 @@ struct ModelLimits {
     context_window: u64,
 }
 
-/// Every model this driver serves, with its limits. Moonshot also ships `kimi-k3.1-pro`,
-/// `kimi-k3.1-pro-highspeed`, `kimi-k2.7-code` and `kimi-k2.6`; none of them are implemented
-/// here. This table is the classification seam a second model would be added at — nothing else
-/// in the crate branches on the model name — and `murmur.yaml`'s `models:` block must declare
-/// the same numbers for each entry.
-const SUPPORTED_MODELS: &[(&str, ModelLimits)] = &[(
-    "kimi-k3",
-    ModelLimits {
-        max_output_tokens: 1_048_576,
-        context_window: 1_048_576,
-    },
-)];
+/// How Moonshot lets a request steer one model's reasoning, as its model parameter reference
+/// documents it. Each kind names the request fields the model takes, so the body and the
+/// config checks follow from the kind rather than from the model id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThinkingControl {
+    /// Always reasons. Takes top-level `reasoning_effort` and has no `thinking` parameter.
+    ReasoningEffort,
+    /// Thinking and Preserved Thinking are always on. Takes neither `reasoning_effort` nor a
+    /// `thinking` switch; an omitted `thinking` is read as `{"type":"enabled","keep":"all"}`.
+    AlwaysOn,
+    /// Takes `thinking` enabled or disabled, and no `reasoning_effort`.
+    Switchable,
+}
+
+/// Every model this driver serves, with its limits and its thinking control. This table is the
+/// one place the crate branches on a model id: everything else reads the row `validate_model`
+/// returns. `murmur.yaml`'s `models:` block must declare the same numbers for each entry, and
+/// README.md's "Model limits" table the same ids.
+const SUPPORTED_MODELS: &[(&str, ModelLimits, ThinkingControl)] = &[
+    ("kimi-k3.1-pro", K3_LIMITS, ThinkingControl::ReasoningEffort),
+    (
+        "kimi-k3.1-pro-highspeed",
+        K3_LIMITS,
+        ThinkingControl::ReasoningEffort,
+    ),
+    ("kimi-k3", K3_LIMITS, ThinkingControl::ReasoningEffort),
+    ("kimi-k2.7-code", K2_LIMITS, ThinkingControl::AlwaysOn),
+    (
+        "kimi-k2.7-code-highspeed",
+        K2_LIMITS,
+        ThinkingControl::AlwaysOn,
+    ),
+    ("kimi-k2.6", K2_LIMITS, ThinkingControl::Switchable),
+];
+
+/// Moonshot documents `max_completion_tokens` "can be set up to 1048576" on the K3 models, and
+/// a 1,048,576-token window for them.
+const K3_LIMITS: ModelLimits = ModelLimits {
+    max_output_tokens: 1_048_576,
+    context_window: 1_048_576,
+};
+
+/// Moonshot documents a 262,144-token window for the K2 models and no `max_completion_tokens`
+/// ceiling. A cap that does not fit beside the prompt is lowered by the API to fit, so the
+/// window is the largest cap a request can carry.
+const K2_LIMITS: ModelLimits = ModelLimits {
+    max_output_tokens: 262_144,
+    context_window: 262_144,
+};
 
 /// Look the model up by its exact id before a request body is built, so an unsupported model
 /// costs no HTTP call.
-fn validate_model(model: &str) -> Result<&'static ModelLimits, String> {
+fn validate_model(model: &str) -> Result<(&'static ModelLimits, ThinkingControl), String> {
     SUPPORTED_MODELS
         .iter()
-        .find(|(id, _)| *id == model)
-        .map(|(_, limits)| limits)
+        .find(|(id, _, _)| *id == model)
+        .map(|(_, limits, control)| (limits, *control))
         .ok_or_else(|| {
             format!(
                 "driver: model '{model}' is not supported by driver-moonshotai. \
                  Supported models: {}.",
                 SUPPORTED_MODELS
                     .iter()
-                    .map(|(id, _)| *id)
+                    .map(|(id, _, _)| *id)
                     .collect::<Vec<_>>()
                     .join(", ")
             )
@@ -86,26 +123,18 @@ const PROVIDER_FIXED_PARAMS: &[&str] = &[
 
 /// Every key `inference.driver.config` accepts on this driver, sorted so the error message
 /// listing them is stable.
-const ACCEPTED_CONFIG_KEYS: &[&str] = &["reasoning_effort", "response_format"];
+const ACCEPTED_CONFIG_KEYS: &[&str] = &["reasoning_effort", "response_format", "thinking"];
 
 /// Moonshot's own effort vocabulary, in ascending order of spend. `medium` is OpenAI's spelling
 /// and is not accepted here: each driver owns its provider's vocabulary rather than a
 /// murmur-wide normalisation across providers' effort dials.
 const REASONING_EFFORT_VALUES: &[&str] = &["low", "high", "max"];
 
-/// Moonshot's own default. Kept rather than substituted with a cheaper tier, and stamped on
-/// every request so the effective value is visible in a recorded request rather than left to
-/// drift with the provider's default.
+/// Moonshot's own default for the models that take `reasoning_effort`. Kept rather than
+/// substituted with a cheaper tier, and stamped on every request to such a model so the
+/// effective value is visible in a recorded request rather than left to drift with the
+/// provider's default.
 const DEFAULT_REASONING_EFFORT: &str = "max";
-
-/// `thinking` is refused with its own message rather than the generic unrecognised-key one:
-/// `kimi-k3` always reasons and the provider exposes no switch, so there is nothing behind the
-/// key to honour at any value. If `kimi-k2.6` — the one Moonshot model with a genuine
-/// thinking/non-thinking toggle — is ever added, the key becomes meaningful and must keep this
-/// spelling, matching driver-anthropic and driver-deepseek.
-const THINKING_REFUSAL: &str = "driver: inference.driver.config 'thinking' is not accepted by \
-     driver-moonshotai: kimi-k3 always reasons and Moonshot exposes no switch to turn it \
-     off, at any value. Remove the key.";
 
 /// `strict: false` is refused rather than silently upgraded to `true`.
 const STRICT_FALSE_REFUSAL: &str =
@@ -113,24 +142,19 @@ const STRICT_FALSE_REFUSAL: &str =
      strict: false is refused rather than silently upgraded, because a schema the provider does \
      not enforce is not the guarantee this key offers";
 
-/// The two dials read from `inference.driver.config`.
-#[derive(Debug, Clone, PartialEq)]
+/// The dials read from `inference.driver.config`. Parsing knows nothing of the model: whether a
+/// dial applies is checked against the model's [`ThinkingControl`] in `preflight_request`.
+#[derive(Debug, Clone, Default, PartialEq)]
 struct DriverConfig {
-    /// `reasoning_effort` — one of [`REASONING_EFFORT_VALUES`], lowercased. Always Some; an
-    /// unconfigured capsule gets [`DEFAULT_REASONING_EFFORT`].
-    reasoning_effort: String,
+    /// `reasoning_effort` — one of [`REASONING_EFFORT_VALUES`], lowercased. `None` when the key
+    /// is absent; a model that takes the dial then gets [`DEFAULT_REASONING_EFFORT`].
+    reasoning_effort: Option<String>,
+    /// `thinking` — `Some(true)` for `"enabled"`, `Some(false)` for `"disabled"`, `None` when
+    /// the key is absent. A switchable model treats `None` as enabled.
+    thinking: Option<bool>,
     /// `response_format` — validated and normalised (`strict` defaulted to `true`), then
     /// forwarded to the provider body under the same name.
     response_format: Option<Value>,
-}
-
-impl Default for DriverConfig {
-    fn default() -> Self {
-        DriverConfig {
-            reasoning_effort: DEFAULT_REASONING_EFFORT.to_string(),
-            response_format: None,
-        }
-    }
 }
 
 /// Read the driver-config JSON into the dial set. Runs as the first fallible step of
@@ -151,12 +175,6 @@ fn parse_driver_config(driver_config: Option<&str>) -> Result<DriverConfig, Stri
         return Err("driver: inference.driver.config must be a JSON object".to_string());
     };
 
-    // Checked before the generic sweep so the operator is told *why* the key cannot exist here,
-    // rather than being told it was merely misspelled.
-    if config.contains_key("thinking") {
-        return Err(THINKING_REFUSAL.to_string());
-    }
-
     let unrecognised = config
         .keys()
         .filter(|key| !ACCEPTED_CONFIG_KEYS.contains(&key.as_str()))
@@ -173,7 +191,11 @@ fn parse_driver_config(driver_config: Option<&str>) -> Result<DriverConfig, Stri
     }
 
     Ok(DriverConfig {
-        reasoning_effort: parse_reasoning_effort(config.get("reasoning_effort"))?,
+        reasoning_effort: config
+            .get("reasoning_effort")
+            .map(parse_reasoning_effort)
+            .transpose()?,
+        thinking: config.get("thinking").map(parse_thinking).transpose()?,
         response_format: config
             .get("response_format")
             .map(validate_response_format)
@@ -183,10 +205,9 @@ fn parse_driver_config(driver_config: Option<&str>) -> Result<DriverConfig, Stri
 
 /// Trimmed and matched case-insensitively; sent lowercased. The rejected value appears verbatim
 /// in the error alongside the accepted set, so a manifest holding OpenAI's `medium` says so.
-fn parse_reasoning_effort(value: Option<&Value>) -> Result<String, String> {
+fn parse_reasoning_effort(value: &Value) -> Result<String, String> {
     match value {
-        None => Ok(DEFAULT_REASONING_EFFORT.to_string()),
-        Some(Value::String(raw)) => {
+        Value::String(raw) => {
             let normalised = raw.trim().to_ascii_lowercase();
             if REASONING_EFFORT_VALUES.contains(&normalised.as_str()) {
                 Ok(normalised)
@@ -197,8 +218,20 @@ fn parse_reasoning_effort(value: Option<&Value>) -> Result<String, String> {
                 ))
             }
         }
-        Some(other) => Err(format!(
+        other => Err(format!(
             "driver: inference.driver.config 'reasoning_effort' must be a string, got {other}"
+        )),
+    }
+}
+
+/// `"enabled"` or `"disabled"`, trimmed and matched case-insensitively — the spelling
+/// driver-openai, driver-anthropic and driver-deepseek read the same key with.
+fn parse_thinking(value: &Value) -> Result<bool, String> {
+    match value {
+        Value::String(raw) if raw.trim().eq_ignore_ascii_case("enabled") => Ok(true),
+        Value::String(raw) if raw.trim().eq_ignore_ascii_case("disabled") => Ok(false),
+        other => Err(format!(
+            "driver: inference.driver.config 'thinking' must be \"enabled\" or \"disabled\", got {other}"
         )),
     }
 }
@@ -350,18 +383,51 @@ fn thinking_text(content: &[MurmurContentBlock]) -> Option<String> {
 
 // ── Request translation ───────────────────────────────────────────────────────
 
-/// Every check that can be made without building a body or touching the network.
-fn preflight_request(request: &MurmurRequest) -> Result<(), String> {
-    let limits = validate_model(&request.model)?;
+/// Every check that can be made without building a body or touching the network: the model,
+/// then the output cap, then each configured dial against the model's thinking control. A dial
+/// the model cannot honour is refused at any value. Returns the model's thinking control, which
+/// decides the reasoning fields on the body.
+fn preflight_request(
+    request: &MurmurRequest,
+    config: &DriverConfig,
+) -> Result<ThinkingControl, String> {
+    let model = request.model.as_str();
+    let (limits, control) = validate_model(model)?;
     validate_max_tokens(limits, request.max_tokens)?;
-    Ok(())
+
+    if config.reasoning_effort.is_some() && control != ThinkingControl::ReasoningEffort {
+        return Err(format!(
+            "driver: inference.driver.config 'reasoning_effort' is not accepted for model \
+             '{model}': Moonshot documents reasoning_effort as not supported on it. Remove the key."
+        ));
+    }
+    if config.thinking.is_some() {
+        match control {
+            ThinkingControl::ReasoningEffort => {
+                return Err(format!(
+                    "driver: inference.driver.config 'thinking' is not accepted for model \
+                     '{model}': the K3 models always reason and Moonshot exposes no switch to \
+                     turn it off, at any value. Remove the key."
+                ))
+            }
+            ThinkingControl::AlwaysOn => {
+                return Err(format!(
+                    "driver: inference.driver.config 'thinking' is not accepted for model \
+                     '{model}': its thinking is always on and cannot be switched, at any value. \
+                     Remove the key."
+                ))
+            }
+            ThinkingControl::Switchable => {}
+        }
+    }
+    Ok(control)
 }
 
 /// The body `run_inner` puts on the wire: pre-flight, translate, stamp the streaming flags.
 /// Tests assert on this rather than on a bare translation.
 fn build_provider_request(request: &MurmurRequest, config: &DriverConfig) -> Result<Value, String> {
-    preflight_request(request)?;
-    let mut body = translate_murmur_request_to_moonshot(request, config)?;
+    let control = preflight_request(request, config)?;
+    let mut body = translate_murmur_request_to_moonshot(request, config, control)?;
     stamp_streaming_flags(&mut body);
     Ok(body)
 }
@@ -369,6 +435,7 @@ fn build_provider_request(request: &MurmurRequest, config: &DriverConfig) -> Res
 fn translate_murmur_request_to_moonshot(
     request: &MurmurRequest,
     config: &DriverConfig,
+    control: ThinkingControl,
 ) -> Result<Value, String> {
     let mut messages = Vec::new();
 
@@ -426,12 +493,32 @@ fn translate_murmur_request_to_moonshot(
         body.insert("tools".to_string(), Value::Array(tools));
     }
 
-    // Top-level, not nested under a `reasoning` object, and stamped on every request including
-    // the unconfigured one.
-    body.insert(
-        "reasoning_effort".to_string(),
-        Value::String(config.reasoning_effort.clone()),
-    );
+    match control {
+        // Top-level, not nested under a `reasoning` object, and stamped on every request
+        // including the unconfigured one.
+        ThinkingControl::ReasoningEffort => {
+            let effort = config
+                .reasoning_effort
+                .as_deref()
+                .unwrap_or(DEFAULT_REASONING_EFFORT);
+            body.insert(
+                "reasoning_effort".to_string(),
+                Value::String(effort.to_string()),
+            );
+        }
+        // Moonshot reads an omitted `thinking` as enabled with `keep: "all"`.
+        ThinkingControl::AlwaysOn => {}
+        // Enabled asks for `keep: "all"`, so the `reasoning_content` this driver replays on
+        // every assistant turn is kept, as it is on the other two kinds.
+        ThinkingControl::Switchable => {
+            let thinking = if config.thinking.unwrap_or(true) {
+                json!({"type": "enabled", "keep": "all"})
+            } else {
+                json!({"type": "disabled"})
+            };
+            body.insert("thinking".to_string(), thinking);
+        }
+    }
 
     if let Some(response_format) = config.response_format.as_ref() {
         body.insert("response_format".to_string(), response_format.clone());
@@ -1462,7 +1549,7 @@ mod tests {
     use super::{
         build_provider_request, http_error_payload, parse_driver_config, parse_moonshot_sse_body,
         translate_moonshot_response_to_murmur, translate_murmur_request_to_moonshot,
-        validate_model, DriverConfig, MurmurRequest,
+        validate_model, DriverConfig, MurmurRequest, ThinkingControl, SUPPORTED_MODELS,
     };
     use serde_json::{json, Value};
 
@@ -1495,6 +1582,24 @@ mod tests {
         build_provider_request(request, config).expect("fixture request must translate")
     }
 
+    /// A one-turn request for `model` with the given output cap.
+    fn request_for(model: &str, max_tokens: u64) -> MurmurRequest {
+        request_from(json!({
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+        }))
+    }
+
+    /// Every supported id of one thinking-control kind.
+    fn models_of(control: ThinkingControl) -> Vec<&'static str> {
+        SUPPORTED_MODELS
+            .iter()
+            .filter(|(_, _, kind)| *kind == control)
+            .map(|(id, _, _)| *id)
+            .collect()
+    }
+
     fn contains_key_anywhere(value: &Value, key: &str) -> bool {
         match value {
             Value::Object(map) => {
@@ -1508,48 +1613,175 @@ mod tests {
     // ── Scenario 3 — model scope ──────────────────────────────────────────────
 
     #[test]
-    fn unsupported_model_is_refused_before_any_request_is_built() {
-        assert!(validate_model("kimi-k3").is_ok());
+    fn every_supported_model_builds_a_body_naming_it() {
+        let ids: Vec<&str> = SUPPORTED_MODELS.iter().map(|(id, _, _)| *id).collect();
+        assert_eq!(
+            ids,
+            [
+                "kimi-k3.1-pro",
+                "kimi-k3.1-pro-highspeed",
+                "kimi-k3",
+                "kimi-k2.7-code",
+                "kimi-k2.7-code-highspeed",
+                "kimi-k2.6"
+            ]
+        );
+        for id in ids {
+            let body = body_for(&request_for(id, 8192), &DriverConfig::default());
+            assert_eq!(body["model"], json!(id));
+        }
+    }
 
-        for rejected in ["kimi-k2.6", "gpt-5", "kimi-k2.7-code"] {
-            let err =
-                validate_model(rejected).expect_err("only kimi-k3 is implemented by this driver");
-            assert!(err.starts_with("driver: "), "got {err}");
-            assert!(err.contains(rejected), "the model must be named: {err}");
-            assert!(
-                err.contains("kimi-k3"),
-                "the supported set must be listed: {err}"
+    #[test]
+    fn unsupported_model_is_refused_before_any_request_is_built() {
+        for rejected in [
+            "kimi-k2.5",
+            "moonshot-v1-8k",
+            "kimi-k2-thinking",
+            "gpt-5",
+            "",
+        ] {
+            let err = validate_model(rejected).expect_err("the id is outside SUPPORTED_MODELS");
+            assert_eq!(
+                err,
+                format!(
+                    "driver: model '{rejected}' is not supported by driver-moonshotai. \
+                     Supported models: kimi-k3.1-pro, kimi-k3.1-pro-highspeed, kimi-k3, \
+                     kimi-k2.7-code, kimi-k2.7-code-highspeed, kimi-k2.6."
+                )
             );
         }
 
         // The rejection reaches an operator through the ordinary request path too, with no
         // provider body built.
-        let request = request_from(json!({
-            "model": "kimi-k2.6",
-            "max_tokens": 8192,
-            "messages": []
-        }));
-        assert!(build_provider_request(&request, &DriverConfig::default()).is_err());
+        let err = build_provider_request(&request_for("kimi-k2.5", 8192), &DriverConfig::default())
+            .expect_err("kimi-k2.5 is deprecated by Moonshot and refused");
+        assert!(err.contains("'kimi-k2.5'"), "got {err}");
     }
 
-    // ── Scenario 4 — `thinking` refused by name ───────────────────────────────
+    // ── Scenario 4 — the reasoning fields follow the model's thinking control ─
 
     #[test]
-    fn thinking_config_key_is_refused_by_name_with_its_own_reason() {
-        let generic = parse_driver_config(Some(r#"{"verbosity":"high"}"#))
-            .expect_err("an unrecognised key must be refused");
+    fn a_k3_model_gets_reasoning_effort_and_no_thinking() {
+        for id in models_of(ThinkingControl::ReasoningEffort) {
+            let body = body_for(&request_for(id, 8192), &DriverConfig::default());
+            assert_eq!(body["reasoning_effort"], json!("max"), "{id}: {body}");
+            assert!(body.get("thinking").is_none(), "{id}: {body}");
 
-        for raw in [r#"{"thinking":"enabled"}"#, r#"{"thinking":"disabled"}"#] {
-            let err = parse_driver_config(Some(raw))
-                .expect_err("kimi-k3 has no thinking switch, so the key cannot be honoured");
+            let low = body_for(
+                &request_for(id, 8192),
+                &config(r#"{"reasoning_effort":"low"}"#),
+            );
+            assert_eq!(low["reasoning_effort"], json!("low"), "{id}: {low}");
+        }
+    }
+
+    #[test]
+    fn a_k2_7_code_model_gets_neither_reasoning_field() {
+        let ids = models_of(ThinkingControl::AlwaysOn);
+        assert_eq!(ids, ["kimi-k2.7-code", "kimi-k2.7-code-highspeed"]);
+        for id in ids {
+            let body = body_for(&request_for(id, 8192), &DriverConfig::default());
+            assert!(body.get("reasoning_effort").is_none(), "{id}: {body}");
+            assert!(body.get("thinking").is_none(), "{id}: {body}");
+        }
+    }
+
+    #[test]
+    fn kimi_k2_6_gets_a_thinking_switch_that_keeps_reasoning_when_enabled() {
+        assert_eq!(models_of(ThinkingControl::Switchable), ["kimi-k2.6"]);
+
+        for raw in [
+            "{}",
+            r#"{"thinking":"enabled"}"#,
+            r#"{"thinking":" Enabled "}"#,
+        ] {
+            let body = body_for(&request_for("kimi-k2.6", 8192), &config(raw));
+            assert_eq!(
+                body["thinking"],
+                json!({"type": "enabled", "keep": "all"}),
+                "{raw}: {body}"
+            );
+            assert!(body.get("reasoning_effort").is_none(), "{raw}: {body}");
+        }
+
+        let disabled = body_for(
+            &request_for("kimi-k2.6", 8192),
+            &config(r#"{"thinking":"disabled"}"#),
+        );
+        assert_eq!(disabled["thinking"], json!({"type": "disabled"}));
+        assert!(disabled.get("reasoning_effort").is_none(), "{disabled}");
+    }
+
+    #[test]
+    fn reasoning_effort_on_a_k2_model_is_refused_naming_the_key_and_the_model() {
+        for id in ["kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6"] {
+            let err = build_provider_request(
+                &request_for(id, 8192),
+                &config(r#"{"reasoning_effort":"high"}"#),
+            )
+            .expect_err("Moonshot documents reasoning_effort as not supported on K2");
             assert_eq!(
                 err,
-                "driver: inference.driver.config 'thinking' is not accepted by \
-                 driver-moonshotai: kimi-k3 always reasons and Moonshot exposes no switch \
-                 to turn it off, at any value. Remove the key."
+                format!(
+                    "driver: inference.driver.config 'reasoning_effort' is not accepted for \
+                     model '{id}': Moonshot documents reasoning_effort as not supported on it. \
+                     Remove the key."
+                )
             );
-            assert_ne!(err, generic, "the refusal must not be the generic message");
-            assert!(!err.contains("unrecognised"), "got {err}");
+        }
+    }
+
+    #[test]
+    fn thinking_on_a_k3_model_is_refused_at_any_value_with_the_k3_reason() {
+        for id in models_of(ThinkingControl::ReasoningEffort) {
+            for raw in [r#"{"thinking":"enabled"}"#, r#"{"thinking":"disabled"}"#] {
+                let err = build_provider_request(&request_for(id, 8192), &config(raw))
+                    .expect_err("the K3 models have no thinking switch");
+                assert_eq!(
+                    err,
+                    format!(
+                        "driver: inference.driver.config 'thinking' is not accepted for model \
+                         '{id}': the K3 models always reason and Moonshot exposes no switch to \
+                         turn it off, at any value. Remove the key."
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn thinking_on_a_k2_7_code_model_is_refused_at_any_value() {
+        for id in models_of(ThinkingControl::AlwaysOn) {
+            for raw in [r#"{"thinking":"enabled"}"#, r#"{"thinking":"disabled"}"#] {
+                let err = build_provider_request(&request_for(id, 8192), &config(raw))
+                    .expect_err("K2.7 Code's thinking cannot be switched");
+                assert_eq!(
+                    err,
+                    format!(
+                        "driver: inference.driver.config 'thinking' is not accepted for model \
+                         '{id}': its thinking is always on and cannot be switched, at any \
+                         value. Remove the key."
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_unknown_thinking_value_is_refused_naming_the_value_and_the_accepted_pair() {
+        for (raw, shown) in [
+            (r#"{"thinking":"auto"}"#, r#""auto""#),
+            (r#"{"thinking":true}"#, "true"),
+        ] {
+            let err = parse_driver_config(Some(raw)).expect_err("only enabled or disabled");
+            assert_eq!(
+                err,
+                format!(
+                    "driver: inference.driver.config 'thinking' must be \"enabled\" or \
+                     \"disabled\", got {shown}"
+                )
+            );
         }
     }
 
@@ -1567,15 +1799,15 @@ mod tests {
 
         assert_eq!(
             config(r#"{"reasoning_effort":"low"}"#).reasoning_effort,
-            "low"
+            Some("low".to_string())
         );
         assert_eq!(
             config(r#"{"reasoning_effort":"HIGH"}"#).reasoning_effort,
-            "high"
+            Some("high".to_string())
         );
         assert_eq!(
             config(r#"{"reasoning_effort":" max "}"#).reasoning_effort,
-            "max"
+            Some("max".to_string())
         );
 
         let err = parse_driver_config(Some(r#"{"reasoning_effort":3}"#))
@@ -1595,7 +1827,7 @@ mod tests {
         assert_eq!(
             err,
             "driver: unrecognised inference.driver.config key(s): stroe, verbosity. \
-             Accepted keys: reasoning_effort, response_format"
+             Accepted keys: reasoning_effort, response_format, thinking"
         );
     }
 
@@ -1610,7 +1842,8 @@ mod tests {
             parse_driver_config(Some("   ")).unwrap(),
             DriverConfig::default()
         );
-        assert_eq!(DriverConfig::default().reasoning_effort, "max");
+        assert!(DriverConfig::default().reasoning_effort.is_none());
+        assert!(DriverConfig::default().thinking.is_none());
         assert!(DriverConfig::default().response_format.is_none());
 
         assert!(parse_driver_config(Some("not json")).is_err());
@@ -1685,26 +1918,23 @@ mod tests {
             "Moonshot defines no max_tokens member: {body}"
         );
 
-        let oversized = request_from(json!({
-            "model": "kimi-k3",
-            "max_tokens": 1_048_577u64,
-            "messages": []
-        }));
-        let err = build_provider_request(&oversized, &DriverConfig::default())
-            .expect_err("a cap above the ceiling must be refused pre-flight");
-        assert_eq!(
-            err,
-            "driver: inference.max_tokens 1048577 exceeds the Moonshot max_completion_tokens \
-             ceiling of 1048576"
-        );
+        for (id, ceiling) in [("kimi-k3.1-pro", 1_048_576u64), ("kimi-k2.6", 262_144)] {
+            let err =
+                build_provider_request(&request_for(id, ceiling + 1), &DriverConfig::default())
+                    .expect_err("a cap above the ceiling must be refused pre-flight");
+            assert_eq!(
+                err,
+                format!(
+                    "driver: inference.max_tokens {} exceeds the Moonshot \
+                     max_completion_tokens ceiling of {ceiling}",
+                    ceiling + 1
+                )
+            );
 
-        // The ceiling itself is accepted.
-        let at_ceiling = request_from(json!({
-            "model": "kimi-k3",
-            "max_tokens": 1_048_576u64,
-            "messages": []
-        }));
-        assert!(build_provider_request(&at_ceiling, &DriverConfig::default()).is_ok());
+            // The ceiling itself is accepted.
+            let at_ceiling = body_for(&request_for(id, ceiling), &DriverConfig::default());
+            assert_eq!(at_ceiling["max_completion_tokens"], json!(ceiling));
+        }
     }
 
     // ── Scenario 10 — reasoning and text stay separated ───────────────────────
@@ -2315,8 +2545,12 @@ mod tests {
             "max_tokens": 8192,
             "messages": [{"role": "tool", "content": [{"type": "text", "text": "out"}]}]
         }));
-        let err = translate_murmur_request_to_moonshot(&orphan_tool, &DriverConfig::default())
-            .expect_err("a tool result with no call to attach to must be refused");
+        let err = translate_murmur_request_to_moonshot(
+            &orphan_tool,
+            &DriverConfig::default(),
+            ThinkingControl::ReasoningEffort,
+        )
+        .expect_err("a tool result with no call to attach to must be refused");
         assert_eq!(
             err,
             "driver: tool message is missing required field 'tool_call_id'"
@@ -2328,16 +2562,29 @@ mod tests {
             "max_tokens": 8192,
             "messages": [{"role": "developer", "content": []}]
         }));
-        let err = translate_murmur_request_to_moonshot(&bad_role, &DriverConfig::default())
-            .expect_err("an unknown role must be named, not dropped");
+        let err = translate_murmur_request_to_moonshot(
+            &bad_role,
+            &DriverConfig::default(),
+            ThinkingControl::ReasoningEffort,
+        )
+        .expect_err("an unknown role must be named, not dropped");
         assert_eq!(err, "driver: unsupported message role 'developer'");
 
         // Every message opens with the driver prefix.
         for message in [
             translate_moonshot_response_to_murmur(&filtered).unwrap_err(),
-            translate_murmur_request_to_moonshot(&orphan_tool, &DriverConfig::default())
-                .unwrap_err(),
-            translate_murmur_request_to_moonshot(&bad_role, &DriverConfig::default()).unwrap_err(),
+            translate_murmur_request_to_moonshot(
+                &orphan_tool,
+                &DriverConfig::default(),
+                ThinkingControl::ReasoningEffort,
+            )
+            .unwrap_err(),
+            translate_murmur_request_to_moonshot(
+                &bad_role,
+                &DriverConfig::default(),
+                ThinkingControl::ReasoningEffort,
+            )
+            .unwrap_err(),
         ] {
             assert!(message.starts_with("driver: "), "got {message}");
         }
@@ -2579,8 +2826,11 @@ mod tests {
         }
 
         // The accepted set is SUPPORTED_MODELS, and the manifest repeats its numbers.
-        let accepted: Vec<&str> = super::SUPPORTED_MODELS.iter().map(|(id, _)| *id).collect();
-        for (id, source) in super::SUPPORTED_MODELS {
+        let accepted: Vec<&str> = super::SUPPORTED_MODELS
+            .iter()
+            .map(|(id, _, _)| *id)
+            .collect();
+        for (id, source, _) in super::SUPPORTED_MODELS {
             if let Some(limits) = models.get(*id) {
                 assert_eq!(
                     (

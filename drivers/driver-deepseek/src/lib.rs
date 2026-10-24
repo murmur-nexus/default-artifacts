@@ -9,21 +9,16 @@ use serde_json::{json, Map, Value};
 
 // ── Model validation ──────────────────────────────────────────────────────────
 
-const SUPPORTED_MODELS: &[&str] = &["deepseek-v4-flash", "deepseek-v4-pro"];
-const DEPRECATED_MODELS: &[&str] = &["deepseek-chat", "deepseek-reasoner"];
+/// The DeepSeek models this driver accepts. murmur.yaml's `models:` block and
+/// README.md's "Model limits" table hold the same ids.
+const SUPPORTED_MODELS: &[&str] = &["deepseek-flash", "deepseek-v4-pro"];
 
 fn validate_model(model: &str) -> Result<(), String> {
-    if DEPRECATED_MODELS.contains(&model) {
-        return Err(format!(
-            "model '{model}' is deprecated and not supported by driver-deepseek \
-             (to be removed by DeepSeek on 2026-07-24). \
-             Use 'deepseek-v4-flash' or 'deepseek-v4-pro'."
-        ));
-    }
     if !SUPPORTED_MODELS.contains(&model) {
         return Err(format!(
-            "model '{model}' is not supported by driver-deepseek. \
-             Supported models: deepseek-v4-flash, deepseek-v4-pro."
+            "driver: model '{model}' is not supported by driver-deepseek. \
+             Supported models: {}.",
+            SUPPORTED_MODELS.join(", ")
         ));
     }
     Ok(())
@@ -1236,45 +1231,44 @@ mod tests {
     // ── validate_model ────────────────────────────────────────────────────────
 
     #[test]
-    fn validate_model_rejects_deprecated() {
-        let err_chat = validate_model("deepseek-chat").unwrap_err();
-        assert!(
-            err_chat.contains("deprecated"),
-            "expected 'deprecated' in: {err_chat}"
-        );
-        assert!(
-            err_chat.contains("deepseek-v4-flash"),
-            "expected alternative model name in: {err_chat}"
-        );
-
-        let err_reasoner = validate_model("deepseek-reasoner").unwrap_err();
-        assert!(
-            err_reasoner.contains("deprecated"),
-            "expected 'deprecated' in: {err_reasoner}"
-        );
-        assert!(
-            err_reasoner.contains("deepseek-v4-pro"),
-            "expected alternative model name in: {err_reasoner}"
-        );
-    }
-
-    #[test]
-    fn validate_model_rejects_unknown() {
-        let err = validate_model("gpt-4o").unwrap_err();
-        assert!(
-            err.contains("not supported"),
-            "expected 'not supported' in: {err}"
-        );
-        assert!(
-            !err.contains("deprecated"),
-            "unknown model should not say deprecated: {err}"
-        );
+    fn validate_model_refuses_retired_and_unlisted_ids_with_the_supported_list() {
+        for model in [
+            "deepseek-v4-flash",
+            "deepseek-chat",
+            "deepseek-reasoner",
+            "gpt-5",
+        ] {
+            let err = validate_model(model).unwrap_err();
+            assert_eq!(
+                err,
+                format!(
+                    "driver: model '{model}' is not supported by driver-deepseek. \
+                     Supported models: deepseek-flash, deepseek-v4-pro."
+                )
+            );
+            assert!(
+                !err.contains("deprecated"),
+                "a refusal carries no deprecation wording: {err}"
+            );
+        }
     }
 
     #[test]
     fn validate_model_accepts_supported() {
-        assert!(validate_model("deepseek-v4-flash").is_ok());
+        assert!(validate_model("deepseek-flash").is_ok());
         assert!(validate_model("deepseek-v4-pro").is_ok());
+    }
+
+    #[test]
+    fn body_built_for_deepseek_flash_carries_that_model() {
+        let request: MurmurRequest = serde_json::from_value(
+            json!({"model": "deepseek-flash", "max_tokens": 1024, "messages": []}),
+        )
+        .unwrap();
+        validate_model(&request.model).unwrap();
+
+        let body = translate_murmur_request_to_deepseek(&request, &thinking_enabled()).unwrap();
+        assert_eq!(body["model"], "deepseek-flash");
     }
 
     // ── ThinkingConfig ────────────────────────────────────────────────────────
@@ -1309,7 +1303,7 @@ mod tests {
     #[test]
     fn request_strips_temperature_when_thinking_enabled() {
         let request: MurmurRequest = serde_json::from_value(json!({
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-flash",
             "max_tokens": 512,
             "messages": [],
             "params": {
@@ -1349,7 +1343,7 @@ mod tests {
     #[test]
     fn request_includes_temperature_when_thinking_disabled() {
         let request: MurmurRequest = serde_json::from_value(json!({
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-flash",
             "max_tokens": 512,
             "messages": [],
             "params": {

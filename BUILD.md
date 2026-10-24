@@ -99,13 +99,15 @@ exact model id, holding `max_output_tokens` and `context_window`, and `max_input
 provider documents an input ceiling below the window. Each is an integer from 1 to 4294967295, and
 `max_input_tokens` is below `context_window`. The README's "Model limits" table carries all three,
 with `none` for a model that declares no `max_input_tokens`. A crate test fails until that block
-agrees with the driver's README and with any `SUPPORTED_MODELS` table in `src/lib.rs`. To add a model to a driver:
+agrees with the driver's README and with any `SUPPORTED_MODELS` or `MODEL_ROUTES` table in
+`src/lib.rs`. To add a model to a driver:
 
 | Driver | Add |
 |---|---|
-| `driver-openai`, `driver-anthropic` | a `models:` entry and a row in the README's "Model limits" table |
+| `driver-anthropic` | a `models:` entry and a row in the README's "Model limits" table |
+| `driver-openai` | a `MODEL_ROUTES` row with its endpoint, a `models:` entry, a "Model limits" row and an "Endpoints" row |
 | `driver-deepseek` | the id in `SUPPORTED_MODELS`, a `models:` entry and a "Model limits" row |
-| `driver-moonshotai` | a `SUPPORTED_MODELS` entry with its limits, a `models:` entry and a "Model limits" row |
+| `driver-moonshotai` | a `SUPPORTED_MODELS` entry with its limits and its `ThinkingControl`, a `models:` entry and a "Model limits" row |
 | `driver-zai` | a `SUPPORTED_MODELS` entry with its limits and a `models:` entry; its README states the limits under "Model scope" |
 
 Then bump the driver's minor version.

@@ -32,9 +32,9 @@ WASM components (`runtime: driver`). Export `murmur:tool/run` (`world driver`) a
 | Artifact | Location | Description |
 |---|---|---|
 | `driver-anthropic` | `drivers/driver-anthropic/` | Anthropic Messages API, with extended thinking and prompt-cache breakpoints; caching is tuned by a `config:` block on its manifest entry |
-| `driver-deepseek` | `drivers/driver-deepseek/` | DeepSeek API — `deepseek-v4-flash` and `deepseek-v4-pro`, with thinking mode |
-| `driver-moonshotai` | `drivers/driver-moonshotai/` | Moonshot AI Chat Completions API — `kimi-k3` only, which always reasons; reasoning effort and `json_schema` structured output are tuned by `inference.driver.config`, which rejects any key it does not read |
-| `driver-openai` | `drivers/driver-openai/` | OpenAI-compatible Chat Completions API, with Responses API for `gpt-5` and later models; reasoning summaries, effort and verbosity are tuned by `inference.driver.config`, which rejects any key it does not read |
+| `driver-deepseek` | `drivers/driver-deepseek/` | DeepSeek API — `deepseek-flash` and `deepseek-v4-pro`, with thinking mode; any other model is refused |
+| `driver-moonshotai` | `drivers/driver-moonshotai/` | Moonshot AI Chat Completions API — the K3 models `kimi-k3.1-pro`, `kimi-k3.1-pro-highspeed` and `kimi-k3`, and the K2 models `kimi-k2.7-code`, `kimi-k2.7-code-highspeed` and `kimi-k2.6`, which Moonshot retires by the end of December 2026; reasoning effort (K3), the thinking switch (`kimi-k2.6`) and `json_schema` structured output are tuned by `inference.driver.config`, which rejects any key it does not read or the model cannot honour |
+| `driver-openai` | `drivers/driver-openai/` | OpenAI API — sends each model it lists to the Responses or Chat Completions endpoint that model's page lists, and refuses any other model; reasoning summaries, effort and verbosity are tuned by `inference.driver.config`, which rejects any key it does not read |
 | `driver-zai` | `drivers/driver-zai/` | Z.ai Chat Completions API — `glm-5.3` only, which always reasons; reasoning effort is tuned by `inference.driver.config`, which rejects any key it does not read, and the reasoning goes back to Z.ai on every later turn |
 
 All five report the provider's own token counts on an optional top-level `usage` object of the response — `input_tokens`, `output_tokens`, `cached_tokens`, `cache_write_tokens` — which Murmur carries onto the `inference` trace event. `input_tokens` counts only the request tokens neither read from nor written to the prompt cache, so `input_tokens + cached_tokens + cache_write_tokens` is the provider's total request count, whichever way the provider itself splits it. Each member is independently optional and is omitted, never zero-filled, when the provider did not report it. `driver-openai` also forwards Murmur's `prompt_cache_key` routing hint into the provider body; the other four drop it, because none of those provider APIs defines a cache-key field. See each driver's own README for the per-provider field mapping.
@@ -79,15 +79,16 @@ takes a capsule's `inference.max_tokens` and `context.max_tokens` from that tabl
 leaves them unset, and compacts against the input budget,
 `min(max_input_tokens, context_window − output cap)`. A model a driver does not list still needs
 `inference.max_tokens`, or the launch is refused with `E-RUN-052`, and needs `context.max_tokens`
-for compaction to run. Each driver's README lists its models, the numbers and
-their sources, and the models it accepts without declaring:
+for compaction to run; `driver-deepseek`, `driver-moonshotai` and `driver-openai` then refuse it on
+the first inference call. Each driver's README lists its models, the numbers and their sources,
+and the models it accepts without declaring or refuses:
 
 | Artifact | First release with `models:` | README section |
 |---|---|---|
 | `driver-anthropic` | 0.14.0 | "Model limits", "Models without declared limits" |
-| `driver-deepseek` | 0.13.0 | "Model limits", "Models without declared limits" |
-| `driver-moonshotai` | 0.12.0 | "Model limits", "Models without declared limits" |
-| `driver-openai` | 0.14.0 | "Model limits", "Models without declared limits" |
+| `driver-deepseek` | 0.13.0 | "Model limits", "Models this driver refuses" |
+| `driver-moonshotai` | 0.12.0 | "Model limits", "Models this driver refuses" |
+| `driver-openai` | 0.14.0 | "Endpoints", "Model limits", "Models this driver refuses" |
 | `driver-zai` | 0.1.0 | "Model scope" |
 
 ## Hooks

@@ -1,7 +1,7 @@
 name: driver-openai
 version: 0.15.0
 runtime: driver
-description: OpenAI inference driver for Murmur agent capsules — Chat Completions, with Responses API for gpt-5 and later models. Reads store, thinking, reasoning_effort and verbosity from inference.driver.config and rejects any other key; store grants server-side retention and with it stateful continuation via previous_response_id.
+description: OpenAI inference driver for Murmur agent capsules — routes each listed OpenAI model to the Responses or Chat Completions endpoint its model page lists, and refuses any other model. Reads store, thinking, reasoning_effort and verbosity from inference.driver.config and rejects any other key; store grants server-side retention and with it stateful continuation via previous_response_id.
 requires_files:
   - driver_openai.wasm
 
@@ -28,6 +28,12 @@ models:
     max_output_tokens: 128000
     context_window: 400000
     max_input_tokens: 272000
+  gpt-oss-120b:
+    max_output_tokens: 131072
+    context_window: 131072
+  gpt-oss-20b:
+    max_output_tokens: 131072
+    context_window: 131072
   gpt-6-sol:
     max_output_tokens: 128000
     context_window: 1050000
@@ -66,24 +72,6 @@ models:
   gpt-5.2-pro:
     max_output_tokens: 128000
     context_window: 400000
-  gpt-5:
-    max_output_tokens: 128000
-    context_window: 400000
-    max_input_tokens: 272000
-  gpt-5-mini:
-    max_output_tokens: 128000
-    context_window: 400000
-    max_input_tokens: 272000
-  gpt-5-nano:
-    max_output_tokens: 128000
-    context_window: 400000
-    max_input_tokens: 272000
-  gpt-5-pro:
-    max_output_tokens: 272000
-    context_window: 400000
-  o3:
-    max_output_tokens: 100000
-    context_window: 200000
   chat-latest:
     max_output_tokens: 128000
     context_window: 400000
