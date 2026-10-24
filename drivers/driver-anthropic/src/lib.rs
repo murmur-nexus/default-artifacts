@@ -2,6 +2,7 @@
 // or from cfg(test). Suppress dead_code noise in plain host library builds.
 #![cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
 
+use murmur_driver_stream::Failure;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
@@ -611,6 +612,59 @@ fn provider_error_message(error: Option<&Value>) -> String {
     format!("Anthropic error: {}: {}", part("type"), part("message"))
 }
 
+/// The Messages API `error.type`s that report a fault waiting can clear: an overload, an
+/// internal error, a rate limit or a timeout. Delivered in an SSE `error` event or a `2xx` error
+/// body, they mark the failure transient.
+const TRANSIENT_ERROR_TYPES: &[&str] = &[
+    "overloaded_error",
+    "api_error",
+    "rate_limit_error",
+    "timeout_error",
+];
+
+/// The `error.details.error_code` of a `rate_limit_error` that reports the organization's tier
+/// spend cap: requests fail until the next month or a tier increase, so waiting cannot clear it.
+const SPEND_CAP_ERROR_CODE: &str = "enforced_spend_limit_reached";
+
+/// Whether a Messages API error object reports the tier spend cap.
+fn is_spend_cap(error: Option<&Value>) -> bool {
+    error
+        .and_then(|error| error.pointer("/details/error_code"))
+        .and_then(Value::as_str)
+        == Some(SPEND_CAP_ERROR_CODE)
+}
+
+/// The failure for a Messages API error object delivered after a `2xx` head, in an SSE `error`
+/// event or a buffered body: [`provider_error_message`]'s text, transient when its type is one of
+/// [`TRANSIENT_ERROR_TYPES`] and it does not report the spend cap, plain otherwise.
+fn provider_failure(error: Option<&Value>) -> Failure {
+    let message = provider_error_message(error);
+    let error_type = error
+        .and_then(|error| error.get("type"))
+        .and_then(Value::as_str);
+    match error_type {
+        Some(error_type) if TRANSIENT_ERROR_TYPES.contains(&error_type) && !is_spend_cap(error) => {
+            Failure::transient(message)
+        }
+        _ => Failure::plain(message),
+    }
+}
+
+/// The failure for a provider status `>= 400`: `HTTP <status>: <body>`. murmur decides from the
+/// status alone, so it is plain, except a `429` whose body reports the tier spend cap, which is
+/// permanent so murmur does not spend its retries on it. Billing problems arrive as `400` or `402`,
+/// neither of which murmur retries.
+fn status_failure(status: u16, body: &str) -> Failure {
+    let message = format!("HTTP {status}: {body}");
+    let spend_cap = status == 429
+        && serde_json::from_str::<Value>(body).is_ok_and(|value| is_spend_cap(value.get("error")));
+    if spend_cap {
+        Failure::permanent(message)
+    } else {
+        Failure::plain(message)
+    }
+}
+
 fn map_anthropic_stop_reason(anthropic_stop: &str) -> Result<&'static str, String> {
     match anthropic_stop {
         "end_turn" | "stop_sequence" => Ok("end_turn"),
@@ -622,13 +676,11 @@ fn map_anthropic_stop_reason(anthropic_stop: &str) -> Result<&'static str, Strin
     }
 }
 
-/// Translate a buffered Messages API body. Provider errors and refusals come back as
-/// `Ok(error_payload(..))`; a body the driver cannot read as a finished turn is an `Err`.
-fn translate_anthropic_response_to_murmur(response: &Value) -> Result<Value, String> {
+/// Translate a buffered Messages API body. A provider error, a refusal and a body the driver
+/// cannot read as a finished turn are each a [`Failure`]; only a provider error can be transient.
+fn translate_anthropic_response_to_murmur(response: &Value) -> Result<Value, Failure> {
     if response.get("type").and_then(Value::as_str) == Some("error") {
-        return Ok(error_payload(&provider_error_message(
-            response.get("error"),
-        )));
+        return Err(provider_failure(response.get("error")));
     }
 
     // Absent, `null` or non-string: not a finished Messages API response.
@@ -637,7 +689,7 @@ fn translate_anthropic_response_to_murmur(response: &Value) -> Result<Value, Str
         .and_then(Value::as_str)
         .ok_or_else(|| NO_STOP_REASON.to_string())?;
     if anthropic_stop == "refusal" {
-        return Ok(error_payload(REFUSED));
+        return Err(Failure::plain(REFUSED));
     }
     let stop_reason = map_anthropic_stop_reason(anthropic_stop)?;
 
@@ -760,8 +812,9 @@ enum ToolCallSignal<'a> {
 
 /// Why a stream stopped being read before its turn finished.
 enum StreamFailure {
-    /// An `event: error`; its `Anthropic error: ` message ends the turn as a provider error.
-    Provider(String),
+    /// An `event: error`; its `Anthropic error: ` message ends the turn as a provider error,
+    /// transient or plain by its type.
+    Provider(Failure),
     /// A `driver: ` message: the stream cannot be read as a Messages API turn.
     Malformed(String),
 }
@@ -890,7 +943,7 @@ fn dispatch_anthropic_sse_event(
             // A provider error even when its data does not parse.
             let val = serde_json::from_str::<Value>(data).ok();
             let error = val.as_ref().and_then(|val| val.get("error"));
-            return Err(StreamFailure::Provider(provider_error_message(error)));
+            return Err(StreamFailure::Provider(provider_failure(error)));
         }
         "content_block_start" => {
             let val = parse()?;
@@ -1053,7 +1106,7 @@ fn parse_anthropic_sse_body<F: FnMut(&str), G: FnMut(&str)>(
     body: &str,
     emit: &mut F,
     emit_thinking: &mut G,
-) -> Result<Value, String> {
+) -> Result<Value, Failure> {
     parse_anthropic_sse_body_with_signals(body, emit, emit_thinking).0
 }
 
@@ -1088,7 +1141,7 @@ fn parse_anthropic_sse_body_with_signals<F: FnMut(&str), G: FnMut(&str)>(
     body: &str,
     emit: &mut F,
     emit_thinking: &mut G,
-) -> (Result<Value, String>, Vec<RecordedSignal>) {
+) -> (Result<Value, Failure>, Vec<RecordedSignal>) {
     let mut state = AnthropicSseState::new();
     let mut signals = Vec::new();
     for line in body.lines() {
@@ -1103,24 +1156,26 @@ fn parse_anthropic_sse_body_with_signals<F: FnMut(&str), G: FnMut(&str)>(
     (assemble_anthropic_streaming_response(state), signals)
 }
 
-/// Build the turn a stream carried. A provider error or refusal comes back as
-/// `Ok(error_payload(..))`; a stream the driver cannot read as a finished turn is an `Err`.
-fn assemble_anthropic_streaming_response(state: AnthropicSseState) -> Result<Value, String> {
+/// Build the turn a stream carried. A provider error, a refusal and a stream the driver cannot
+/// read as a finished turn are each a [`Failure`]. A provider error event takes precedence over
+/// the stream ending early; a stream cut before any `message_delta` carried a stop reason, an
+/// empty body included, is transient.
+fn assemble_anthropic_streaming_response(state: AnthropicSseState) -> Result<Value, Failure> {
     match state.failure {
-        Some(StreamFailure::Provider(message)) => return Ok(error_payload(&message)),
-        Some(StreamFailure::Malformed(message)) => return Err(message),
+        Some(StreamFailure::Provider(failure)) => return Err(failure),
+        Some(StreamFailure::Malformed(message)) => return Err(Failure::plain(message)),
         None => {}
     }
     if state.saw_content_line && !state.saw_event_line {
-        return Err(NOT_AN_EVENT_STREAM.to_string());
+        return Err(Failure::plain(NOT_AN_EVENT_STREAM));
     }
     // No `message_delta` carried a stop reason, so the stream ended before the turn did.
     let anthropic_stop = state
         .stop_reason
         .as_deref()
-        .ok_or_else(|| STREAM_NO_STOP_REASON.to_string())?;
+        .ok_or_else(|| Failure::transient(STREAM_NO_STOP_REASON))?;
     if anthropic_stop == "refusal" {
-        return Ok(error_payload(REFUSED));
+        return Err(Failure::plain(REFUSED));
     }
     let stop_reason = map_anthropic_stop_reason(anthropic_stop)?;
     let stopped_at_cap = anthropic_stop == "max_tokens";
@@ -1199,9 +1254,9 @@ mod wasm_driver {
     use super::{
         assemble_anthropic_streaming_response, classify_model, error_payload, parse_beta_features,
         parse_prompt_cache_config, parse_thinking_config, process_anthropic_sse_bytes,
-        stamp_streaming_flags, translate_anthropic_response_to_murmur,
-        translate_murmur_request_to_anthropic, AnthropicSseState, MurmurRequest, ThinkingConfig,
-        ToolCallSignal,
+        stamp_streaming_flags, status_failure, translate_anthropic_response_to_murmur,
+        translate_murmur_request_to_anthropic, AnthropicSseState, Failure, MurmurRequest,
+        ThinkingConfig, ToolCallSignal,
     };
     use serde_json::Value;
 
@@ -1232,9 +1287,9 @@ mod wasm_driver {
         fn run(
             input: exports::murmur::tool::run::ToolInput,
         ) -> exports::murmur::tool::run::ToolResult {
-            let response = match run_inner(input) {
-                Ok(value) => value,
-                Err(err) => error_payload(&err),
+            let (response, metadata) = match run_inner(input) {
+                Ok(value) => (value, vec![]),
+                Err(failure) => (error_payload(&failure.message), failure.metadata()),
             };
 
             let stop_reason = response
@@ -1263,12 +1318,12 @@ mod wasm_driver {
                 data: Some(response.to_string()),
                 data_path: None,
                 truncated: false,
-                metadata: vec![],
+                metadata,
             }
         }
     }
 
-    fn run_inner(input: exports::murmur::tool::run::ToolInput) -> Result<Value, String> {
+    fn run_inner(input: exports::murmur::tool::run::ToolInput) -> Result<Value, Failure> {
         let endpoint = murmur_driver_env::require_endpoint(
             std::env::var(murmur_driver_env::INFERENCE_ENDPOINT_VAR)
                 .ok()
@@ -1327,8 +1382,8 @@ mod wasm_driver {
         let status = response.status();
 
         if status >= 400 {
-            let text = consume_body_as_string(response)?;
-            return Ok(error_payload(&format!("HTTP {status}: {text}")));
+            let text = consume_body_as_string(response, status)?;
+            return Err(status_failure(status, &text));
         }
 
         let incoming_body = response
@@ -1339,7 +1394,7 @@ mod wasm_driver {
             .map_err(|()| "driver: failed to stream response body".to_string())?;
 
         // Detect format from first read: JSON bodies start with '{' or '['.
-        let first = read_chunk(&stream)?;
+        let first = read_chunk(&stream, status)?;
         let is_json = first
             .iter()
             .find(|&&b| !b.is_ascii_whitespace())
@@ -1350,7 +1405,7 @@ mod wasm_driver {
             // Non-streaming fallback (test servers, providers ignoring stream:true).
             let mut all = first;
             loop {
-                let chunk = read_chunk(&stream)?;
+                let chunk = read_chunk(&stream, status)?;
                 if chunk.is_empty() {
                     break;
                 }
@@ -1391,7 +1446,7 @@ mod wasm_driver {
             // Continue reading remaining chunks.
             if !done {
                 'outer: loop {
-                    let chunk = read_chunk(&stream)?;
+                    let chunk = read_chunk(&stream, status)?;
                     if chunk.is_empty() {
                         break;
                     }
@@ -1490,7 +1545,8 @@ mod wasm_driver {
 
     fn consume_body_as_string(
         response: wasip2::http::types::IncomingResponse,
-    ) -> Result<String, String> {
+        status: u16,
+    ) -> Result<String, Failure> {
         let incoming_body = response
             .consume()
             .map_err(|()| "driver: failed to consume error response body".to_string())?;
@@ -1499,7 +1555,7 @@ mod wasm_driver {
             .map_err(|()| "driver: failed to stream error response body".to_string())?;
         let mut bytes = Vec::new();
         loop {
-            let chunk = read_chunk(&stream)?;
+            let chunk = read_chunk(&stream, status)?;
             if chunk.is_empty() {
                 break;
             }
@@ -1508,14 +1564,22 @@ mod wasm_driver {
         drop(stream);
         let _ = wasip2::http::types::IncomingBody::finish(incoming_body);
         String::from_utf8(bytes)
-            .map_err(|err| format!("driver: error response body is not UTF-8: {err}"))
+            .map_err(|err| format!("driver: error response body is not UTF-8: {err}").into())
     }
 
-    fn read_chunk(stream: &wasip2::io::streams::InputStream) -> Result<Vec<u8>, String> {
+    /// The next chunk of a body that arrived under `status`, empty at its end. A failed read is
+    /// [`murmur_driver_stream::read_failure`]'s, transient only under a `2xx` status.
+    fn read_chunk(
+        stream: &wasip2::io::streams::InputStream,
+        status: u16,
+    ) -> Result<Vec<u8>, Failure> {
         match stream.blocking_read(16 * 1024) {
             Ok(chunk) => Ok(chunk),
             Err(wasip2::io::streams::StreamError::Closed) => Ok(Vec::new()),
-            Err(err) => Err(format!("driver: failed to read response stream: {err:?}")),
+            Err(err) => Err(murmur_driver_stream::read_failure(
+                status,
+                &format!("{err:?}"),
+            )),
         }
     }
 
@@ -1570,10 +1634,11 @@ mod wasm_driver {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_model, parse_anthropic_sse_body, parse_beta_features, parse_prompt_cache_config,
-        parse_thinking_config, stamp_streaming_flags, translate_anthropic_response_to_murmur,
-        translate_murmur_request_to_anthropic, CacheTtl, ModelFamily, MurmurRequest,
-        PromptCacheConfig, ThinkingConfig, DRIVER_CACHE_BREAKPOINTS, MAX_CACHE_BREAKPOINTS,
+        classify_model, error_payload, parse_anthropic_sse_body, parse_beta_features,
+        parse_prompt_cache_config, parse_thinking_config, stamp_streaming_flags,
+        translate_anthropic_response_to_murmur, translate_murmur_request_to_anthropic, CacheTtl,
+        Failure, ModelFamily, MurmurRequest, PromptCacheConfig, ThinkingConfig,
+        DRIVER_CACHE_BREAKPOINTS, MAX_CACHE_BREAKPOINTS,
     };
     use serde_json::{json, Value};
 
@@ -1737,9 +1802,9 @@ mod tests {
         let body = json!({"id":"x","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"hi"}}]});
 
         let err = translate_anthropic_response_to_murmur(&body).unwrap_err();
-        assert_eq!(err, NO_STOP_REASON);
-        assert!(!err.contains("chat.completion"));
-        assert!(!err.contains("choices"));
+        assert_eq!(err, Failure::plain(NO_STOP_REASON));
+        assert!(!err.message.contains("chat.completion"));
+        assert!(!err.message.contains("choices"));
     }
 
     #[test]
@@ -1753,7 +1818,7 @@ mod tests {
 
         assert_eq!(
             translate_anthropic_response_to_murmur(&body).unwrap_err(),
-            NO_STOP_REASON
+            Failure::plain(NO_STOP_REASON)
         );
     }
 
@@ -1792,14 +1857,14 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(err, STREAM_NO_STOP_REASON);
+        assert_eq!(err, Failure::transient(STREAM_NO_STOP_REASON));
         assert_eq!(emitted, vec!["Hello", " world"]);
     }
 
     #[test]
     fn empty_stream_is_refused() {
         let err = parse_anthropic_sse_body("", &mut |_| {}, &mut |_| {}).unwrap_err();
-        assert_eq!(err, STREAM_NO_STOP_REASON);
+        assert_eq!(err, Failure::transient(STREAM_NO_STOP_REASON));
     }
 
     #[test]
@@ -1820,7 +1885,7 @@ mod tests {
         );
 
         let err = parse_anthropic_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap_err();
-        assert_eq!(err, STREAM_NO_STOP_REASON);
+        assert_eq!(err, Failure::transient(STREAM_NO_STOP_REASON));
     }
 
     #[test]
@@ -1853,7 +1918,7 @@ mod tests {
         let body = json!({"stop_reason": "model_context_window_exceeded", "content": []});
         assert_eq!(
             translate_anthropic_response_to_murmur(&body),
-            Err(REFUSAL.to_string())
+            Err(Failure::plain(REFUSAL))
         );
 
         let stream = concat!(
@@ -1872,7 +1937,7 @@ mod tests {
         );
         assert_eq!(
             parse_anthropic_sse_body(stream, &mut |_| {}, &mut |_| {}),
-            Err(REFUSAL.to_string())
+            Err(Failure::plain(REFUSAL))
         );
     }
 
@@ -1912,8 +1977,21 @@ mod tests {
             .to_string()
     }
 
+    /// The turn a stream carried, or its failure's message. Every failure this helper sees
+    /// must be plain: it is for streams that are malformed or refused, never cut or overloaded.
     fn parse_stream(body: &str) -> Result<Value, String> {
-        parse_anthropic_sse_body(body, &mut |_| {}, &mut |_| {})
+        parse_anthropic_sse_body(body, &mut |_| {}, &mut |_| {}).map_err(plain_message)
+    }
+
+    /// The message of a failure that must be plain.
+    fn plain_message(failure: Failure) -> String {
+        assert_eq!(failure.retry, None, "expected a plain failure: {failure}");
+        failure.message
+    }
+
+    /// A result as the wasm `run` wrapper renders it: the turn, or the failure's error payload.
+    fn rendered(result: Result<Value, Failure>) -> Value {
+        result.unwrap_or_else(|failure| error_payload(&failure.message))
     }
 
     fn buffered_block_err(block: Value) -> String {
@@ -1921,7 +1999,7 @@ mod tests {
             "stop_reason": "end_turn",
             "content": [{"type": "text", "text": "fine"}, block]
         });
-        translate_anthropic_response_to_murmur(&body).unwrap_err()
+        plain_message(translate_anthropic_response_to_murmur(&body).unwrap_err())
     }
 
     #[test]
@@ -1938,7 +2016,7 @@ mod tests {
             }
             assert_eq!(
                 translate_anthropic_response_to_murmur(&body).unwrap_err(),
-                "driver: malformed Anthropic response: no content array",
+                Failure::plain("driver: malformed Anthropic response: no content array"),
                 "content = {content:?}"
             );
         }
@@ -2076,9 +2154,15 @@ mod tests {
             "type": "error",
             "error": {"type": "overloaded_error", "message": "Overloaded"}
         });
-        let payload = translate_anthropic_response_to_murmur(&body).unwrap();
+        let result = translate_anthropic_response_to_murmur(&body);
         assert_eq!(
-            payload,
+            result,
+            Err(Failure::transient(
+                "Anthropic error: overloaded_error: Overloaded"
+            ))
+        );
+        assert_eq!(
+            rendered(result),
             json!({"stop_reason": "error", "error": "Anthropic error: overloaded_error: Overloaded"})
         );
     }
@@ -2099,7 +2183,9 @@ mod tests {
                 "Anthropic error: unknown: slow down",
             ),
         ] {
-            let payload = translate_anthropic_response_to_murmur(&body).unwrap();
+            let failure = translate_anthropic_response_to_murmur(&body).unwrap_err();
+            assert_eq!(failure, Failure::plain(expected));
+            let payload = error_payload(&failure.message);
             assert_eq!(payload["stop_reason"], "error");
             assert_eq!(payload["error"], expected);
         }
@@ -2108,8 +2194,10 @@ mod tests {
     #[test]
     fn buffered_refusal_is_a_refusal() {
         let body = json!({"stop_reason": "refusal", "content": [{"type": "text", "text": "no"}]});
+        let result = translate_anthropic_response_to_murmur(&body);
+        assert_eq!(result, Err(Failure::plain(REFUSED)));
         assert_eq!(
-            translate_anthropic_response_to_murmur(&body).unwrap(),
+            rendered(result),
             json!({"stop_reason": "error", "error": REFUSED})
         );
     }
@@ -2120,7 +2208,9 @@ mod tests {
             let body = json!({"stop_reason": reason, "content": []});
             assert_eq!(
                 translate_anthropic_response_to_murmur(&body).unwrap_err(),
-                format!("driver: unsupported Anthropic stop_reason '{reason}'")
+                Failure::plain(format!(
+                    "driver: unsupported Anthropic stop_reason '{reason}'"
+                ))
             );
         }
     }
@@ -2140,12 +2230,17 @@ mod tests {
         ]);
 
         let mut emitted: Vec<String> = Vec::new();
-        let payload =
-            parse_anthropic_sse_body(&body, &mut |c| emitted.push(c.to_string()), &mut |_| {})
-                .unwrap();
+        let result =
+            parse_anthropic_sse_body(&body, &mut |c| emitted.push(c.to_string()), &mut |_| {});
 
         assert_eq!(
-            payload,
+            result,
+            Err(Failure::transient(
+                "Anthropic error: overloaded_error: Overloaded"
+            ))
+        );
+        assert_eq!(
+            rendered(result),
             json!({"stop_reason": "error", "error": "Anthropic error: overloaded_error: Overloaded"})
         );
         assert_eq!(emitted, vec!["Hello"]);
@@ -2158,8 +2253,8 @@ mod tests {
             ("error", "overloaded!"),
         ]);
         assert_eq!(
-            parse_stream(&body).unwrap(),
-            json!({"stop_reason": "error", "error": "Anthropic error: unknown: unknown"})
+            parse_stream(&body).unwrap_err(),
+            "Anthropic error: unknown: unknown"
         );
     }
 
@@ -2174,10 +2269,7 @@ mod tests {
             ),
             ("message_stop", MESSAGE_STOP),
         ]);
-        assert_eq!(
-            parse_stream(&body).unwrap(),
-            json!({"stop_reason": "error", "error": REFUSED})
-        );
+        assert_eq!(parse_stream(&body).unwrap_err(), REFUSED);
     }
 
     #[test]
@@ -2296,7 +2388,9 @@ mod tests {
                 .unwrap_err();
         assert_eq!(
             err,
-            "driver: malformed Anthropic stream: text_delta for block 3, which never started"
+            Failure::plain(
+                "driver: malformed Anthropic stream: text_delta for block 3, which never started"
+            )
         );
         assert!(emitted.is_empty());
 
@@ -2541,7 +2635,7 @@ mod tests {
         let mut emitted: Vec<String> = Vec::new();
         let err = parse_anthropic_sse_body(body, &mut |c| emitted.push(c.to_string()), &mut |_| {})
             .unwrap_err();
-        assert_eq!(err, NOT_AN_EVENT_STREAM);
+        assert_eq!(err, Failure::plain(NOT_AN_EVENT_STREAM));
         assert!(emitted.is_empty());
     }
 
@@ -2585,7 +2679,7 @@ mod tests {
         ]);
         assert_eq!(
             result.unwrap_err(),
-            "driver: malformed Anthropic stream: a line is not UTF-8"
+            Failure::plain("driver: malformed Anthropic stream: a line is not UTF-8")
         );
 
         // The same stream in valid UTF-8, with CRLF line endings, still reads.
@@ -2610,8 +2704,8 @@ mod tests {
     fn blank_or_comment_only_stream_keeps_the_no_stop_reason_message() {
         for body in ["\n\n", "   \n\t\n", ": keep-alive\n\n: keep-alive\n"] {
             assert_eq!(
-                parse_stream(body).unwrap_err(),
-                STREAM_NO_STOP_REASON,
+                parse_anthropic_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap_err(),
+                Failure::transient(STREAM_NO_STOP_REASON),
                 "body = {body:?}"
             );
         }
@@ -4006,6 +4100,327 @@ mod tests {
         }
         for retired in [concat!("murmur::", "text"), concat!("murmur:", "text")] {
             assert!(!source.contains(retired), "lib.rs must not name {retired}");
+        }
+    }
+
+    // ── Transient failures ───────────────────────────────────────────────────
+
+    const MESSAGE_START: &str = r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"usage":{"input_tokens":3,"output_tokens":1}}}"#;
+
+    fn error_event(error_type: &str, message: &str) -> String {
+        json!({"type": "error", "error": {"type": error_type, "message": message}}).to_string()
+    }
+
+    fn stream_result(body: &str) -> Result<Value, Failure> {
+        parse_anthropic_sse_body(body, &mut |_| {}, &mut |_| {})
+    }
+
+    #[test]
+    fn a_stream_cut_after_message_start_and_a_text_delta_is_transient() {
+        let body = sse(&[
+            ("message_start", MESSAGE_START),
+            ("content_block_start", TEXT_START_0),
+            ("content_block_delta", &text_delta(0, "Hel")),
+        ]);
+        assert_eq!(
+            stream_result(&body),
+            Err(Failure::transient(STREAM_NO_STOP_REASON))
+        );
+    }
+
+    #[test]
+    fn a_stream_cut_mid_tool_call_is_transient() {
+        let body = sse(&[
+            ("message_start", MESSAGE_START),
+            ("content_block_start", TOOL_START_0),
+            ("content_block_delta", &input_delta(0, "{\"cmd\":\"l")),
+        ]);
+        assert_eq!(
+            stream_result(&body),
+            Err(Failure::transient(STREAM_NO_STOP_REASON))
+        );
+    }
+
+    #[test]
+    fn a_stream_whose_message_delta_carries_an_empty_stop_reason_is_transient() {
+        let body = sse(&[
+            ("content_block_start", TEXT_START_0),
+            ("content_block_delta", &text_delta(0, "Hi")),
+            (
+                "message_delta",
+                r#"{"type":"message_delta","delta":{"stop_reason":""}}"#,
+            ),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+        assert_eq!(
+            stream_result(&body),
+            Err(Failure::transient(STREAM_NO_STOP_REASON))
+        );
+    }
+
+    #[test]
+    fn a_stream_cut_mid_line_is_transient() {
+        // The last event never reached its dispatching blank line.
+        let body = format!(
+            "{}event: content_block_delta\ndata: {{\"type\":\"content_block_del",
+            sse(&[("content_block_start", TEXT_START_0)])
+        );
+        assert_eq!(
+            stream_result(&body),
+            Err(Failure::transient(STREAM_NO_STOP_REASON))
+        );
+    }
+
+    #[test]
+    fn every_transient_error_type_in_a_stream_is_transient_with_its_message() {
+        for (error_type, message) in [
+            ("overloaded_error", "Overloaded"),
+            ("api_error", "Internal server error"),
+            (
+                "rate_limit_error",
+                "Number of request tokens has exceeded your rate limit",
+            ),
+            ("timeout_error", "Request timed out"),
+        ] {
+            let body = sse(&[
+                ("message_start", MESSAGE_START),
+                ("content_block_start", TEXT_START_0),
+                ("content_block_delta", &text_delta(0, "Hello")),
+                ("error", &error_event(error_type, message)),
+            ]);
+            assert_eq!(
+                stream_result(&body),
+                Err(Failure::transient(format!(
+                    "Anthropic error: {error_type}: {message}"
+                ))),
+                "{error_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_transient_error_type_in_a_2xx_body_is_transient_with_its_message() {
+        for error_type in [
+            "overloaded_error",
+            "api_error",
+            "rate_limit_error",
+            "timeout_error",
+        ] {
+            let body = json!({"type": "error", "error": {"type": error_type, "message": "m"}});
+            assert_eq!(
+                translate_anthropic_response_to_murmur(&body),
+                Err(Failure::transient(format!(
+                    "Anthropic error: {error_type}: m"
+                ))),
+                "{error_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_spend_cap_rate_limit_error_after_a_2xx_head_stays_plain() {
+        let error = json!({
+            "type": "rate_limit_error",
+            "message": "You have reached your API usage limits",
+            "details": {"error_code": "enforced_spend_limit_reached"}
+        });
+        let expected = Failure::plain(
+            "Anthropic error: rate_limit_error: You have reached your API usage limits",
+        );
+        let event = json!({"type": "error", "error": error}).to_string();
+        assert_eq!(
+            stream_result(&sse(&[("error", &event)])),
+            Err(expected.clone())
+        );
+        assert_eq!(
+            translate_anthropic_response_to_murmur(&json!({"type": "error", "error": error})),
+            Err(expected)
+        );
+    }
+
+    #[test]
+    fn a_non_transient_error_event_then_eof_stays_plain_with_the_provider_message() {
+        for error_type in [
+            "invalid_request_error",
+            "authentication_error",
+            "permission_error",
+            "not_found_error",
+            "request_too_large",
+            "billing_error",
+            "some_future_error",
+        ] {
+            let body = sse(&[
+                ("message_start", MESSAGE_START),
+                ("content_block_start", TEXT_START_0),
+                ("content_block_delta", &text_delta(0, "Hello")),
+                ("error", &error_event(error_type, "nope")),
+            ]);
+            assert_eq!(
+                stream_result(&body),
+                Err(Failure::plain(format!(
+                    "Anthropic error: {error_type}: nope"
+                ))),
+                "{error_type}"
+            );
+            let buffered =
+                json!({"type": "error", "error": {"type": error_type, "message": "nope"}});
+            assert_eq!(
+                translate_anthropic_response_to_murmur(&buffered),
+                Err(Failure::plain(format!(
+                    "Anthropic error: {error_type}: nope"
+                ))),
+                "{error_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_error_event_with_no_readable_type_stays_plain() {
+        for data in ["overloaded!", r#"{"type":"error","error":{"type":5}}"#] {
+            assert_eq!(
+                stream_result(&sse(&[("error", data)])),
+                Err(Failure::plain("Anthropic error: unknown: unknown")),
+                "{data}"
+            );
+        }
+    }
+
+    #[test]
+    fn refusals_unknown_stop_reasons_and_malformed_streams_stay_plain() {
+        let refused = sse(&[
+            ("content_block_start", TEXT_START_0),
+            (
+                "message_delta",
+                r#"{"type":"message_delta","delta":{"stop_reason":"refusal"}}"#,
+            ),
+        ]);
+        assert_eq!(stream_result(&refused), Err(Failure::plain(REFUSED)));
+
+        let unknown_stop = sse(&[(
+            "message_delta",
+            r#"{"type":"message_delta","delta":{"stop_reason":"pause_turn"}}"#,
+        )]);
+        assert_eq!(
+            stream_result(&unknown_stop),
+            Err(Failure::plain(
+                "driver: unsupported Anthropic stop_reason 'pause_turn'"
+            ))
+        );
+
+        let bad_input = sse(&[
+            ("content_block_start", TOOL_START_0),
+            ("content_block_delta", &input_delta(0, "{not json")),
+            ("message_delta", TOOL_USE_STOP),
+        ]);
+        assert_eq!(
+            stream_result(&bad_input).unwrap_err().retry,
+            None,
+            "bad tool input"
+        );
+
+        let past_limit = sse(&[(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":1024,"content_block":{"type":"text","text":""}}"#,
+        )]);
+        assert_eq!(stream_result(&past_limit).unwrap_err().retry, None);
+
+        let not_json = sse(&[("message_delta", "{not json")]);
+        assert_eq!(stream_result(&not_json).unwrap_err().retry, None);
+
+        let chat = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n";
+        assert_eq!(
+            stream_result(chat),
+            Err(Failure::plain(NOT_AN_EVENT_STREAM))
+        );
+    }
+
+    #[test]
+    fn a_finished_turn_is_a_success_on_both_paths() {
+        let streamed = sse(&[
+            ("message_start", MESSAGE_START),
+            ("content_block_start", TEXT_START_0),
+            ("content_block_delta", &text_delta(0, "Hi")),
+            ("message_delta", END_TURN),
+            ("message_stop", MESSAGE_STOP),
+        ]);
+        assert_eq!(stream_result(&streamed).unwrap()["stop_reason"], "end_turn");
+        let buffered =
+            json!({"stop_reason": "end_turn", "content": [{"type": "text", "text": "Hi"}]});
+        assert_eq!(
+            translate_anthropic_response_to_murmur(&buffered).unwrap()["stop_reason"],
+            "end_turn"
+        );
+    }
+
+    #[test]
+    fn run_renders_a_failure_with_its_metadata_and_a_success_with_none() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("\nmod wasm_driver {")
+            .expect("mod wasm_driver must exist");
+        let end = source.find("\nmod tests {").expect("mod tests must exist");
+        let wasm = &source[start..end];
+        for needle in [
+            "Ok(value) => (value, vec![]),",
+            "Err(failure) => (error_payload(&failure.message), failure.metadata()),",
+            "return Err(status_failure(status, &text));",
+            "murmur_driver_stream::read_failure(",
+        ] {
+            assert!(
+                wasm.contains(needle),
+                "mod wasm_driver must contain {needle}"
+            );
+        }
+        assert!(
+            !wasm.contains(concat!("\"trans", "ient\"")),
+            "mod wasm_driver must not build a transient tuple of its own"
+        );
+    }
+
+    // ── Status failures ──────────────────────────────────────────────────────
+
+    #[test]
+    fn statuses_stay_plain_with_the_status_and_body() {
+        let rate_limit = r#"{"type":"error","error":{"type":"rate_limit_error","message":"Number of request tokens has exceeded your per-minute rate limit"}}"#;
+        let overloaded =
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+        let billing = r#"{"type":"error","error":{"type":"billing_error","message":"bad card"}}"#;
+        let own_limit = r#"{"type":"error","error":{"type":"invalid_request_error","message":"You have reached your specified API usage limits."}}"#;
+        for (status, body) in [
+            (400, own_limit),
+            (401, "{}"),
+            (402, billing),
+            (403, "{}"),
+            (404, "not found"),
+            (408, ""),
+            (413, "{}"),
+            (422, "{}"),
+            (429, rate_limit),
+            (429, "not json"),
+            (500, "{}"),
+            (502, "<html>bad gateway</html>"),
+            (503, ""),
+            (504, "{}"),
+            (529, overloaded),
+        ] {
+            assert_eq!(
+                super::status_failure(status, body),
+                Failure::plain(format!("HTTP {status}: {body}")),
+                "{status} {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_429_reporting_the_spend_cap_is_permanent() {
+        let body = r#"{"type":"error","error":{"type":"rate_limit_error","message":"You have reached your API usage limits: your organization has crossed its monthly API usage threshold, set based on your organization's API tier. You will regain access on 2026-09-01 at 00:00 UTC.","details":{"error_code":"enforced_spend_limit_reached"}},"request_id":"req_018EeWyXxfu5pfWkrYcMdjWG"}"#;
+        assert_eq!(
+            super::status_failure(429, body),
+            Failure::permanent(format!("HTTP 429: {body}"))
+        );
+        // The same body under any other status is murmur's to judge.
+        for status in [400, 500, 529] {
+            assert_eq!(super::status_failure(status, body).retry, None);
         }
     }
 }

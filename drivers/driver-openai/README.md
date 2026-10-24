@@ -366,6 +366,78 @@ The Chat Completions surface maps `finish_reason: "length"` to the same
 `max_tokens` stop reason, and hard-errors on unparseable tool-call arguments
 with `driver: failed to parse OpenAI tool call arguments JSON: …`.
 
+## Transient failures
+
+The driver tells murmur whether a failed call may be made again, through the
+reserved `transient` key in its `tool-result.metadata`. It sets the key only on
+a failed call, at most once, and never retries a request itself.
+
+The driver marks these failures `"true"`. Each comes after OpenAI answered
+`2xx`, so murmur's gateway saw a successful status and cannot tell the call
+failed:
+
+| Failure | Surface | Message |
+|---|---|---|
+| SSE stream ends with no chunk carrying a `finish_reason`, or only an empty one; an empty body counts | Chat Completions | `driver: OpenAI stream ended with no finish_reason` |
+| SSE stream ends with no `response.completed`, `response.incomplete` or `response.failed` event; an empty body counts | Responses | `driver: OpenAI Responses stream ended with no terminal event` |
+| A read of the response body fails, on the SSE or the JSON path | both | `driver: failed to read response stream: <error>` |
+| A chunk carries an `error` object whose `code` or `type` is a transient one below | Chat Completions | `OpenAI error: <code-or-type>: <message>` |
+| An `error` event whose `code` is a transient one below | Responses | `OpenAI error: <code>: <message>` |
+| A `response.failed` event, or a buffered body, whose `error.code` is a transient one below | Responses | `OpenAI Responses error: <message>` |
+
+In an `OpenAI error:` message, `unknown` stands in for a missing code or message.
+
+The transient codes and types are the ones OpenAI documents as a server fault,
+a temporary overload or a temporary rate limit:
+
+| `code` or `type` | OpenAI's meaning |
+|---|---|
+| `server_error` | Issue on OpenAI's servers |
+| `rate_limit_exceeded` | Rate limit reached |
+| `rate_limit_error`, `slow_down` | Request rate increased too quickly |
+| `service_unavailable_error`, `server_is_overloaded` | Model temporarily overloaded |
+
+An error that also names a quota code below is never transient.
+
+The driver marks one failure `"false"`: a `429` whose body's `error.code` or
+`error.type` names exhausted credit, spend or usage. OpenAI says retrying these
+"won't restore API access", so murmur does not spend its retries on them. The
+message stays `HTTP 429: <body>`.
+
+| `error.code` or `error.type` | Cause |
+|---|---|
+| `insufficient_quota` | The broad type of every billing error |
+| `credit_balance_exhausted` | No prepaid credits remain |
+| `organization_spend_limit_exceeded` | Organization spend limit reached |
+| `project_spend_limit_exceeded` | Project spend limit reached |
+| `organization_usage_limit_exceeded` | OpenAI-assigned usage limit reached |
+
+Every other failure carries no `transient` key:
+
+| Failure | Message |
+|---|---|
+| Any other status `>= 400`, including a rate-limit `429` and every `5xx` | `HTTP <status>: <body>` |
+| A connection that fails before the response head | the transport error |
+| A read that fails while reading a `>= 400` body | `driver: failed to read response stream: <error>` |
+| `finish_reason: "content_filter"` | `OpenAI response blocked by content_filter` |
+| A `refusal` content part | `OpenAI response refused: <refusal>` |
+| `response.incomplete` for any reason but `max_output_tokens` | `OpenAI Responses incomplete: <reason>` |
+| `response.failed` with no `error` | `OpenAI Responses request failed` |
+| A provider error with any other code or type, or none | its message, as above |
+| A malformed stream: an unknown stop reason, unparseable tool-call arguments, a tool call index past 1024 | the driver's message |
+| Every refusal before the request is sent | the driver's message |
+
+murmur decides statuses and connection failures alone, from what its gateway
+recorded: it retries a `408`, a `429` and most `5xx`, and a connection that
+broke before the head. A provider error event before EOF is reported in place
+of the cut-stream message, so an `error` event naming an unknown code and then
+EOF stays a plain failure.
+
+On a retry murmur discards everything the failed attempt streamed. OpenAI sends
+its delay hints as the HTTP `retry-after` and `retry-after-ms` headers, which
+murmur reads itself, so the driver passes no delay. murmur 0.8.0 and later read
+the `transient` key. An earlier murmur ignores it and fails the call as before.
+
 ## A missing stop signal is refused
 
 A turn that never says why it stopped is refused rather than read as finished.
@@ -381,7 +453,7 @@ empty counts as none. On Responses, a stream is finished only by a
 | Responses, SSE stream that ends with no terminal event | `driver: OpenAI Responses stream ended with no terminal event` |
 
 A Responses `error` object is still reported first, as `OpenAI Responses error:
-<message>`. The refusal is returned as `{"stop_reason":"error","error":"<message>"}`,
+<message>`, and so is an `error` event, as `OpenAI error: <code>: <message>`. The refusal is returned as `{"stop_reason":"error","error":"<message>"}`,
 so the task ends failed. A connection dropped before the final chunk is the
 common cause; text already streamed is not withdrawn, it is just not recorded as
 a finished reply.
@@ -389,6 +461,9 @@ a finished reply.
 A stream that breaks off with a read error instead, such as a body cut short of
 its declared `content-length`, fails the turn on either surface with
 `driver: failed to read response stream: <error>`, returned the same way.
+
+murmur may make a call that failed either way again; see
+[Transient failures](#transient-failures).
 
 A failed task status and a `task_failed` trace line with cause `driver_error`
 need a murmur runtime released after v0.4.0. On v0.4.0 and earlier the runtime

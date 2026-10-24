@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use murmur_driver_stream::Failure;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
@@ -427,19 +428,19 @@ fn stamp_streaming_flags(body: &mut Value) {
 
 // ── Response translation ──────────────────────────────────────────────────────
 
-fn translate_deepseek_response_to_murmur(response: &Value) -> Result<Value, String> {
+fn translate_deepseek_response_to_murmur(response: &Value) -> Result<Value, Failure> {
     let choice = response
         .get("choices")
         .and_then(Value::as_array)
         .and_then(|choices| choices.first())
-        .ok_or_else(|| "driver: DeepSeek response missing choices[0]".to_string())?;
+        .ok_or_else(|| Failure::plain("driver: DeepSeek response missing choices[0]"))?;
 
     // Absent, `null`, non-string or empty: the turn did not finish.
     let finish_reason = choice
         .get("finish_reason")
         .and_then(Value::as_str)
         .filter(|reason| !reason.is_empty())
-        .ok_or_else(|| "driver: DeepSeek response has no finish_reason".to_string())?;
+        .ok_or_else(|| Failure::plain("driver: DeepSeek response has no finish_reason"))?;
     let stop_reason = map_finish_reason(finish_reason)?;
 
     let message = choice.get("message").unwrap_or(&Value::Null);
@@ -470,7 +471,9 @@ fn translate_deepseek_response_to_murmur(response: &Value) -> Result<Value, Stri
                 .unwrap_or("{}");
 
             let arguments: Value = serde_json::from_str(arguments_raw).map_err(|err| {
-                format!("driver: failed to parse DeepSeek tool call arguments JSON: {err}")
+                Failure::plain(format!(
+                    "driver: failed to parse DeepSeek tool call arguments JSON: {err}"
+                ))
             })?;
 
             content.push(json!({
@@ -558,21 +561,73 @@ enum ToolCallSignal<'a> {
     InputBytes { id: &'a str, bytes: u64 },
 }
 
+/// The `finish_reason`s DeepSeek documents as the inference system running out of resources
+/// mid-turn: the same request may well finish on another attempt, so each fails the call as
+/// [`Failure::transient`].
+const TRANSIENT_FINISH_REASONS: &[&str] = &["insufficient_system_resource"];
+
+/// The message reported when the stream ended before any chunk carried a `finish_reason`.
+const STREAM_NO_FINISH_REASON: &str = "driver: DeepSeek stream ended with no finish_reason";
+
 /// Map a DeepSeek `finish_reason` to a murmur `stop_reason`. Each caller refuses a missing reason
-/// with its own path's message; an unmapped one is an error naming it.
-fn map_finish_reason(finish_reason: &str) -> Result<&'static str, String> {
+/// with its own path's message. A reason in [`TRANSIENT_FINISH_REASONS`] fails the call as
+/// transient; any other unmapped one is a plain error naming it.
+fn map_finish_reason(finish_reason: &str) -> Result<&'static str, Failure> {
     match finish_reason {
         "stop" => Ok("end_turn"),
         "tool_calls" => Ok("tool_call"),
         "length" => Ok("max_tokens"),
-        other => Err(format!(
+        other if TRANSIENT_FINISH_REASONS.contains(&other) => Err(Failure::transient(format!(
+            "DeepSeek stream failed: finish_reason '{other}'"
+        ))),
+        other => Err(Failure::plain(format!(
             "driver: unsupported DeepSeek finish_reason '{other}'"
-        )),
+        ))),
     }
 }
 
+/// The failure for a top-level `error` member inside a `2xx` stream:
+/// `DeepSeek error: <type-or-code>: <message>`, with `unknown` for a missing part.
+///
+/// Always plain. DeepSeek documents its overload, server and rate-limit failures only as the
+/// statuses `503`, `500` and `429`, which murmur classifies itself; it names no error type or
+/// code that marks an in-stream failure as one of those, so the driver has none to mark.
+fn stream_error_failure(error: &Value) -> Failure {
+    let kind = error
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|kind| !kind.is_empty())
+        .map(str::to_string)
+        .or_else(|| match error.get("code") {
+            Some(Value::String(code)) if !code.is_empty() => Some(code.clone()),
+            Some(Value::Number(code)) => Some(code.to_string()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    let message = match error {
+        Value::String(message) if !message.is_empty() => message.as_str(),
+        _ => error
+            .get("message")
+            .and_then(Value::as_str)
+            .filter(|message| !message.is_empty())
+            .unwrap_or("unknown"),
+    };
+    Failure::plain(format!("DeepSeek error: {kind}: {message}"))
+}
+
+/// The failure for a provider status `>= 400`: `HTTP <status>: <body>`, always plain.
+///
+/// murmur classifies every status itself, retrying `408`, `429` and the `5xx` it lists. DeepSeek
+/// gives no status murmur retries a cause waiting cannot clear: an empty balance is `402`, which
+/// murmur never retries, and its `429` is a concurrency limit, which clears.
+fn status_failure(status: u16, body: &str) -> Failure {
+    Failure::plain(format!("HTTP {status}: {body}"))
+}
+
 /// Process one complete SSE line. Returns `Ok(true)` when the stream is done (`[DONE]`),
-/// and `Err` for a tool call index past [`murmur_driver_stream::MAX_SLOTS_PER_TURN`].
+/// `Err` for a tool call index past [`murmur_driver_stream::MAX_SLOTS_PER_TURN`], and `Err` with
+/// [`stream_error_failure`] for a chunk carrying a top-level `error`, which ends the turn before
+/// a missing `finish_reason` could read as a cut stream.
 ///
 /// DeepSeek streams OpenAI-compatible chat-completions chunks plus a `reasoning_content`
 /// delta field. `reasoning_content` is routed to `emit_thinking`, `content` to `emit_text`.
@@ -584,7 +639,7 @@ fn process_deepseek_sse_line(
     emit_text: &mut impl FnMut(&str),
     emit_thinking: &mut impl FnMut(&str),
     signal: &mut impl FnMut(ToolCallSignal<'_>),
-) -> Result<bool, String> {
+) -> Result<bool, Failure> {
     if line == "data: [DONE]" {
         return Ok(true);
     }
@@ -594,6 +649,10 @@ fn process_deepseek_sse_line(
     let Ok(data) = serde_json::from_str::<Value>(json_str) else {
         return Ok(false);
     };
+
+    if let Some(error) = data.get("error").filter(|value| !value.is_null()) {
+        return Err(stream_error_failure(error));
+    }
 
     // Read before the `choices`-shaped early returns below: the usage-bearing final chunk has an
     // empty `choices` array and would otherwise be discarded.
@@ -634,7 +693,7 @@ fn process_deepseek_sse_line(
         for tc in tc_arr {
             let index = tc.get("index").and_then(Value::as_u64).unwrap_or(0);
             let state = murmur_driver_stream::slot_mut(tool_states, index)
-                .map_err(|err| format!("driver: tool call {err}"))?;
+                .map_err(|err| Failure::plain(format!("driver: tool call {err}")))?;
             if let Some(id) = tc.get("id").and_then(Value::as_str) {
                 if state.id.is_empty() {
                     state.id = id.to_string();
@@ -663,11 +722,12 @@ fn assemble_deepseek_streaming_response(
     tool_states: Vec<ToolCallState>,
     stop_reason: Option<String>,
     usage: UsageTokens,
-) -> Result<Value, String> {
-    // No chunk carried a finish_reason, so the stream ended before the turn did.
+) -> Result<Value, Failure> {
+    // No chunk carried a finish_reason, so the stream ended before the turn did: a cut the same
+    // request may not hit again.
     let finish_reason = stop_reason
         .as_deref()
-        .ok_or_else(|| "driver: DeepSeek stream ended with no finish_reason".to_string())?;
+        .ok_or_else(|| Failure::transient(STREAM_NO_FINISH_REASON))?;
     let stop_reason_str = map_finish_reason(finish_reason)?;
 
     let mut tool_content = Vec::new();
@@ -681,7 +741,9 @@ fn assemble_deepseek_streaming_response(
             state.arguments.as_str()
         };
         let input: Value = serde_json::from_str(arguments).map_err(|err| {
-            format!("driver: failed to parse DeepSeek tool call arguments JSON: {err}")
+            Failure::plain(format!(
+                "driver: failed to parse DeepSeek tool call arguments JSON: {err}"
+            ))
         })?;
         tool_content.push(json!({
             "type": "tool_call",
@@ -711,7 +773,7 @@ fn parse_deepseek_sse_body<F: FnMut(&str), G: FnMut(&str)>(
     body: &str,
     emit_text: &mut F,
     emit_thinking: &mut G,
-) -> Result<Value, String> {
+) -> Result<Value, Failure> {
     parse_deepseek_sse_body_with_signals(body, emit_text, emit_thinking).0
 }
 
@@ -746,7 +808,7 @@ fn parse_deepseek_sse_body_with_signals<F: FnMut(&str), G: FnMut(&str)>(
     body: &str,
     emit_text: &mut F,
     emit_thinking: &mut G,
-) -> (Result<Value, String>, Vec<RecordedSignal>) {
+) -> (Result<Value, Failure>, Vec<RecordedSignal>) {
     let mut text_acc = String::new();
     let mut reasoning_acc = String::new();
     let mut tool_states: Vec<ToolCallState> = Vec::new();
@@ -806,9 +868,9 @@ fn error_payload(message: &str) -> Value {
 mod wasm_driver {
     use super::{
         assemble_deepseek_streaming_response, error_payload, process_deepseek_sse_line,
-        stamp_streaming_flags, translate_deepseek_response_to_murmur,
-        translate_murmur_request_to_deepseek, validate_model, MurmurRequest, ThinkingConfig,
-        ToolCallSignal, ToolCallState, UsageTokens,
+        stamp_streaming_flags, status_failure, translate_deepseek_response_to_murmur,
+        translate_murmur_request_to_deepseek, validate_model, Failure, MurmurRequest,
+        ThinkingConfig, ToolCallSignal, ToolCallState, UsageTokens,
     };
     use serde_json::Value;
     use std::collections::HashMap;
@@ -838,9 +900,9 @@ mod wasm_driver {
         fn run(
             input: exports::murmur::tool::run::ToolInput,
         ) -> exports::murmur::tool::run::ToolResult {
-            let response = match run_inner(input) {
-                Ok(value) => value,
-                Err(err) => error_payload(&err),
+            let (response, metadata) = match run_inner(input) {
+                Ok(value) => (value, vec![]),
+                Err(failure) => (error_payload(&failure.message), failure.metadata()),
             };
 
             let stop_reason = response
@@ -869,12 +931,12 @@ mod wasm_driver {
                 data: Some(response.to_string()),
                 data_path: None,
                 truncated: false,
-                metadata: vec![],
+                metadata,
             }
         }
     }
 
-    fn run_inner(input: exports::murmur::tool::run::ToolInput) -> Result<Value, String> {
+    fn run_inner(input: exports::murmur::tool::run::ToolInput) -> Result<Value, Failure> {
         let endpoint = murmur_driver_env::require_endpoint(
             std::env::var(murmur_driver_env::INFERENCE_ENDPOINT_VAR)
                 .ok()
@@ -919,8 +981,8 @@ mod wasm_driver {
         let status = response.status();
 
         if status >= 400 {
-            let text = consume_body_as_string(response)?;
-            return Ok(error_payload(&format!("HTTP {status}: {text}")));
+            let text = consume_body_as_string(response, status)?;
+            return Err(status_failure(status, &text));
         }
 
         let incoming_body = response
@@ -931,7 +993,7 @@ mod wasm_driver {
             .map_err(|()| "driver: failed to stream response body".to_string())?;
 
         // Detect format from first read: JSON bodies start with '{' or '['.
-        let first = read_chunk(&stream)?;
+        let first = read_chunk(&stream, status)?;
         let is_json = first
             .iter()
             .find(|&&b| !b.is_ascii_whitespace())
@@ -942,7 +1004,7 @@ mod wasm_driver {
             // Non-streaming fallback (test servers, providers ignoring stream:true).
             let mut all = first;
             loop {
-                let chunk = read_chunk(&stream)?;
+                let chunk = read_chunk(&stream, status)?;
                 if chunk.is_empty() {
                     break;
                 }
@@ -971,7 +1033,7 @@ mod wasm_driver {
                                usage: &mut UsageTokens,
                                text_acc: &mut String,
                                reasoning_acc: &mut String|
-             -> Result<bool, String> {
+             -> Result<bool, Failure> {
                 let mut et = |t: &str| {
                     murmur::stream::events::emit_chunk(t);
                     text_acc.push_str(t);
@@ -1016,7 +1078,7 @@ mod wasm_driver {
             // Continue reading remaining chunks.
             if !done {
                 'outer: loop {
-                    let chunk = read_chunk(&stream)?;
+                    let chunk = read_chunk(&stream, status)?;
                     if chunk.is_empty() {
                         break;
                     }
@@ -1124,7 +1186,8 @@ mod wasm_driver {
 
     fn consume_body_as_string(
         response: wasip2::http::types::IncomingResponse,
-    ) -> Result<String, String> {
+        status: u16,
+    ) -> Result<String, Failure> {
         let incoming_body = response
             .consume()
             .map_err(|()| "driver: failed to consume error response body".to_string())?;
@@ -1133,7 +1196,7 @@ mod wasm_driver {
             .map_err(|()| "driver: failed to stream error response body".to_string())?;
         let mut bytes = Vec::new();
         loop {
-            let chunk = read_chunk(&stream)?;
+            let chunk = read_chunk(&stream, status)?;
             if chunk.is_empty() {
                 break;
             }
@@ -1142,14 +1205,22 @@ mod wasm_driver {
         drop(stream);
         let _ = wasip2::http::types::IncomingBody::finish(incoming_body);
         String::from_utf8(bytes)
-            .map_err(|err| format!("driver: error response body is not UTF-8: {err}"))
+            .map_err(|err| format!("driver: error response body is not UTF-8: {err}").into())
     }
 
-    fn read_chunk(stream: &wasip2::io::streams::InputStream) -> Result<Vec<u8>, String> {
+    /// One read of a response body whose head carried `status`. A failed read is classified by
+    /// [`murmur_driver_stream::read_failure`]: transient after a `2xx`, plain otherwise.
+    fn read_chunk(
+        stream: &wasip2::io::streams::InputStream,
+        status: u16,
+    ) -> Result<Vec<u8>, Failure> {
         match stream.blocking_read(16 * 1024) {
             Ok(chunk) => Ok(chunk),
             Err(wasip2::io::streams::StreamError::Closed) => Ok(Vec::new()),
-            Err(err) => Err(format!("driver: failed to read response stream: {err:?}")),
+            Err(err) => Err(murmur_driver_stream::read_failure(
+                status,
+                &format!("{err:?}"),
+            )),
         }
     }
 
@@ -1209,7 +1280,8 @@ mod wasm_driver {
 mod tests {
     use super::{
         parse_deepseek_sse_body, stamp_streaming_flags, translate_deepseek_response_to_murmur,
-        translate_murmur_request_to_deepseek, validate_model, MurmurRequest, ThinkingConfig,
+        translate_murmur_request_to_deepseek, validate_model, Failure, MurmurRequest,
+        ThinkingConfig,
     };
     use serde_json::{json, Value};
     use std::collections::HashMap;
@@ -1777,14 +1849,14 @@ mod tests {
             let response = json!({"choices": [choice]});
             assert_eq!(
                 translate_deepseek_response_to_murmur(&response).unwrap_err(),
-                "driver: DeepSeek response has no finish_reason",
+                Failure::plain("driver: DeepSeek response has no finish_reason"),
                 "finish_reason = {finish_reason:?}"
             );
         }
     }
 
     #[test]
-    fn stream_that_ends_with_no_finish_reason_is_refused() {
+    fn stream_that_ends_with_no_finish_reason_is_refused_as_transient() {
         let cut_off = concat!(
             "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Let me \"},\"finish_reason\":null}]}\n",
             "data: {\"choices\":[{\"delta\":{\"content\":\"The answer \"},\"finish_reason\":null}]}\n",
@@ -1797,7 +1869,7 @@ mod tests {
         for body in [cut_off, blank_reason, ""] {
             assert_eq!(
                 parse_deepseek_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap_err(),
-                "driver: DeepSeek stream ended with no finish_reason",
+                Failure::transient("driver: DeepSeek stream ended with no finish_reason"),
                 "body = {body:?}"
             );
         }
@@ -2111,9 +2183,9 @@ mod tests {
             );
             assert_eq!(
                 result,
-                Err(format!(
+                Err(Failure::plain(format!(
                     "driver: tool call index {index} is past the limit of 1024 per turn"
-                ))
+                )))
             );
             assert_eq!(tool_states.capacity(), 0);
             assert_eq!(signals, vec![]);
@@ -2128,9 +2200,9 @@ mod tests {
         let (result, _) = parse_deepseek_sse_body_with_signals(&body, &mut |_| {}, &mut |_| {});
         assert_eq!(
             result,
-            Err(
-                "driver: tool call index 4294967296 is past the limit of 1024 per turn".to_string()
-            )
+            Err(Failure::plain(
+                "driver: tool call index 4294967296 is past the limit of 1024 per turn"
+            ))
         );
     }
 
@@ -2271,6 +2343,263 @@ mod tests {
         }
         for retired in [concat!("murmur::", "text"), concat!("murmur:", "text")] {
             assert!(!source.contains(retired), "lib.rs must not name {retired}");
+        }
+    }
+
+    // ── Transient failures ────────────────────────────────────────────────────
+
+    mod transient {
+        use super::super::{
+            error_payload, map_finish_reason, parse_deepseek_sse_body, status_failure,
+            translate_deepseek_response_to_murmur, Failure, TRANSIENT_FINISH_REASONS,
+        };
+        use super::{chunk, tool_delta};
+        use murmur_driver_stream::Retry;
+        use serde_json::{json, Value};
+
+        fn parse(body: &str) -> Result<Value, Failure> {
+            parse_deepseek_sse_body(body, &mut |_| {}, &mut |_| {})
+        }
+
+        fn finish(reason: &str) -> String {
+            format!(
+                "data: {}\ndata: [DONE]\n",
+                json!({"choices": [{"delta": {}, "finish_reason": reason}]})
+            )
+        }
+
+        fn response(reason: &str) -> Value {
+            json!({"choices": [{
+                "message": {"role": "assistant", "content": "partial"},
+                "finish_reason": reason,
+            }]})
+        }
+
+        const CUT: &str = "driver: DeepSeek stream ended with no finish_reason";
+
+        #[test]
+        fn a_stream_cut_after_text_deltas_is_transient() {
+            let body = [
+                chunk(json!({"content": "Hello"})),
+                chunk(json!({"content": " wor"})),
+            ]
+            .concat();
+            assert_eq!(parse(&body), Err(Failure::transient(CUT)));
+        }
+
+        #[test]
+        fn a_stream_cut_inside_a_tool_call_is_transient() {
+            let body = [
+                tool_delta(0, Some("call_1"), Some("bash"), Some("")),
+                tool_delta(0, None, None, Some(r#"{"cmd":"l"#)),
+            ]
+            .concat();
+            assert_eq!(parse(&body), Err(Failure::transient(CUT)));
+        }
+
+        #[test]
+        fn an_empty_finish_reason_and_an_empty_body_are_cuts() {
+            let blank = [chunk(json!({"content": "Hi"})), finish("")].concat();
+            for body in [blank.as_str(), "", "data: [DONE]\n"] {
+                let failure = parse(body).unwrap_err();
+                assert_eq!(failure, Failure::transient(CUT), "body = {body:?}");
+                assert_eq!(
+                    failure.metadata(),
+                    vec![("transient".to_string(), "true".to_string())]
+                );
+            }
+        }
+
+        #[test]
+        fn insufficient_system_resource_is_transient_on_the_stream() {
+            let body = [
+                chunk(json!({"content": "Half an ans"})),
+                finish("insufficient_system_resource"),
+            ]
+            .concat();
+            assert_eq!(
+                parse(&body),
+                Err(Failure::transient(
+                    "DeepSeek stream failed: finish_reason 'insufficient_system_resource'"
+                ))
+            );
+        }
+
+        #[test]
+        fn insufficient_system_resource_is_transient_on_the_json_path() {
+            assert_eq!(
+                translate_deepseek_response_to_murmur(&response("insufficient_system_resource")),
+                Err(Failure::transient(
+                    "DeepSeek stream failed: finish_reason 'insufficient_system_resource'"
+                ))
+            );
+        }
+
+        #[test]
+        fn the_transient_finish_reasons_are_exactly_the_documented_one() {
+            assert_eq!(TRANSIENT_FINISH_REASONS, ["insufficient_system_resource"]);
+            for reason in TRANSIENT_FINISH_REASONS {
+                assert_eq!(
+                    map_finish_reason(reason).unwrap_err().retry,
+                    Some(Retry::Transient)
+                );
+            }
+        }
+
+        #[test]
+        fn other_unmapped_finish_reasons_stay_plain_on_both_paths() {
+            for reason in ["content_filter", "aborted", "something_new"] {
+                let expected = Failure::plain(format!(
+                    "driver: unsupported DeepSeek finish_reason '{reason}'"
+                ));
+                assert_eq!(parse(&finish(reason)), Err(expected.clone()), "{reason}");
+                assert_eq!(
+                    translate_deepseek_response_to_murmur(&response(reason)),
+                    Err(expected),
+                    "{reason}"
+                );
+            }
+        }
+
+        #[test]
+        fn an_error_chunk_then_eof_stays_plain_with_the_provider_message() {
+            let body = [
+                chunk(json!({"content": "Hello"})),
+                format!(
+                    "data: {}\n",
+                    json!({"error": {"message": "Service busy", "type": "server_error", "code": 503}})
+                ),
+            ]
+            .concat();
+            let failure = parse(&body).unwrap_err();
+            assert_eq!(
+                failure,
+                Failure::plain("DeepSeek error: server_error: Service busy")
+            );
+            assert!(failure.metadata().is_empty());
+        }
+
+        #[test]
+        fn an_error_chunk_ends_the_turn_even_before_a_later_finish_reason() {
+            let body = [
+                format!(
+                    "data: {}\n",
+                    json!({"error": {"message": "bad", "type": "invalid_request_error"}})
+                ),
+                finish("stop"),
+            ]
+            .concat();
+            assert_eq!(
+                parse(&body),
+                Err(Failure::plain("DeepSeek error: invalid_request_error: bad"))
+            );
+        }
+
+        #[test]
+        fn an_error_chunk_names_its_code_or_unknown_for_a_missing_part() {
+            for (error, expected) in [
+                (
+                    json!({"code": "rate", "message": "m"}),
+                    "DeepSeek error: rate: m",
+                ),
+                (json!({"code": 500}), "DeepSeek error: 500: unknown"),
+                (json!({}), "DeepSeek error: unknown: unknown"),
+                (json!("boom"), "DeepSeek error: unknown: boom"),
+            ] {
+                let body = format!("data: {}\n", json!({ "error": error }));
+                assert_eq!(parse(&body), Err(Failure::plain(expected)));
+            }
+        }
+
+        #[test]
+        fn a_null_error_member_is_not_an_error_chunk() {
+            let body = [
+                format!(
+                    "data: {}\n",
+                    json!({"error": null, "choices": [{"delta": {"content": "ok"}, "finish_reason": null}]})
+                ),
+                finish("stop"),
+            ]
+            .concat();
+            assert_eq!(parse(&body).unwrap()["stop_reason"], "end_turn");
+        }
+
+        #[test]
+        fn malformed_streams_and_bodies_stay_plain() {
+            let bad_args = [
+                tool_delta(0, Some("call_1"), Some("bash"), Some("{not json")),
+                finish("tool_calls"),
+            ]
+            .concat();
+            let failure = parse(&bad_args).unwrap_err();
+            assert_eq!(failure.retry, None);
+            assert!(failure
+                .message
+                .starts_with("driver: failed to parse DeepSeek tool call arguments JSON: "));
+
+            assert_eq!(
+                translate_deepseek_response_to_murmur(&json!({"id": "x"})),
+                Err(Failure::plain(
+                    "driver: DeepSeek response missing choices[0]"
+                ))
+            );
+            assert_eq!(
+                translate_deepseek_response_to_murmur(&json!({"choices": [{"message": {}}]})),
+                Err(Failure::plain(
+                    "driver: DeepSeek response has no finish_reason"
+                ))
+            );
+        }
+
+        #[test]
+        fn every_status_failure_is_plain_and_carries_the_body() {
+            let body = r#"{"error":{"message":"m","type":"t"}}"#;
+            for status in [
+                400, 401, 402, 403, 404, 408, 413, 422, 429, 500, 502, 503, 504, 529,
+            ] {
+                assert_eq!(
+                    status_failure(status, body),
+                    Failure::plain(format!("HTTP {status}: {body}")),
+                    "status {status}"
+                );
+            }
+            let balance = r#"{"error":{"message":"Insufficient Balance","type":"unknown_error"}}"#;
+            assert_eq!(status_failure(402, balance).retry, None);
+            assert_eq!(status_failure(429, "Rate Limit Reached").retry, None);
+        }
+
+        #[test]
+        fn a_failure_renders_today_s_payload() {
+            let failure = Failure::transient(CUT);
+            assert_eq!(
+                error_payload(&failure.message).to_string(),
+                format!(r#"{{"error":"{CUT}","stop_reason":"error"}}"#)
+            );
+        }
+
+        #[test]
+        fn a_success_carries_no_transient_marker() {
+            let ok = parse(&[chunk(json!({"content": "Hi"})), finish("stop")].concat()).unwrap();
+            assert_eq!(ok["stop_reason"], "end_turn");
+            assert!(!ok.to_string().contains("transient"));
+            let ok = translate_deepseek_response_to_murmur(&response("stop")).unwrap();
+            assert!(!ok.to_string().contains("transient"));
+        }
+
+        #[test]
+        fn run_adds_metadata_only_from_a_failure() {
+            let source = include_str!("lib.rs");
+            let start = source
+                .find("\nmod wasm_driver {")
+                .expect("mod wasm_driver must exist");
+            let end = source.find("\nmod tests {").expect("mod tests must exist");
+            let wasm = &source[start..end];
+            assert!(wasm.contains("Ok(value) => (value, vec![]),"));
+            assert!(wasm.contains(
+                "Err(failure) => (error_payload(&failure.message), failure.metadata()),"
+            ));
+            assert_eq!(wasm.matches("metadata,").count(), 1);
+            assert!(!wasm.contains(concat!("\"trans", "ient\"")));
         }
     }
 }

@@ -28,7 +28,7 @@ set but empty`. Neither reaches the network. Requests go to
 ```yaml
 artifacts:
   - name: murmur/driver-zai
-    version: "0.2.0"
+    version: "0.3.0"
     runtime: driver
     gateway:
       endpoint: https://api.z.ai/api/paas/v4
@@ -218,7 +218,8 @@ v0.6.0.
 | `stop` | `end_turn` |
 | `tool_calls` | `tool_call` |
 | `length` | `max_tokens` |
-| `sensitive`, `model_context_window_exceeded`, `network_error`, anything else | `driver: unsupported Z.ai finish_reason '<reason>'` |
+| `network_error` | `Z.ai stream failed: finish_reason 'network_error'`, marked transient |
+| `sensitive`, `model_context_window_exceeded`, anything else | `driver: unsupported Z.ai finish_reason '<reason>'` |
 
 A turn that never says why it stopped is refused rather than read as
 `end_turn`. A `finish_reason` that is absent, `null`, not a string or empty
@@ -227,7 +228,66 @@ counts as none:
 | Response | Refused with |
 |---|---|
 | JSON body whose first choice has no `finish_reason` | `driver: Z.ai response has no finish_reason` |
-| SSE stream in which no chunk carries a `finish_reason` | `driver: Z.ai stream ended with no finish_reason` |
+| SSE stream in which no chunk carries a `finish_reason` | `driver: Z.ai stream ended with no finish_reason`, marked transient |
+
+## Transient failures
+
+A failed call's result can carry one `transient` tuple in its `metadata`, which
+tells murmur whether to make the call again. murmur reads it from v0.8.0, the
+first release after v0.7.0. An earlier murmur ignores it and fails the call as
+before. Before a retry, murmur discards everything the failed attempt streamed.
+
+The driver marks `"true"` only after Z.ai answered `2xx`:
+
+| Failure | Message |
+|---|---|
+| the SSE stream ended before any chunk carried a non-empty `finish_reason`; an empty body counts | `driver: Z.ai stream ended with no finish_reason` |
+| a read of the response body failed, on the SSE path or the JSON fallback | `driver: failed to read response stream: <error>` |
+| `finish_reason: "network_error"`, on the SSE path or the JSON fallback | `Z.ai stream failed: finish_reason 'network_error'` |
+| a stream chunk carrying an `error` object whose `code` is in the table below | `Z.ai error: <code>: <message>` |
+
+| Z.ai code | Z.ai's message |
+|---|---|
+| `1200` | API Call Error |
+| `1230` | API call process error |
+| `1234` | Network error, please try again later |
+| `1302` | Rate limit reached for requests |
+| `1305` | The service may be temporarily overloaded, please try again later |
+
+Z.ai sends these codes with a `5xx` or `429` status, and documents that a
+stream which breaks off reports it in `finish_reason` instead. The driver still
+reads an `error` chunk if one arrives.
+
+The driver marks `"false"` on an HTTP `429` whose body's `error.code` names an
+exhausted balance, plan or usage limit, which waiting does not clear. The
+message stays `HTTP 429: <body>`.
+
+| Z.ai code | Z.ai's message |
+|---|---|
+| `1113` | Insufficient balance or no resource package |
+| `1308` | Usage limit reached; resets at a stated time |
+| `1309` | GLM Coding Plan package has expired |
+| `1310` | Weekly/Monthly Limit Exhausted |
+| `1311` | Current subscription plan does not include the model |
+| `1313` | Request frequency limited under the Fair Usage Policy |
+| `1314` | Enterprise package has expired |
+| `1315` | API key limited to enterprise coding package scenarios |
+| `1316`–`1321` | 5-hour or 7-day usage limit reached, no extra usage available |
+
+Every other failure carries no `transient` tuple:
+
+| Failure | Why |
+|---|---|
+| any other status `>= 400`, and a connection failure before the response head | murmur decides these itself, from the status or the connection error |
+| a read that fails while reading a `>= 400` body | the status decides |
+| `sensitive`, `model_context_window_exceeded`, any other unsupported `finish_reason` | the same request fails the same way |
+| a stream chunk carrying an `error` object with any other code, or none | reported as `Z.ai error: <code>: <message>`, `unknown` for a missing part, even when the stream ends right after it |
+| a JSON body with no `finish_reason` or no `choices[0]` | the response is malformed |
+| a tool call index past the limit, or tool arguments that are not JSON | the response is malformed |
+| every refusal under [Errors](#errors) | no request was sent |
+
+Z.ai's delay hints arrive as HTTP `retry-after` headers, which murmur reads
+itself. The driver sets no delay and never repeats a request.
 
 ## Token usage
 
@@ -304,3 +364,5 @@ read as index 0.
 The `run` wrapper turns an error into a `ToolResult` with `status: error`, the
 message as its summary, and `{"stop_reason":"error","error":…}` as its data. A
 provider status `>= 400` produces the same shape carrying `HTTP <status>: <body>`.
+The result's `metadata` is empty, except for the `transient` tuple described
+under [Transient failures](#transient-failures).
