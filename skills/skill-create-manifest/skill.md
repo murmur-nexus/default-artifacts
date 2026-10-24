@@ -85,7 +85,7 @@ entry into the project store.
 ```yaml
 artifacts:
   - name: murmur/tool-editor
-    version: "0.9.0"
+    version: "0.10.0"
     runtime: tool
 
   - name: murmur/driver-anthropic
@@ -483,7 +483,7 @@ description: "Simple file editing capsule — reads and writes files, exits on c
 
 artifacts:
   - name: murmur/tool-editor
-    version: "0.9.0"
+    version: "0.10.0"
     runtime: tool
   - name: murmur/driver-anthropic
     version: "0.15.0"
@@ -520,7 +520,7 @@ artifacts:
     version: "0.4.0"
     runtime: tool
   - name: murmur/tool-editor
-    version: "0.9.0"
+    version: "0.10.0"
     runtime: tool
   - name: murmur/driver-anthropic
     version: "0.15.0"
@@ -564,7 +564,7 @@ description: "Orchestrator that spawns sub-capsules for parallel task execution"
 
 artifacts:
   - name: murmur/tool-editor
-    version: "0.9.0"
+    version: "0.10.0"
     runtime: tool
   - name: murmur/driver-anthropic
     version: "0.15.0"

@@ -1,22 +1,29 @@
 name: tool-editor
-version: 0.9.0
+version: 0.10.0
 runtime: tool
 implementation: wasm
 description: |
   Structured file editing interface for Murmur capsules. Provides read, write,
   surgical patch, and search operations without requiring shell capability grants.
 
-  | op              | inputs                                             | outputs                                         |
-  |-----------------|----------------------------------------------------|-------------------------------------------------|
-  | read_file       | path, start_line?, end_line?                       | content: string, total_lines: int               |
-  | write_file      | dest_path, content                                 | (file created/updated)                          |
-  | replace_in_file | dest_path, old_string, new_string                  | count: N replacements                           |
-  | find_in_files   | pattern, dir?, glob?, recursive?, context_lines?   | matches: [{path, line, text}], capped?: string  |
+  | op              | inputs                                             | outputs                                                  |
+  |-----------------|----------------------------------------------------|----------------------------------------------------------|
+  | read_file       | path, start_line?, end_line?                       | content, total_lines, start_line?, end_line?, truncated? |
+  | write_file      | dest_path, content                                 | (file created/updated)                                   |
+  | replace_in_file | dest_path, old_string, new_string                  | count: N replacements                                    |
+  | find_in_files   | pattern, dir?, glob?, recursive?, context_lines?   | matches: [{path, line, text}], capped?: string           |
 
-  read_file start_line/end_line are 1-based inclusive; both optional. Omitting both
-  reads the whole file. A ranged read returns only that span plus total_lines and the
-  resolved start_line/end_line. Ranges are capped (max 2000 lines); an oversized or
-  inverted range errors rather than silently widening the read. read_file returns the
+  read_file start_line/end_line are 1-based inclusive; both optional. A read returns at
+  most 2000 lines and at most 100 KB (102,400 bytes) of content, and a line longer than
+  2000 characters is cut to its first 2000 characters. A read with no range starts at
+  line 1; a file within all three limits comes back verbatim as content, plus
+  total_lines. Otherwise read_file returns the lines that fit joined with "\n",
+  total_lines, the resolved start_line and end_line, and a truncated note when a limit
+  cut the read. The note names the limit and, when the read stopped before the
+  requested lines ran out, the start_line that continues the read. An omitted end_line
+  reads to end of file or to the first limit reached. An explicit span over 2000 lines,
+  a start_line below 1 or past the end of the file, or an inverted range errors; an
+  end_line past the end clamps to the file's line count. read_file returns the
   requested content on every successful call, including a repeat read of an unchanged
   file, and writes nothing.
 
@@ -87,10 +94,10 @@ input_schema:
       description: "Whether to search recursively. Optional for find_in_files. Defaults to true."
     start_line:
       type: integer
-      description: "1-based inclusive first line to read. Optional for read_file. Omit to read from the top."
+      description: "1-based inclusive first line to read. Optional for read_file. Omit to read from line 1."
     end_line:
       type: integer
-      description: "1-based inclusive last line to read. Optional for read_file. Omit to read to EOF; clamps to the file's line count."
+      description: "1-based inclusive last line to read. Optional for read_file. Omitted, the read runs to end of file or to the first limit reached (2000 lines, 100 KB). Clamps to the file's line count. An explicit span over 2000 lines errors."
     context_lines:
       type: integer
       description: "Lines of context around each match (like grep -C). Optional for find_in_files. Defaults to 0 (no context); max 20."

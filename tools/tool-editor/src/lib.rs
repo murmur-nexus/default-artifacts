@@ -29,12 +29,16 @@ pub mod logic {
     const FIND_MAX_FILES: usize = 5_000;
     const FIND_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
-    // Upper bound on a single ranged `read_file` request, in lines. A bounded read exists to
-    // let an agent inspect a function instead of a whole module, so the cap enforces by
-    // construction that a ranged read is always *smaller* than the whole-file read it
-    // replaces. 2000 lines is generous enough to cover any single function or type while
-    // still being a small fraction of a large module.
-    const MAX_READ_RANGE_LINES: usize = 2000;
+    // read_file limits. Every read, with or without a range, returns at most this many lines,
+    // this many bytes of `content`, and no line longer than `MAX_LINE_CHARS`; a read cut by one
+    // of them still succeeds, with a `truncated` note built by `read_cut_note`.
+    const MAX_READ_LINES: usize = 2000;
+    // About 25,000 tokens at about 4 bytes per token, and above 2000 lines of ordinary source
+    // (30-45 bytes per line), so on normal code the line limit binds first.
+    const MAX_READ_BYTES: usize = 100 * 1024;
+    // Characters (Unicode scalar values) a returned line keeps. A cut line is at most 8,000
+    // bytes, so the first line of a read always fits under `MAX_READ_BYTES`.
+    const MAX_LINE_CHARS: usize = 2000;
 
     // Upper bound on `find_in_files` `context_lines`, mirroring the range a `grep -C` user
     // would realistically ask for. Beyond this the context stops being "the surrounding
@@ -54,7 +58,8 @@ pub mod logic {
         // start_line past the end of the file. All three are caller mistakes about *which*
         // lines to read, so they share one kind; the message states which one occurred.
         pub const INVALID_RANGE: &str = "invalid_range";
-        // read_file resolved span exceeds MAX_READ_RANGE_LINES — a valid but too-wide range.
+        // read_file explicit start_line/end_line span exceeds MAX_READ_LINES — a valid but
+        // too-wide range.
         pub const RANGE_TOO_LARGE: &str = "range_too_large";
         // find_in_files context_lines is negative or exceeds MAX_CONTEXT_LINES.
         pub const CONTEXT_TOO_LARGE: &str = "context_too_large";
@@ -167,32 +172,32 @@ pub mod logic {
         let start_arg = op.get("start_line").and_then(Value::as_i64);
         let end_arg = op.get("end_line").and_then(Value::as_i64);
 
-        // Whole-file read: the content verbatim, plus `total_lines` so an agent can size a
-        // follow-up ranged read.
-        if start_arg.is_none() && end_arg.is_none() {
-            return match std::fs::read_to_string(&path) {
-                Ok(content) => {
-                    let byte_count = content.len();
-                    let total_lines = content.lines().count();
-                    ok_with(
-                        format!("read {path}"),
-                        json!({
-                            "content": content,
-                            "total_lines": total_lines,
-                        }),
-                        format!("{byte_count} bytes"),
-                    )
-                }
-                Err(e) => err_result(io_error_kind(&e), format!("{path}: {e}")),
-            };
-        }
-
-        // Ranged read. The whole file is read to count its lines and validate the span.
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
             Err(e) => return err_result(io_error_kind(&e), format!("{path}: {e}")),
         };
         let total_lines = content.lines().count();
+
+        // A read with no range of a file within every limit: the content verbatim, plus
+        // `total_lines` so an agent can size a follow-up ranged read.
+        if start_arg.is_none()
+            && end_arg.is_none()
+            && total_lines <= MAX_READ_LINES
+            && content.len() <= MAX_READ_BYTES
+            && content
+                .lines()
+                .all(|line| line.chars().nth(MAX_LINE_CHARS).is_none())
+        {
+            let byte_count = content.len();
+            return ok_with(
+                format!("read {path}"),
+                json!({
+                    "content": content,
+                    "total_lines": total_lines,
+                }),
+                format!("{byte_count} bytes"),
+            );
+        }
 
         let start = start_arg.unwrap_or(1);
         if start < 1 {
@@ -211,49 +216,122 @@ pub mod logic {
         }
         // end defaults to EOF; an explicit end past EOF *clamps* (read-to-EOF is what an agent
         // means) — the one case that clamps instead of erroring.
-        let mut end = end_arg.unwrap_or(total_lines as i64);
-        if end > total_lines as i64 {
-            end = total_lines as i64;
-        }
-        if start > end {
+        let requested_end = end_arg.map_or(total_lines as i64, |e| e.min(total_lines as i64));
+        if start > requested_end {
             return err_result(
                 err::INVALID_RANGE,
-                format!("inverted range: start_line {start} is greater than end_line {end}"),
-            );
-        }
-
-        let start = start as usize;
-        let end = end as usize;
-        let span = end - start + 1;
-        if span > MAX_READ_RANGE_LINES {
-            return err_result(
-                err::RANGE_TOO_LARGE,
                 format!(
-                    "requested range of {span} lines exceeds the maximum of {MAX_READ_RANGE_LINES}; narrow start_line/end_line"
+                    "inverted range: start_line {start} is greater than end_line {requested_end}"
                 ),
             );
         }
 
-        // Slice `[start-1, end)` (0-based half-open), join with "\n". `lines()` already strips
-        // line terminators, so the join reproduces the original text of the span.
-        let sliced: String = content
-            .lines()
-            .skip(start - 1)
-            .take(end - start + 1)
-            .collect::<Vec<&str>>()
-            .join("\n");
-        let byte_count = sliced.len();
+        let start = start as usize;
+        let requested_end = requested_end as usize;
+        // Only an explicit span is refused; an omitted end_line reads up to the first limit.
+        if end_arg.is_some() {
+            let span = requested_end - start + 1;
+            if span > MAX_READ_LINES {
+                return err_result(
+                    err::RANGE_TOO_LARGE,
+                    format!(
+                        "requested range of {span} lines exceeds the maximum of {MAX_READ_LINES}; narrow start_line/end_line"
+                    ),
+                );
+            }
+        }
+        let line_end = requested_end.min(start + MAX_READ_LINES - 1);
 
-        ok_with(
-            format!("read {path} lines {start}-{end}"),
-            json!({
-                "content": sliced,
-                "total_lines": total_lines,
-                "start_line": start,
-                "end_line": end,
-            }),
-            format!("{byte_count} bytes (lines {start}-{end} of {total_lines})"),
-        )
+        // Lines `start..=line_end` in order, each cut to MAX_LINE_CHARS, until the next one
+        // would take `content` past MAX_READ_BYTES. `lines()` strips line terminators, so the
+        // "\n" join reproduces the original text of an uncut span.
+        let mut sliced = String::new();
+        let mut end = start - 1;
+        let mut cut_lines = 0;
+        let mut first_cut_line = None;
+        for (number, line) in (start..=line_end).zip(content.lines().skip(start - 1)) {
+            let (line, cut) = match line.char_indices().nth(MAX_LINE_CHARS) {
+                Some((at, _)) => (&line[..at], true),
+                None => (line, false),
+            };
+            let separator = usize::from(number > start);
+            if sliced.len() + separator + line.len() > MAX_READ_BYTES {
+                break;
+            }
+            if separator == 1 {
+                sliced.push('\n');
+            }
+            sliced.push_str(line);
+            end = number;
+            if cut {
+                cut_lines += 1;
+                first_cut_line.get_or_insert(number);
+            }
+        }
+
+        let stopped_at = if end < line_end {
+            Some(ReadLimit::Bytes)
+        } else if line_end < requested_end {
+            Some(ReadLimit::Lines)
+        } else {
+            None
+        };
+        let byte_count = sliced.len();
+        let mut data = json!({
+            "content": sliced,
+            "total_lines": total_lines,
+            "start_line": start,
+            "end_line": end,
+        });
+        let mut summary = format!("{byte_count} bytes (lines {start}-{end} of {total_lines}");
+        let lines_cut = first_cut_line.map(|first| (cut_lines, first));
+        if let Some(note) = read_cut_note(start, end, total_lines, stopped_at, lines_cut) {
+            data["truncated"] = Value::String(note);
+            summary.push_str(", truncated");
+        }
+        summary.push(')');
+
+        ok_with(format!("read {path} lines {start}-{end}"), data, summary)
+    }
+
+    /// The read_file limit that stopped a read before the lines it asked for ran out.
+    #[derive(Clone, Copy)]
+    enum ReadLimit {
+        Lines,
+        Bytes,
+    }
+
+    /// The `truncated` note of a cut read: the limit that stopped it and the `start_line` that
+    /// continues it, then how many returned lines were cut to [`MAX_LINE_CHARS`] and the first
+    /// of them. `lines_cut` is `(count, first line number)`. `None` when the read was not cut.
+    fn read_cut_note(
+        start: usize,
+        end: usize,
+        total_lines: usize,
+        stopped_at: Option<ReadLimit>,
+        lines_cut: Option<(usize, usize)>,
+    ) -> Option<String> {
+        let range = stopped_at.map(|reason| {
+            let limit = match reason {
+                ReadLimit::Lines => format!("the limit of {MAX_READ_LINES} lines"),
+                ReadLimit::Bytes => {
+                    format!("the limit of {}", format_result_size(MAX_READ_BYTES))
+                }
+            };
+            format!(
+                "Read stopped at {limit}. Lines {start}-{end} of {total_lines} are returned; start_line {} continues the read.",
+                end + 1
+            )
+        });
+        let cut = lines_cut.map(|(count, first)| {
+            format!(
+                "Lines longer than {MAX_LINE_CHARS} characters are cut to their first {MAX_LINE_CHARS} characters: {count} in this read, the first at line {first}."
+            )
+        });
+        match (range, cut) {
+            (Some(range), Some(cut)) => Some(format!("{range} {cut}")),
+            (range, cut) => range.or(cut),
+        }
     }
 
     fn op_write_file(op: &Value) -> Value {
@@ -1801,12 +1879,12 @@ pub mod logic {
         fn read_file_ranged_oversized_span_errors() {
             let dir = scratch("read_oversized");
             // A file larger than the cap, requested whole via an explicit span.
-            let path = write_numbered_file(&dir, "big.txt", MAX_READ_RANGE_LINES + 500);
+            let path = write_numbered_file(&dir, "big.txt", MAX_READ_LINES + 500);
             let op = json!({
                 "operation": "read_file",
                 "path": &path,
                 "start_line": 1,
-                "end_line": MAX_READ_RANGE_LINES + 500,
+                "end_line": MAX_READ_LINES + 500,
             });
 
             let out = op_read_file(&op);
@@ -1816,6 +1894,250 @@ pub mod logic {
                 .as_str()
                 .unwrap()
                 .contains("exceeds the maximum"));
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_end_only_span_over_the_line_limit_errors() {
+            let dir = scratch("read_end_only_oversized");
+            let path = write_numbered_file(&dir, "big.txt", 2500);
+            let op = json!({ "operation": "read_file", "path": &path, "end_line": 2500 });
+
+            let out = op_read_file(&op);
+            assert_eq!(out["ok"], false, "{out:?}");
+            assert_eq!(out["error_kind"], err::RANGE_TOO_LARGE);
+            assert_eq!(
+                out["message"],
+                "requested range of 2500 lines exceeds the maximum of 2000; narrow start_line/end_line"
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        // ── read_file limits: lines, bytes and line length ───────────────────────
+
+        // `first..=last` of a `write_numbered_file` fixture, joined as a read returns them.
+        fn numbered_lines(first: usize, last: usize) -> String {
+            (first..=last)
+                .map(|i| format!("line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        #[test]
+        fn read_file_with_no_range_stops_at_the_line_limit() {
+            let dir = scratch("read_line_limit");
+            let path = write_numbered_file(&dir, "big.txt", 5000);
+
+            let out =
+                run(&json!({ "data": { "operation": "read_file", "path": &path } }).to_string());
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(out["content"], numbered_lines(1, 2000));
+            assert!(out["content"].as_str().unwrap().ends_with("line 2000"));
+            assert_data_keys(
+                &out,
+                &[
+                    "content",
+                    "total_lines",
+                    "start_line",
+                    "end_line",
+                    "truncated",
+                ],
+            );
+            assert_eq!(out["total_lines"], 5000);
+            assert_eq!(out["start_line"], 1);
+            assert_eq!(out["end_line"], 2000);
+            assert_eq!(
+                out["truncated"],
+                "Read stopped at the limit of 2000 lines. Lines 1-2000 of 5000 are returned; start_line 2001 continues the read."
+            );
+            assert_eq!(out["message"], format!("read {path} lines 1-2000"));
+            assert!(
+                out["summary"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("(lines 1-2000 of 5000, truncated)"),
+                "{out:?}"
+            );
+            assert_eq!(out["metadata"]["state_effect"], "read");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_start_line_named_in_the_note_continues_the_read() {
+            let dir = scratch("read_continue");
+            let path = write_numbered_file(&dir, "big.txt", 5000);
+
+            let second = op_read_file(
+                &json!({ "operation": "read_file", "path": &path, "start_line": 2001 }),
+            );
+            assert_eq!(second["ok"], true, "{second:?}");
+            assert_eq!(second["content"], numbered_lines(2001, 4000));
+            assert_eq!(second["start_line"], 2001);
+            assert_eq!(second["end_line"], 4000);
+            assert!(
+                second["truncated"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("start_line 4001 continues the read."),
+                "{second:?}"
+            );
+
+            let last = op_read_file(
+                &json!({ "operation": "read_file", "path": &path, "start_line": 4001 }),
+            );
+            assert_eq!(last["ok"], true, "{last:?}");
+            assert_eq!(last["content"], numbered_lines(4001, 5000));
+            assert_eq!(last["start_line"], 4001);
+            assert_eq!(last["end_line"], 5000);
+            assert_data_keys(&last, &["content", "total_lines", "start_line", "end_line"]);
+            assert_eq!(
+                last["summary"],
+                format!(
+                    "{} bytes (lines 4001-5000 of 5000)",
+                    numbered_lines(4001, 5000).len()
+                )
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_with_no_range_within_every_limit_is_verbatim() {
+            let dir = scratch("read_fits");
+            let path = write_numbered_file(&dir, "f.txt", MAX_READ_LINES);
+            let expected = fs::read_to_string(&path).unwrap();
+            assert!(expected.len() <= MAX_READ_BYTES);
+
+            let out = op_read_file(&json!({ "operation": "read_file", "path": &path }));
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(out["content"], expected.as_str());
+            assert!(out["content"].as_str().unwrap().ends_with("line 2000\n"));
+            assert_eq!(out["total_lines"], MAX_READ_LINES);
+            assert_data_keys(&out, &["content", "total_lines"]);
+            assert_eq!(out["message"], format!("read {path}"));
+            assert_eq!(out["summary"], format!("{} bytes", expected.len()));
+
+            let empty = dir.join("empty.txt");
+            fs::write(&empty, "").unwrap();
+            let out =
+                op_read_file(&json!({ "operation": "read_file", "path": empty.to_string_lossy() }));
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(out["content"], "");
+            assert_eq!(out["total_lines"], 0);
+            assert_data_keys(&out, &["content", "total_lines"]);
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        // 60 lines of 1,900 `x`, 114,060 bytes: over the byte limit and under the line limit.
+        fn write_wide_file(dir: &std::path::Path) -> String {
+            let path = dir.join("wide.txt");
+            fs::write(&path, format!("{}\n", "x".repeat(1900)).repeat(60)).unwrap();
+            path.to_string_lossy().to_string()
+        }
+
+        // 53×1900+52 = 100,752 ≤ 102,400 < 54×1900+53 = 102,653: 53 lines fit.
+        const WIDE_NOTE: &str = "Read stopped at the limit of 100 KB. Lines 1-53 of 60 are returned; start_line 54 continues the read.";
+
+        #[test]
+        fn read_file_with_no_range_stops_at_the_byte_limit() {
+            let dir = scratch("read_byte_limit");
+            let path = write_wide_file(&dir);
+            assert_eq!(fs::metadata(&path).unwrap().len(), 114_060);
+
+            let out = op_read_file(&json!({ "operation": "read_file", "path": &path }));
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(out["start_line"], 1);
+            assert_eq!(out["end_line"], 53);
+            assert_eq!(out["total_lines"], 60);
+            assert_eq!(out["content"].as_str().unwrap().len(), 100_752);
+            assert!(out["content"].as_str().unwrap().len() <= MAX_READ_BYTES);
+            assert_eq!(out["truncated"], WIDE_NOTE);
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_explicit_span_stops_at_the_byte_limit() {
+            let dir = scratch("read_byte_limit_span");
+            let path = write_wide_file(&dir);
+
+            let out = op_read_file(
+                &json!({ "operation": "read_file", "path": &path, "start_line": 1, "end_line": 60 }),
+            );
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(out["start_line"], 1);
+            assert_eq!(out["end_line"], 53);
+            assert_eq!(out["content"].as_str().unwrap().len(), 100_752);
+            assert_eq!(out["truncated"], WIDE_NOTE);
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_cuts_a_long_line_to_its_first_2000_characters() {
+            let dir = scratch("read_long_line");
+            let one = dir.join("one.txt");
+            fs::write(&one, "a".repeat(50_000)).unwrap();
+
+            let out =
+                op_read_file(&json!({ "operation": "read_file", "path": one.to_string_lossy() }));
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(out["content"], "a".repeat(2000));
+            assert_eq!(out["start_line"], 1);
+            assert_eq!(out["end_line"], 1);
+            assert_eq!(out["total_lines"], 1);
+            assert_eq!(
+                out["truncated"],
+                "Lines longer than 2000 characters are cut to their first 2000 characters: 1 in this read, the first at line 1."
+            );
+
+            // Multi-byte characters are cut on a char boundary: 2000 `é` are 4000 bytes.
+            let accents = dir.join("accents.txt");
+            fs::write(&accents, format!("first\n{}\nthird\n", "é".repeat(3000))).unwrap();
+            let out = op_read_file(
+                &json!({ "operation": "read_file", "path": accents.to_string_lossy() }),
+            );
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(
+                out["content"],
+                format!("first\n{}\nthird", "é".repeat(2000))
+            );
+            assert_eq!("é".repeat(2000).len(), 4000);
+            assert_eq!(out["end_line"], 3);
+            assert!(
+                out["truncated"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("1 in this read, the first at line 2."),
+                "{out:?}"
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_file_note_names_the_line_limit_then_the_cut_lines() {
+            let dir = scratch("read_both_notes");
+            let path = write_numbered_file(&dir, "f.txt", 2500);
+            let mut lines: Vec<String> = fs::read_to_string(&path)
+                .unwrap()
+                .lines()
+                .map(str::to_string)
+                .collect();
+            lines[9] = "b".repeat(2500);
+            fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+            let out = op_read_file(&json!({ "operation": "read_file", "path": &path }));
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(out["end_line"], 2000);
+            assert_eq!(
+                out["truncated"],
+                "Read stopped at the limit of 2000 lines. Lines 1-2000 of 2500 are returned; start_line 2001 continues the read. Lines longer than 2000 characters are cut to their first 2000 characters: 1 in this read, the first at line 10."
+            );
 
             let _ = fs::remove_dir_all(&dir);
         }
@@ -2527,7 +2849,8 @@ mod wasm_tool {
             // a string used verbatim, else a non-null value re-serialized, else None. This
             // reproduces the pre-port `ToolResult.data` byte-for-byte (e.g. whole-file read ->
             // `{"content":...,"total_lines":...}`, ranged read -> the same plus
-            // `start_line`/`end_line`, write/error -> None). Status/summary/state_effect carry the rest.
+            // `start_line`/`end_line`, cut read -> the ranged shape plus `truncated`,
+            // write/error -> None). Status/summary/state_effect carry the rest.
             let data = result
                 .get("data")
                 .and_then(Value::as_str)
@@ -2540,8 +2863,11 @@ mod wasm_tool {
                 });
 
             // A find_in_files search stopped by one of its limits carries a `capped` note in
-            // `data`; `truncated` tells a UI the same without parsing it.
-            let truncated = result.get("data").and_then(|d| d.get("capped")).is_some();
+            // `data`, and a read_file cut by one of its limits a `truncated` note; `truncated`
+            // tells a UI the same without parsing either.
+            let truncated = result
+                .get("data")
+                .is_some_and(|d| d.get("capped").is_some() || d.get("truncated").is_some());
 
             ToolResult {
                 status,
