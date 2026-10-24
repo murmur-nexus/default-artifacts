@@ -1843,6 +1843,39 @@ mod tests {
         assert_eq!(result["content"][0]["text"], "Hello world");
     }
 
+    #[test]
+    fn model_context_window_exceeded_is_refused_not_mapped_to_max_tokens() {
+        // murmur's `max_tokens` means the turn stopped at the `inference.max_tokens` output cap,
+        // and it has no stop reason for a reply cut at the context window.
+        const REFUSAL: &str =
+            "driver: unsupported Anthropic stop_reason 'model_context_window_exceeded'";
+
+        let body = json!({"stop_reason": "model_context_window_exceeded", "content": []});
+        assert_eq!(
+            translate_anthropic_response_to_murmur(&body),
+            Err(REFUSAL.to_string())
+        );
+
+        let stream = concat!(
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n",
+            "\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"model_context_window_exceeded\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":1}}\n",
+            "\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n",
+            "\n",
+        );
+        assert_eq!(
+            parse_anthropic_sse_body(stream, &mut |_| {}, &mut |_| {}),
+            Err(REFUSAL.to_string())
+        );
+    }
+
     // ── Malformed, provider-error and refused responses ──────────────────────
 
     const REFUSED: &str = "Anthropic response refused";
@@ -3556,6 +3589,8 @@ mod tests {
         struct Limits {
             max_output_tokens: u32,
             context_window: u32,
+            #[serde(default)]
+            max_input_tokens: Option<u32>,
         }
 
         // Parsed with the crate murmur parses the bundled manifest with.
@@ -3570,9 +3605,16 @@ mod tests {
                     && limits.max_output_tokens <= limits.context_window,
                 "models.{id}: {limits:?} must satisfy 1 <= max_output_tokens <= context_window"
             );
+            if let Some(ceiling) = limits.max_input_tokens {
+                assert!(
+                    ceiling >= 1 && ceiling < limits.context_window,
+                    "models.{id}: {limits:?} must satisfy 1 <= max_input_tokens < context_window"
+                );
+            }
         }
 
-        // README.md's "Model limits" table: | `<id>` | <max_output_tokens> | <context_window> | …
+        // README.md's "Model limits" table:
+        // | `<id>` | <max_output_tokens> | <context_window> | <max_input_tokens or none> | …
         let readme = include_str!("../README.md");
         let section = readme
             .split("\n## ")
@@ -3581,7 +3623,7 @@ mod tests {
         let mut documented = BTreeMap::new();
         for row in section.lines() {
             let cells: Vec<&str> = row.split('|').map(str::trim).collect();
-            let [_, id, out, ctx, ..] = cells[..] else {
+            let [_, id, out, ctx, input, ..] = cells[..] else {
                 continue;
             };
             let Some(id) = id.strip_prefix('`').and_then(|id| id.strip_suffix('`')) else {
@@ -3591,9 +3633,16 @@ mod tests {
                 cell.parse()
                     .unwrap_or_else(|_| panic!("README.md row '{id}': '{cell}' is not an integer"))
             };
+            let ceiling = match input {
+                "none" => None,
+                cell => Some(cell.parse().unwrap_or_else(|_| {
+                    panic!("README.md row '{id}': '{cell}' is not an integer or none")
+                })),
+            };
             let limits = Limits {
                 max_output_tokens: number(out),
                 context_window: number(ctx),
+                max_input_tokens: ceiling,
             };
             assert!(
                 documented.insert(id.to_string(), limits).is_none(),

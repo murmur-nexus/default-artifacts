@@ -28,7 +28,7 @@ set but empty`. Neither reaches the network. Requests go to
 ```yaml
 artifacts:
   - name: murmur/driver-moonshotai
-    version: "0.12.0"
+    version: "0.13.0"
     runtime: driver
     gateway:
       endpoint: https://api.moonshot.ai/v1
@@ -37,6 +37,7 @@ artifacts:
 inference:
   transport: http
   model: kimi-k3
+  max_tokens: 131072     # Moonshot's default; left unset, murmur after v0.7.0 refuses the launch (E-RUN-055)
   driver:
     artifact: murmur/driver-moonshotai
 ```
@@ -47,7 +48,7 @@ inference:
 | `inference.model` | yes | — (must be `kimi-k3`) |
 | `gateway.endpoint` | yes | — |
 | `gateway.api_key` | yes, unless the entry declares `keyless: true` | — without either, the launch fails with `E-CAP-018` |
-| `inference.max_tokens` | no | `1048576`, from `models:` — see [Model limits](#model-limits); ceiling `1048576` |
+| `inference.max_tokens` | no | `1048576`, from `models:`, which equals the window, so murmur refuses the launch with `E-RUN-055` — see [Model limits](#model-limits); ceiling `1048576` |
 | `context.max_tokens` | no | `1048576`, from `models:` |
 | `inference.driver.config` | no | `{}` — see below |
 
@@ -63,30 +64,39 @@ branches on the model name.
 
 ## Model limits
 
-| Model | max_output_tokens | context_window | Source |
-|---|---|---|---|
-| `kimi-k3` | 1048576 | 1048576 | Read 2026-10-23. Output: <https://platform.kimi.ai/docs/api/chat>, `max_completion_tokens`: "for Kimi K3-series models (kimi-k3.1-pro, kimi-k3.1-pro-highspeed, kimi-k3) it defaults to 131072 and can be set up to 1048576". Window: <https://platform.kimi.ai/docs/pricing/chat>, "All K3 series models support a 1,048,576-token context window." The input alone "must be less than the model context window size" |
+| Model | max_output_tokens | context_window | max_input_tokens | Source |
+|---|---|---|---|---|
+| `kimi-k3` | 1048576 | 1048576 | none | Read 2026-10-23. Output: <https://platform.kimi.ai/docs/api/chat>, `max_completion_tokens`: "for Kimi K3-series models (kimi-k3.1-pro, kimi-k3.1-pro-highspeed, kimi-k3) it defaults to 131072 and can be set up to 1048576". Window: <https://platform.kimi.ai/docs/pricing/chat>, "All K3 series models support a 1,048,576-token context window." The input alone "must be less than the model context window size" |
 
 The limits live in one table, `SUPPORTED_MODELS` in `src/lib.rs`, and
-`murmur.yaml` declares the same numbers under `models:`. A test fails if the two
-disagree, or if this table disagrees with `murmur.yaml`.
+`murmur.yaml` declares the same numbers under `models:`, the `none` as no
+`max_input_tokens` key. A test fails if the two disagree, or if this table
+disagrees with `murmur.yaml`.
 
-`max_output_tokens` equals the whole window, and that is safe as the default
-cap: when `prompt_tokens` plus `max_completion_tokens` exceeds the window,
-Moonshot lowers the generation limit for that request to fit the remaining
-context and serves it.
+Moonshot documents no input ceiling separate from the window: the input alone
+must be less than the window, so `kimi-k3` declares no `max_input_tokens`.
+`max_output_tokens` equals the whole window. When `prompt_tokens` plus
+`max_completion_tokens` exceeds the window, Moonshot lowers the generation limit
+for that request to fit the remaining context and serves it.
 
-Compaction fires when occupancy crosses `inference.compaction.threshold`
-(default `0.98`) of the window. Moonshot refuses a prompt that alone fills the
-window, so a session that would reach that limit before compaction fires sets
-`inference.compaction.threshold` or `context.max_tokens` lower.
+murmur compacts against one input budget per call:
+`min(max_input_tokens, context_window − output cap)`, which with no
+`context.max_tokens` is `1048576 −` the output cap. `inference.compaction.threshold` and
+`context.seed_budget` are fractions of that budget. On the first murmur release
+after v0.7.0:
+
+| Capsule sets | Result |
+|---|---|
+| no `inference.max_tokens` | the output cap defaults to `1048576`, equal to the window, so the input budget is `0` and murmur refuses the launch with `E-RUN-055` |
+| an `inference.max_tokens` below `1048576` | an input budget of `1048576 −` that cap |
+| an `inference.max_tokens` of `1048576` or more | no input budget; murmur refuses the launch with `E-RUN-055` |
 
 Whether the runtime reads `models:` depends on the murmur release:
 
 | murmur | What it does with `models:` | What the capsule sets |
 |---|---|---|
 | v0.7.0 and earlier | ignores it; an unknown manifest key is a `W-SEC-019` warning, never a refusal | `inference.max_tokens` and `context.max_tokens`; left unset, the runtime's own defaults apply, not `kimi-k3`'s limits |
-| the first release after v0.7.0 | defaults the output cap and context window from it when the capsule leaves them unset, and caps a hook's `run-inference` (e.g. `hook-compact`) at its `max_output_tokens` | nothing, unless it wants tighter limits than the table |
+| the first release after v0.7.0 | defaults the output cap and context window from it when the capsule leaves them unset, reads `max_input_tokens` as the input ceiling, measures compaction and the seed budget against the input budget, and caps a hook's `run-inference` (e.g. `hook-compact`) at its `max_output_tokens` | an `inference.max_tokens` below `1048576`, since the default cap leaves no input budget |
 
 A capsule value always wins: the runtime never clamps or raises
 `inference.max_tokens` or `context.max_tokens` to the table.

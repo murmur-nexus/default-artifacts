@@ -62,23 +62,33 @@ no case folding and no prefix match, so `GLM-5.3`, `glm-5.3-flash` and `glm-5.2`
 are all refused. The check runs before a request body is built, so an
 unsupported model costs no HTTP call.
 
-| Model | `max_output_tokens` | `context_window` |
-|---|---|---|
-| `glm-5.3` | `131072` | `1048576` |
+| Model | `max_output_tokens` | `context_window` | `max_input_tokens` |
+|---|---|---|---|
+| `glm-5.3` | `131072` | `1048576` | `none` |
 
 | Limit | Source |
 |---|---|
 | `max_output_tokens: 131072` | Z.ai's GLM-5.3 guide gives a maximum output of 128K tokens, and Z.ai answers `max_tokens: 131073` with HTTP 400 code `1210`, "限制数值范围[1,131072]" |
 | `context_window: 1048576` | the GLM-5.3 guide's "1M-token context window"; the model weights' `max_position_embeddings` is `1048576` |
+| `max_input_tokens`: none | neither the GLM-5.3 guide ("a 1M-token context window and a maximum output length of 128K tokens") nor the chat-completions API reference documents an input ceiling separate from the window |
 
 The limits live in one table, `SUPPORTED_MODELS` in `src/lib.rs`, and
 `murmur.yaml` declares the same numbers under `models:`. A test fails if the two
-disagree. Whether the runtime reads that block depends on the murmur release:
+disagree.
+
+murmur compacts against one input budget per call:
+`min(max_input_tokens, context_window − output cap)`, which here is
+`context_window − output cap`. `inference.compaction.threshold` and
+`context.seed_budget` are fractions of that budget. With the default cap of
+`131072`, the budget is `1048576 − 131072 = 917504` tokens. An
+`inference.max_tokens` the capsule sets changes the `window − output cap` term.
+
+Whether the runtime reads that block depends on the murmur release:
 
 | murmur | What it does with `models:` | What the capsule sets |
 |---|---|---|
 | v0.7.0 and earlier | ignores it; an unknown manifest key is a `W-SEC-019` warning, never a refusal | `inference.max_tokens` and `context.max_tokens`; left unset, the runtime's own defaults apply, not `glm-5.3`'s limits |
-| the first release after v0.7.0 | defaults the output cap and context window from it when the capsule leaves them unset, and caps a hook's `run-inference` (e.g. `hook-compact`) at its `max_output_tokens` | nothing, unless it wants tighter limits than the table |
+| the first release after v0.7.0 | defaults the output cap and context window from it when the capsule leaves them unset, reads `max_input_tokens` as the input ceiling, measures compaction and the seed budget against the input budget, and caps a hook's `run-inference` (e.g. `hook-compact`) at its `max_output_tokens` | nothing, unless it wants tighter limits than the table |
 
 ## Config keys
 

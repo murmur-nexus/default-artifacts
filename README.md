@@ -73,10 +73,13 @@ names the index and the limit, before anything is stored for it. Each driver's R
 exact message.
 
 All five declare the output cap and context window of the models they serve, under `models:` in
-their `murmur.yaml`. A murmur release after v0.7.0 takes a capsule's `inference.max_tokens` and
-`context.max_tokens` from that table when the capsule leaves them unset. A model a driver does not
-list still needs `inference.max_tokens`, or the launch is refused with `E-RUN-052`, and needs
-`context.max_tokens` for compaction to run. Each driver's README lists its models, the numbers and
+their `murmur.yaml`, and `max_input_tokens` for a model whose provider documents an input ceiling
+below the window. Of the five providers, only OpenAI documents one. A murmur release after v0.7.0
+takes a capsule's `inference.max_tokens` and `context.max_tokens` from that table when the capsule
+leaves them unset, and compacts against the input budget,
+`min(max_input_tokens, context_window − output cap)`. A model a driver does not list still needs
+`inference.max_tokens`, or the launch is refused with `E-RUN-052`, and needs `context.max_tokens`
+for compaction to run. Each driver's README lists its models, the numbers and
 their sources, and the models it accepts without declaring:
 
 | Artifact | First release with `models:` | README section |

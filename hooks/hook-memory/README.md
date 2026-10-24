@@ -76,8 +76,8 @@ artifacts:
 |---|---|---|---|
 | `capabilities.conversation.read: true` | runtime | yes | The conversation record. Without it the hook can read nothing and fails loudly — see below. |
 | `capabilities.task_io.read: true` | runtime | no | Relevance selection instead of recency: the hook scores each candidate message by how much of the task's wording it shares. Without it, or when the task is not yet in scope, the newest messages are seeded instead. |
-| `context.max_tokens` | runtime | yes | The hook's seed budget is `context.max_tokens × context.seed_budget`. |
-| `context.seed_budget` | runtime | no | Fraction of `max_tokens` a seed may occupy; defaults to `0.10`. |
+| A context window: `context.max_tokens`, or the driver's `models:` entry for the model | runtime | yes | The input budget the seed budget is cut from, `min(max_input_tokens, window − output cap)`. The hook's seed budget is `context.seed_budget` × that input budget. |
+| `context.seed_budget` | runtime | no | Fraction of the input budget a seed may occupy; defaults to `0.10`. |
 | `config.seed_roles` | this hook | no | Which record roles may be seeded. See below. |
 
 The runtime consumes the `capabilities:` and `context:` keys: it gates the host
@@ -144,7 +144,7 @@ records directory, at all.
 
 | Situation | Why |
 |---|---|
-| The capsule declares no `context.max_tokens` | The task's `budget-tokens` arrives as `0`, meaning "not computed" rather than "unbounded". A seed proposed against it would be refused anyway, with `reason: "no_budget"`. |
+| No context window: neither `context.max_tokens` nor a `models:` entry for the model | The task's `budget-tokens` arrives as `0`, meaning "not computed" rather than "unbounded". A seed proposed against it would be refused anyway, with `reason: "no_budget"`. |
 | `lifecycle.conversation: threaded` | The runtime has already reloaded this conversation's history into the task. Seeding on top of it would duplicate it. |
 | The record is empty | **Not an error.** The two ordinary causes are a first-ever run — nothing has been recorded yet — and a capsule running `inference.transport: process`, whose CLI owns its own conversation and puts no message list in front of the model, so no record is ever written. `context.record: off` does the same. |
 
