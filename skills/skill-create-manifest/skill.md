@@ -410,7 +410,9 @@ inference:
 `driver-openai` accepts only the OpenAI models its README lists, and refuses any other id,
 including an OpenAI-compatible provider's. For Z.ai's GLM, use `murmur/driver-zai` with
 `gateway.endpoint: https://api.z.ai/api/paas/v4` and `inference.model: glm-5.3`; see its row in
-§10.
+§10. For GLM 5.3 on Baseten's Model APIs, use `murmur/driver-baseten` with
+`gateway.endpoint: https://inference.baseten.co/v1` and `inference.model: zai-org/GLM-5.3`; see its
+row in §10.
 
 ---
 
@@ -628,6 +630,7 @@ name its `artifacts:` entry uses. For live discovery, use `mur search <keyword>`
 | Artifact | Runtime | Description |
 |---|---|---|
 | `murmur/driver-anthropic` | driver | Anthropic Messages API inference driver. Use with `gateway.endpoint: https://api.anthropic.com` |
+| `murmur/driver-baseten` | driver | Baseten Model APIs inference driver: `zai-org/GLM-5.3` only, on the Chat Completions surface, with a `reasoning_effort` config key; its reasoning goes back to Baseten on every later turn, and a task's turns share one `x-session-affinity`. Use with `gateway.endpoint: https://inference.baseten.co/v1` |
 | `murmur/driver-claude-code` | driver | Process driver for the `claude` CLI (Claude Code). The harness authenticates itself, so a turn spends a Claude subscription rather than an API key; the driver holds no credential and is granted nothing. Use with `inference.transport: process` and `capabilities.env.allow: [HOME, PATH]`; its entry takes no `gateway:`. |
 | `murmur/driver-deepseek` | driver | DeepSeek inference driver: `deepseek-flash` and `deepseek-v4-pro`, with thinking mode; any other model is refused. Use with `gateway.endpoint` set to DeepSeek's API base URL; it appends `/chat/completions`. |
 | `murmur/driver-moonshotai` | driver | Moonshot AI inference driver: `kimi-k3.1-pro`, `kimi-k3.1-pro-highspeed` and `kimi-k3` with a `reasoning_effort` config key, and `kimi-k2.7-code`, `kimi-k2.7-code-highspeed` and `kimi-k2.6` (Moonshot retires K2 by the end of December 2026), on the Chat Completions surface; `kimi-k2.6` takes a `thinking` config key, and every model takes `response_format`. Use with `gateway.endpoint: https://api.moonshot.ai/v1` |

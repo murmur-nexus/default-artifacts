@@ -1,0 +1,17 @@
+name: driver-baseten
+version: 0.1.0
+runtime: driver
+description: "Baseten Model APIs inference driver — zai-org/GLM-5.3 on the Chat Completions surface, with a reasoning_effort config key"
+requires_files:
+  - driver_baseten.wasm
+
+# How this provider expects the inference credential to be presented; the runtime substitutes {key}.
+upstream_auth:
+  header: Authorization
+  value: "Bearer {key}"
+
+# The limits of each model this driver serves; src/lib.rs's SUPPORTED_MODELS holds the same numbers.
+models:
+  zai-org/GLM-5.3:
+    max_output_tokens: 262144
+    context_window: 1048576

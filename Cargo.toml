@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "drivers/driver-anthropic",
+  "drivers/driver-baseten",
   "drivers/driver-claude-code",
   "drivers/driver-deepseek",
   "drivers/driver-moonshotai",

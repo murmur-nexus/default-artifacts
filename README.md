@@ -32,14 +32,15 @@ WASM components (`runtime: driver`). Export `murmur:tool/run` (`world driver`) a
 | Artifact | Location | Description |
 |---|---|---|
 | `driver-anthropic` | `drivers/driver-anthropic/` | Anthropic Messages API, with extended thinking and prompt-cache breakpoints; caching is tuned by a `config:` block on its manifest entry |
+| `driver-baseten` | `drivers/driver-baseten/` | Baseten Model APIs Chat Completions — `zai-org/GLM-5.3` only, which always reasons; reasoning effort is tuned by `inference.driver.config`, which rejects any key it does not read, the reasoning goes back on later turns, and a task's turns share Baseten's session affinity |
 | `driver-deepseek` | `drivers/driver-deepseek/` | DeepSeek API — `deepseek-flash` and `deepseek-v4-pro`, with thinking mode; any other model is refused |
 | `driver-moonshotai` | `drivers/driver-moonshotai/` | Moonshot AI Chat Completions API — the K3 models `kimi-k3.1-pro`, `kimi-k3.1-pro-highspeed` and `kimi-k3`, and the K2 models `kimi-k2.7-code`, `kimi-k2.7-code-highspeed` and `kimi-k2.6`, which Moonshot retires by the end of December 2026; reasoning effort (K3), the thinking switch (`kimi-k2.6`) and `json_schema` structured output are tuned by `inference.driver.config`, which rejects any key it does not read or the model cannot honour |
 | `driver-openai` | `drivers/driver-openai/` | OpenAI API — sends each model it lists to the Responses or Chat Completions endpoint that model's page lists, and refuses any other model; reasoning summaries, effort and verbosity are tuned by `inference.driver.config`, which rejects any key it does not read |
 | `driver-zai` | `drivers/driver-zai/` | Z.ai Chat Completions API — `glm-5.3` only, which always reasons; reasoning effort is tuned by `inference.driver.config`, which rejects any key it does not read, and the reasoning goes back to Z.ai on every later turn |
 
-All five report the provider's own token counts on an optional top-level `usage` object of the response — `input_tokens`, `output_tokens`, `cached_tokens`, `cache_write_tokens` — which Murmur carries onto the `inference` trace event. `input_tokens` counts only the request tokens neither read from nor written to the prompt cache, so `input_tokens + cached_tokens + cache_write_tokens` is the provider's total request count, whichever way the provider itself splits it. Each member is independently optional and is omitted, never zero-filled, when the provider did not report it. `driver-openai` also forwards Murmur's `prompt_cache_key` routing hint into the provider body; the other four drop it, because none of those provider APIs defines a cache-key field. See each driver's own README for the per-provider field mapping.
+All six report the provider's own token counts on an optional top-level `usage` object of the response — `input_tokens`, `output_tokens`, `cached_tokens`, `cache_write_tokens` — which Murmur carries onto the `inference` trace event. `input_tokens` counts only the request tokens neither read from nor written to the prompt cache, so `input_tokens + cached_tokens + cache_write_tokens` is the provider's total request count, whichever way the provider itself splits it. Each member is independently optional and is omitted, never zero-filled, when the provider did not report it. Murmur also sends a `prompt_cache_key` routing hint: `driver-openai` forwards it into the provider body, `driver-baseten` sends a SHA-256 of it as Baseten's `x-session-affinity` header, and the other four drop it, because none of those provider APIs defines a cache-key field. See each driver's own README for the per-provider field mapping.
 
-All five also take the endpoint they talk to from the host, in
+All six also take the endpoint they talk to from the host, in
 `MURMUR_INFERENCE_ENDPOINT`, and none of them carries a provider URL of its own.
 The capsule manifest therefore names the provider as `gateway.endpoint` on the
 driver's `artifacts:` entry, with the key as `gateway.api_key`; the runtime hands
@@ -48,7 +49,7 @@ key to each request it sends on. An endpoint that is absent, empty or
 whitespace-only is refused before any request is built, never replaced with a
 provider default.
 
-All five stream text and thinking, and report each tool call while the model is still writing
+All six stream text and thinking, and report each tool call while the model is still writing
 it, through `murmur:stream/events@0.1.0`: the call's start, with the id and name of the
 `tool_call` the driver will return, then a rising UTF-8 byte count of its arguments, never the
 arguments themselves. On `transport: http` these become `tool-call-started` and
@@ -59,6 +60,7 @@ see above) refuses a driver release built before it at launch, with `E-WIT-LEVEL
 | Artifact | First release on `murmur:stream/events` |
 |---|---|
 | `driver-anthropic` | 0.10.0 |
+| `driver-baseten` | 0.1.0 |
 | `driver-deepseek` | 0.8.0 |
 | `driver-moonshotai` | 0.7.0 |
 | `driver-openai` | 0.9.0 |
@@ -66,26 +68,27 @@ see above) refuses a driver release built before it at launch, with `E-WIT-LEVEL
 
 See each driver's "Tool-call progress" section for the provider event each report is taken from.
 
-All five hold at most 1024 tool calls per streamed turn, numbered 0 through 1023 by the provider's
+All six hold at most 1024 tool calls per streamed turn, numbered 0 through 1023 by the provider's
 own `index` (`driver-anthropic` counts content blocks; `driver-openai` applies it on Chat
 Completions only). A stream naming index 1024 or more fails the turn with a `driver:` error that
 names the index and the limit, before anything is stored for it. Each driver's README gives the
 exact message.
 
-All five declare the output cap and context window of the models they serve, under `models:` in
+All six declare the output cap and context window of the models they serve, under `models:` in
 their `murmur.yaml`, and `max_input_tokens` for a model whose provider documents an input ceiling
-below the window. Of the five providers, only OpenAI documents one. A murmur release after v0.7.0
+below the window. Of the six providers, only OpenAI documents one. A murmur release after v0.7.0
 takes a capsule's `inference.max_tokens` and `context.max_tokens` from that table when the capsule
 leaves them unset, and compacts against the input budget,
 `min(max_input_tokens, context_window − output cap)`. A model a driver does not list still needs
 `inference.max_tokens`, or the launch is refused with `E-RUN-052`, and needs `context.max_tokens`
-for compaction to run; `driver-deepseek`, `driver-moonshotai` and `driver-openai` then refuse it on
-the first inference call. Each driver's README lists its models, the numbers and their sources,
+for compaction to run; `driver-baseten`, `driver-deepseek`, `driver-moonshotai`, `driver-openai`
+and `driver-zai` then refuse it on the first inference call. Each driver's README lists its models, the numbers and their sources,
 and the models it accepts without declaring or refuses:
 
 | Artifact | First release with `models:` | README section |
 |---|---|---|
 | `driver-anthropic` | 0.14.0 | "Model limits", "Models without declared limits" |
+| `driver-baseten` | 0.1.0 | "Model scope" |
 | `driver-deepseek` | 0.13.0 | "Model limits", "Models this driver refuses" |
 | `driver-moonshotai` | 0.12.0 | "Model limits", "Models this driver refuses" |
 | `driver-openai` | 0.14.0 | "Endpoints", "Model limits", "Models this driver refuses" |

@@ -608,6 +608,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "driver-baseten"
+version = "0.0.0"
+dependencies = [
+ "murmur-driver-env",
+ "murmur-driver-stream",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "wasip2",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
 name = "driver-claude-code"
 version = "0.0.0"
 dependencies = [
