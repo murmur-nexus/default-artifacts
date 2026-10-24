@@ -28,7 +28,7 @@ directory's path and the name each of the session's tools opens it by.
 | Every skill is a tool that returns its `skill.md` when called by name; the one named in `inference.system_prompt_artifact` is bound as the system prompt instead | §2, §7 |
 | `inference.system_prompt_artifact`, and that at most one of `system_prompt`, `system_prompt_file` and `system_prompt_artifact` may be set (`E-MAN-003`) | §7 |
 | The `task_io.read: true` hook grant, a host import (`murmur:task-io/read`) rather than a directory | §4.3a |
-| A catalog row for each of the 27 default artifacts, with what its entry needs | §10 |
+| A catalog row for each of the 28 default artifacts, with what its entry needs | §10 |
 | Pins that each equal the pinned artifact's current version | §3, §7, §8, §10 |
 
 0.5.0 also teaches:
@@ -38,3 +38,10 @@ directory's path and the name each of the session's tools opens it by.
 | `murmur/driver-zai` for Z.ai's GLM, with `gateway.endpoint: https://api.z.ai/api/paas/v4` and `inference.model: glm-5.3` | §7 |
 | `gateway.keyless: true` for an upstream that takes no key, and its `E-MAN-003` and `E-CAP-018` refusals | §7 |
 | Finding the runtime directory, and each skill's `skill.md` in it, through MURMUR.md's `- Runtime directory:` entry | §2 |
+
+0.6.0 also teaches:
+
+| What | Where `skill.md` teaches it |
+|---|---|
+| `murmur/driver-baseten` for GLM 5.3 on Baseten's Model APIs, with `gateway.endpoint: https://inference.baseten.co/v1` and `inference.model: zai-org/GLM-5.3` | §7 |
+| A catalog row for `murmur/driver-baseten` | §10 |
