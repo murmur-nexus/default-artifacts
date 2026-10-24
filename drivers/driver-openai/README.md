@@ -162,8 +162,9 @@ driver: model 'o3-pro' is not supported by driver-openai. Supported models: gpt-
 | audio, realtime, transcription, speech, image, embedding and moderation models, such as `gpt-audio-1.5` or `gpt-realtime-2.1` | they do not generate text on an endpoint this driver calls |
 | any other id, including an OpenAI-compatible provider's ids such as `llama3.1:8b` | not on OpenAI's all-models page. Z.ai's GLM models have their own driver, `driver-zai` |
 
-None of these has a `models:` entry. The runtime checks for one at launch,
-before the driver sees a request:
+None of these has a `models:` entry. A murmur release after v0.7.0 checks for
+one at launch, before the driver sees a request; on v0.7.0 and earlier every
+row launches and the driver refuses the first inference call:
 
 | Capsule sets | Result |
 |---|---|

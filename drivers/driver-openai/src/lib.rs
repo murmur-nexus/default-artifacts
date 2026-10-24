@@ -305,13 +305,11 @@ fn verbatim_string_key(config: &Map<String, Value>, key: &str) -> Result<Option<
 
 // ── Provider-field incompatibility ────────────────────────────────────────────
 
-/// Fields the Chat Completions surface does not define at all. Both are Responses-only
+/// Fields this driver keeps off Chat Completions. `reasoning` and `text` are Responses-only
 /// containers: `reasoning` holds the effort and summary dials, `text` holds `verbosity`.
-const CHAT_COMPLETIONS_UNSUPPORTED_FIELDS: &[&str] = &["reasoning", "text"];
-
-/// Fields this driver keeps off Chat Completions. `reasoning_effort` is a reasoning model's
-/// dial, and the one model routed to Chat Completions, `chat-latest`, documents no reasoning.
-const GPT_CLASSIC_UNSUPPORTED_FIELDS: &[&str] = &["reasoning_effort"];
+/// `reasoning_effort` is a reasoning model's dial, and the one model routed to Chat
+/// Completions, `chat-latest`, documents no reasoning.
+const CHAT_COMPLETIONS_UNSUPPORTED_FIELDS: &[&str] = &["reasoning", "text", "reasoning_effort"];
 
 /// Whether a provider request field may appear in the body on this API surface. The one
 /// incompatibility rule in this driver: the `params` pass-through loop on each surface and the
@@ -322,10 +320,7 @@ fn provider_field_supported(field: &str, surface: ApiSurface) -> bool {
         // The Responses surface has no unsupported-field row: every `MODEL_ROUTES` row routed
         // there accepts every field either channel can put on the body.
         ApiSurface::Responses => true,
-        ApiSurface::ChatCompletions => {
-            !CHAT_COMPLETIONS_UNSUPPORTED_FIELDS.contains(&field)
-                && !GPT_CLASSIC_UNSUPPORTED_FIELDS.contains(&field)
-        }
+        ApiSurface::ChatCompletions => !CHAT_COMPLETIONS_UNSUPPORTED_FIELDS.contains(&field),
     }
 }
 
@@ -2487,7 +2482,7 @@ mod tests {
     #[test]
     fn translates_murmur_request_to_openai_chat_completions() {
         let request: MurmurRequest = serde_json::from_value(json!({
-            "model": "gpt-4.1",
+            "model": "chat-latest",
             "max_tokens": 512,
             "system": "You are helpful",
             "messages": [
@@ -2590,9 +2585,9 @@ mod tests {
     }
 
     #[test]
-    fn gpt_classic_passes_temperature_through() {
+    fn chat_completions_passes_temperature_through() {
         let request: MurmurRequest = serde_json::from_value(json!({
-            "model": "gpt-4o",
+            "model": "chat-latest",
             "max_tokens": 512,
             "messages": [],
             "params": {
@@ -3444,7 +3439,7 @@ mod tests {
 
     #[test]
     fn chat_completions_forwards_prompt_cache_key() {
-        let request = request_with_cache_key("gpt-4o", json!({}));
+        let request = request_with_cache_key("chat-latest", json!({}));
         let translated = translate_murmur_request_to_openai(&request).unwrap();
         assert_eq!(translated["prompt_cache_key"], "demo-capsule:1.0.0:ctx-7");
     }
@@ -3452,7 +3447,7 @@ mod tests {
     #[test]
     fn chat_completions_host_key_wins_over_a_same_named_param() {
         let request = request_with_cache_key(
-            "gpt-4o",
+            "chat-latest",
             json!({"params": {"prompt_cache_key": "from-params"}}),
         );
         let translated = translate_murmur_request_to_openai(&request).unwrap();
@@ -3485,7 +3480,7 @@ mod tests {
             Some(json!(7)),
         ] {
             let mut payload = json!({
-                "model": "gpt-4o",
+                "model": "chat-latest",
                 "max_tokens": 256,
                 "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
             });
@@ -3854,7 +3849,7 @@ mod tests {
 
     #[test]
     fn streaming_flags_include_usage_only_on_chat_completions() {
-        let mut chat = json!({"model": "gpt-4o", "stream": false});
+        let mut chat = json!({"model": "chat-latest", "stream": false});
         stamp_streaming_flags(&mut chat, ApiSurface::ChatCompletions);
         assert_eq!(chat["stream"], json!(true));
         assert_eq!(chat["stream_options"], json!({"include_usage": true}));

@@ -76,9 +76,10 @@ A capsule value always wins: the runtime never clamps or raises
 ## Models this driver refuses
 
 The driver refuses every id outside `SUPPORTED_MODELS`: the retired and
-unlisted ids in [Model scope](#model-scope), and any other id. None of them has
-a `models:` entry. The runtime checks for one at launch, before the driver sees
-a request:
+unlisted ids in [Model scope](#model-scope), and any other id. None of them
+has a `models:` entry. A murmur release after v0.7.0 checks for one at launch,
+before the driver sees a request; on v0.7.0 and earlier every row launches and
+the driver refuses the first inference call:
 
 | Capsule sets | Result |
 |---|---|
