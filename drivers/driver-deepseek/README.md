@@ -35,29 +35,33 @@ DeepSeek-V4.1-Flash. The driver does not accept `deepseek-flash`.
 
 ## Model limits
 
-| Model | max_output_tokens | context_window | Source |
-|---|---|---|---|
-| `deepseek-v4-flash` | 393216 | 1048576 | Read 2026-10-23. <https://api-docs.deepseek.com/quick_start/pricing> gives "CONTEXT LENGTH 1M" and "MAX OUTPUT MAXIMUM: 384K", and says `deepseek-v4-flash` requests "are served by the DeepSeek-V4.1-Flash-1017 model". Exact integers: <https://api-docs.deepseek.com/api/create-chat-completion>, `max_tokens`: "The value must be between 1 and 384K (393216)"; <https://api-docs.deepseek.com/api/list-models>, example response for DeepSeek-V4.1-Flash: `"context_window": 1048576`, `"max_output_tokens": 393216`. The window counts input and output together |
-| `deepseek-v4-pro` | 393216 | 1048576 | Read 2026-10-23. <https://api-docs.deepseek.com/quick_start/pricing> gives "CONTEXT LENGTH 1M" and "MAX OUTPUT MAXIMUM: 384K". Exact integers: <https://api-docs.deepseek.com/api/create-chat-completion>, `max_tokens`: "The value must be between 1 and 384K (393216)"; <https://api-docs.deepseek.com/api/list-models>, example response for `deepseek-v4-pro`: `"context_window": 1048576`, `"max_output_tokens": 393216`. The window counts input and output together |
+| Model | max_output_tokens | context_window | max_input_tokens | Source |
+|---|---|---|---|---|
+| `deepseek-v4-flash` | 393216 | 1048576 | none | Read 2026-10-23. <https://api-docs.deepseek.com/quick_start/pricing> gives "CONTEXT LENGTH 1M" and "MAX OUTPUT MAXIMUM: 384K", and says `deepseek-v4-flash` requests "are served by the DeepSeek-V4.1-Flash-1017 model". Exact integers: <https://api-docs.deepseek.com/api/create-chat-completion>, `max_tokens`: "The value must be between 1 and 384K (393216)"; <https://api-docs.deepseek.com/api/list-models>, example response for DeepSeek-V4.1-Flash: `"context_window": 1048576`, `"max_output_tokens": 393216`. The window counts input and output together |
+| `deepseek-v4-pro` | 393216 | 1048576 | none | Read 2026-10-23. <https://api-docs.deepseek.com/quick_start/pricing> gives "CONTEXT LENGTH 1M" and "MAX OUTPUT MAXIMUM: 384K". Exact integers: <https://api-docs.deepseek.com/api/create-chat-completion>, `max_tokens`: "The value must be between 1 and 384K (393216)"; <https://api-docs.deepseek.com/api/list-models>, example response for `deepseek-v4-pro`: `"context_window": 1048576`, `"max_output_tokens": 393216`. The window counts input and output together |
 
-`murmur.yaml` declares the same numbers under `models:`, and a test fails if the
-two disagree or if `models:` holds any id other than those in `SUPPORTED_MODELS`.
-The driver itself keeps no limits and checks no ceiling.
+`murmur.yaml` declares the same numbers under `models:`, each `none` as no
+`max_input_tokens` key, and a test fails if the two disagree or if `models:`
+holds any id other than those in `SUPPORTED_MODELS`. The driver itself keeps no
+limits and checks no ceiling.
 
 DeepSeek counts output against the window: "The total length of input tokens and
-generated tokens is limited by the model's context length." With the default cap
-of `393216`, the input that still leaves room for a full-length reply is
-`1048576 − 393216 = 655360` tokens. Compaction fires when occupancy crosses
-`inference.compaction.threshold` (default `0.98`) of the window, so at the
-default a long session can reach DeepSeek's limit first. A capsule that runs
-that long sets `inference.compaction.threshold` or `context.max_tokens` lower.
+generated tokens is limited by the model's context length." It documents no
+separate input ceiling, so neither model declares `max_input_tokens`.
+
+murmur compacts against one input budget per call:
+`min(max_input_tokens, context_window − output cap)`, which here is
+`context_window − output cap`. `inference.compaction.threshold` and
+`context.seed_budget` are fractions of that budget. With the default cap of
+`393216`, the budget of both models is `1048576 − 393216 = 655360` tokens. An
+`inference.max_tokens` the capsule sets changes the `window − output cap` term.
 
 Whether the runtime reads `models:` depends on the murmur release:
 
 | murmur | What it does with `models:` | What the capsule sets |
 |---|---|---|
 | v0.7.0 and earlier | ignores it; an unknown manifest key is a `W-SEC-019` warning, never a refusal | `inference.max_tokens` and `context.max_tokens`; left unset, the runtime's own defaults apply, not the models' limits |
-| the first release after v0.7.0 | defaults the output cap and context window from it when the capsule leaves them unset, and caps a hook's `run-inference` (e.g. `hook-compact`) at its `max_output_tokens` | nothing, unless it wants tighter limits than the table |
+| the first release after v0.7.0 | defaults the output cap and context window from it when the capsule leaves them unset, reads `max_input_tokens` as the input ceiling, measures compaction and the seed budget against the input budget, and caps a hook's `run-inference` (e.g. `hook-compact`) at its `max_output_tokens` | nothing, unless it wants tighter limits than the table |
 
 A capsule value always wins: the runtime never clamps or raises
 `inference.max_tokens` or `context.max_tokens` to the table.

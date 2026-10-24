@@ -89,7 +89,7 @@ artifacts:
     runtime: tool
 
   - name: murmur/driver-anthropic
-    version: "0.14.0"
+    version: "0.15.0"
     runtime: driver
 
   - name: murmur/hook-debug
@@ -321,12 +321,12 @@ Controls context budget and output truncation.
 
 ```yaml
 context:
-  max_tokens: 100000     # token budget; triggers compaction when threshold is reached
+  max_tokens: 100000     # context window; compaction fires at the threshold fraction of the input budget cut from it
 ```
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `max_tokens` | integer > 0 | — (no limit) | Token budget for the session. When usage approaches the compaction threshold (default 98% of this value), the runtime fires the compaction hook. |
+| `max_tokens` | integer > 0 | the `context_window` the driver's `models:` table declares for the model; with neither, there is no window, compaction does not run and no seed budget applies | The context window. Compaction fires when usage reaches `inference.compaction.threshold` × the input budget, `min(max_input_tokens, window − output cap)`, where `max_input_tokens` is the driver's input ceiling for the model, when it declares one. |
 
 **Runtime-enforced truncation limits** (set by the runtime, not yet manifest fields):
 - `context.max_tool_output`: max tokens for a tool-result `data` field before truncation
@@ -347,7 +347,7 @@ so the driver never sees it.
 ```yaml
 artifacts:
   - name: murmur/driver-anthropic
-    version: "0.14.0"
+    version: "0.15.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
@@ -367,7 +367,7 @@ inference:
 | `system_prompt` | string | no | Inline system prompt. |
 | `system_prompt_file` | string | no | Path to a `.md` file loaded as the system prompt. |
 | `system_prompt_artifact` | string | no | The `name`, as written, of a declared `artifacts:` entry whose content is read once at launch and bound as the system prompt. That entry is a skill by default; any other entry must declare `prompt_payload: true`, or the launch fails with `E-MAN-003`. The bound skill is not offered as a tool. |
-| `compaction.threshold` | float (0,1] | no | Fraction of `context.max_tokens` at which compaction fires. Default: 0.98. |
+| `compaction.threshold` | float (0,1] | no | Fraction of the input budget at which compaction fires. Default: 0.98. |
 | `compaction.model` | string | no | Model for compaction inference. Defaults to the primary model. |
 
 At most one of `system_prompt`, `system_prompt_file` and `system_prompt_artifact` may be set; a
@@ -393,7 +393,7 @@ cannot.
 ```yaml
 artifacts:
   - name: murmur/driver-openai
-    version: "0.14.0"
+    version: "0.15.0"
     runtime: driver
     gateway:
       endpoint: https://api.openai.com/v1
@@ -485,7 +485,7 @@ artifacts:
     version: "0.9.0"
     runtime: tool
   - name: murmur/driver-anthropic
-    version: "0.14.0"
+    version: "0.15.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
@@ -522,7 +522,7 @@ artifacts:
     version: "0.9.0"
     runtime: tool
   - name: murmur/driver-anthropic
-    version: "0.14.0"
+    version: "0.15.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
@@ -566,7 +566,7 @@ artifacts:
     version: "0.9.0"
     runtime: tool
   - name: murmur/driver-anthropic
-    version: "0.14.0"
+    version: "0.15.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
@@ -639,7 +639,7 @@ name its `artifacts:` entry uses. For live discovery, use `mur search <keyword>`
 | `murmur/hook-diff-summary` | hook | Edit summary. Snapshots each file `murmur/tool-editor` writes and emits a unified-diff summary at end of turn. Needs `filesystem.scope: "."`. Pairs with `murmur/tool-editor` 0.3.0 or later. |
 | `murmur/hook-eval` | hook | Evaluation scorer. Runs configured scorers (exit_ok, max_turns, tool_sequence, llm_judge) and writes results to `hooks/eval.jsonl` in the session records directory, where `mur eval` reads them. Needs `filesystem.records: true`. |
 | `murmur/hook-grafana` | hook | OTel span emitter. Sends structured telemetry to Grafana Tempo. Requires `observability.otel_endpoint` in the capsule manifest. |
-| `murmur/hook-memory` | hook | Conversation memory. At `on-task-start`, seeds the task with a budget-bounded slice of the earlier conversation. Needs `conversation.read: true` and `context.max_tokens`. `task_io.read: true` is optional and selects by relevance instead of recency. |
+| `murmur/hook-memory` | hook | Conversation memory. At `on-task-start`, seeds the task with a budget-bounded slice of the earlier conversation. Needs `conversation.read: true` and a context window: `context.max_tokens`, or the driver's `models:` entry for the model. `task_io.read: true` is optional and selects by relevance instead of recency. |
 | `murmur/hook-regression-verifier` | hook | Regression gate. Reopens a task whose edits broke previously-passing tests, judged from the test runs it sees in `on-shell` (`pytest`, `cargo test`, `go test`, jest). Appends each verdict to `hooks/regression-verifier.jsonl` in the session records directory. Needs `filesystem.records: true`. The reopen budget is `lifecycle.max_task_reopens`. |
 | `murmur/hook-shell-desc` | hook | Shell tool descriptions. At staging (`on-stage`), returns a tool manifest for each of `cargo`, `curl`, `find`, `git`, `grep`, `jq`, `node`, `python3` and `rustc`, stating what it takes and returns; shell interpreters keep the runtime's own description. Needs no `capabilities:` block. |
 | `murmur/tool-code-coverage` | tool | Native binary. Spectrum-based fault localization (Ochiai, Tarantula) over a Rust repository already indexed by `murmur/tool-code-graph`, from per-test LCOV reports the agent produced; writes suspicion scores onto the code-graph database. Never runs tests or coverage itself. Needs no grant beyond the session workdir, which must hold `repo_path` and `coverage_dir`. |

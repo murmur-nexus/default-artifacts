@@ -1862,6 +1862,8 @@ mod tests {
         struct Limits {
             max_output_tokens: u32,
             context_window: u32,
+            #[serde(default)]
+            max_input_tokens: Option<u32>,
         }
 
         // Parsed with the crate murmur parses the bundled manifest with.
@@ -1876,9 +1878,16 @@ mod tests {
                     && limits.max_output_tokens <= limits.context_window,
                 "models.{id}: {limits:?} must satisfy 1 <= max_output_tokens <= context_window"
             );
+            if let Some(ceiling) = limits.max_input_tokens {
+                assert!(
+                    ceiling >= 1 && ceiling < limits.context_window,
+                    "models.{id}: {limits:?} must satisfy 1 <= max_input_tokens < context_window"
+                );
+            }
         }
 
-        // README.md's "Model limits" table: | `<id>` | <max_output_tokens> | <context_window> | …
+        // README.md's "Model limits" table:
+        // | `<id>` | <max_output_tokens> | <context_window> | <max_input_tokens or none> | …
         let readme = include_str!("../README.md");
         let section = readme
             .split("\n## ")
@@ -1887,7 +1896,7 @@ mod tests {
         let mut documented = BTreeMap::new();
         for row in section.lines() {
             let cells: Vec<&str> = row.split('|').map(str::trim).collect();
-            let [_, id, out, ctx, ..] = cells[..] else {
+            let [_, id, out, ctx, input, ..] = cells[..] else {
                 continue;
             };
             let Some(id) = id.strip_prefix('`').and_then(|id| id.strip_suffix('`')) else {
@@ -1897,9 +1906,16 @@ mod tests {
                 cell.parse()
                     .unwrap_or_else(|_| panic!("README.md row '{id}': '{cell}' is not an integer"))
             };
+            let ceiling = match input {
+                "none" => None,
+                cell => Some(cell.parse().unwrap_or_else(|_| {
+                    panic!("README.md row '{id}': '{cell}' is not an integer or none")
+                })),
+            };
             let limits = Limits {
                 max_output_tokens: number(out),
                 context_window: number(ctx),
+                max_input_tokens: ceiling,
             };
             assert!(
                 documented.insert(id.to_string(), limits).is_none(),

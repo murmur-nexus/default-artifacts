@@ -36,53 +36,69 @@ marked deprecated, generates text, and lists the endpoint this driver routes it
 to on its own model page: Responses for `gpt-<N≥5>`, Chat Completions for the
 o-series and every other id. Each model's own id is declared, matched exactly.
 
-| Model | max_output_tokens | context_window | Source |
-|---|---|---|---|
-| `gpt-6-astra` | 128000 | 1050000 | <https://developers.openai.com/api/docs/models/gpt-6-astra>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens", "Maximum input tokens: 922,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
-| `gpt-6.1-sol` | 128000 | 1050000 | <https://developers.openai.com/api/docs/models/gpt-6.1-sol>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens", "Maximum input tokens: 922,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
-| `gpt-6-luna` | 128000 | 1050000 | <https://developers.openai.com/api/docs/models/gpt-6-luna>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens", "Maximum input tokens: 922,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
-| `gpt-5.6-cyber` | 128000 | 400000 | <https://developers.openai.com/api/docs/models/gpt-5.6-cyber>, read 2026-10-23: "400,000 context window", "128,000 max output tokens", "Maximum input tokens: 272,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
-| `gpt-6-sol` | 128000 | 1050000 | <https://developers.openai.com/api/docs/models/gpt-6-sol>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens", "Maximum input tokens: 922,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
-| `gpt-5.6-sol` | 128000 | 1050000 | <https://developers.openai.com/api/docs/models/gpt-5.6-sol>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens", "Maximum input tokens: 922,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
-| `gpt-5.6-terra` | 128000 | 1050000 | <https://developers.openai.com/api/docs/models/gpt-5.6-terra>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens", "Maximum input tokens: 922,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
-| `gpt-5.6-luna` | 128000 | 1050000 | <https://developers.openai.com/api/docs/models/gpt-5.6-luna>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens", "Maximum input tokens: 922,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
-| `gpt-5.5` | 128000 | 1050000 | <https://developers.openai.com/api/docs/models/gpt-5.5>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens"; Responses (`v1/responses`): "Supported" |
-| `gpt-5.5-pro` | 128000 | 1050000 | <https://developers.openai.com/api/docs/models/gpt-5.5-pro>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens"; Responses (`v1/responses`): "Supported" |
-| `gpt-5.4` | 128000 | 1050000 | <https://developers.openai.com/api/docs/models/gpt-5.4>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens"; Responses (`v1/responses`): "Supported" |
-| `gpt-5.4-pro` | 128000 | 1050000 | <https://developers.openai.com/api/docs/models/gpt-5.4-pro>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens"; Responses (`v1/responses`): "Supported" |
-| `gpt-5.4-mini` | 128000 | 400000 | <https://developers.openai.com/api/docs/models/gpt-5.4-mini>, read 2026-10-23: "400,000 context window", "128,000 max output tokens", "Maximum input tokens: 272,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
-| `gpt-5.2` | 128000 | 400000 | <https://developers.openai.com/api/docs/models/gpt-5.2>, read 2026-10-23: "400,000 context window", "128,000 max output tokens"; Responses (`v1/responses`): "Supported" |
-| `gpt-5.2-pro` | 128000 | 400000 | <https://developers.openai.com/api/docs/models/gpt-5.2-pro>, read 2026-10-23: "400,000 context window", "128,000 max output tokens"; Responses (`v1/responses`): "Supported" |
-| `gpt-5` | 128000 | 400000 | <https://developers.openai.com/api/docs/models/gpt-5>, read 2026-10-23: "400,000 context window", "128,000 max output tokens", "Maximum input tokens: 272,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
-| `gpt-5-mini` | 128000 | 400000 | <https://developers.openai.com/api/docs/models/gpt-5-mini>, read 2026-10-23: "400,000 context window", "128,000 max output tokens", "Maximum input tokens: 272,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
-| `gpt-5-nano` | 128000 | 400000 | <https://developers.openai.com/api/docs/models/gpt-5-nano>, read 2026-10-23: "400,000 context window", "128,000 max output tokens", "Maximum input tokens: 272,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
-| `gpt-5-pro` | 272000 | 400000 | <https://developers.openai.com/api/docs/models/gpt-5-pro>, read 2026-10-23: "400,000 context window", "272,000 max output tokens"; Responses (`v1/responses`): "Supported" |
-| `o3` | 100000 | 200000 | <https://developers.openai.com/api/docs/models/o3>, read 2026-10-23: "200,000 context window", "100,000 max output tokens"; Chat Completions (`v1/chat/completions`): "Supported" |
-| `chat-latest` | 128000 | 400000 | <https://developers.openai.com/api/docs/models/chat-latest>, read 2026-10-23: "400,000 context window", "128,000 max output tokens", "Maximum input tokens: 272,000" (input ceiling below the window); Chat Completions (`v1/chat/completions`): "Supported" |
+| Model | max_output_tokens | context_window | max_input_tokens | Source |
+|---|---|---|---|---|
+| `gpt-6-astra` | 128000 | 1050000 | 922000 | <https://developers.openai.com/api/docs/models/gpt-6-astra>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens", "Maximum input tokens: 922,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-6.1-sol` | 128000 | 1050000 | 922000 | <https://developers.openai.com/api/docs/models/gpt-6.1-sol>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens", "Maximum input tokens: 922,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-6-luna` | 128000 | 1050000 | 922000 | <https://developers.openai.com/api/docs/models/gpt-6-luna>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens", "Maximum input tokens: 922,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-5.6-cyber` | 128000 | 400000 | 272000 | <https://developers.openai.com/api/docs/models/gpt-5.6-cyber>, read 2026-10-23: "400,000 context window", "128,000 max output tokens", "Maximum input tokens: 272,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-6-sol` | 128000 | 1050000 | 922000 | <https://developers.openai.com/api/docs/models/gpt-6-sol>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens", "Maximum input tokens: 922,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-5.6-sol` | 128000 | 1050000 | 922000 | <https://developers.openai.com/api/docs/models/gpt-5.6-sol>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens", "Maximum input tokens: 922,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-5.6-terra` | 128000 | 1050000 | 922000 | <https://developers.openai.com/api/docs/models/gpt-5.6-terra>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens", "Maximum input tokens: 922,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-5.6-luna` | 128000 | 1050000 | 922000 | <https://developers.openai.com/api/docs/models/gpt-5.6-luna>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens", "Maximum input tokens: 922,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-5.5` | 128000 | 1050000 | none | <https://developers.openai.com/api/docs/models/gpt-5.5>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens"; Responses (`v1/responses`): "Supported" |
+| `gpt-5.5-pro` | 128000 | 1050000 | none | <https://developers.openai.com/api/docs/models/gpt-5.5-pro>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens"; Responses (`v1/responses`): "Supported" |
+| `gpt-5.4` | 128000 | 1050000 | none | <https://developers.openai.com/api/docs/models/gpt-5.4>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens"; Responses (`v1/responses`): "Supported" |
+| `gpt-5.4-pro` | 128000 | 1050000 | none | <https://developers.openai.com/api/docs/models/gpt-5.4-pro>, read 2026-10-23: "1,050,000 context window", "128,000 max output tokens"; Responses (`v1/responses`): "Supported" |
+| `gpt-5.4-mini` | 128000 | 400000 | 272000 | <https://developers.openai.com/api/docs/models/gpt-5.4-mini>, read 2026-10-23: "400,000 context window", "128,000 max output tokens", "Maximum input tokens: 272,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-5.2` | 128000 | 400000 | none | <https://developers.openai.com/api/docs/models/gpt-5.2>, read 2026-10-23: "400,000 context window", "128,000 max output tokens"; Responses (`v1/responses`): "Supported" |
+| `gpt-5.2-pro` | 128000 | 400000 | none | <https://developers.openai.com/api/docs/models/gpt-5.2-pro>, read 2026-10-23: "400,000 context window", "128,000 max output tokens"; Responses (`v1/responses`): "Supported" |
+| `gpt-5` | 128000 | 400000 | 272000 | <https://developers.openai.com/api/docs/models/gpt-5>, read 2026-10-23: "400,000 context window", "128,000 max output tokens", "Maximum input tokens: 272,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-5-mini` | 128000 | 400000 | 272000 | <https://developers.openai.com/api/docs/models/gpt-5-mini>, read 2026-10-23: "400,000 context window", "128,000 max output tokens", "Maximum input tokens: 272,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-5-nano` | 128000 | 400000 | 272000 | <https://developers.openai.com/api/docs/models/gpt-5-nano>, read 2026-10-23: "400,000 context window", "128,000 max output tokens", "Maximum input tokens: 272,000" (input ceiling below the window); Responses (`v1/responses`): "Supported" |
+| `gpt-5-pro` | 272000 | 400000 | none | <https://developers.openai.com/api/docs/models/gpt-5-pro>, read 2026-10-23: "400,000 context window", "272,000 max output tokens"; Responses (`v1/responses`): "Supported" |
+| `o3` | 100000 | 200000 | none | <https://developers.openai.com/api/docs/models/o3>, read 2026-10-23: "200,000 context window", "100,000 max output tokens"; Chat Completions (`v1/chat/completions`): "Supported" |
+| `chat-latest` | 128000 | 400000 | 272000 | <https://developers.openai.com/api/docs/models/chat-latest>, read 2026-10-23: "400,000 context window", "128,000 max output tokens", "Maximum input tokens: 272,000" (input ceiling below the window); Chat Completions (`v1/chat/completions`): "Supported" |
 
-`murmur.yaml` declares the same ids and numbers under `models:`, and a test
-fails if the two disagree.
+`murmur.yaml` declares the same ids and numbers under `models:`, each
+`max_input_tokens` cell as that model's `max_input_tokens` and each `none` as
+no such key, and a test fails if the two disagree.
 
 OpenAI documents "Maximum input tokens" below the context window for several of
 these models: `922000` against a `1050000` window for the `gpt-6` and
 `gpt-5.6-sol`/`-terra`/`-luna` models, and `272000` against `400000` for
 `gpt-5.6-cyber`, `gpt-5.4-mini`, `gpt-5`, `gpt-5-mini`, `gpt-5-nano` and
 `chat-latest`. A request whose input exceeds that ceiling is refused even though
-the window has room. `context_window` is still the documented window.
+the window has room. `context_window` is still the documented window, and
+`max_input_tokens` declares the ceiling. A model whose page gives no "Maximum
+input tokens" declares none.
 
-Compaction fires when occupancy crosses `inference.compaction.threshold`
-(default `0.98`) of the window. On `gpt-5.6-luna` that is `1029000` tokens,
-above the `922000` input ceiling, so at the default a long session reaches
-OpenAI's input limit before compaction fires. A capsule that runs that long sets
-`inference.compaction.threshold` (`0.87` keeps `gpt-5.6-luna` under `922000`) or
-`context.max_tokens` lower. The driver does not shrink the window to compensate.
+murmur compacts against one input budget per call:
+`min(max_input_tokens, context_window − output cap)`.
+`inference.compaction.threshold` and `context.seed_budget` are fractions of that
+budget. With the default output cap, the model's `max_output_tokens`:
+
+| Input budget | Basis | Models |
+|---|---|---|
+| 922000 | `max_input_tokens`; the ceiling equals `1050000 − 128000`, and a tie goes to the ceiling | each model whose `max_input_tokens` is 922000 |
+| 272000 | `max_input_tokens`; the ceiling equals `400000 − 128000` | each model whose `max_input_tokens` is 272000 |
+| 922000 | `1050000 − 128000` | `gpt-5.5`, `gpt-5.5-pro`, `gpt-5.4`, `gpt-5.4-pro` |
+| 272000 | `400000 − 128000` | `gpt-5.2`, `gpt-5.2-pro` |
+| 128000 | `400000 − 272000` | `gpt-5-pro` |
+| 100000 | `200000 − 100000` | `o3` |
+
+With the default cap every declared ceiling equals `window − 128000`, so the
+budget's value is the same with or without the ceiling; only its basis differs.
+An `inference.max_tokens` the capsule sets changes the `window − output cap`
+term, and the ceiling still bounds the budget: on `gpt-5.6-luna` an
+`inference.max_tokens` of `8192` gives `min(922000, 1041808) = 922000`.
 
 Whether the runtime reads `models:` depends on the murmur release:
 
 | murmur | What it does with `models:` | What the capsule sets |
 |---|---|---|
 | v0.7.0 and earlier | ignores it; an unknown manifest key is a `W-SEC-019` warning, never a refusal | `inference.max_tokens` and `context.max_tokens`; left unset, the runtime's own defaults apply, not the model's limits |
-| the first release after v0.7.0 | defaults the output cap and context window from it when the capsule leaves them unset, and caps a hook's `run-inference` (e.g. `hook-compact`) at its `max_output_tokens` | nothing, unless it wants tighter limits than the table |
+| the first release after v0.7.0 | defaults the output cap and context window from it when the capsule leaves them unset, reads `max_input_tokens` as the input ceiling, measures compaction and the seed budget against the input budget, and caps a hook's `run-inference` (e.g. `hook-compact`) at its `max_output_tokens` | nothing, unless it wants tighter limits than the table |
 
 A capsule value always wins: the runtime never clamps or raises
 `inference.max_tokens` or `context.max_tokens` to the table.
