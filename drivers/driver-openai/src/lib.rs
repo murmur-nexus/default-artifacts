@@ -2,6 +2,7 @@
 // or from cfg(test). Suppress dead_code noise in plain host library builds.
 #![cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
 
+use murmur_driver_stream::Failure;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
@@ -12,7 +13,6 @@ use serde_json::{json, Map, Value};
 ///   • response-side: the `tool-result.metadata` key this driver returns the
 ///     provider response `id` under, so the host can persist and re-supply it.
 /// Both directions must use this exact string — the host reads/writes it verbatim.
-#[allow(dead_code)] // reachable only from the wasm32-gated driver module
 const CONTINUATION_ID_KEY: &str = "continuation_id";
 
 /// Reserved key carrying the prompt-cache routing hint. Read from a top-level member of the
@@ -1095,13 +1095,20 @@ fn responses_stop_reason(
     }
 }
 
-fn translate_responses_to_murmur(response: &Value) -> Result<Value, String> {
+/// A Responses `response.error` object as the failure it ends the turn with:
+/// `OpenAI Responses error: <message>`, transient when its `code` is a [`TRANSIENT_ERRORS`]
+/// entry. The same on the streaming and the buffered path.
+fn responses_error_failure(error: &Value) -> Failure {
+    let msg = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown error");
+    ProviderError::of(error).failure(format!("OpenAI Responses error: {msg}"))
+}
+
+fn translate_responses_to_murmur(response: &Value) -> Result<Value, Failure> {
     if let Some(err) = response.get("error").filter(|e| !e.is_null()) {
-        let msg = err
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown error");
-        return Ok(error_payload(&format!("OpenAI Responses error: {msg}")));
+        return Err(responses_error_failure(err));
     }
 
     let status = response
@@ -1171,7 +1178,8 @@ fn translate_responses_to_murmur(response: &Value) -> Result<Value, String> {
                     Err(err) => {
                         return Err(format!(
                             "driver: failed to parse Responses function_call arguments JSON: {err}"
-                        ));
+                        )
+                        .into());
                     }
                 };
                 content.push(json!({
@@ -1337,7 +1345,9 @@ enum ToolCallSignal<'a> {
 }
 
 /// Process one complete SSE line. Returns `Ok(true)` when the stream is done (`[DONE]`),
-/// and `Err` for a tool call index past [`murmur_driver_stream::MAX_SLOTS_PER_TURN`].
+/// and `Err` for a tool call index past [`murmur_driver_stream::MAX_SLOTS_PER_TURN`] or for a
+/// chunk carrying a top-level `error` object, which ends the turn with the provider's error
+/// rather than letting the stream read as cut.
 ///
 /// Text content is routed through `thinking` and split between `emit_text` (which the
 /// caller also uses to accumulate `text_acc`) and `emit_thinking`. Structured thinking
@@ -1352,7 +1362,7 @@ fn process_openai_sse_line(
     emit_text: &mut impl FnMut(&str),
     emit_thinking: &mut impl FnMut(&str),
     signal: &mut impl FnMut(ToolCallSignal<'_>),
-) -> Result<bool, String> {
+) -> Result<bool, Failure> {
     if line == "data: [DONE]" {
         return Ok(true);
     }
@@ -1362,6 +1372,11 @@ fn process_openai_sse_line(
     let Ok(data) = serde_json::from_str::<Value>(json_str) else {
         return Ok(false);
     };
+
+    if let Some(error) = data.get("error").filter(|error| !error.is_null()) {
+        let error = ProviderError::of(error);
+        return Err(error.failure(error.describe()));
+    }
 
     // Read before the `choices`-shaped early returns below: the chunk that carries usage (sent
     // only when `stream_options.include_usage` was requested) has an empty `choices` array.
@@ -1421,7 +1436,7 @@ fn process_openai_sse_line(
         for tc in tc_arr {
             let index = tc.get("index").and_then(Value::as_u64).unwrap_or(0);
             let state = murmur_driver_stream::slot_mut(tool_states, index)
-                .map_err(|err| format!("driver: tool call {err}"))?;
+                .map_err(|err| Failure::plain(format!("driver: tool call {err}")))?;
             if let Some(id) = tc.get("id").and_then(Value::as_str) {
                 if state.id.is_empty() {
                     state.id = id.to_string();
@@ -1450,7 +1465,7 @@ fn parse_openai_sse_body<F: FnMut(&str), G: FnMut(&str)>(
     body: &str,
     emit_text: &mut F,
     emit_thinking: &mut G,
-) -> Result<Value, String> {
+) -> Result<Value, Failure> {
     parse_openai_sse_body_with_signals(body, emit_text, emit_thinking).0
 }
 
@@ -1485,7 +1500,7 @@ fn parse_openai_sse_body_with_signals<F: FnMut(&str), G: FnMut(&str)>(
     body: &str,
     emit_text: &mut F,
     emit_thinking: &mut G,
-) -> (Result<Value, String>, Vec<RecordedSignal>) {
+) -> (Result<Value, Failure>, Vec<RecordedSignal>) {
     let mut text_acc = String::new();
     let mut thinking_acc = String::new();
     let mut tool_states: Vec<ToolCallState> = Vec::new();
@@ -1550,7 +1565,7 @@ fn parse_responses_sse_body<F: FnMut(&str), G: FnMut(&str)>(
     body: &str,
     emit_text: &mut F,
     emit_thinking: &mut G,
-) -> Result<Value, String> {
+) -> Result<Value, Failure> {
     parse_responses_sse_body_with_signals(body, emit_text, emit_thinking).0
 }
 
@@ -1561,7 +1576,7 @@ fn parse_responses_sse_body_with_signals<F: FnMut(&str), G: FnMut(&str)>(
     body: &str,
     emit_text: &mut F,
     emit_thinking: &mut G,
-) -> (Result<Value, String>, Vec<RecordedSignal>) {
+) -> (Result<Value, Failure>, Vec<RecordedSignal>) {
     let mut signals = Vec::new();
     let mut text_acc = String::new();
     let mut thinking_acc = String::new();
@@ -1569,7 +1584,7 @@ fn parse_responses_sse_body_with_signals<F: FnMut(&str), G: FnMut(&str)>(
     let mut tool_index_by_output_index = std::collections::HashMap::new();
     let mut status: Option<String> = None;
     let mut incomplete_reason: Option<String> = None;
-    let mut error_message: Option<String> = None;
+    let mut provider_error: Option<Failure> = None;
     let mut response_id: Option<String> = None;
     let mut usage = UsageTokens::default();
 
@@ -1590,7 +1605,7 @@ fn parse_responses_sse_body_with_signals<F: FnMut(&str), G: FnMut(&str)>(
                 &mut tool_index_by_output_index,
                 &mut status,
                 &mut incomplete_reason,
-                &mut error_message,
+                &mut provider_error,
                 &mut response_id,
                 &mut usage,
                 &mut combined_text,
@@ -1609,7 +1624,7 @@ fn parse_responses_sse_body_with_signals<F: FnMut(&str), G: FnMut(&str)>(
         tool_states,
         status,
         incomplete_reason,
-        error_message,
+        provider_error,
         usage,
     );
     (result, signals)
@@ -1621,11 +1636,12 @@ fn assemble_openai_streaming_response(
     tool_states: Vec<ToolCallState>,
     stop_reason: Option<String>,
     usage: UsageTokens,
-) -> Result<Value, String> {
-    // No chunk carried a finish_reason, so the stream ended before the turn did.
+) -> Result<Value, Failure> {
+    // No chunk carried a finish_reason, so the stream ended before the turn did: after a `2xx`
+    // head that is a cut stream, which the same request may not hit again.
     let finish_reason = stop_reason
         .as_deref()
-        .ok_or_else(|| "driver: OpenAI stream ended with no finish_reason".to_string())?;
+        .ok_or_else(|| Failure::transient("driver: OpenAI stream ended with no finish_reason"))?;
     let stop_reason_str = match finish_reason {
         "stop" => "end_turn",
         "tool_calls" => "tool_call",
@@ -1634,9 +1650,7 @@ fn assemble_openai_streaming_response(
             return Ok(error_payload("OpenAI response blocked by content_filter"));
         }
         other => {
-            return Err(format!(
-                "driver: unsupported OpenAI finish_reason '{other}'"
-            ));
+            return Err(format!("driver: unsupported OpenAI finish_reason '{other}'").into());
         }
     };
 
@@ -1646,7 +1660,9 @@ fn assemble_openai_streaming_response(
             continue;
         }
         let input: Value = serde_json::from_str(&state.arguments).map_err(|err| {
-            format!("driver: failed to parse OpenAI tool call arguments JSON: {err}")
+            Failure::plain(format!(
+                "driver: failed to parse OpenAI tool call arguments JSON: {err}"
+            ))
         })?;
         tool_content.push(json!({
             "type": "tool_call",
@@ -1668,6 +1684,135 @@ fn error_payload(message: &str) -> Value {
         "stop_reason": "error",
         "error": message,
     })
+}
+
+// ── Failures murmur may retry ─────────────────────────────────────────────────
+
+/// OpenAI error `code`s and `type`s its error-code and rate-limit guides describe as a server
+/// fault, a temporary model overload or a temporary rate limit. A provider error naming one,
+/// reported inside a `2xx` stream or body, is [`Failure::transient`].
+const TRANSIENT_ERRORS: &[&str] = &[
+    "server_error",
+    "rate_limit_exceeded",
+    "rate_limit_error",
+    "slow_down",
+    "server_is_overloaded",
+    "service_unavailable_error",
+];
+
+/// OpenAI error `code`s and `type`s naming exhausted credit, spend or usage. Its error-code guide
+/// says retrying them "won't restore API access", so a `429` naming one is
+/// [`Failure::permanent`], and a provider error naming one is never transient.
+const QUOTA_ERRORS: &[&str] = &[
+    "insufficient_quota",
+    "credit_balance_exhausted",
+    "organization_spend_limit_exceeded",
+    "project_spend_limit_exceeded",
+    "organization_usage_limit_exceeded",
+];
+
+/// The parts of an OpenAI error object a driver reports and classifies. An empty string counts
+/// as absent.
+struct ProviderError<'a> {
+    code: Option<&'a str>,
+    kind: Option<&'a str>,
+    message: Option<&'a str>,
+}
+
+impl<'a> ProviderError<'a> {
+    /// An error object: `{"code", "type", "message"}`, as a Chat Completions error chunk, a
+    /// Responses `response.error` and an HTTP error body carry it.
+    fn of(error: &'a Value) -> Self {
+        let field = |name: &str| {
+            error
+                .get(name)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+        };
+        Self {
+            code: field("code"),
+            kind: field("type"),
+            message: field("message"),
+        }
+    }
+
+    /// A Responses `error` event. Its reference puts `code` and `message` on the event itself,
+    /// whose `type` is always `"error"`; an event carrying a nested `error` object is read from
+    /// that object instead.
+    fn of_event(event: &'a Value) -> Self {
+        match event.get("error").filter(|error| error.is_object()) {
+            Some(error) => Self::of(error),
+            None => Self {
+                kind: None,
+                ..Self::of(event)
+            },
+        }
+    }
+
+    fn names_any(&self, names: &[&str]) -> bool {
+        [self.code, self.kind]
+            .into_iter()
+            .flatten()
+            .any(|name| names.contains(&name))
+    }
+
+    /// `OpenAI error: <code-or-type>: <message>`, `unknown` standing in for a missing part.
+    fn describe(&self) -> String {
+        format!(
+            "OpenAI error: {}: {}",
+            self.code.or(self.kind).unwrap_or("unknown"),
+            self.message.unwrap_or("unknown")
+        )
+    }
+
+    /// This error, reported after a `2xx` head, as a failure carrying `message`: transient when
+    /// it names a [`TRANSIENT_ERRORS`] entry and no [`QUOTA_ERRORS`] one, plain otherwise.
+    fn failure(&self, message: String) -> Failure {
+        if self.names_any(TRANSIENT_ERRORS) && !self.names_any(QUOTA_ERRORS) {
+            Failure::transient(message)
+        } else {
+            Failure::plain(message)
+        }
+    }
+}
+
+/// The failure for a provider status `>= 400`: `HTTP <status>: <body>`, with the provider's own
+/// body so the operator sees what OpenAI said.
+///
+/// murmur decides from the status alone whether to retry, so every status is plain except a
+/// `429` whose error names exhausted credit, spend or usage ([`QUOTA_ERRORS`]): murmur would
+/// retry a `429`, and waiting does not restore that access.
+fn status_failure(status: u16, body: &str) -> Failure {
+    let message = format!("HTTP {status}: {body}");
+    let quota = status == 429
+        && serde_json::from_str::<Value>(body)
+            .ok()
+            .as_ref()
+            .and_then(|body| body.get("error"))
+            .is_some_and(|error| ProviderError::of(error).names_any(QUOTA_ERRORS));
+    if quota {
+        Failure::permanent(message)
+    } else {
+        Failure::plain(message)
+    }
+}
+
+/// The payload and metadata `run` returns for what `run_inner` produced: a success as it is,
+/// with the `continuation_id` tuple when it carries one; a failure as its error payload, with
+/// the `transient` tuple [`Failure::metadata`] renders for it.
+fn render_outcome(
+    outcome: Result<(Value, Option<String>), Failure>,
+) -> (Value, Vec<(String, String)>) {
+    match outcome {
+        Ok((response, continuation_id)) => (
+            response,
+            continuation_id
+                .map(|id| (CONTINUATION_ID_KEY.to_string(), id))
+                .into_iter()
+                .collect(),
+        ),
+        Err(failure) => (error_payload(&failure.message), failure.metadata()),
+    }
 }
 
 /// Shared tail: orders content blocks as thinking (if any) first, then either
@@ -1694,6 +1839,9 @@ fn assemble_content_tail(
 
 /// Process one complete SSE line of Responses API typed events. Returns `true`
 /// when the stream is done (`data: [DONE]`, if the provider sends one).
+///
+/// A provider error, from a terminal event's `response.error` or from an `error` event, is
+/// recorded in `provider_error` as the failure it ends the turn with, already classified.
 #[allow(clippy::too_many_arguments)]
 fn process_responses_sse_line(
     line: &str,
@@ -1701,7 +1849,7 @@ fn process_responses_sse_line(
     tool_index_by_output_index: &mut std::collections::HashMap<u64, usize>,
     status: &mut Option<String>,
     incomplete_reason: &mut Option<String>,
-    error_message: &mut Option<String>,
+    provider_error: &mut Option<Failure>,
     response_id: &mut Option<String>,
     usage: &mut UsageTokens,
     emit_text: &mut impl FnMut(&str),
@@ -1806,16 +1954,15 @@ fn process_responses_sse_line(
                 .filter(|e| !e.is_null())
                 .or_else(|| data.get("error").filter(|e| !e.is_null()));
             if let Some(err) = err {
-                *error_message = Some(
-                    err.get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown error")
-                        .to_string(),
-                );
+                *provider_error = Some(responses_error_failure(err));
             }
             if let Some(reported) = response_obj.get("usage").filter(|value| !value.is_null()) {
                 usage.merge_from(extract_responses_usage(reported));
             }
+        }
+        "error" => {
+            let error = ProviderError::of_event(&data);
+            *provider_error = Some(error.failure(error.describe()));
         }
         _ => {}
     }
@@ -1829,16 +1976,19 @@ fn assemble_responses_streaming_response(
     tool_states: Vec<ToolCallState>,
     status: Option<String>,
     incomplete_reason: Option<String>,
-    error_message: Option<String>,
+    provider_error: Option<Failure>,
     usage: UsageTokens,
-) -> Result<Value, String> {
-    if let Some(msg) = error_message {
-        return Ok(error_payload(&format!("OpenAI Responses error: {msg}")));
+) -> Result<Value, Failure> {
+    // A provider error outranks a missing terminal event: an `error` event and then EOF is
+    // the provider's error, not a cut stream.
+    if let Some(failure) = provider_error {
+        return Err(failure);
     }
 
-    // `status` is set only by a `response.completed`, `.incomplete` or `.failed` event.
+    // `status` is set only by a `response.completed`, `.incomplete` or `.failed` event; without
+    // one the stream ended before the turn did.
     let status = status.as_deref().ok_or_else(|| {
-        "driver: OpenAI Responses stream ended with no terminal event".to_string()
+        Failure::transient("driver: OpenAI Responses stream ended with no terminal event")
     })?;
     let has_function_call = !tool_states.is_empty();
     let stop_reason =
@@ -1859,7 +2009,8 @@ fn assemble_responses_streaming_response(
             Err(err) => {
                 return Err(format!(
                     "driver: failed to parse Responses function_call arguments JSON: {err}"
-                ));
+                )
+                .into());
             }
         };
         tool_content.push(json!({
@@ -1881,11 +2032,12 @@ fn assemble_responses_streaming_response(
 mod wasm_driver {
     use super::{
         assemble_openai_streaming_response, assemble_responses_streaming_response,
-        build_provider_request, error_payload, parse_driver_config, process_openai_sse_line,
-        process_responses_sse_line, route, store_opt_in, translate_openai_response_to_murmur,
-        translate_responses_to_murmur, ApiSurface, MurmurRequest, ThinkingState, ToolCallSignal,
-        ToolCallState, UsageTokens, CONTINUATION_ID_KEY,
+        build_provider_request, parse_driver_config, process_openai_sse_line,
+        process_responses_sse_line, render_outcome, route, status_failure, store_opt_in,
+        translate_openai_response_to_murmur, translate_responses_to_murmur, ApiSurface,
+        MurmurRequest, ThinkingState, ToolCallSignal, ToolCallState, UsageTokens,
     };
+    use murmur_driver_stream::Failure;
     use serde_json::Value;
     use std::collections::HashMap;
 
@@ -1914,10 +2066,12 @@ mod wasm_driver {
         fn run(
             input: exports::murmur::tool::run::ToolInput,
         ) -> exports::murmur::tool::run::ToolResult {
-            let (response, continuation_id) = match run_inner(input) {
-                Ok(pair) => pair,
-                Err(err) => (error_payload(&err), None),
-            };
+            // The provider response id goes back to the host on the reserved
+            // `continuation_id` metadata key so it can persist it and chain the next call.
+            // Only populated when retention (`store`) was granted and the response succeeded
+            // (see `run_inner`). A failure carries the `transient` tuple instead, when it has
+            // one; otherwise the list is empty and the host holds no id.
+            let (response, metadata) = render_outcome(run_inner(input));
 
             let stop_reason = response
                 .get("stop_reason")
@@ -1939,16 +2093,6 @@ mod wasm_driver {
                 None
             };
 
-            // Hand the provider response id back to the host on the reserved
-            // `continuation_id` metadata key so it can persist it and chain the
-            // next call. Only populated when retention (`store`) was granted and
-            // the response succeeded (see `run_inner`); otherwise the list is
-            // empty and the host holds no id — byte-identical to pre-v0.5.16.
-            let metadata = match continuation_id {
-                Some(id) => vec![(CONTINUATION_ID_KEY.to_string(), id)],
-                None => vec![],
-            };
-
             exports::murmur::tool::run::ToolResult {
                 status,
                 summary,
@@ -1966,7 +2110,7 @@ mod wasm_driver {
     /// `store` grant, or on an error response.
     fn run_inner(
         input: exports::murmur::tool::run::ToolInput,
-    ) -> Result<(Value, Option<String>), String> {
+    ) -> Result<(Value, Option<String>), Failure> {
         // Read and validated before every other step, including the endpoint lookup: an
         // unrecognised key must fail the call before any HTTP request is dispatched, and a
         // capsule whose config is wrong should learn that rather than an endpoint complaint.
@@ -2009,8 +2153,8 @@ mod wasm_driver {
         let status = response.status();
 
         if status >= 400 {
-            let text = consume_body_as_string(response)?;
-            return Ok((error_payload(&format!("HTTP {status}: {text}")), None));
+            let text = consume_body_as_string(response, status)?;
+            return Err(status_failure(status, &text));
         }
 
         let incoming_body = response
@@ -2021,7 +2165,7 @@ mod wasm_driver {
             .map_err(|()| "driver: failed to stream response body".to_string())?;
 
         // Detect format from first read: JSON bodies start with '{' or '['.
-        let first = read_chunk(&stream)?;
+        let first = read_chunk(&stream, status)?;
         let is_json = first
             .iter()
             .find(|&&b| !b.is_ascii_whitespace())
@@ -2034,7 +2178,7 @@ mod wasm_driver {
             // Non-streaming fallback (test servers, providers ignoring stream:true).
             let mut all = first;
             loop {
-                let chunk = read_chunk(&stream)?;
+                let chunk = read_chunk(&stream, status)?;
                 if chunk.is_empty() {
                     break;
                 }
@@ -2056,10 +2200,10 @@ mod wasm_driver {
         } else {
             match surface {
                 ApiSurface::ChatCompletions => (
-                    run_chat_completions_sse(stream, &first, incoming_body)?,
+                    run_chat_completions_sse(stream, &first, incoming_body, status)?,
                     None,
                 ),
-                ApiSurface::Responses => run_responses_sse(stream, &first, incoming_body)?,
+                ApiSurface::Responses => run_responses_sse(stream, &first, incoming_body, status)?,
             }
         };
 
@@ -2083,7 +2227,8 @@ mod wasm_driver {
         stream: wasip2::io::streams::InputStream,
         first: &[u8],
         incoming_body: wasip2::http::types::IncomingBody,
-    ) -> Result<Value, String> {
+        status: u16,
+    ) -> Result<Value, Failure> {
         let mut line_buf: Vec<u8> = Vec::new();
         let mut text_acc = String::new();
         let mut thinking_acc = String::new();
@@ -2095,7 +2240,7 @@ mod wasm_driver {
         // The line loop runs in a closure so that every exit, an `Err`
         // included, reaches the drops below: wasmtime traps when the
         // `IncomingBody` is dropped while its child `InputStream` lives.
-        let streamed = (|| -> Result<(), String> {
+        let streamed = (|| -> Result<(), Failure> {
             let mut done = false;
 
             // Process bytes already read.
@@ -2135,7 +2280,7 @@ mod wasm_driver {
             // Continue reading remaining chunks.
             if !done {
                 'outer: loop {
-                    let chunk = read_chunk(&stream)?;
+                    let chunk = read_chunk(&stream, status)?;
                     if chunk.is_empty() {
                         break;
                     }
@@ -2205,22 +2350,23 @@ mod wasm_driver {
         stream: wasip2::io::streams::InputStream,
         first: &[u8],
         incoming_body: wasip2::http::types::IncomingBody,
-    ) -> Result<(Value, Option<String>), String> {
+        status: u16,
+    ) -> Result<(Value, Option<String>), Failure> {
         let mut line_buf: Vec<u8> = Vec::new();
         let mut text_acc = String::new();
         let mut thinking_acc = String::new();
         let mut tool_states: Vec<ToolCallState> = Vec::new();
         let mut tool_index_by_output_index: HashMap<u64, usize> = HashMap::new();
-        let mut status: Option<String> = None;
+        let mut terminal_status: Option<String> = None;
         let mut incomplete_reason: Option<String> = None;
-        let mut error_message: Option<String> = None;
+        let mut provider_error: Option<Failure> = None;
         let mut response_id: Option<String> = None;
         let mut usage = UsageTokens::default();
 
         // The line loop runs in a closure so that every exit, an `Err`
         // included, reaches the drops below: wasmtime traps when the
         // `IncomingBody` is dropped while its child `InputStream` lives.
-        let streamed = (|| -> Result<(), String> {
+        let streamed = (|| -> Result<(), Failure> {
             let mut done = false;
 
             // Process bytes already read.
@@ -2241,9 +2387,9 @@ mod wasm_driver {
                             line,
                             &mut tool_states,
                             &mut tool_index_by_output_index,
-                            &mut status,
+                            &mut terminal_status,
                             &mut incomplete_reason,
-                            &mut error_message,
+                            &mut provider_error,
                             &mut response_id,
                             &mut usage,
                             &mut emit_t,
@@ -2263,7 +2409,7 @@ mod wasm_driver {
             // Continue reading remaining chunks.
             if !done {
                 'outer: loop {
-                    let chunk = read_chunk(&stream)?;
+                    let chunk = read_chunk(&stream, status)?;
                     if chunk.is_empty() {
                         break;
                     }
@@ -2284,9 +2430,9 @@ mod wasm_driver {
                                     line,
                                     &mut tool_states,
                                     &mut tool_index_by_output_index,
-                                    &mut status,
+                                    &mut terminal_status,
                                     &mut incomplete_reason,
-                                    &mut error_message,
+                                    &mut provider_error,
                                     &mut response_id,
                                     &mut usage,
                                     &mut emit_t,
@@ -2314,9 +2460,9 @@ mod wasm_driver {
             &text_acc,
             &thinking_acc,
             tool_states,
-            status,
+            terminal_status,
             incomplete_reason,
-            error_message,
+            provider_error,
             usage,
         )?;
         Ok((result, response_id))
@@ -2387,9 +2533,11 @@ mod wasm_driver {
         await_response(future)
     }
 
+    /// The body of a response whose head carried `status`, read whole.
     fn consume_body_as_string(
         response: wasip2::http::types::IncomingResponse,
-    ) -> Result<String, String> {
+        status: u16,
+    ) -> Result<String, Failure> {
         let incoming_body = response
             .consume()
             .map_err(|()| "driver: failed to consume error response body".to_string())?;
@@ -2398,7 +2546,7 @@ mod wasm_driver {
             .map_err(|()| "driver: failed to stream error response body".to_string())?;
         let mut bytes = Vec::new();
         loop {
-            let chunk = read_chunk(&stream)?;
+            let chunk = read_chunk(&stream, status)?;
             if chunk.is_empty() {
                 break;
             }
@@ -2406,15 +2554,23 @@ mod wasm_driver {
         }
         drop(stream);
         let _ = wasip2::http::types::IncomingBody::finish(incoming_body);
-        String::from_utf8(bytes)
-            .map_err(|err| format!("driver: error response body is not UTF-8: {err}"))
+        String::from_utf8(bytes).map_err(|err| {
+            Failure::plain(format!("driver: error response body is not UTF-8: {err}"))
+        })
     }
 
-    fn read_chunk(stream: &wasip2::io::streams::InputStream) -> Result<Vec<u8>, String> {
+    /// The next chunk of a body whose response head carried `status`; empty at EOF.
+    fn read_chunk(
+        stream: &wasip2::io::streams::InputStream,
+        status: u16,
+    ) -> Result<Vec<u8>, Failure> {
         match stream.blocking_read(16 * 1024) {
             Ok(chunk) => Ok(chunk),
             Err(wasip2::io::streams::StreamError::Closed) => Ok(Vec::new()),
-            Err(err) => Err(format!("driver: failed to read response stream: {err:?}")),
+            Err(err) => Err(murmur_driver_stream::read_failure(
+                status,
+                &format!("{err:?}"),
+            )),
         }
     }
 
@@ -2476,6 +2632,7 @@ mod tests {
         translate_responses_to_murmur, ApiSurface, DriverConfig, MurmurRequest, ToolCallState,
         UsageTokens, MODEL_ROUTES,
     };
+    use murmur_driver_stream::Failure;
     use serde_json::{json, Value};
     use std::collections::HashMap;
 
@@ -3167,7 +3324,7 @@ mod tests {
         let mut idx: HashMap<u64, usize> = HashMap::new();
         let mut status: Option<String> = None;
         let mut incomplete_reason: Option<String> = None;
-        let mut error_message: Option<String> = None;
+        let mut provider_error: Option<Failure> = None;
         let mut response_id: Option<String> = None;
         let mut usage = UsageTokens::default();
         let line = r#"data: {"type":"response.completed","response":{"id":"resp_stream_42","status":"completed"}}"#;
@@ -3177,7 +3334,7 @@ mod tests {
             &mut idx,
             &mut status,
             &mut incomplete_reason,
-            &mut error_message,
+            &mut provider_error,
             &mut response_id,
             &mut usage,
             &mut |_| {},
@@ -3281,12 +3438,8 @@ mod tests {
             "error": {"message": "rate limited"},
             "output": []
         });
-        let translated = translate_responses_to_murmur(&response).unwrap();
-        assert_eq!(translated["stop_reason"], "error");
-        assert!(translated["error"]
-            .as_str()
-            .unwrap()
-            .contains("rate limited"));
+        let failure = translate_responses_to_murmur(&response).unwrap_err();
+        assert!(failure.message.contains("rate limited"));
     }
 
     #[test]
@@ -3397,9 +3550,8 @@ mod tests {
     #[test]
     fn responses_streaming_error_event_handling() {
         let body = "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"boom\"}}}\n";
-        let result = parse_responses_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap();
-        assert_eq!(result["stop_reason"], "error");
-        assert!(result["error"].as_str().unwrap().contains("boom"));
+        let failure = parse_responses_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap_err();
+        assert!(failure.message.contains("boom"));
     }
 
     #[test]
@@ -4239,8 +4391,10 @@ mod tests {
             ]
         });
         let err = translate_responses_to_murmur(&response).unwrap_err();
+        assert_eq!(err.retry, None);
         assert!(
-            err.starts_with("driver: failed to parse Responses function_call arguments JSON:"),
+            err.message
+                .starts_with("driver: failed to parse Responses function_call arguments JSON:"),
             "{err}"
         );
     }
@@ -4253,8 +4407,10 @@ mod tests {
             "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n",
         );
         let err = parse_responses_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap_err();
+        assert_eq!(err.retry, None);
         assert!(
-            err.starts_with("driver: failed to parse Responses function_call arguments JSON:"),
+            err.message
+                .starts_with("driver: failed to parse Responses function_call arguments JSON:"),
             "{err}"
         );
     }
@@ -4302,7 +4458,11 @@ mod tests {
         );
         for body in [cut_off, blank_reason, ""] {
             let err = parse_openai_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap_err();
-            assert_eq!(err, STREAM_NO_FINISH_REASON, "body = {body:?}");
+            assert_eq!(
+                err,
+                Failure::transient(STREAM_NO_FINISH_REASON),
+                "body = {body:?}"
+            );
         }
     }
 
@@ -4319,7 +4479,7 @@ mod tests {
             }
             assert_eq!(
                 translate_responses_to_murmur(&response).unwrap_err(),
-                "driver: OpenAI Responses response has no status",
+                Failure::plain("driver: OpenAI Responses response has no status"),
                 "status = {status:?}"
             );
         }
@@ -4328,9 +4488,10 @@ mod tests {
     #[test]
     fn responses_top_level_error_is_still_read_before_the_status() {
         let response = json!({"error": {"message": "boom"}});
-        let payload = translate_responses_to_murmur(&response).unwrap();
-        assert_eq!(payload["stop_reason"], "error");
-        assert_eq!(payload["error"], "OpenAI Responses error: boom");
+        assert_eq!(
+            translate_responses_to_murmur(&response).unwrap_err(),
+            Failure::plain("OpenAI Responses error: boom")
+        );
     }
 
     #[test]
@@ -4342,7 +4503,7 @@ mod tests {
         for body in [body, ""] {
             assert_eq!(
                 parse_responses_sse_body(body, &mut |_| {}, &mut |_| {}).unwrap_err(),
-                "driver: OpenAI Responses stream ended with no terminal event",
+                Failure::transient("driver: OpenAI Responses stream ended with no terminal event"),
                 "body = {body:?}"
             );
         }
@@ -4869,9 +5030,9 @@ mod tests {
             );
             assert_eq!(
                 result,
-                Err(format!(
+                Err(Failure::plain(format!(
                     "driver: tool call index {index} is past the limit of 1024 per turn"
-                ))
+                )))
             );
             assert_eq!(tool_states.capacity(), 0);
             assert_eq!(signals, vec![]);
@@ -4886,9 +5047,9 @@ mod tests {
         let (result, _) = parse_openai_sse_body_with_signals(&body, &mut |_| {}, &mut |_| {});
         assert_eq!(
             result,
-            Err(
-                "driver: tool call index 4294967296 is past the limit of 1024 per turn".to_string()
-            )
+            Err(Failure::plain(
+                "driver: tool call index 4294967296 is past the limit of 1024 per turn"
+            ))
         );
     }
 
@@ -4998,6 +5159,347 @@ mod tests {
         }
         for retired in [concat!("murmur::", "text"), concat!("murmur:", "text")] {
             assert!(!source.contains(retired), "lib.rs must not name {retired}");
+        }
+    }
+
+    // ── Transient failures ────────────────────────────────────────────────────
+
+    use super::{render_outcome, status_failure, CONTINUATION_ID_KEY};
+    use murmur_driver_stream::{Retry, TRANSIENT_METADATA_KEY};
+
+    fn chat(body: &str) -> Result<Value, Failure> {
+        parse_openai_sse_body(body, &mut |_| {}, &mut |_| {})
+    }
+
+    fn responses(body: &str) -> Result<Value, Failure> {
+        parse_responses_sse_body(body, &mut |_| {}, &mut |_| {})
+    }
+
+    const CHAT_TEXT_DELTA: &str =
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n";
+    const RESPONSES_TEXT_DELTA: &str =
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n";
+    const RESPONSES_NO_TERMINAL_EVENT: &str =
+        "driver: OpenAI Responses stream ended with no terminal event";
+
+    /// A Chat Completions chunk carrying a top-level `error` object.
+    fn chat_error_chunk(error: Value) -> String {
+        format!("data: {}\n", json!({ "error": error }))
+    }
+
+    #[test]
+    fn a_chat_stream_cut_before_its_finish_reason_is_transient() {
+        let after_text = CHAT_TEXT_DELTA.to_string();
+        let after_partial_tool_call = [
+            chat_tool_delta(0, Some("call_a"), Some("read"), Some("{\"pa")),
+            chat_tool_delta(0, None, None, Some("th\":")),
+        ]
+        .concat();
+        let empty_reason = format!(
+            "{CHAT_TEXT_DELTA}data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"\"}}]}}\n"
+        );
+        for body in [
+            after_text,
+            after_partial_tool_call,
+            empty_reason,
+            String::new(),
+        ] {
+            assert_eq!(
+                chat(&body).unwrap_err(),
+                Failure::transient("driver: OpenAI stream ended with no finish_reason"),
+                "body = {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_responses_stream_cut_before_its_terminal_event_is_transient() {
+        let after_text = RESPONSES_TEXT_DELTA.to_string();
+        let after_partial_tool_call = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"read\"}}\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"pa\"}\n",
+        )
+        .to_string();
+        for body in [after_text, after_partial_tool_call, String::new()] {
+            assert_eq!(
+                responses(&body).unwrap_err(),
+                Failure::transient(RESPONSES_NO_TERMINAL_EVENT),
+                "body = {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_chat_error_chunk_naming_a_transient_error_is_transient() {
+        for (error, message) in [
+            (
+                json!({"message": "The server had an error", "type": "server_error", "param": null, "code": null}),
+                "OpenAI error: server_error: The server had an error",
+            ),
+            (
+                json!({"message": "Rate limit reached", "type": "requests", "code": "rate_limit_exceeded"}),
+                "OpenAI error: rate_limit_exceeded: Rate limit reached",
+            ),
+            (
+                json!({"message": "Slow down", "type": "rate_limit_error", "code": "slow_down"}),
+                "OpenAI error: slow_down: Slow down",
+            ),
+            (
+                json!({"message": "Overloaded", "type": "service_unavailable_error", "code": "server_is_overloaded"}),
+                "OpenAI error: server_is_overloaded: Overloaded",
+            ),
+        ] {
+            let body = format!("{CHAT_TEXT_DELTA}{}", chat_error_chunk(error));
+            assert_eq!(chat(&body).unwrap_err(), Failure::transient(message));
+        }
+    }
+
+    #[test]
+    fn a_responses_failed_event_naming_a_transient_code_is_transient() {
+        for code in ["server_error", "rate_limit_exceeded"] {
+            let body = format!(
+                "{RESPONSES_TEXT_DELTA}data: {}\n",
+                json!({"type": "response.failed", "response": {"status": "failed", "error": {"code": code, "message": "boom"}}})
+            );
+            assert_eq!(
+                responses(&body).unwrap_err(),
+                Failure::transient("OpenAI Responses error: boom"),
+                "code = {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_responses_error_event_naming_a_transient_code_is_transient() {
+        let top_level = json!({"type": "error", "code": "server_error", "message": "Something went wrong", "param": null, "sequence_number": 3});
+        let nested = json!({"type": "error", "error": {"type": "rate_limit_error", "code": "rate_limit_exceeded", "message": "Slow"}});
+        for (event, message) in [
+            (
+                top_level,
+                "OpenAI error: server_error: Something went wrong",
+            ),
+            (nested, "OpenAI error: rate_limit_exceeded: Slow"),
+        ] {
+            let body = format!("{RESPONSES_TEXT_DELTA}data: {event}\n");
+            assert_eq!(responses(&body).unwrap_err(), Failure::transient(message));
+        }
+    }
+
+    #[test]
+    fn a_buffered_responses_error_naming_a_transient_code_is_transient() {
+        for code in ["server_error", "rate_limit_exceeded"] {
+            let response = json!({"status": "failed", "error": {"code": code, "message": "boom"}, "output": []});
+            assert_eq!(
+                translate_responses_to_murmur(&response).unwrap_err(),
+                Failure::transient("OpenAI Responses error: boom")
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_transient_provider_error_stays_plain_with_its_message() {
+        let chat_body = format!(
+            "{CHAT_TEXT_DELTA}{}",
+            chat_error_chunk(
+                json!({"message": "Bad prompt", "type": "invalid_request_error", "code": "invalid_prompt"})
+            )
+        );
+        assert_eq!(
+            chat(&chat_body).unwrap_err(),
+            Failure::plain("OpenAI error: invalid_prompt: Bad prompt")
+        );
+
+        let failed = format!(
+            "data: {}\n",
+            json!({"type": "response.failed", "response": {"status": "failed", "error": {"code": "vector_store_timeout", "message": "slow store"}}})
+        );
+        assert_eq!(
+            responses(&failed).unwrap_err(),
+            Failure::plain("OpenAI Responses error: slow store")
+        );
+
+        let buffered = json!({"error": {"code": "invalid_image", "message": "bad image"}});
+        assert_eq!(
+            translate_responses_to_murmur(&buffered).unwrap_err(),
+            Failure::plain("OpenAI Responses error: bad image")
+        );
+    }
+
+    #[test]
+    fn an_unknown_error_then_eof_stays_plain_and_names_the_error_not_the_cut() {
+        let chat_body = format!("{CHAT_TEXT_DELTA}data: {{\"error\":{{}}}}\n");
+        assert_eq!(
+            chat(&chat_body).unwrap_err(),
+            Failure::plain("OpenAI error: unknown: unknown")
+        );
+
+        let responses_body = format!(
+            "{RESPONSES_TEXT_DELTA}data: {{\"type\":\"error\",\"code\":\"ERR_SOMETHING\",\"message\":\"Something went wrong\"}}\n"
+        );
+        assert_eq!(
+            responses(&responses_body).unwrap_err(),
+            Failure::plain("OpenAI error: ERR_SOMETHING: Something went wrong")
+        );
+    }
+
+    #[test]
+    fn an_in_stream_error_naming_a_quota_is_never_transient() {
+        let body = chat_error_chunk(
+            json!({"message": "Out of credit", "type": "insufficient_quota", "code": "rate_limit_exceeded"}),
+        );
+        assert_eq!(
+            chat(&body).unwrap_err(),
+            Failure::plain("OpenAI error: rate_limit_exceeded: Out of credit")
+        );
+    }
+
+    #[test]
+    fn refusals_content_filters_and_malformed_streams_stay_plain() {
+        let content_filter =
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"content_filter\"}]}\n";
+        assert_eq!(
+            chat(content_filter).unwrap()["error"],
+            "OpenAI response blocked by content_filter"
+        );
+
+        let unknown_reason =
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"surprise\"}]}\n";
+        assert_eq!(
+            chat(unknown_reason).unwrap_err(),
+            Failure::plain("driver: unsupported OpenAI finish_reason 'surprise'")
+        );
+
+        let bad_arguments = [
+            chat_tool_delta(0, Some("call_a"), Some("read"), Some("{not json")),
+            CHAT_TOOL_CALLS_FINISH.to_string(),
+        ]
+        .concat();
+        let failure = chat(&bad_arguments).unwrap_err();
+        assert_eq!(failure.retry, None);
+        assert!(failure
+            .message
+            .starts_with("driver: failed to parse OpenAI tool call arguments JSON:"));
+
+        let past_limit = chat_tool_delta(1024, Some("call_x"), Some("bash"), Some(""));
+        assert_eq!(chat(&past_limit).unwrap_err().retry, None);
+
+        let refused = json!({"status": "completed", "output": [{"type": "message", "content": [{"type": "refusal", "refusal": "no"}]}]});
+        assert_eq!(
+            translate_responses_to_murmur(&refused).unwrap()["error"],
+            "OpenAI response refused: no"
+        );
+
+        let incomplete = "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"content_filter\"}}}\n";
+        assert_eq!(
+            responses(incomplete).unwrap()["error"],
+            "OpenAI Responses incomplete: content_filter"
+        );
+
+        let failed_without_error =
+            "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"}}\n";
+        assert_eq!(
+            responses(failed_without_error).unwrap()["error"],
+            "OpenAI Responses request failed"
+        );
+
+        let unknown_status =
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"queued\"}}\n";
+        assert_eq!(
+            responses(unknown_status).unwrap_err(),
+            Failure::plain("driver: unsupported OpenAI Responses status 'queued'")
+        );
+    }
+
+    #[test]
+    fn every_status_but_a_quota_429_is_plain_with_the_body() {
+        let rate_limit = r#"{"error":{"message":"Rate limit reached","type":"requests","code":"rate_limit_exceeded"}}"#;
+        let slow_down =
+            r#"{"error":{"message":"Slow down","type":"rate_limit_error","code":"slow_down"}}"#;
+        let generic = r#"{"error":{"message":"nope","type":"invalid_request_error","code":null}}"#;
+        let mut cases: Vec<(u16, &str)> =
+            [400, 401, 403, 404, 408, 413, 422, 500, 502, 503, 504, 529]
+                .into_iter()
+                .map(|status| (status, generic))
+                .collect();
+        cases.extend([
+            (429, rate_limit),
+            (429, slow_down),
+            (429, "not json"),
+            (429, ""),
+        ]);
+        // A quota code on a status other than 429 is still murmur's to decide.
+        cases.push((
+            400,
+            r#"{"error":{"type":"insufficient_quota","code":"insufficient_quota","message":"x"}}"#,
+        ));
+        for (status, body) in cases {
+            assert_eq!(
+                status_failure(status, body),
+                Failure::plain(format!("HTTP {status}: {body}")),
+                "status = {status}, body = {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_429_naming_exhausted_quota_is_permanent() {
+        let bodies = [
+            r#"{"error":{"message":"You exceeded your current quota","type":"insufficient_quota","param":null,"code":"insufficient_quota"}}"#,
+            r#"{"error":{"message":"quota","type":"insufficient_quota","code":null}}"#,
+            r#"{"error":{"message":"credit","type":"insufficient_quota","code":"credit_balance_exhausted"}}"#,
+            r#"{"error":{"message":"org spend","code":"organization_spend_limit_exceeded"}}"#,
+            r#"{"error":{"message":"project spend","code":"project_spend_limit_exceeded"}}"#,
+            r#"{"error":{"message":"usage","code":"organization_usage_limit_exceeded"}}"#,
+        ];
+        for body in bodies {
+            assert_eq!(
+                status_failure(429, body),
+                Failure::permanent(format!("HTTP 429: {body}")),
+                "body = {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_success_carries_no_transient_tuple_and_keeps_its_continuation_id() {
+        let success = chat(&format!(
+            "{CHAT_TEXT_DELTA}data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n"
+        ))
+        .unwrap();
+
+        let (response, metadata) = render_outcome(Ok((success.clone(), None)));
+        assert_eq!(response, success);
+        assert!(metadata.is_empty());
+
+        let (_, metadata) = render_outcome(Ok((success, Some("resp_1".to_string()))));
+        assert_eq!(
+            metadata,
+            vec![(CONTINUATION_ID_KEY.to_string(), "resp_1".to_string())]
+        );
+        assert!(!metadata
+            .iter()
+            .any(|(key, _)| key == TRANSIENT_METADATA_KEY));
+    }
+
+    #[test]
+    fn a_failure_renders_its_error_payload_and_at_most_one_transient_tuple() {
+        for (failure, metadata) in [
+            (Failure::plain("driver: boom"), vec![]),
+            (
+                Failure::transient("driver: boom"),
+                vec![Retry::Transient.metadata()],
+            ),
+            (
+                Failure::permanent("driver: boom"),
+                vec![Retry::Permanent.metadata()],
+            ),
+        ] {
+            let (response, rendered) = render_outcome(Err(failure));
+            assert_eq!(
+                response,
+                json!({"stop_reason": "error", "error": "driver: boom"})
+            );
+            assert_eq!(rendered, metadata);
         }
     }
 }

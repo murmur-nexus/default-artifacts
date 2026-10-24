@@ -376,6 +376,53 @@ A failed task status and a `task_failed` trace line with cause `driver_error`
 need a murmur runtime released after v0.4.0. On v0.4.0 and earlier the runtime
 records the error but still reports the task as `ok` and exits 0.
 
+## Transient failures
+
+murmur makes an inference call again when it fails transiently. It sees the
+status and a connection that broke before the response head itself. What goes
+wrong after a `2xx` head only the driver sees, so on those failures the driver
+adds one reserved tuple to the result's `metadata`: `("transient", "true")` asks
+murmur to retry, and `("transient", "false")` vetoes a retry of a status murmur
+would otherwise retry. murmur 0.8.0 and later read the key; an earlier murmur
+ignores it and fails the call as before.
+
+The driver marks these `"true"`, each only after Moonshot answered `2xx`:
+
+| What happened | Error message |
+|---|---|
+| The SSE stream ended, or the body was empty, before any chunk carried a `finish_reason` | `driver: Moonshot stream ended with no finish_reason` |
+| A read of the response body failed | `driver: failed to read response stream: <error>` |
+| A stream chunk carried an `error` object whose `type` is `engine_overloaded_error`, `rate_limit_reached_error`, `server_error`, `unexpected_output`, `server_unavailable` or `client_closed_request` | `Moonshot error: <type>: <message>` |
+
+The driver marks this `"false"`:
+
+| Status | Moonshot `error.type` | Why |
+|---|---|---|
+| `429` | `exceeded_current_quota_error` | The account balance or token quota has run out. Waiting does not top it up. |
+
+Everything else carries no `transient` tuple, and murmur alone decides whether
+to retry it from the status or the connection failure its gateway recorded:
+
+| Failure | Error message |
+|---|---|
+| Any other status `>= 400`, a rate-limit or overload `429` included | `HTTP <status>: <body>` |
+| A read of a `>= 400` body failed | `driver: failed to read response stream: <error>` |
+| A connection failure before the response head | murmur's own |
+| A stream chunk carrying any other error `type`, such as `content_filter`, or none | `Moonshot error: <type>: <message>`, with `unknown` for a missing part |
+| A `finish_reason` other than `stop`, `tool_calls` or `length`, `content_filter` included | `driver: unsupported Moonshot finish_reason '<reason>'` |
+| A stream with a line that is not SSE, or a `data:` payload that is not JSON, that then ends without a `finish_reason` | `driver: Moonshot stream ended with no finish_reason` |
+| A tool call index past the limit, or tool-call arguments that are not JSON | the `driver: ` message under [Errors](#errors) |
+| A JSON body with no `finish_reason` | `driver: Moonshot response has no finish_reason` |
+| Any refusal before the request is sent | the refusal's own message |
+
+An error chunk ends the turn when it arrives, so it is reported in place of a
+stream that then ends without a `finish_reason`.
+
+On a retry murmur discards everything the failed attempt streamed. Moonshot
+sends its wait hints as HTTP headers, which murmur reads itself: `Retry-After`
+on an overloaded `429`. The driver passes no delay of its own and never repeats
+a request.
+
 ## Token usage
 
 Every translated response carries an optional top-level `usage` object, on both
@@ -430,8 +477,11 @@ implemented, and there is no surface router — one surface needs none.
 Every fallible function returns a message opening `driver: `, and nothing
 panics. The `run` wrapper turns an error into a `ToolResult` with
 `status: error`, the message as its summary, and
-`{"stop_reason":"error","error":…}` as its data. A provider status `>= 400`
-produces the same shape carrying `HTTP <status>: <body>`.
+`{"stop_reason":"error","error":…}` as its data, plus the `transient` tuple
+described under [Transient failures](#transient-failures) when the failure
+carries one. A provider status `>= 400` produces the same shape carrying
+`HTTP <status>: <body>`, and an `error` object inside the stream carries
+`Moonshot error: <type>: <message>`.
 
 A turn holds at most 1024 tool calls: a streamed chunk numbers each call with an
 `index`, and one naming index 1024 or more fails the turn with

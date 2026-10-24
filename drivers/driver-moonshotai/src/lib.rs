@@ -2,6 +2,7 @@
 // or from cfg(test). Suppress dead_code noise in plain host library builds.
 #![cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
 
+use murmur_driver_stream::Failure;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
@@ -905,8 +906,30 @@ enum ToolCallSignal<'a> {
     InputBytes { id: &'a str, bytes: u64 },
 }
 
+/// What a stream has said about how it ends, read by [`assemble_moonshot_streaming_response`].
+#[derive(Debug, Default)]
+struct StreamEnd {
+    /// The `finish_reason` a chunk carried.
+    finish_reason: Option<String>,
+    /// Set by a complete line that is not SSE, or a `data: ` payload that is not JSON. Such a
+    /// body is not a Moonshot stream that was cut, so ending it without a `finish_reason` is not
+    /// a transient failure.
+    malformed: bool,
+}
+
+/// Whether `line` is SSE syntax: blank, a `:` comment, or one of the four SSE fields.
+fn is_sse_line(line: &str) -> bool {
+    line.is_empty()
+        || line.starts_with(':')
+        || ["data", "event", "id", "retry"].iter().any(|field| {
+            line.strip_prefix(field)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
+        })
+}
+
 /// Process one complete SSE line. Returns `Ok(true)` when the stream is done (`data: [DONE]`),
-/// and `Err` for a tool call index past [`murmur_driver_stream::MAX_SLOTS_PER_TURN`].
+/// and `Err` for a chunk carrying a provider `error` object (see [`provider_error_failure`]) or a
+/// tool call index past [`murmur_driver_stream::MAX_SLOTS_PER_TURN`].
 ///
 /// Moonshot streams OpenAI-compatible chat-completions chunks plus a separate
 /// `reasoning_content` delta. `delta.reasoning_content` is routed to `emit_thinking`,
@@ -915,21 +938,29 @@ enum ToolCallSignal<'a> {
 fn process_moonshot_sse_line(
     line: &str,
     tool_states: &mut Vec<ToolCallState>,
-    stop_reason: &mut Option<String>,
+    end: &mut StreamEnd,
     usage: &mut UsageTokens,
     emit_text: &mut impl FnMut(&str),
     emit_thinking: &mut impl FnMut(&str),
     signal: &mut impl FnMut(ToolCallSignal<'_>),
-) -> Result<bool, String> {
+) -> Result<bool, Failure> {
     if line == "data: [DONE]" {
         return Ok(true);
     }
     let Some(json_str) = line.strip_prefix("data: ") else {
+        end.malformed |= !is_sse_line(line);
         return Ok(false);
     };
     let Ok(data) = serde_json::from_str::<Value>(json_str) else {
+        end.malformed = true;
         return Ok(false);
     };
+
+    // Read first: an error chunk carries no `choices`, and the provider's account of why the
+    // turn failed outranks the stream then ending without a `finish_reason`.
+    if let Some(error) = data.get("error").filter(|value| !value.is_null()) {
+        return Err(provider_error_failure(error));
+    }
 
     // Read before the `choices`-shaped early returns below: the usage-bearing final chunk has an
     // empty `choices` array and would otherwise be discarded.
@@ -947,7 +978,7 @@ fn process_moonshot_sse_line(
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
     {
-        *stop_reason = Some(reason.to_string());
+        end.finish_reason = Some(reason.to_string());
     }
 
     let Some(delta) = choice.and_then(|c| c.get("delta")) else {
@@ -970,7 +1001,7 @@ fn process_moonshot_sse_line(
         for tc in tc_arr {
             let index = tc.get("index").and_then(Value::as_u64).unwrap_or(0);
             let state = murmur_driver_stream::slot_mut(tool_states, index)
-                .map_err(|err| format!("driver: tool call {err}"))?;
+                .map_err(|err| Failure::plain(format!("driver: tool call {err}")))?;
             if let Some(id) = tc.get("id").and_then(Value::as_str) {
                 if state.id.is_empty() {
                     state.id = id.to_string();
@@ -999,13 +1030,20 @@ fn assemble_moonshot_streaming_response(
     text_acc: &str,
     reasoning_acc: &str,
     tool_states: Vec<ToolCallState>,
-    stop_reason: Option<String>,
+    end: StreamEnd,
     usage: UsageTokens,
-) -> Result<Value, String> {
-    // No chunk carried a finish_reason, so the stream ended before the turn did.
-    let finish_reason = stop_reason
-        .as_deref()
-        .ok_or_else(|| "driver: Moonshot stream ended with no finish_reason".to_string())?;
+) -> Result<Value, Failure> {
+    // No chunk carried a finish_reason, so the stream ended before the turn did. After a `2xx`
+    // head that is a broken connection, which the same request may not meet again — unless the
+    // body was never a well-formed Moonshot stream.
+    let Some(finish_reason) = end.finish_reason.as_deref() else {
+        let message = "driver: Moonshot stream ended with no finish_reason";
+        return Err(if end.malformed {
+            Failure::plain(message)
+        } else {
+            Failure::transient(message)
+        });
+    };
     let stop_reason_str = map_finish_reason(finish_reason)?;
 
     let mut tool_content = Vec::new();
@@ -1049,7 +1087,7 @@ fn parse_moonshot_sse_body<F: FnMut(&str), G: FnMut(&str)>(
     body: &str,
     emit_text: &mut F,
     emit_thinking: &mut G,
-) -> Result<Value, String> {
+) -> Result<Value, Failure> {
     parse_moonshot_sse_body_with_signals(body, emit_text, emit_thinking).0
 }
 
@@ -1084,15 +1122,18 @@ fn parse_moonshot_sse_body_with_signals<F: FnMut(&str), G: FnMut(&str)>(
     body: &str,
     emit_text: &mut F,
     emit_thinking: &mut G,
-) -> (Result<Value, String>, Vec<RecordedSignal>) {
+) -> (Result<Value, Failure>, Vec<RecordedSignal>) {
     let mut text_acc = String::new();
     let mut reasoning_acc = String::new();
     let mut tool_states: Vec<ToolCallState> = Vec::new();
-    let mut stop_reason: Option<String> = None;
+    let mut end = StreamEnd::default();
     let mut usage = UsageTokens::default();
     let mut signals = Vec::new();
 
-    for line in body.lines() {
+    // Only newline-terminated lines, as the wasm module reads them: an unterminated tail is a
+    // line the connection cut, never processed.
+    let terminated = &body[..body.rfind('\n').map_or(0, |at| at + 1)];
+    for line in terminated.lines() {
         let line = line.trim_end_matches('\r');
         let done = {
             let mut et = |t: &str| {
@@ -1106,7 +1147,7 @@ fn parse_moonshot_sse_body_with_signals<F: FnMut(&str), G: FnMut(&str)>(
             process_moonshot_sse_line(
                 line,
                 &mut tool_states,
-                &mut stop_reason,
+                &mut end,
                 &mut usage,
                 &mut et,
                 &mut eth,
@@ -1120,13 +1161,8 @@ fn parse_moonshot_sse_body_with_signals<F: FnMut(&str), G: FnMut(&str)>(
         }
     }
 
-    let result = assemble_moonshot_streaming_response(
-        &text_acc,
-        &reasoning_acc,
-        tool_states,
-        stop_reason,
-        usage,
-    );
+    let result =
+        assemble_moonshot_streaming_response(&text_acc, &reasoning_acc, tool_states, end, usage);
     (result, signals)
 }
 
@@ -1139,10 +1175,74 @@ fn error_payload(message: &str) -> Value {
     })
 }
 
-/// The payload for a provider status `>= 400`. Same shape as any other driver error, carrying
-/// the status and the provider's own body so the operator sees what Moonshot said.
-fn http_error_payload(status: u16, body: &str) -> Value {
-    error_payload(&format!("HTTP {status}: {body}"))
+/// The `data` payload and `tool-result.metadata` a failed call returns: the same error payload
+/// every failure has, plus the failure's `transient` tuple when it carries one.
+fn failure_result(failure: &Failure) -> (Value, Vec<(String, String)>) {
+    (error_payload(&failure.message), failure.metadata())
+}
+
+// ── Failures murmur may retry ─────────────────────────────────────────────────
+
+/// The `error.type` values Moonshot documents as server load, a rate limit, a server fault or a
+/// lost connection. Reported inside a `2xx` stream, each marks the failure transient.
+const TRANSIENT_ERROR_TYPES: &[&str] = &[
+    "engine_overloaded_error",
+    "rate_limit_reached_error",
+    "server_error",
+    "unexpected_output",
+    "server_unavailable",
+    "client_closed_request",
+];
+
+/// The `error.type` values Moonshot documents for an exhausted balance or token quota. On a
+/// `429` each vetoes murmur's retry of the status: waiting does not top the account up.
+const QUOTA_ERROR_TYPES: &[&str] = &["exceeded_current_quota_error"];
+
+/// The failure for an `error` object Moonshot sent inside a `2xx` stream:
+/// `Moonshot error: <type>: <message>`, naming `error.code` when there is no `type` and `unknown`
+/// for a missing part. Transient for a type in [`TRANSIENT_ERROR_TYPES`], plain otherwise.
+fn provider_error_failure(error: &Value) -> Failure {
+    let kind = error
+        .get("type")
+        .and_then(Value::as_str)
+        .or_else(|| error.get("code").and_then(Value::as_str));
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| error.as_str());
+    let text = format!(
+        "Moonshot error: {}: {}",
+        kind.unwrap_or("unknown"),
+        message.unwrap_or("unknown")
+    );
+    if kind.is_some_and(|kind| TRANSIENT_ERROR_TYPES.contains(&kind)) {
+        Failure::transient(text)
+    } else {
+        Failure::plain(text)
+    }
+}
+
+/// The failure for a provider status `>= 400`: `HTTP <status>: <body>`, carrying the provider's
+/// own body so the operator sees what Moonshot said.
+///
+/// murmur classifies a status itself, so this adds nothing to most of them. The one exception is
+/// a `429` whose `error.type` is in [`QUOTA_ERROR_TYPES`], marked permanent so murmur does not
+/// spend its retries on an empty account.
+fn status_failure(status: u16, body: &str) -> Failure {
+    let message = format!("HTTP {status}: {body}");
+    let quota_exhausted = status == 429
+        && serde_json::from_str::<Value>(body).is_ok_and(|parsed| {
+            parsed
+                .get("error")
+                .and_then(|error| error.get("type"))
+                .and_then(Value::as_str)
+                .is_some_and(|kind| QUOTA_ERROR_TYPES.contains(&kind))
+        });
+    if quota_exhausted {
+        Failure::permanent(message)
+    } else {
+        Failure::plain(message)
+    }
 }
 
 // ── WASM driver module ────────────────────────────────────────────────────────
@@ -1150,11 +1250,12 @@ fn http_error_payload(status: u16, body: &str) -> Value {
 #[cfg(target_arch = "wasm32")]
 mod wasm_driver {
     use super::{
-        assemble_moonshot_streaming_response, build_provider_request, error_payload,
-        http_error_payload, parse_driver_config, process_moonshot_sse_line,
-        translate_moonshot_response_to_murmur, MurmurRequest, ToolCallSignal, ToolCallState,
-        UsageTokens,
+        assemble_moonshot_streaming_response, build_provider_request, failure_result,
+        parse_driver_config, process_moonshot_sse_line, status_failure,
+        translate_moonshot_response_to_murmur, MurmurRequest, StreamEnd, ToolCallSignal,
+        ToolCallState, UsageTokens,
     };
+    use murmur_driver_stream::Failure;
     use serde_json::Value;
 
     wit_bindgen::generate!({
@@ -1182,9 +1283,9 @@ mod wasm_driver {
         fn run(
             input: exports::murmur::tool::run::ToolInput,
         ) -> exports::murmur::tool::run::ToolResult {
-            let response = match run_inner(input) {
-                Ok(value) => value,
-                Err(err) => error_payload(&err),
+            let (response, metadata) = match run_inner(input) {
+                Ok(value) => (value, vec![]),
+                Err(failure) => failure_result(&failure),
             };
 
             let stop_reason = response
@@ -1213,12 +1314,12 @@ mod wasm_driver {
                 data: Some(response.to_string()),
                 data_path: None,
                 truncated: false,
-                metadata: vec![],
+                metadata,
             }
         }
     }
 
-    fn run_inner(input: exports::murmur::tool::run::ToolInput) -> Result<Value, String> {
+    fn run_inner(input: exports::murmur::tool::run::ToolInput) -> Result<Value, Failure> {
         // First fallible step: a config the driver cannot honour fails here, before any other
         // environment read and before any HTTP request is dispatched.
         let driver_config = std::env::var("MURMUR_INFERENCE_DRIVER_CONFIG").ok();
@@ -1255,8 +1356,8 @@ mod wasm_driver {
         let status = response.status();
 
         if status >= 400 {
-            let text = consume_body_as_string(response)?;
-            return Ok(http_error_payload(status, &text));
+            let text = consume_body_as_string(response, status)?;
+            return Err(status_failure(status, &text));
         }
 
         let incoming_body = response
@@ -1267,7 +1368,7 @@ mod wasm_driver {
             .map_err(|()| "driver: failed to stream response body".to_string())?;
 
         // Detect format from first read: JSON bodies start with '{' or '['.
-        let first = read_chunk(&stream)?;
+        let first = read_chunk(&stream, status)?;
         let is_json = first
             .iter()
             .find(|&&b| !b.is_ascii_whitespace())
@@ -1278,7 +1379,7 @@ mod wasm_driver {
             // Non-streaming fallback (test servers, providers ignoring stream:true).
             let mut all = first;
             loop {
-                let chunk = read_chunk(&stream)?;
+                let chunk = read_chunk(&stream, status)?;
                 if chunk.is_empty() {
                     break;
                 }
@@ -1297,17 +1398,17 @@ mod wasm_driver {
             let mut text_acc = String::new();
             let mut reasoning_acc = String::new();
             let mut tool_states: Vec<ToolCallState> = Vec::new();
-            let mut stop_reason: Option<String> = None;
+            let mut end = StreamEnd::default();
             let mut usage = UsageTokens::default();
             let mut done = false;
 
             let handle_line = |line: &str,
                                tool_states: &mut Vec<ToolCallState>,
-                               stop_reason: &mut Option<String>,
+                               end: &mut StreamEnd,
                                usage: &mut UsageTokens,
                                text_acc: &mut String,
                                reasoning_acc: &mut String|
-             -> Result<bool, String> {
+             -> Result<bool, Failure> {
                 let mut et = |t: &str| {
                     murmur::stream::events::emit_chunk(t);
                     text_acc.push_str(t);
@@ -1319,7 +1420,7 @@ mod wasm_driver {
                 process_moonshot_sse_line(
                     line,
                     tool_states,
-                    stop_reason,
+                    end,
                     usage,
                     &mut et,
                     &mut eth,
@@ -1335,7 +1436,7 @@ mod wasm_driver {
                     done = handle_line(
                         line,
                         &mut tool_states,
-                        &mut stop_reason,
+                        &mut end,
                         &mut usage,
                         &mut text_acc,
                         &mut reasoning_acc,
@@ -1352,7 +1453,7 @@ mod wasm_driver {
             // Continue reading remaining chunks.
             if !done {
                 'outer: loop {
-                    let chunk = read_chunk(&stream)?;
+                    let chunk = read_chunk(&stream, status)?;
                     if chunk.is_empty() {
                         break;
                     }
@@ -1363,7 +1464,7 @@ mod wasm_driver {
                             done = handle_line(
                                 line,
                                 &mut tool_states,
-                                &mut stop_reason,
+                                &mut end,
                                 &mut usage,
                                 &mut text_acc,
                                 &mut reasoning_acc,
@@ -1385,7 +1486,7 @@ mod wasm_driver {
                 &text_acc,
                 &reasoning_acc,
                 tool_states,
-                stop_reason,
+                end,
                 usage,
             )?
         };
@@ -1460,7 +1561,8 @@ mod wasm_driver {
 
     fn consume_body_as_string(
         response: wasip2::http::types::IncomingResponse,
-    ) -> Result<String, String> {
+        status: u16,
+    ) -> Result<String, Failure> {
         let incoming_body = response
             .consume()
             .map_err(|()| "driver: failed to consume error response body".to_string())?;
@@ -1469,7 +1571,7 @@ mod wasm_driver {
             .map_err(|()| "driver: failed to stream error response body".to_string())?;
         let mut bytes = Vec::new();
         loop {
-            let chunk = read_chunk(&stream)?;
+            let chunk = read_chunk(&stream, status)?;
             if chunk.is_empty() {
                 break;
             }
@@ -1477,15 +1579,24 @@ mod wasm_driver {
         }
         drop(stream);
         let _ = wasip2::http::types::IncomingBody::finish(incoming_body);
-        String::from_utf8(bytes)
-            .map_err(|err| format!("driver: error response body is not UTF-8: {err}"))
+        String::from_utf8(bytes).map_err(|err| {
+            Failure::plain(format!("driver: error response body is not UTF-8: {err}"))
+        })
     }
 
-    fn read_chunk(stream: &wasip2::io::streams::InputStream) -> Result<Vec<u8>, String> {
+    /// The next chunk of a response body that arrived with `status`, empty at its end. A failed
+    /// read is classified by [`murmur_driver_stream::read_failure`].
+    fn read_chunk(
+        stream: &wasip2::io::streams::InputStream,
+        status: u16,
+    ) -> Result<Vec<u8>, Failure> {
         match stream.blocking_read(16 * 1024) {
             Ok(chunk) => Ok(chunk),
             Err(wasip2::io::streams::StreamError::Closed) => Ok(Vec::new()),
-            Err(err) => Err(format!("driver: failed to read response stream: {err:?}")),
+            Err(err) => Err(murmur_driver_stream::read_failure(
+                status,
+                &format!("{err:?}"),
+            )),
         }
     }
 
@@ -1547,10 +1658,11 @@ mod wasm_driver {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_provider_request, http_error_payload, parse_driver_config, parse_moonshot_sse_body,
+        build_provider_request, parse_driver_config, parse_moonshot_sse_body, status_failure,
         translate_moonshot_response_to_murmur, translate_murmur_request_to_moonshot,
         validate_model, DriverConfig, MurmurRequest, ThinkingControl, SUPPORTED_MODELS,
     };
+    use murmur_driver_stream::Failure;
     use serde_json::{json, Value};
 
     // ── Fixtures and helpers ──────────────────────────────────────────────────
@@ -1978,7 +2090,10 @@ mod tests {
         let stream = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\ndata: [DONE]\n";
         let err =
             parse_moonshot_sse_body(stream, &mut |_: &str| {}, &mut |_: &str| {}).unwrap_err();
-        assert_eq!(err, "driver: Moonshot stream ended with no finish_reason");
+        assert_eq!(
+            err,
+            Failure::transient("driver: Moonshot stream ended with no finish_reason")
+        );
     }
 
     #[test]
@@ -2591,11 +2706,8 @@ mod tests {
 
         // A provider status >= 400.
         assert_eq!(
-            http_error_payload(429, "{\"error\":\"rate limit exceeded\"}"),
-            json!({
-                "stop_reason": "error",
-                "error": "HTTP 429: {\"error\":\"rate limit exceeded\"}"
-            })
+            status_failure(429, "{\"error\":\"rate limit exceeded\"}"),
+            Failure::plain("HTTP 429: {\"error\":\"rate limit exceeded\"}")
         );
     }
 
@@ -2705,7 +2817,7 @@ mod tests {
         for body in [cut_off, blank_reason, ""] {
             assert_eq!(
                 parse_moonshot_sse_body(body, &mut |_: &str| {}, &mut |_: &str| {}).unwrap_err(),
-                "driver: Moonshot stream ended with no finish_reason",
+                Failure::transient("driver: Moonshot stream ended with no finish_reason"),
                 "body = {body:?}"
             );
         }
@@ -3017,7 +3129,7 @@ mod tests {
 
     #[test]
     fn a_tool_call_index_past_the_limit_fails_the_turn_without_allocating() {
-        use super::{process_moonshot_sse_line, UsageTokens};
+        use super::{process_moonshot_sse_line, StreamEnd, UsageTokens};
 
         for index in [1024, 4_294_967_296, u64::MAX] {
             let line = tool_delta(index, Some("call_x"), Some("bash"), Some(""));
@@ -3026,7 +3138,7 @@ mod tests {
             let result = process_moonshot_sse_line(
                 line.trim_end_matches('\n'),
                 &mut tool_states,
-                &mut None,
+                &mut StreamEnd::default(),
                 &mut UsageTokens::default(),
                 &mut |_| {},
                 &mut |_| {},
@@ -3034,9 +3146,9 @@ mod tests {
             );
             assert_eq!(
                 result,
-                Err(format!(
+                Err(Failure::plain(format!(
                     "driver: tool call index {index} is past the limit of 1024 per turn"
-                ))
+                )))
             );
             assert_eq!(tool_states.capacity(), 0);
             assert_eq!(signals, vec![]);
@@ -3051,9 +3163,9 @@ mod tests {
         let (result, _) = parse_moonshot_sse_body_with_signals(&body, &mut |_| {}, &mut |_| {});
         assert_eq!(
             result,
-            Err(
-                "driver: tool call index 4294967296 is past the limit of 1024 per turn".to_string()
-            )
+            Err(Failure::plain(
+                "driver: tool call index 4294967296 is past the limit of 1024 per turn"
+            ))
         );
     }
 
@@ -3195,5 +3307,322 @@ mod tests {
         for retired in [concat!("murmur::", "text"), concat!("murmur:", "text")] {
             assert!(!source.contains(retired), "lib.rs must not name {retired}");
         }
+    }
+
+    // ── Transient failures ────────────────────────────────────────────────────
+
+    use super::failure_result;
+    use murmur_driver_stream::{Retry, TRANSIENT_METADATA_KEY};
+
+    const CUT: &str = "driver: Moonshot stream ended with no finish_reason";
+
+    fn parse(body: &str) -> Result<Value, Failure> {
+        parse_moonshot_sse_body(body, &mut |_: &str| {}, &mut |_: &str| {})
+    }
+
+    fn error_chunk(error: Value) -> String {
+        format!("data: {}\n", json!({ "error": error }))
+    }
+
+    #[test]
+    fn a_stream_cut_before_its_finish_reason_is_transient() {
+        let after_text = chunk(json!({"content": "Hel"}));
+        let after_reasoning = chunk(json!({"reasoning_content": "Let me"}));
+        let after_partial_tool_call =
+            tool_delta(0, Some("call_a"), Some("bash"), Some("{\"cmd\":\"l"));
+        let empty_reason = format!(
+            "{}data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"\"}}]}}\n",
+            chunk(json!({"content": "Hello"}))
+        );
+        for body in [
+            after_text.as_str(),
+            after_reasoning.as_str(),
+            after_partial_tool_call.as_str(),
+            empty_reason.as_str(),
+            "",
+        ] {
+            assert_eq!(parse(body), Err(Failure::transient(CUT)), "body = {body:?}");
+        }
+    }
+
+    #[test]
+    fn each_documented_transient_error_type_in_the_stream_is_transient() {
+        for kind in [
+            "engine_overloaded_error",
+            "rate_limit_reached_error",
+            "server_error",
+            "unexpected_output",
+            "server_unavailable",
+            "client_closed_request",
+        ] {
+            let body = format!(
+                "{}{}",
+                chunk(json!({"content": "partial"})),
+                error_chunk(json!({"type": kind, "message": "try again later"}))
+            );
+            assert_eq!(
+                parse(&body),
+                Err(Failure::transient(format!(
+                    "Moonshot error: {kind}: try again later"
+                ))),
+                "type = {kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_error_chunk_names_its_code_when_it_has_no_type() {
+        let body = error_chunk(json!({"code": "server_error", "message": "boom"}));
+        assert_eq!(
+            parse(&body),
+            Err(Failure::transient("Moonshot error: server_error: boom"))
+        );
+    }
+
+    #[test]
+    fn a_non_transient_error_chunk_then_eof_stays_plain_with_the_provider_message() {
+        for (error, message) in [
+            (
+                json!({"type": "content_filter", "message": "high risk"}),
+                "Moonshot error: content_filter: high risk",
+            ),
+            (
+                json!({"type": "exceeded_current_quota_error", "message": "Token quota is insufficient"}),
+                "Moonshot error: exceeded_current_quota_error: Token quota is insufficient",
+            ),
+            (
+                json!({"type": "brand_new_error"}),
+                "Moonshot error: brand_new_error: unknown",
+            ),
+            (
+                json!({"message": "no type"}),
+                "Moonshot error: unknown: no type",
+            ),
+            (
+                json!("a bare string"),
+                "Moonshot error: unknown: a bare string",
+            ),
+        ] {
+            let body = format!("{}{}", chunk(json!({"content": "x"})), error_chunk(error));
+            assert_eq!(parse(&body), Err(Failure::plain(message)));
+        }
+    }
+
+    #[test]
+    fn an_error_chunk_outranks_a_later_finish_reason() {
+        let body = format!(
+            "{}data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\ndata: [DONE]\n",
+            error_chunk(json!({"type": "engine_overloaded_error", "message": "busy"}))
+        );
+        assert_eq!(
+            parse(&body),
+            Err(Failure::transient(
+                "Moonshot error: engine_overloaded_error: busy"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_null_error_member_is_not_an_error_chunk() {
+        let body = concat!(
+            "data: {\"error\":null,\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n",
+            "data: [DONE]\n",
+        );
+        assert_eq!(parse(body).unwrap()["stop_reason"], "end_turn");
+    }
+
+    #[test]
+    fn content_filter_and_unknown_finish_reasons_stay_plain_on_both_paths() {
+        for reason in ["content_filter", "something_new"] {
+            let message = format!("driver: unsupported Moonshot finish_reason '{reason}'");
+            let body = format!(
+                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"x\"}},\"finish_reason\":\"{reason}\"}}]}}\ndata: [DONE]\n"
+            );
+            assert_eq!(parse(&body), Err(Failure::plain(message.clone())));
+            let buffered =
+                json!({"choices": [{"finish_reason": reason, "message": {"content": ""}}]});
+            assert_eq!(
+                translate_moonshot_response_to_murmur(&buffered).map_err(Failure::from),
+                Err(Failure::plain(message))
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_streams_stay_plain() {
+        let past_limit = [
+            tool_delta(4_294_967_296, Some("call_x"), Some("bash"), Some("")),
+            TOOL_CALLS_FINISH.to_string(),
+        ]
+        .concat();
+        assert_eq!(
+            parse(&past_limit).unwrap_err().retry,
+            None,
+            "index past the limit"
+        );
+
+        let bad_arguments = [
+            tool_delta(0, Some("call_a"), Some("bash"), Some("{not json")),
+            TOOL_CALLS_FINISH.to_string(),
+        ]
+        .concat();
+        let err = parse(&bad_arguments).unwrap_err();
+        assert!(
+            err.message
+                .starts_with("driver: failed to parse Moonshot tool call arguments JSON: "),
+            "got {err}"
+        );
+        assert_eq!(err.retry, None);
+    }
+
+    #[test]
+    fn a_body_that_is_not_an_event_stream_stays_plain() {
+        let html = "<html>\n<body>502 Bad Gateway</body>\n</html>\n";
+        assert_eq!(parse(html), Err(Failure::plain(CUT)));
+    }
+
+    #[test]
+    fn unparseable_event_data_then_eof_stays_plain() {
+        let body = format!("{}data: {{not json\n", chunk(json!({"content": "x"})));
+        assert_eq!(parse(&body), Err(Failure::plain(CUT)));
+    }
+
+    #[test]
+    fn sse_comments_and_fields_do_not_make_a_cut_stream_malformed() {
+        let body = format!(
+            ": keep-alive\nevent: message\nid: 7\nretry: 1000\n\n{}",
+            chunk(json!({"content": "x"}))
+        );
+        assert_eq!(parse(&body), Err(Failure::transient(CUT)));
+    }
+
+    #[test]
+    fn a_line_cut_mid_chunk_is_a_cut_stream_not_a_malformed_one() {
+        let body = format!(
+            "{}data: {{\"choices\":[{{\"delta\":{{\"cont",
+            chunk(json!({"content": "Hel"}))
+        );
+        assert_eq!(parse(&body), Err(Failure::transient(CUT)));
+    }
+
+    #[test]
+    fn a_buffered_response_without_a_finish_reason_stays_plain() {
+        let response = json!({"choices": [{"message": {"content": "partial"}}]});
+        assert_eq!(
+            translate_moonshot_response_to_murmur(&response).map_err(Failure::from),
+            Err(Failure::plain(
+                "driver: Moonshot response has no finish_reason"
+            ))
+        );
+    }
+
+    #[test]
+    fn statuses_are_left_to_murmur_except_a_quota_429() {
+        let rate_limited = r#"{"error":{"type":"rate_limit_reached_error","message":"Organization-level RPM limit reached"}}"#;
+        let overloaded = r#"{"error":{"type":"engine_overloaded_error","message":"The engine is currently overloaded, please try again later"}}"#;
+        let bad_request =
+            r#"{"error":{"type":"invalid_request_error","message":"Input token length too long"}}"#;
+        for (status, body) in [
+            (400, bad_request),
+            (
+                401,
+                r#"{"error":{"type":"invalid_authentication_error","message":"Invalid Authentication"}}"#,
+            ),
+            (
+                403,
+                r#"{"error":{"type":"permission_denied_error","message":"The API you are accessing is not open"}}"#,
+            ),
+            (
+                404,
+                r#"{"error":{"type":"resource_not_found_error","message":"Model not found"}}"#,
+            ),
+            (408, "timeout"),
+            (413, "too large"),
+            (422, "unprocessable"),
+            (429, rate_limited),
+            (429, overloaded),
+            (429, "not json"),
+            (
+                500,
+                r#"{"error":{"type":"server_error","message":"Internal server error"}}"#,
+            ),
+            (502, "<html>bad gateway</html>"),
+            (
+                503,
+                r#"{"error":{"type":"server_unavailable","message":"unavailable"}}"#,
+            ),
+            (504, "504 Gateway Time-out"),
+            (529, ""),
+            // A quota type on a status murmur does not retry anyway adds nothing.
+            (
+                402,
+                r#"{"error":{"type":"exceeded_current_quota_error","message":"x"}}"#,
+            ),
+        ] {
+            assert_eq!(
+                status_failure(status, body),
+                Failure::plain(format!("HTTP {status}: {body}")),
+                "status {status}"
+            );
+        }
+        for body in [
+            r#"{"error":{"type":"exceeded_current_quota_error","message":"Account balance is insufficient or the account has been disabled"}}"#,
+            r#"{"error":{"type":"exceeded_current_quota_error","message":"Token quota is insufficient"}}"#,
+        ] {
+            assert_eq!(
+                status_failure(429, body),
+                Failure::permanent(format!("HTTP 429: {body}"))
+            );
+        }
+    }
+
+    #[test]
+    fn a_failure_renders_todays_payload_plus_at_most_one_transient_tuple() {
+        let (data, metadata) = failure_result(&Failure::transient(CUT));
+        assert_eq!(data, json!({"stop_reason": "error", "error": CUT}));
+        assert_eq!(
+            metadata,
+            vec![(TRANSIENT_METADATA_KEY.to_string(), "true".to_string())]
+        );
+
+        let quota = status_failure(429, r#"{"error":{"type":"exceeded_current_quota_error"}}"#);
+        let (data, metadata) = failure_result(&quota);
+        assert_eq!(data["error"], quota.message);
+        assert_eq!(quota.retry, Some(Retry::Permanent));
+        assert_eq!(
+            metadata,
+            vec![(TRANSIENT_METADATA_KEY.to_string(), "false".to_string())]
+        );
+
+        let (data, metadata) = failure_result(&Failure::plain("driver: missing tool-input.data"));
+        assert_eq!(
+            data,
+            json!({"stop_reason": "error", "error": "driver: missing tool-input.data"})
+        );
+        assert!(metadata.is_empty());
+    }
+
+    #[test]
+    fn a_completed_stream_is_a_success_not_a_failure() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n",
+            "data: [DONE]\n",
+        );
+        let response = parse(body).expect("a finished stream succeeds");
+        assert_eq!(response["stop_reason"], "end_turn");
+        assert!(response.get("error").is_none());
+    }
+
+    #[test]
+    fn the_run_wrapper_attaches_metadata_only_to_a_failure() {
+        let module = wasm_module_source();
+        let run = &module[module.find("fn run(").expect("run must exist")..];
+        let run = &run[..run
+            .find("fn run_inner(")
+            .expect("run_inner must follow run")];
+        assert!(run.contains("Ok(value) => (value, vec![])"));
+        assert!(run.contains("Err(failure) => failure_result(&failure)"));
+        assert!(!run.contains(TRANSIENT_METADATA_KEY));
     }
 }

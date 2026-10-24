@@ -2,6 +2,7 @@
 // or from cfg(test). Suppress dead_code noise in plain host library builds.
 #![cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
 
+use murmur_driver_stream::Failure;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
@@ -567,15 +568,86 @@ fn stamp_streaming_flags(body: &mut Value) {
 // ── Stop-reason mapping ───────────────────────────────────────────────────────
 
 /// Map a Z.ai `finish_reason` to a murmur `stop_reason`. Each caller refuses a missing reason
-/// with its own path's message. Z.ai also documents `sensitive`,
-/// `model_context_window_exceeded` and `network_error`; those and any unknown reason are an
-/// error naming it rather than a guess.
-fn map_finish_reason(finish_reason: &str) -> Result<&'static str, String> {
+/// with its own path's message. `network_error` is Z.ai's report that the turn broke off on its
+/// side, so it fails the call transiently. Z.ai also documents `sensitive` and
+/// `model_context_window_exceeded`; those and any unknown reason are a plain error naming it
+/// rather than a guess.
+fn map_finish_reason(finish_reason: &str) -> Result<&'static str, Failure> {
     match finish_reason {
         "stop" => Ok("end_turn"),
         "tool_calls" => Ok("tool_call"),
         "length" => Ok("max_tokens"),
-        other => Err(format!("driver: unsupported Z.ai finish_reason '{other}'")),
+        "network_error" => Err(Failure::transient(
+            "Z.ai stream failed: finish_reason 'network_error'",
+        )),
+        other => Err(Failure::plain(format!(
+            "driver: unsupported Z.ai finish_reason '{other}'"
+        ))),
+    }
+}
+
+// ── Provider errors ───────────────────────────────────────────────────────────
+
+/// Z.ai business error codes that report a server fault, a lost connection, a rate limit or an
+/// overload: `1200` API call error, `1230` API call process error, `1234` network error, `1302`
+/// request rate limit, `1305` temporary overload. Z.ai sends them with a `5xx` or `429` status,
+/// which murmur retries by itself; reported inside a `2xx` stream, they fail the call
+/// transiently.
+const TRANSIENT_ERROR_CODES: &[&str] = &["1200", "1230", "1234", "1302", "1305"];
+
+/// Z.ai business error codes sent with a `429` that waiting a few seconds does not clear: `1113`
+/// no balance or resource package, `1308` and `1310` plan usage limits that reset at a stated
+/// time, `1309` and `1314` an expired plan, `1311` a plan without the model, `1313` a Fair Usage
+/// restriction, `1315` a key limited to enterprise coding, and `1316`–`1321` 5-hour and 7-day
+/// limits with no extra usage left.
+const QUOTA_EXHAUSTED_CODES: &[&str] = &[
+    "1113", "1308", "1309", "1310", "1311", "1313", "1314", "1315", "1316", "1317", "1318", "1319",
+    "1320", "1321",
+];
+
+/// The business code of a Z.ai `error` object, which Z.ai sends as a string (`"1113"`) or a
+/// number.
+fn error_code(error: &Value) -> Option<String> {
+    match error.get("code")? {
+        Value::String(code) => Some(code.clone()),
+        Value::Number(code) => Some(code.to_string()),
+        _ => None,
+    }
+}
+
+/// The failure for a top-level `error` object inside a `2xx` stream:
+/// `Z.ai error: <code>: <message>`, a missing part read as `unknown`. Transient only for the
+/// codes in [`TRANSIENT_ERROR_CODES`].
+fn stream_error_failure(error: &Value) -> Failure {
+    let code = error_code(error);
+    let message = format!(
+        "Z.ai error: {}: {}",
+        code.as_deref().unwrap_or("unknown"),
+        error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+    );
+    match code {
+        Some(code) if TRANSIENT_ERROR_CODES.contains(&code.as_str()) => Failure::transient(message),
+        _ => Failure::plain(message),
+    }
+}
+
+/// The failure for a provider status `>= 400`: `HTTP <status>: <body>`, carrying Z.ai's own body
+/// so the operator sees what it said. A `429` whose `error.code` is in
+/// [`QUOTA_EXHAUSTED_CODES`] vetoes murmur's retry; every other status is left to murmur.
+fn status_failure(status: u16, body: &str) -> Failure {
+    let message = format!("HTTP {status}: {body}");
+    let quota_exhausted = status == 429
+        && serde_json::from_str::<Value>(body)
+            .ok()
+            .and_then(|body| body.get("error").and_then(error_code))
+            .is_some_and(|code| QUOTA_EXHAUSTED_CODES.contains(&code.as_str()));
+    if quota_exhausted {
+        Failure::permanent(message)
+    } else {
+        Failure::plain(message)
     }
 }
 
@@ -608,7 +680,7 @@ fn parse_tool_arguments(arguments: &str) -> Result<Value, String> {
 
 /// The non-streaming JSON path, reached when the response body's first non-whitespace byte is
 /// `{` or `[` — scripted test servers, and providers that ignore `stream: true`.
-fn translate_zai_response_to_murmur(response: &Value) -> Result<Value, String> {
+fn translate_zai_response_to_murmur(response: &Value) -> Result<Value, Failure> {
     let choice = response
         .get("choices")
         .and_then(Value::as_array)
@@ -721,7 +793,8 @@ enum ToolCallSignal<'a> {
 }
 
 /// Process one complete SSE line. Returns `Ok(true)` when the stream is done (`data: [DONE]`),
-/// and `Err` for a tool call index past [`murmur_driver_stream::MAX_SLOTS_PER_TURN`].
+/// and `Err` for a chunk carrying a top-level `error` object ([`stream_error_failure`]) or a
+/// tool call index past [`murmur_driver_stream::MAX_SLOTS_PER_TURN`].
 ///
 /// Z.ai streams OpenAI-shaped chat-completions chunks plus a separate `reasoning_content`
 /// delta. `delta.reasoning_content` is routed to `emit_thinking`, `delta.content` to
@@ -737,7 +810,7 @@ fn process_zai_sse_line(
     emit_text: &mut impl FnMut(&str),
     emit_thinking: &mut impl FnMut(&str),
     signal: &mut impl FnMut(ToolCallSignal<'_>),
-) -> Result<bool, String> {
+) -> Result<bool, Failure> {
     if line == "data: [DONE]" {
         return Ok(true);
     }
@@ -747,6 +820,11 @@ fn process_zai_sse_line(
     let Ok(data) = serde_json::from_str::<Value>(json_str) else {
         return Ok(false);
     };
+
+    // An error ends the turn here, so it is reported as Z.ai's and never as a cut stream.
+    if let Some(error) = data.get("error").filter(|error| error.is_object()) {
+        return Err(stream_error_failure(error));
+    }
 
     // Read from any chunk, before the `choices`-shaped early returns below. Z.ai puts it on the
     // chunk that also carries `finish_reason`.
@@ -787,7 +865,7 @@ fn process_zai_sse_line(
         for tc in tc_arr {
             let index = tc.get("index").and_then(Value::as_u64).unwrap_or(0);
             let state = murmur_driver_stream::slot_mut(tool_states, index)
-                .map_err(|err| format!("driver: tool call {err}"))?;
+                .map_err(|err| Failure::plain(format!("driver: tool call {err}")))?;
             if let Some(id) = tc.get("id").and_then(Value::as_str) {
                 if state.id.is_empty() {
                     state.id = id.to_string();
@@ -811,18 +889,19 @@ fn process_zai_sse_line(
 }
 
 /// Turn the accumulated stream state into the murmur response, its `content` in the order
-/// [`ordered_content`] fixes.
+/// [`ordered_content`] fixes. A stream that ended before any chunk named a `finish_reason` was
+/// cut after the provider's `2xx`, so it fails transiently.
 fn assemble_zai_streaming_response(
     text_acc: &str,
     reasoning_acc: &str,
     tool_states: Vec<ToolCallState>,
     stop_reason: Option<String>,
     usage: UsageTokens,
-) -> Result<Value, String> {
+) -> Result<Value, Failure> {
     // No chunk carried a finish_reason, so the stream ended before the turn did.
     let finish_reason = stop_reason
         .as_deref()
-        .ok_or_else(|| "driver: Z.ai stream ended with no finish_reason".to_string())?;
+        .ok_or_else(|| Failure::transient("driver: Z.ai stream ended with no finish_reason"))?;
     let stop_reason_str = map_finish_reason(finish_reason)?;
 
     let mut tool_calls = Vec::new();
@@ -853,7 +932,7 @@ fn parse_zai_sse_body<F: FnMut(&str), G: FnMut(&str)>(
     body: &str,
     emit_text: &mut F,
     emit_thinking: &mut G,
-) -> Result<Value, String> {
+) -> Result<Value, Failure> {
     parse_zai_sse_body_with_signals(body, emit_text, emit_thinking).0
 }
 
@@ -888,7 +967,7 @@ fn parse_zai_sse_body_with_signals<F: FnMut(&str), G: FnMut(&str)>(
     body: &str,
     emit_text: &mut F,
     emit_thinking: &mut G,
-) -> (Result<Value, String>, Vec<RecordedSignal>) {
+) -> (Result<Value, Failure>, Vec<RecordedSignal>) {
     let mut text_acc = String::new();
     let mut reasoning_acc = String::new();
     let mut tool_states: Vec<ToolCallState> = Vec::new();
@@ -938,21 +1017,17 @@ fn error_payload(message: &str) -> Value {
     })
 }
 
-/// The payload for a provider status `>= 400`. Same shape as any other driver error, carrying
-/// the status and the provider's own body so the operator sees what Z.ai said.
-fn http_error_payload(status: u16, body: &str) -> Value {
-    error_payload(&format!("HTTP {status}: {body}"))
-}
-
 // ── WASM driver module ────────────────────────────────────────────────────────
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_driver {
     use super::{
-        assemble_zai_streaming_response, build_provider_request, error_payload, http_error_payload,
-        parse_driver_config, process_zai_sse_line, translate_zai_response_to_murmur, MurmurRequest,
-        ToolCallSignal, ToolCallState, UsageTokens,
+        assemble_zai_streaming_response, build_provider_request, error_payload,
+        parse_driver_config, process_zai_sse_line, status_failure,
+        translate_zai_response_to_murmur, MurmurRequest, ToolCallSignal, ToolCallState,
+        UsageTokens,
     };
+    use murmur_driver_stream::Failure;
     use serde_json::Value;
 
     wit_bindgen::generate!({
@@ -980,9 +1055,9 @@ mod wasm_driver {
         fn run(
             input: exports::murmur::tool::run::ToolInput,
         ) -> exports::murmur::tool::run::ToolResult {
-            let response = match run_inner(input) {
-                Ok(value) => value,
-                Err(err) => error_payload(&err),
+            let (response, metadata) = match run_inner(input) {
+                Ok(value) => (value, vec![]),
+                Err(failure) => (error_payload(&failure.message), failure.metadata()),
             };
 
             let stop_reason = response
@@ -1011,12 +1086,12 @@ mod wasm_driver {
                 data: Some(response.to_string()),
                 data_path: None,
                 truncated: false,
-                metadata: vec![],
+                metadata,
             }
         }
     }
 
-    fn run_inner(input: exports::murmur::tool::run::ToolInput) -> Result<Value, String> {
+    fn run_inner(input: exports::murmur::tool::run::ToolInput) -> Result<Value, Failure> {
         // First fallible step: a config the driver cannot honour fails here, before any other
         // environment read and before any HTTP request is dispatched.
         let driver_config = std::env::var("MURMUR_INFERENCE_DRIVER_CONFIG").ok();
@@ -1053,8 +1128,8 @@ mod wasm_driver {
         let status = response.status();
 
         if status >= 400 {
-            let text = consume_body_as_string(response)?;
-            return Ok(http_error_payload(status, &text));
+            let text = consume_body_as_string(response, status)?;
+            return Err(status_failure(status, &text));
         }
 
         let incoming_body = response
@@ -1065,7 +1140,7 @@ mod wasm_driver {
             .map_err(|()| "driver: failed to stream response body".to_string())?;
 
         // Detect format from first read: JSON bodies start with '{' or '['.
-        let first = read_chunk(&stream)?;
+        let first = read_chunk(&stream, status)?;
         let is_json = first
             .iter()
             .find(|&&b| !b.is_ascii_whitespace())
@@ -1076,7 +1151,7 @@ mod wasm_driver {
             // Non-streaming fallback (test servers, providers ignoring stream:true).
             let mut all = first;
             loop {
-                let chunk = read_chunk(&stream)?;
+                let chunk = read_chunk(&stream, status)?;
                 if chunk.is_empty() {
                     break;
                 }
@@ -1105,7 +1180,7 @@ mod wasm_driver {
                                usage: &mut UsageTokens,
                                text_acc: &mut String,
                                reasoning_acc: &mut String|
-             -> Result<bool, String> {
+             -> Result<bool, Failure> {
                 let mut et = |t: &str| {
                     murmur::stream::events::emit_chunk(t);
                     text_acc.push_str(t);
@@ -1150,7 +1225,7 @@ mod wasm_driver {
             // Continue reading remaining chunks.
             if !done {
                 'outer: loop {
-                    let chunk = read_chunk(&stream)?;
+                    let chunk = read_chunk(&stream, status)?;
                     if chunk.is_empty() {
                         break;
                     }
@@ -1256,9 +1331,12 @@ mod wasm_driver {
         await_response(future)
     }
 
+    /// Read a `>= 400` response's body. A read that fails here stays plain: murmur decides from
+    /// `status` alone.
     fn consume_body_as_string(
         response: wasip2::http::types::IncomingResponse,
-    ) -> Result<String, String> {
+        status: u16,
+    ) -> Result<String, Failure> {
         let incoming_body = response
             .consume()
             .map_err(|()| "driver: failed to consume error response body".to_string())?;
@@ -1267,7 +1345,7 @@ mod wasm_driver {
             .map_err(|()| "driver: failed to stream error response body".to_string())?;
         let mut bytes = Vec::new();
         loop {
-            let chunk = read_chunk(&stream)?;
+            let chunk = read_chunk(&stream, status)?;
             if chunk.is_empty() {
                 break;
             }
@@ -1275,15 +1353,24 @@ mod wasm_driver {
         }
         drop(stream);
         let _ = wasip2::http::types::IncomingBody::finish(incoming_body);
-        String::from_utf8(bytes)
-            .map_err(|err| format!("driver: error response body is not UTF-8: {err}"))
+        String::from_utf8(bytes).map_err(|err| {
+            Failure::plain(format!("driver: error response body is not UTF-8: {err}"))
+        })
     }
 
-    fn read_chunk(stream: &wasip2::io::streams::InputStream) -> Result<Vec<u8>, String> {
+    /// The next chunk of a response body that arrived with `status`, empty at its end. A failed
+    /// read is classified by [`murmur_driver_stream::read_failure`].
+    fn read_chunk(
+        stream: &wasip2::io::streams::InputStream,
+        status: u16,
+    ) -> Result<Vec<u8>, Failure> {
         match stream.blocking_read(16 * 1024) {
             Ok(chunk) => Ok(chunk),
             Err(wasip2::io::streams::StreamError::Closed) => Ok(Vec::new()),
-            Err(err) => Err(format!("driver: failed to read response stream: {err:?}")),
+            Err(err) => Err(murmur_driver_stream::read_failure(
+                status,
+                &format!("{err:?}"),
+            )),
         }
     }
 
@@ -1345,11 +1432,12 @@ mod wasm_driver {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_provider_request, http_error_payload, map_finish_reason, parse_driver_config,
-        parse_zai_sse_body, parse_zai_sse_body_with_signals, translate_murmur_request_to_zai,
-        translate_zai_response_to_murmur, DriverConfig, MurmurRequest, RecordedSignal,
-        SUPPORTED_MODELS,
+        build_provider_request, error_payload, map_finish_reason, parse_driver_config,
+        parse_zai_sse_body, parse_zai_sse_body_with_signals, status_failure,
+        translate_murmur_request_to_zai, translate_zai_response_to_murmur, DriverConfig,
+        MurmurRequest, RecordedSignal, SUPPORTED_MODELS,
     };
+    use murmur_driver_stream::{Failure, Retry};
     use serde_json::{json, Value};
 
     // ── Fixtures and helpers ──────────────────────────────────────────────────
@@ -1391,7 +1479,7 @@ mod tests {
         }
     }
 
-    fn parse_quiet(body: &str) -> Result<Value, String> {
+    fn parse_quiet(body: &str) -> Result<Value, Failure> {
         parse_zai_sse_body(body, &mut |_: &str| {}, &mut |_: &str| {})
     }
 
@@ -1964,7 +2052,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stream_that_ends_with_no_finish_reason_is_refused() {
+    fn a_stream_cut_before_its_finish_reason_fails_transiently() {
         let cut_off = concat!(
             "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Let me \"},\"finish_reason\":null}]}\n",
             "data: {\"choices\":[{\"delta\":{\"content\":\"The answer \"},\"finish_reason\":null}]}\n",
@@ -1974,11 +2062,17 @@ mod tests {
             "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"\"}]}\n",
             "data: [DONE]\n",
         );
-        for body in [cut_off, blank_reason, ""] {
+        let partial_tool_call = tool_delta(0, Some("call_1"), Some("bash"), Some("{\"cmd\":"));
+        for body in [cut_off, blank_reason, partial_tool_call.as_str(), ""] {
+            let failure = parse_quiet(body).unwrap_err();
             assert_eq!(
-                parse_quiet(body).unwrap_err(),
-                "driver: Z.ai stream ended with no finish_reason",
+                failure,
+                Failure::transient("driver: Z.ai stream ended with no finish_reason"),
                 "body = {body:?}"
+            );
+            assert_eq!(
+                failure.metadata(),
+                vec![("transient".to_string(), "true".to_string())]
             );
         }
     }
@@ -2164,14 +2258,14 @@ mod tests {
     }
 
     #[test]
-    fn every_other_finish_reason_is_an_error_naming_it_on_both_paths() {
+    fn every_other_finish_reason_is_a_plain_error_naming_it_on_both_paths() {
         for reason in [
             "sensitive",
             "model_context_window_exceeded",
-            "network_error",
             "content_filter",
         ] {
-            let expected = format!("driver: unsupported Z.ai finish_reason '{reason}'");
+            let expected =
+                Failure::plain(format!("driver: unsupported Z.ai finish_reason '{reason}'"));
             let buffered =
                 json!({"choices": [{"finish_reason": reason, "message": {"content": ""}}]});
             assert_eq!(
@@ -2195,7 +2289,7 @@ mod tests {
             }
             assert_eq!(
                 translate_zai_response_to_murmur(&json!({"choices": [choice]})).unwrap_err(),
-                "driver: Z.ai response has no finish_reason",
+                Failure::plain("driver: Z.ai response has no finish_reason"),
                 "finish_reason = {finish_reason:?}"
             );
         }
@@ -2255,9 +2349,11 @@ mod tests {
         });
         let err = translate_zai_response_to_murmur(&buffered).unwrap_err();
         assert!(
-            err.starts_with("driver: failed to parse Z.ai tool call arguments JSON: "),
+            err.message
+                .starts_with("driver: failed to parse Z.ai tool call arguments JSON: "),
             "got {err}"
         );
+        assert_eq!(err.retry, None);
 
         let stream = [
             tool_delta(0, Some("call_1"), Some("bash"), Some("{not json")),
@@ -2266,9 +2362,11 @@ mod tests {
         .concat();
         let err = parse_quiet(&stream).unwrap_err();
         assert!(
-            err.starts_with("driver: failed to parse Z.ai tool call arguments JSON: "),
+            err.message
+                .starts_with("driver: failed to parse Z.ai tool call arguments JSON: "),
             "got {err}"
         );
+        assert_eq!(err.retry, None);
     }
 
     #[test]
@@ -2276,7 +2374,7 @@ mod tests {
         for response in [json!({}), json!({"choices": []}), json!({"choices": "x"})] {
             assert_eq!(
                 translate_zai_response_to_murmur(&response).unwrap_err(),
-                "driver: Z.ai response missing choices[0]"
+                Failure::plain("driver: Z.ai response missing choices[0]")
             );
         }
     }
@@ -2284,10 +2382,193 @@ mod tests {
     #[test]
     fn a_provider_error_status_carries_the_status_and_body() {
         let body = r#"{"error":{"code":"1210","message":"This model always engages in thinking and cannot be disabled; please use low, high, or max"}}"#;
+        let failure = status_failure(400, body);
         assert_eq!(
-            http_error_payload(400, body),
+            error_payload(&failure.message),
             json!({"stop_reason": "error", "error": format!("HTTP 400: {body}")})
         );
+        assert_eq!(failure.retry, None);
+    }
+
+    // ── Transient failures ────────────────────────────────────────────────────
+
+    fn error_chunk(error: Value) -> String {
+        format!("data: {}\n", json!({ "error": error }))
+    }
+
+    const TEXT_DELTA: &str =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n";
+
+    #[test]
+    fn a_network_error_finish_reason_fails_transiently_on_both_paths() {
+        let expected = Failure::transient("Z.ai stream failed: finish_reason 'network_error'");
+        let buffered =
+            json!({"choices": [{"finish_reason": "network_error", "message": {"content": "x"}}]});
+        assert_eq!(
+            translate_zai_response_to_murmur(&buffered).unwrap_err(),
+            expected
+        );
+        let stream = format!(
+            "{TEXT_DELTA}data: {}\ndata: [DONE]\n",
+            json!({"choices": [{"delta": {}, "finish_reason": "network_error"}]})
+        );
+        assert_eq!(parse_quiet(&stream).unwrap_err(), expected);
+        assert_eq!(map_finish_reason("network_error"), Err(expected));
+    }
+
+    #[test]
+    fn each_transient_error_code_in_a_stream_fails_transiently_naming_it() {
+        for (code, message) in [
+            ("1200", "API Call Error"),
+            ("1230", "API call process error"),
+            (
+                "1234",
+                "Network error, error id: abc, please try again later",
+            ),
+            ("1302", "Rate limit reached for requests"),
+            (
+                "1305",
+                "The service may be temporarily overloaded, please try again later",
+            ),
+        ] {
+            let expected = Failure::transient(format!("Z.ai error: {code}: {message}"));
+            let as_string = error_chunk(json!({"code": code, "message": message}));
+            let as_number =
+                error_chunk(json!({"code": code.parse::<u64>().unwrap(), "message": message}));
+            for body in [
+                as_string.clone(),
+                as_number,
+                format!("{TEXT_DELTA}{as_string}"),
+                format!("{as_string}data: [DONE]\n"),
+            ] {
+                assert_eq!(parse_quiet(&body).unwrap_err(), expected, "body = {body:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_non_transient_error_chunk_then_eof_stays_plain_with_its_own_message() {
+        for (error, message) in [
+            (
+                json!({"code": "1301", "message": "System detected potentially unsafe or sensitive content"}),
+                "Z.ai error: 1301: System detected potentially unsafe or sensitive content",
+            ),
+            (
+                json!({"code": 1214, "message": "Parameter `x` is invalid."}),
+                "Z.ai error: 1214: Parameter `x` is invalid.",
+            ),
+            (
+                json!({"code": "9999", "message": "something new"}),
+                "Z.ai error: 9999: something new",
+            ),
+            (json!({}), "Z.ai error: unknown: unknown"),
+            (
+                json!({"message": "no code"}),
+                "Z.ai error: unknown: no code",
+            ),
+        ] {
+            let body = format!("{TEXT_DELTA}{}", error_chunk(error));
+            assert_eq!(
+                parse_quiet(&body).unwrap_err(),
+                Failure::plain(message),
+                "body = {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_error_chunk_takes_precedence_over_a_later_finish_reason() {
+        let body = format!(
+            "{}data: {}\n",
+            error_chunk(json!({"code": "1234", "message": "Network error"})),
+            json!({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+        );
+        assert_eq!(
+            parse_quiet(&body).unwrap_err(),
+            Failure::transient("Z.ai error: 1234: Network error")
+        );
+    }
+
+    #[test]
+    fn a_pre_flight_refusal_is_a_plain_failure() {
+        let request = request_for_model("glm-4.6", 8192);
+        let failure =
+            Failure::from(build_provider_request(&request, &DriverConfig::default()).unwrap_err());
+        assert_eq!(failure.retry, None);
+        assert!(failure.metadata().is_empty());
+    }
+
+    #[test]
+    fn a_completed_turn_carries_no_transient_marker() {
+        let stream = format!(
+            "{TEXT_DELTA}data: {}\ndata: [DONE]\n",
+            json!({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+        );
+        let response = parse_quiet(&stream).unwrap();
+        assert_eq!(response["stop_reason"], json!("end_turn"));
+        assert!(!contains_key_anywhere(&response, "transient"));
+    }
+
+    // ── Statuses ──────────────────────────────────────────────────────────────
+
+    fn quota_body(code: &str) -> String {
+        json!({"error": {"code": code, "message": "limit"}}).to_string()
+    }
+
+    #[test]
+    fn every_status_but_a_quota_429_is_left_to_murmur() {
+        let rate_limited = quota_body("1302");
+        let overloaded = quota_body("1305");
+        for (status, body) in [
+            (400, quota_body("1210")),
+            (401, quota_body("1000")),
+            (403, quota_body("1220")),
+            (404, "not found".to_string()),
+            (408, String::new()),
+            (413, String::new()),
+            (422, quota_body("1214")),
+            (429, rate_limited),
+            (429, overloaded),
+            (429, "not json".to_string()),
+            (429, quota_body("1113").replace("error", "err")),
+            (500, quota_body("1234")),
+            (502, String::new()),
+            (503, String::new()),
+            (504, String::new()),
+            (529, String::new()),
+        ] {
+            assert_eq!(
+                status_failure(status, &body),
+                Failure::plain(format!("HTTP {status}: {body}")),
+                "status = {status}, body = {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quota_or_plan_429_vetoes_the_retry() {
+        for code in [
+            "1113", "1308", "1309", "1310", "1311", "1313", "1314", "1315", "1316", "1317", "1318",
+            "1319", "1320", "1321",
+        ] {
+            let body = quota_body(code);
+            let failure = status_failure(429, &body);
+            assert_eq!(failure, Failure::permanent(format!("HTTP 429: {body}")));
+            assert_eq!(failure.retry, Some(Retry::Permanent));
+        }
+        let numeric = r#"{"error":{"code":1113,"message":"Insufficient balance or no resource package. Please recharge."}}"#;
+        assert_eq!(
+            status_failure(429, numeric),
+            Failure::permanent(format!("HTTP 429: {numeric}"))
+        );
+    }
+
+    #[test]
+    fn a_quota_code_on_any_status_but_429_is_left_to_murmur() {
+        for status in [400, 402, 500, 503] {
+            let body = quota_body("1113");
+            assert_eq!(status_failure(status, &body).retry, None);
+        }
     }
 
     // ── Response content order on the JSON fallback ───────────────────────────
@@ -2654,9 +2935,9 @@ mod tests {
             );
             assert_eq!(
                 result,
-                Err(format!(
+                Err(Failure::plain(format!(
                     "driver: tool call index {index} is past the limit of 1024 per turn"
-                ))
+                )))
             );
             assert_eq!(tool_states.capacity(), 0);
             assert_eq!(signals, vec![]);
@@ -2671,9 +2952,9 @@ mod tests {
         let (result, _) = parse_zai_sse_body_with_signals(&body, &mut |_| {}, &mut |_| {});
         assert_eq!(
             result,
-            Err(
-                "driver: tool call index 4294967296 is past the limit of 1024 per turn".to_string()
-            )
+            Err(Failure::plain(
+                "driver: tool call index 4294967296 is past the limit of 1024 per turn"
+            ))
         );
     }
 

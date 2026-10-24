@@ -7,8 +7,16 @@
 //! 4 294 967 296 would have the guest allocate billions of slots and die. [`slot_mut`] is the
 //! one place a table grows from such an index, and it refuses anything past
 //! [`MAX_SLOTS_PER_TURN`] before it allocates.
+//!
+//! The crate also carries the vocabulary through which a driver tells murmur whether a failed
+//! call may be made again: [`TRANSIENT_METADATA_KEY`], [`Retry`], [`Failure`] and
+//! [`read_failure`].
 
 use std::fmt;
+
+mod retry;
+
+pub use retry::{read_failure, Failure, Retry, TRANSIENT_METADATA_KEY};
 
 /// The most slots one turn's stream may name: indexes 0 through 1023.
 ///

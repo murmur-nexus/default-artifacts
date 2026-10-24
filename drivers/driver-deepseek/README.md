@@ -98,7 +98,8 @@ deepseek-flash, deepseek-v4-pro.` No request reaches DeepSeek.
 | `stop` | `end_turn` |
 | `tool_calls` | `tool_call` |
 | `length` | `max_tokens` |
-| anything else | an error naming the unmapped reason |
+| `insufficient_system_resource` | a transient error: `DeepSeek stream failed: finish_reason 'insufficient_system_resource'` |
+| anything else, such as `content_filter` or `aborted` | an error naming the unmapped reason: `driver: unsupported DeepSeek finish_reason '<reason>'` |
 
 A turn that never says why it stopped is refused rather than read as
 `end_turn`. A `finish_reason` that is absent, `null`, not a string or empty
@@ -116,6 +117,51 @@ withdrawn; it is just not recorded as a finished reply.
 A failed task status and a `task_failed` trace line with cause `driver_error`
 need a murmur runtime released after v0.4.0. On v0.4.0 and earlier the runtime
 records the error but still reports the task as `ok` and exits 0.
+
+## Transient failures
+
+murmur makes an inference call again when it fails transiently. murmur judges
+the status DeepSeek answered with and a connection that broke before the
+response head itself. Only the driver sees what goes wrong after a `200`, so on
+those failures it adds the metadata tuple `("transient", "true")` to its
+result. murmur 0.8.0 and later read it; an earlier murmur ignores it and fails
+the call as before.
+
+The driver marks these failures `"true"`:
+
+| After a `200`, DeepSeek… | Reported as |
+|---|---|
+| streams no chunk with a `finish_reason`, or an empty one, before the stream ends; an empty body counts | `driver: DeepSeek stream ended with no finish_reason` |
+| ends the turn with `finish_reason: "insufficient_system_resource"`, on the stream or in a JSON body | `DeepSeek stream failed: finish_reason 'insufficient_system_resource'` |
+| breaks the connection while the body is read | `driver: failed to read response stream: <error>` |
+
+The driver marks no failure `"false"`. Every DeepSeek status that waiting
+cannot clear is one murmur never retries: an empty balance is `402`, a bad key
+`401`. DeepSeek's `429` is a concurrency limit, which clears, so murmur's own
+retry of it stands.
+
+The driver leaves these failures plain, with no `transient` tuple:
+
+| Failure | Reported as |
+|---|---|
+| any status `>= 400`, including `429`, `500` and `503` | `HTTP <status>: <body>` |
+| a broken read of a `>= 400` body | `driver: failed to read response stream: <error>` |
+| a chunk with a top-level `error` member, of any type or code | `DeepSeek error: <type-or-code>: <message>`, with `unknown` for a missing part |
+| an unmapped `finish_reason`, such as `content_filter` or `aborted` | `driver: unsupported DeepSeek finish_reason '<reason>'` |
+| a JSON body with no `choices[0]` or no `finish_reason` | `driver: DeepSeek response missing choices[0]`, `driver: DeepSeek response has no finish_reason` |
+| a malformed stream: tool-argument JSON that does not parse, a tool call index past 1024 | the message naming it |
+| every refusal before the request is sent, such as an unlisted model | the message naming it |
+
+DeepSeek documents its overload, server fault and rate limit only as the
+statuses `503`, `500` and `429`. It names no error type that marks an in-stream
+`error` as one of those, so the driver marks none. An `error` chunk ends the
+turn as soon as it arrives, so a stream that ends after one reports DeepSeek's
+message rather than a cut.
+
+murmur alone decides whether a status or a connection failure before the
+response head is retried. On a retry it discards everything the failed attempt
+streamed. DeepSeek sends any delay hint as an HTTP `retry-after` header, which
+murmur reads itself; the driver passes no delay and never repeats a request.
 
 ## A tool call index past 1024 is refused
 

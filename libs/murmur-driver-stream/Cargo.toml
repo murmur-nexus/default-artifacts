@@ -7,8 +7,10 @@ license.workspace = true
 # Internal-only shared library: the limit on how many slots one turn's stream may name, and
 # the only code that grows a driver's slot table from an index the provider sent. It exists
 # so every driver refuses an out-of-range index the same way instead of allocating whatever
-# the stream asks for. Depends on nothing but `std`, so it cross-compiles to wasm32-wasip2
-# cleanly. NOT an artifact: it has no murmur.yaml, so nothing publishes it.
+# the stream asks for. It also carries the vocabulary through which a driver tells murmur
+# whether a failed call may be made again: the reserved `transient` metadata key and the
+# `Failure` a driver's `run` renders into it. Depends on nothing but `std`, so it
+# cross-compiles to wasm32-wasip2 cleanly. NOT an artifact: it has no murmur.yaml, so nothing publishes it.
 
 [lib]
 name = "murmur_driver_stream"

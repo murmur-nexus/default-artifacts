@@ -112,6 +112,20 @@ agrees with the driver's README and with any `SUPPORTED_MODELS` or `MODEL_ROUTES
 
 Then bump the driver's minor version.
 
+An HTTP driver tells murmur whether a failed call may be made again through the reserved
+`transient` key of its `tool-result.metadata`. murmur classifies a status and a connection failure
+before the response head itself, so the driver marks only what its gateway cannot see. Build every
+failure as a `murmur_driver_stream::Failure` and have `run` return `failure.metadata()` beside the
+error payload; never write the tuple by hand.
+
+| Failure | Constructor | Metadata |
+|---|---|---|
+| after a `2xx` head: the stream ended before the provider's stop reason, a body read failed (`murmur_driver_stream::read_failure`), or the provider reported an overload, server, rate-limit or lost-connection error in the stream | `Failure::transient` | `("transient", "true")` |
+| a `429` whose body names an exhausted quota, balance or spend cap | `Failure::permanent` | `("transient", "false")` |
+| everything else: other statuses, refusals, malformed streams, pre-flight refusals | `Failure::plain` | none |
+
+The driver's README lists each provider error it marks under `## Transient failures`.
+
 ## Release
 
 1. Bump `version:` in the `murmur.yaml` of every artifact whose payload changed — a minor bump

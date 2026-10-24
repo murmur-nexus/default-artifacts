@@ -302,7 +302,7 @@ The translation failures:
 |---|---|
 | JSON body whose `stop_reason` is absent, `null` or not a string, such as a chat-completions body | `driver: Anthropic response has no stop_reason` |
 | Body that holds lines but no SSE `event:` line, such as a chat-completions stream | `driver: response is not an Anthropic event stream` |
-| SSE stream that ends before any `message_delta` carries a non-empty `stop_reason`: a dropped connection, or an empty body | `driver: Anthropic stream ended with no stop_reason` |
+| SSE stream that ends before any `message_delta` carries a non-empty `stop_reason`: a dropped connection, or an empty body. murmur retries it (see [Transient failures](#transient-failures)) | `driver: Anthropic stream ended with no stop_reason` |
 | JSON body missing a field that changes what the turn means | `driver: malformed Anthropic response: <what is missing>` |
 | SSE event missing a field that changes what the turn means | `driver: malformed Anthropic stream: <what is missing>` |
 | SSE `content_block_start` at an `index` of 1024 or more | `driver: malformed Anthropic stream: content block index <n> is past the limit of 1024 per turn` |
@@ -343,6 +343,57 @@ shown and is not withdrawn; it is just not recorded as a finished reply.
 - Absent or malformed `usage`: the turn reports no usage.
 - A stream whose `message_delta` carried a stop reason but that ended before
   `message_stop`: the reply is already complete at that point.
+
+## Transient failures
+
+murmur makes an inference call again when it fails transiently. Its credential
+gateway sees the status, and a connection that breaks before the response head.
+What goes wrong after a `2xx` head only the driver sees, and it says so with the
+`transient` key of its `tool-result.metadata`. The `error` message is the same
+with or without the key.
+
+The driver marks these failures `"true"`, so murmur retries them:
+
+| Failure after a `2xx` head | `error` message |
+|---|---|
+| SSE stream that ends before any `message_delta` carries a non-empty `stop_reason`: a dropped connection, or an empty body | `driver: Anthropic stream ended with no stop_reason` |
+| A read of the body that fails, on the SSE path or the JSON fallback | `driver: failed to read response stream: <error>` |
+| SSE `event: error`, or a JSON body with `"type": "error"`, whose `error.type` is `overloaded_error`, `api_error`, `rate_limit_error` or `timeout_error` | `Anthropic error: <type>: <message>` |
+
+A `rate_limit_error` whose `error.details.error_code` is
+`enforced_spend_limit_reached` reports the tier spend cap, which does not clear
+by waiting, so it is not marked `"true"`.
+
+The driver marks one failure `"false"`, so murmur does not spend its retries on
+it:
+
+| Status | Body | `error` message |
+|---|---|---|
+| `429` | `error.details.error_code` is `enforced_spend_limit_reached`: the tier spend cap, reached until the next month or a tier increase | `HTTP 429: <body>` |
+
+Anthropic reports every other billing problem with a status murmur does not
+retry: a spend limit you set is a `400` `invalid_request_error`, and a payment
+problem a `402` `billing_error`.
+
+Every other failure carries no `transient` key:
+
+| Failure | Who decides |
+|---|---|
+| Any other status, `408`, a rate-limit `429`, `500`, `529` and the rest of `5xx` included, and a connection that breaks before the response head | murmur, from what its gateway saw |
+| A read that fails while reading a body of status `400` or more | murmur, from the status |
+| `event: error` or a JSON error body of any other `error.type`, such as `invalid_request_error`, or with no readable type, also when the stream then ends | not retried |
+| `Anthropic response refused`, an unsupported `stop_reason` such as `model_context_window_exceeded`, a malformed stream or body, and `driver: response is not an Anthropic event stream` | not retried |
+| A request the driver refuses before sending it | not retried |
+
+An `event: error` takes precedence over the stream ending: a plain error event
+followed by the end of the stream reports the provider's message and stays
+plain.
+
+murmur discards everything a failed attempt streamed before it retries. Anthropic
+sends its delay hint as an HTTP `retry-after` header, which murmur reads itself;
+the driver sends no delay of its own and never repeats a request. murmur 0.8.0
+and later read the `transient` key. An earlier murmur ignores it and fails the
+call as before.
 
 ## Prompt cache key
 
