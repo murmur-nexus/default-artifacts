@@ -3,12 +3,22 @@
 //! `murmur:*` interface.
 //!
 //! Two operations and no third: `report` files a terminal verdict, `progress` records that
-//! work is advancing without concluding anything. Both write one fixed file,
-//! `state/report.json`, inside the durable state store the capsule opens with
-//! `capabilities.state`. Nothing else is written, no other file is read, and the trace is
+//! work is advancing without concluding anything. Both write the calling session's own file
+//! inside the durable state store the capsule opens with `capabilities.state`:
+//!
+//! | Seen from | Path |
+//! |---|---|
+//! | the component | `state/reports/<session_id>.json` |
+//! | the host | `~/.murmur/state/<store>/reports/<session_id>.json` |
+//!
+//! `<store>` is `capabilities.state.store`, defaulting to the capsule name. `<session_id>` is
+//! [`SESSION_ID_ENV`] verbatim — the `ses_<32 hex>` id `mur run` prints, fresh for every
+//! launch, `--resume` included. Two sessions of one capsule therefore never share a file, and
+//! a new session never starts on top of the last one's. After each write `reports/` is
+//! trimmed by [`retention`]. Nothing else is written, no other file is read, and the trace is
 //! untouched — the consumer reads the file.
 //!
-//! The file exists to make three states distinguishable: absent (the capsule never
+//! The file exists to make three states distinguishable: absent (the session never
 //! reported), present with `concluded: false` (it filed progress notes and never
 //! concluded), and present with `concluded: true` (its verdict is in `outcome`). Neither
 //! of the first two may ever be read as success; coercing them would reintroduce the
@@ -25,6 +35,7 @@
 pub mod config;
 pub mod ops;
 pub mod report;
+pub mod retention;
 pub mod store;
 
 /// The JSON type of a value, named as an operator or an agent would recognise it. Every
@@ -60,13 +71,14 @@ pub const ARTIFACT_CONFIG_ENV: &str = "MURMUR_ARTIFACT_CONFIG";
 
 /// Guest environment variable carrying the id of the session that is running.
 ///
-/// Best-effort: the durable state store is keyed by capsule and outlives every session, so
-/// stamping this into the report is what lets a consumer tell this run's conclusion from a
-/// stale one — but an absent variable is recorded as `""` and never fails a call.
+/// Required: the durable state store is shared by every session of the capsule, and this id,
+/// used verbatim, names the session's file `state/reports/<session_id>.json`. An id that is
+/// absent, empty, over [`store::MAX_SESSION_ID_CHARS`] or holds a character outside
+/// `[A-Za-z0-9_-]` fails the call with `session_unavailable` and nothing is written.
 pub const SESSION_ID_ENV: &str = "MURMUR_SESSION_ID";
 
-/// Guest environment variable carrying the name of the capsule that is running. Read on
-/// the same best-effort terms as [`SESSION_ID_ENV`].
+/// Guest environment variable carrying the name of the capsule that is running.
+/// Best-effort: an absent variable is recorded as `""` and never fails a call.
 pub const CAPSULE_NAME_ENV: &str = "MURMUR_CAPSULE_NAME";
 
 #[cfg(target_arch = "wasm32")]

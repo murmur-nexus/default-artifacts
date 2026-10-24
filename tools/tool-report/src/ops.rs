@@ -16,7 +16,7 @@ use serde_json::{json, Map, Value};
 use crate::config::{parse_config, ReportConfig};
 use crate::json_type_name;
 use crate::report::{now_rfc3339_millis, Deliverable, NoteFor, ReportDoc, RunIdentity};
-use crate::store::{Store, REPORT_FILE};
+use crate::store::{report_file_name, valid_session_id, Store, REPORTS_DIR};
 
 /// The complete error vocabulary. A caller sees one of these strings in `error_kind` and
 /// nothing else.
@@ -36,6 +36,9 @@ pub mod kind {
     pub const UNDECLARED_STAGE: &str = "undeclared_stage";
     /// The durable-state grant is missing, so there is nowhere durable to report to.
     pub const STATE_UNAVAILABLE: &str = "state_unavailable";
+    /// The session id is absent, empty, over-long or holds a character a file name may not,
+    /// so there is no file this session's report could be written to.
+    pub const SESSION_UNAVAILABLE: &str = "session_unavailable";
     /// The `config:` block is present but not usable.
     pub const CONFIG_INVALID: &str = "config_invalid";
     /// The filesystem refused a read, a write or the rename.
@@ -50,7 +53,7 @@ pub const META_RESOURCE_ID: &str = "resource_id";
 /// and neither is a read a consumer could be credited for repeating.
 pub const EFFECT_MUTATE: &str = "mutate";
 /// Prefix of the opaque `resource_id` this tool declares. The host records the value
-/// verbatim and never parses it; the one report file is the one resource.
+/// verbatim and never parses it; the session's own report file is the one resource.
 pub const RESOURCE_PREFIX: &str = "report:";
 
 /// The two operation names, in the order the manifest's enum lists them.
@@ -118,7 +121,13 @@ pub struct Response {
     pub metadata: Vec<(String, String)>,
 }
 
-/// Dispatch one call against the report rooted at `state_dir`.
+/// Dispatch one call against this session's report under `state_dir`.
+///
+/// The checks run in a fixed order, and each refusal writes nothing: the call parses, names a
+/// known operation, finds the state grant (`state_unavailable`), carries a usable session id
+/// (`session_unavailable`), finds a usable `config:` block, and passes its own argument
+/// checks. Only then is `<state_dir>/reports/<session_id>.json` written, after which
+/// retention trims `reports/` without touching the outcome.
 ///
 /// `state_dir`, `config_json` and `identity` are all supplied by the caller so nothing
 /// below `lib.rs` knows the guest path or reads the process environment: the component
@@ -132,7 +141,7 @@ pub fn run(
     identity: &RunIdentity,
     data: &str,
 ) -> Response {
-    let resource_id = format!("{RESOURCE_PREFIX}{}", state_dir.join(REPORT_FILE).display());
+    let resource_id = resource_id(state_dir, &identity.session_id);
     let (operation, args) = match parse_call(data) {
         Ok(parsed) => parsed,
         Err(e) => return failure(UNKNOWN_OPERATION_LABEL, &e, &resource_id),
@@ -141,6 +150,19 @@ pub fn run(
         Ok(response) => response,
         Err(e) => failure(&operation, &e, &resource_id),
     }
+}
+
+/// The resource a call addresses: the session's own report file, or — when the session id
+/// cannot name a file — the reports directory itself, so a refused call still declares where
+/// it was aimed.
+fn resource_id(state_dir: &Path, session_id: &str) -> String {
+    let reports = state_dir.join(REPORTS_DIR);
+    let target = if valid_session_id(session_id) {
+        reports.join(report_file_name(session_id))
+    } else {
+        reports
+    };
+    format!("{RESOURCE_PREFIX}{}", target.display())
 }
 
 /// Split the call into its operation name and its arguments.
@@ -207,7 +229,7 @@ fn dispatch(
         ));
     }
 
-    let store = Store::open(state_dir)?;
+    let store = Store::open(state_dir, &identity.session_id)?;
     let config = load_config(config_json)?;
 
     match operation {
@@ -540,8 +562,8 @@ fn failure(operation: &str, error: &OpError, resource_id: &str) -> Response {
     }
 }
 
-/// The reserved metadata keys, on every response. Both operations write the one report
-/// file, so the effect is `mutate` and the resource is that file.
+/// The reserved metadata keys, on every response. Both operations write the session's
+/// report file, so the effect is `mutate` and the resource is that file.
 fn metadata(resource_id: &str) -> Vec<(String, String)> {
     vec![
         (META_STATE_EFFECT.to_string(), EFFECT_MUTATE.to_string()),

@@ -31,9 +31,10 @@ pub const MAX_PROGRESS_NOTES: usize = 100;
 
 /// Which run produced a report.
 ///
-/// Both fields are best-effort: the runtime pushes them into every guest environment, and
-/// a call made without them records `""` rather than failing. The store outlives every
-/// session, so an unstamped report would be indistinguishable from a stale one.
+/// The runtime pushes both into every guest environment. The session id is required for a
+/// call to write: it names the file, `state/reports/<session_id>.json`, so a call without a
+/// usable one fails with `session_unavailable` and writes nothing. The capsule name is
+/// best-effort and recorded as `""` when the host did not set it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RunIdentity {
     pub session_id: String,
@@ -42,7 +43,8 @@ pub struct RunIdentity {
 
 impl RunIdentity {
     /// Build an identity from what the environment offered, substituting `""` for either
-    /// variable the host did not set.
+    /// variable the host did not set. An empty session id is refused later, when the store
+    /// is opened.
     pub fn new(session_id: Option<String>, capsule: Option<String>) -> Self {
         Self {
             session_id: session_id.unwrap_or_default(),
@@ -97,7 +99,8 @@ pub struct SupersededReport {
     pub reported_at: String,
 }
 
-/// The whole of `state/report.json`.
+/// The whole of `state/reports/<session_id>.json`. `session_id` always equals the file's
+/// stem.
 ///
 /// `concluded` is the field a consumer branches on, and it is the only one that has to be
 /// read to tell the three states apart. `outcome`, `summary` and `reported_at` are `null`
@@ -146,8 +149,8 @@ impl ReportDoc {
         }
     }
 
-    /// Stamp the run that is writing now. Every call restamps: the store outlives the
-    /// session, so the last writer is the one a consumer needs to be able to identify.
+    /// Stamp the run that is writing now. The file belongs to one session, so the session id
+    /// restamped here is the one it was created with and the one in its name.
     pub fn stamp(&mut self, identity: &RunIdentity) {
         self.capsule = identity.capsule.clone();
         self.session_id = identity.session_id.clone();

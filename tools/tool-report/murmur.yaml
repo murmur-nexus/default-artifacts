@@ -1,19 +1,28 @@
 name: tool-report
-version: 0.4.0
+version: 0.5.0
 runtime: tool
 implementation: wasm
 description: |
-  State this capsule's own conclusion where a consumer can find it. Two operations, one
-  file, no read-back.
+  State this session's own conclusion where a consumer can find it. Two operations, one
+  file per session, no read-back.
 
   | op       | inputs                                       | terminal |
   |----------|----------------------------------------------|----------|
   | report   | outcome, summary, deliverables?, notes_for?   | yes      |
   | progress | note                                          | no       |
 
-  Both write `state/report.json` inside the durable store the capsule opens with
-  `capabilities.state`. Nothing else is written, no other file is read, and the report does
-  not appear in the trace — the consumer reads the file.
+  Both write `state/reports/<session_id>.json` inside the durable store the capsule opens
+  with `capabilities.state` — on the host `~/.murmur/state/<store>/reports/<session_id>.json`,
+  where `<store>` is `capabilities.state.store` (default: the capsule name) and
+  `<session_id>` is `MURMUR_SESSION_ID` verbatim, the `ses_…` id `mur run` prints, fresh for
+  every launch including `--resume`. Each session reads and writes only its own file, so two
+  sessions of one capsule never overwrite each other and a new session never starts from
+  the last one's verdict. Nothing else is written, no other file is read, and the report
+  does not appear in the trace — the consumer reads the file.
+
+  After each write the tool keeps at most 64 report files in `state/reports/`, removing the
+  ones last written longest ago (ties by name), but never the caller's own, never one written
+  in the last 7 days, and never a file not named `<session_id>.json`.
 
   Call `report` once, when you are done, with the verdict you would give if asked. Call
   `progress` while work is advancing, as often as is useful; it concludes nothing.
@@ -34,7 +43,7 @@ description: |
   string; this tool never interprets it.
 
   The report file makes three states distinguishable, which is the point: absent means the
-  capsule never reported; present with `concluded: false` means it filed progress notes and
+  session never reported; present with `concluded: false` means it filed progress notes and
   never concluded; present with `concluded: true` means its verdict is in `outcome`. The
   first two are never success. A second `report` wins and bumps `revision`, and the verdict
   it replaced is pushed onto `superseded` in the same file rather than lost.
@@ -62,11 +71,14 @@ description: |
   enforcing it is the consumer's job.
 
   Without the state grant every operation returns `state_unavailable`; the tool never falls
-  back to the workdir. All responses: {ok: bool, operation: string, concluded: bool,
-  outcome: string|null, revision: int, superseded_count: int, progress_count: int,
-  report_path: string, error_kind?: string, message?: string}. error_kind is one of
+  back to the workdir. A session id that is absent, empty, over 128 characters or holds a
+  character outside A-Z a-z 0-9 _ - returns `session_unavailable` and nothing is written.
+  All responses: {ok: bool, operation: string, concluded: bool, outcome: string|null,
+  revision: int, superseded_count: int, progress_count: int, report_path: string,
+  error_kind?: string, message?: string}. error_kind is one of
   invalid_input, unknown_operation, unknown_outcome, inline_payload_refused,
-  undeclared_kind, undeclared_stage, state_unavailable, config_invalid, io_error.
+  undeclared_kind, undeclared_stage, state_unavailable, session_unavailable, config_invalid,
+  io_error.
 
 input_schema:
   type: object

@@ -5,13 +5,14 @@
 //!
 //! * The report survives *independent* instantiations. A verdict filed in one call is read
 //!   back and superseded by the next — the component-model analogue of two separate tool
-//!   dispatches against a store that outlives both.
+//!   dispatches against a store that outlives both — and two sessions sharing one store
+//!   each write their own file.
 //! * The tool writes nothing outside the durable-state preopen, and fails closed when that
 //!   preopen is absent instead of quietly writing a report inside the workdir the agent can
 //!   rewrite.
 //! * The operator configuration and the run identity are read out of the guest environment,
 //!   from the variables the runtime delivers them in — a path the host tests, which pass
-//!   both in as parameters, never take.
+//!   both in as parameters, never take. Without `MURMUR_SESSION_ID` the call fails closed.
 //!
 //! The `WasiCtx` here is built by hand: the workdir preopen at `.` the runtime always
 //! grants, plus the second preopen `capabilities.state` mounts and the environment
@@ -44,7 +45,7 @@ use bindings::Tool;
 /// `tool_report::STATE_DIR`, which the cdylib exports but this host-target test
 /// links against directly.
 const STATE_GUEST_PATH: &str = tool_report::STATE_DIR;
-const REPORT_FILE: &str = tool_report::store::REPORT_FILE;
+const REPORTS_DIR: &str = tool_report::store::REPORTS_DIR;
 
 struct HostState {
     table: ResourceTable,
@@ -112,12 +113,14 @@ fn linker(engine: &Engine) -> Linker<HostState> {
 /// A fresh Store with the workdir at `.` — what the capsule runtime always grants — plus,
 /// when `state` is `Some`, the second preopen standing in for the `capabilities.state`
 /// grant, the environment variable an artifact's `config:` block arrives in, and the
-/// session and capsule the runtime stamps into every guest environment.
+/// session and capsule the runtime stamps into every guest environment. `session` of `None`
+/// leaves `MURMUR_SESSION_ID` unset.
 fn store_for(
     engine: &Engine,
     workdir: &Path,
     state: Option<&Path>,
     config: Option<&str>,
+    session: Option<&str>,
 ) -> Store<HostState> {
     let mut builder = WasiCtxBuilder::new();
     builder
@@ -131,7 +134,9 @@ fn store_for(
     if let Some(config) = config {
         builder.env(tool_report::ARTIFACT_CONFIG_ENV, config);
     }
-    builder.env(tool_report::SESSION_ID_ENV, SESSION_ID);
+    if let Some(session) = session {
+        builder.env(tool_report::SESSION_ID_ENV, session);
+    }
     builder.env(tool_report::CAPSULE_NAME_ENV, CAPSULE_NAME);
     Store::new(
         engine,
@@ -145,8 +150,8 @@ fn store_for(
 const SESSION_ID: &str = "sess-wasm-1";
 const CAPSULE_NAME: &str = "report-proof-capsule";
 
-/// One independent instantiation + `run` call. Returns the status, the decoded envelope
-/// from `ToolResult.data`, and the metadata list.
+/// One independent instantiation + `run` call as [`SESSION_ID`]. Returns the status, the
+/// decoded envelope from `ToolResult.data`, and the metadata list.
 fn run_report(
     engine: &Engine,
     component: &Component,
@@ -156,7 +161,31 @@ fn run_report(
     config: Option<&str>,
     payload: Value,
 ) -> (Status, Value, Vec<(String, String)>) {
-    let mut store = store_for(engine, workdir, state, config);
+    run_as(
+        engine,
+        component,
+        linker,
+        workdir,
+        state,
+        config,
+        Some(SESSION_ID),
+        payload,
+    )
+}
+
+/// [`run_report`] under an explicit `MURMUR_SESSION_ID`, or with none.
+#[allow(clippy::too_many_arguments)]
+fn run_as(
+    engine: &Engine,
+    component: &Component,
+    linker: &Linker<HostState>,
+    workdir: &Path,
+    state: Option<&Path>,
+    config: Option<&str>,
+    session: Option<&str>,
+    payload: Value,
+) -> (Status, Value, Vec<(String, String)>) {
+    let mut store = store_for(engine, workdir, state, config, session);
     let tool = Tool::instantiate(&mut store, component, linker).expect("instantiate component");
     let input = ToolInput {
         data: Some(payload.to_string()),
@@ -222,8 +251,12 @@ fn entries(dir: &Path) -> Vec<String> {
     names
 }
 
-fn report(state: &Path) -> Value {
-    let text = std::fs::read_to_string(state.join(REPORT_FILE)).expect("read the report");
+/// `session`'s report under the host-side state directory, `reports/<session>.json`.
+fn report(state: &Path, session: &str) -> Value {
+    let path = state
+        .join(REPORTS_DIR)
+        .join(tool_report::store::report_file_name(session));
+    let text = std::fs::read_to_string(path).expect("read the report");
     serde_json::from_str(&text).expect("the report file is one JSON object")
 }
 
@@ -254,7 +287,7 @@ fn the_report_survives_independent_instantiations_and_the_verdict_is_revisable()
             .any(|(k, v)| k == "state_effect" && v == "mutate"),
         "expected state_effect=mutate, got {meta:?}"
     );
-    let expected_resource = format!("report:{STATE_GUEST_PATH}/{REPORT_FILE}");
+    let expected_resource = format!("report:{STATE_GUEST_PATH}/{REPORTS_DIR}/{SESSION_ID}.json");
     assert!(
         meta.iter()
             .any(|(k, v)| k == "resource_id" && v == &expected_resource),
@@ -299,7 +332,7 @@ fn the_report_survives_independent_instantiations_and_the_verdict_is_revisable()
     );
     assert_eq!(envelope["revision"], 2);
 
-    let doc = report(&f.state);
+    let doc = report(&f.state, SESSION_ID);
     assert_eq!(doc["outcome"], "blocked");
     assert_eq!(doc["superseded"][0]["outcome"], "success");
     assert_eq!(doc["progress"][0]["note"], "Indexed 4 of 9 crates.");
@@ -314,7 +347,15 @@ fn the_report_survives_independent_instantiations_and_the_verdict_is_revisable()
         Vec::<String>::new(),
         "the tool must write nothing into the workdir"
     );
-    assert_eq!(entries(&f.state), vec![REPORT_FILE.to_string()]);
+    assert_eq!(entries(&f.state), vec![REPORTS_DIR.to_string()]);
+    assert_eq!(
+        entries(&f.state.join(REPORTS_DIR)),
+        vec![format!("{SESSION_ID}.json")]
+    );
+    assert_eq!(
+        envelope["report_path"],
+        format!("{STATE_GUEST_PATH}/{REPORTS_DIR}/{SESSION_ID}.json")
+    );
 }
 
 #[test]
@@ -442,4 +483,137 @@ fn a_deliverable_carrying_an_inline_payload_is_refused_by_the_component() {
     assert_eq!(envelope["error_kind"], "inline_payload_refused");
     assert_eq!(entries(&f.state), Vec::<String>::new());
     assert_eq!(entries(&f.workdir), Vec::<String>::new());
+}
+
+#[test]
+fn two_sessions_sharing_one_state_preopen_each_write_their_own_file() {
+    let eng = engine();
+    let component = Component::from_file(&eng, component_path()).expect("load component");
+    let lnk = linker(&eng);
+    let f = fixture("two-sessions", true);
+    let first = "ses_0192f3a4b5c67d8e9f0a1b2c3d4e5f6a";
+    let second = "ses_0192f3a4b5c67d8e9f0a1b2c3d4e5f6b";
+
+    for (session, outcome) in [(first, "success"), (second, "blocked")] {
+        let (status, envelope, meta) = run_as(
+            &eng,
+            &component,
+            &lnk,
+            &f.workdir,
+            Some(&f.state),
+            None,
+            Some(session),
+            json!({ "operation": "report", "outcome": outcome, "summary": session }),
+        );
+        assert!(
+            matches!(status, Status::Passed),
+            "{session}: {status:?} {envelope}"
+        );
+        assert_eq!(envelope["revision"], 1, "{session} starts its own file");
+        let expected = format!("report:{STATE_GUEST_PATH}/{REPORTS_DIR}/{session}.json");
+        assert!(
+            meta.iter()
+                .any(|(k, v)| k == "resource_id" && v == &expected),
+            "expected resource_id={expected}, got {meta:?}"
+        );
+    }
+
+    assert_eq!(
+        entries(&f.state.join(REPORTS_DIR)),
+        vec![format!("{first}.json"), format!("{second}.json")]
+    );
+    let first_doc = report(&f.state, first);
+    assert_eq!(first_doc["session_id"], first);
+    assert_eq!(first_doc["outcome"], "success");
+    let second_doc = report(&f.state, second);
+    assert_eq!(second_doc["session_id"], second);
+    assert_eq!(second_doc["outcome"], "blocked");
+    assert_eq!(
+        entries(&f.workdir),
+        Vec::<String>::new(),
+        "the tool must write nothing into the workdir"
+    );
+}
+
+#[test]
+fn without_a_session_id_the_component_fails_closed() {
+    let eng = engine();
+    let component = Component::from_file(&eng, component_path()).expect("load component");
+    let lnk = linker(&eng);
+    let f = fixture("no-session", true);
+
+    let (status, envelope, meta) = run_as(
+        &eng,
+        &component,
+        &lnk,
+        &f.workdir,
+        Some(&f.state),
+        None,
+        None,
+        json!({ "operation": "progress", "note": "n" }),
+    );
+    assert!(
+        matches!(status, Status::Error),
+        "status: {status:?} {envelope}"
+    );
+    assert_eq!(envelope["error_kind"], "session_unavailable");
+    let expected = format!("report:{STATE_GUEST_PATH}/{REPORTS_DIR}");
+    assert!(
+        meta.iter()
+            .any(|(k, v)| k == "resource_id" && v == &expected),
+        "expected resource_id={expected}, got {meta:?}"
+    );
+    assert_eq!(entries(&f.state), Vec::<String>::new(), "nothing written");
+    assert_eq!(entries(&f.workdir), Vec::<String>::new());
+}
+
+#[test]
+fn retention_runs_inside_the_component_and_spares_the_callers_file() {
+    use std::time::{Duration, SystemTime};
+    use tool_report::retention::{MAX_REPORT_FILES, REPORT_RETENTION_GRACE};
+
+    let eng = engine();
+    let component = Component::from_file(&eng, component_path()).expect("load component");
+    let lnk = linker(&eng);
+    let f = fixture("retention", true);
+
+    // MAX + 3 files past the grace, one minute apart, file 0 the oldest.
+    let reports = f.state.join(REPORTS_DIR);
+    std::fs::create_dir(&reports).expect("create reports/");
+    let count = MAX_REPORT_FILES + 3;
+    let planted: Vec<String> = (0..count)
+        .map(|n| {
+            let name = format!("ses_{n:032x}.json");
+            let path = reports.join(&name);
+            std::fs::write(&path, "{}").expect("plant a report");
+            let age = REPORT_RETENTION_GRACE + Duration::from_secs(60 * (count - n) as u64 + 3600);
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .and_then(|file| file.set_modified(SystemTime::now() - age))
+                .expect("age the report");
+            name
+        })
+        .collect();
+
+    let (status, envelope, _meta) = run_report(
+        &eng,
+        &component,
+        &lnk,
+        &f.workdir,
+        Some(&f.state),
+        None,
+        json!({ "operation": "progress", "note": "n" }),
+    );
+    assert!(
+        matches!(status, Status::Passed),
+        "status: {status:?} {envelope}"
+    );
+
+    let remaining = entries(&reports);
+    assert_eq!(remaining.len(), MAX_REPORT_FILES);
+    assert!(remaining.contains(&format!("{SESSION_ID}.json")));
+    for gone in &planted[..4] {
+        assert!(!remaining.contains(gone), "{gone} was among the 4 oldest");
+    }
 }
