@@ -58,7 +58,7 @@ capabilities:
 artifacts:
   - name: murmur/driver-claude-code
     runtime: driver
-    version: "0.5.0"
+    version: "0.6.0"
 ```
 
 The harness starts from an **empty** environment and sees exactly the variables

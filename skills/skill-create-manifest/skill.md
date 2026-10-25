@@ -93,7 +93,7 @@ artifacts:
     runtime: driver
 
   - name: murmur/hook-debug
-    version: "0.8.0"
+    version: "0.9.0"
     runtime: hook
     capabilities:
       filesystem:
@@ -208,7 +208,7 @@ ignored.
 ```yaml
 artifacts:
   - name: murmur/hook-eval
-    version: "0.9.0"
+    version: "0.10.0"
     runtime: hook
     capabilities:
       filesystem:
@@ -218,7 +218,7 @@ artifacts:
           - http://localhost:4318   # only for OTel export
 
   - name: murmur/hook-debug
-    version: "0.8.0"
+    version: "0.9.0"
     runtime: hook
     capabilities:
       filesystem:
@@ -517,7 +517,7 @@ description: "Coding agent with shell, git operations, and file editing"
 
 artifacts:
   - name: murmur/tool-git
-    version: "0.4.0"
+    version: "0.5.0"
     runtime: tool
   - name: murmur/tool-editor
     version: "0.10.0"
@@ -650,6 +650,7 @@ name its `artifacts:` entry uses. For live discovery, use `mur search <keyword>`
 | `murmur/tool-create` | tool | Scaffolds a new tool or hook artifact directory with `murmur.yaml`, a stub implementation and a README, under `tools/<name>/` in the capsule workdir. |
 | `murmur/tool-editor` | tool | File read/write/patch operations: read_file, write_file, replace_in_file, find_in_files. Prefer over shell-based file editing. |
 | `murmur/tool-git` | tool | Native binary. Structured git interface: status, add, diff, commit, branch, checkout, fetch, pull, push, clone, worktree, and more. Needs `git` in `capabilities.shell.allow`; `fetch`, `pull`, `push` and `clone` also need the remote's host in `capabilities.network.allow` and a `capabilities.shell.interpreter_runtime` grant for `git` naming its remote-helper directory. Prefer over granting `bash` for git work. |
+| `murmur/tool-github` | tool | Pushes a local commit range to one pinned GitHub repo so the remote branch lands on the identical SHA (a `git clone --depth 1` works), fetches a branch back, and opens, inspects, lists and merges pull requests. Needs `gateway: {endpoint: https://api.github.com, api_key: ${GITHUB_TOKEN}}` on its entry and a `config:` block with `config_version: 1` and `repo: owner/name`; the runtime attaches the token, and without the gateway every call returns `gateway_missing`. Merging needs `allow_merge: true` and `merge_methods` in `config:`. |
 | `murmur/tool-registry-search` | tool | Native binary. Searches a Murmur artifact index for artifacts matching a keyword; each result is a full `<scope>/<name>` with every published version, newest first. The default index, on the latest default-artifacts release, needs `https://github.com` and `https://release-assets.githubusercontent.com` in `capabilities.network.allow`. |
 | `murmur/tool-report` | tool | States the session's own conclusion in `state/reports/<session_id>.json` (host: `~/.murmur/state/<store>/reports/<session_id>.json`, `<session_id>` = `MURMUR_SESSION_ID` verbatim; at most 64 files kept, never the caller's own or one written in the last 7 days): `progress` notes, then one terminal `report` whose outcome is `success`, `rejected`, `blocked` or `failed`. Needs `capabilities.state: {}` on its entry; an optional `config:` block closes the deliverable kinds and note stages. |
 | `murmur/tool-request-input` | tool | HITL pause gate. Emits an `input-required` signal; the capsule waits for a human reply before continuing. Use with `lifecycle.input_timeout_secs` to avoid indefinite waits. |
@@ -666,10 +667,10 @@ narrow them and warns `W-SEC-008`.
 ```yaml
 artifacts:
   - name: murmur/tool-git
-    version: "0.4.0"
+    version: "0.5.0"
     runtime: tool
   - name: murmur/hook-debug
-    version: "0.8.0"
+    version: "0.9.0"
     runtime: hook
     capabilities:
       filesystem:
