@@ -1333,3 +1333,170 @@ fn push_from_a_directory_that_is_not_a_repository_is_repo_unreadable() {
         "nothing is sent for an unreadable repository"
     );
 }
+
+// ── strict-mode input: every schema property on every call ──────────────────
+
+/// The full 17-property input a strict-mode model (OpenAI's Responses API, with no `strict`
+/// field on the tool) sends on every call, captured from a `gpt-5.6-luna` session: the op's own
+/// fields set, every other property `""`, `0` or `false`.
+fn strict_form(fields: Value) -> String {
+    let mut full = json!({
+        "base": "", "body": "", "branch": "", "draft": false, "expected_head_sha": "",
+        "force": false, "head": "", "head_sha": "", "message": "", "method": "", "number": 0,
+        "op": "", "remote": "", "remote_branch": "", "repo_path": "", "state": "", "title": ""
+    });
+    assert_eq!(full.as_object().unwrap().len(), 17);
+    for (key, value) in fields.as_object().unwrap() {
+        full[key] = value.clone();
+    }
+    full.to_string()
+}
+
+type Sent = Vec<(String, String, Option<Value>)>;
+
+fn sent(requests: Vec<Recorded>) -> Sent {
+    requests
+        .into_iter()
+        .map(|r| (r.method, r.path, r.body))
+        .collect()
+}
+
+/// Run `sparse` and its strict form against two copies of the same scripted fake, and assert
+/// both send the same requests and return the same result.
+fn assert_strict_form_matches(config: &str, sparse: Value, script: Vec<Scripted>) -> Response {
+    let mut fake = Fake::new(script.clone());
+    let expected = run(Some(config), &sparse.to_string(), &mut fake, Path::new("."));
+    let mut strict_fake = Fake::new(script);
+    let actual = run(
+        Some(config),
+        &strict_form(sparse.clone()),
+        &mut strict_fake,
+        Path::new("."),
+    );
+    assert_eq!(actual, expected, "{sparse}");
+    assert_eq!(sent(strict_fake.requests()), sent(fake.requests()));
+    actual
+}
+
+#[test]
+fn strict_form_push_sends_what_the_sparse_push_sends() {
+    let fx = Fixture::new();
+    fx.write_file("a.txt", b"one");
+    fx.write_file("dir/b.txt", b"sub");
+    let head = fx.commit("first");
+    let sparse = json!({"op": "push", "head_sha": head, "remote_branch": "feature-x"});
+
+    let mut fake = GithubEcho::new("main");
+    let expected = run(Some(CONFIG), &sparse.to_string(), &mut fake, &fx.git_dir());
+    let mut strict_fake = GithubEcho::new("main");
+    let actual = run(
+        Some(CONFIG),
+        &strict_form(sparse),
+        &mut strict_fake,
+        &fx.git_dir(),
+    );
+    assert_eq!(data(&actual)["ok"], json!(true), "{}", actual.data);
+    assert_eq!(actual, expected);
+    assert_eq!(sent(strict_fake.requests()), sent(fake.requests()));
+    assert_eq!(strict_fake.refs.borrow().get("feature-x"), Some(&head));
+}
+
+#[test]
+fn strict_form_fetch_sends_what_the_sparse_fetch_sends() {
+    let run_fetch = |input: &str| {
+        let fx = Fixture::new();
+        fx.write_file("a.txt", b"one");
+        let head = fx.commit("first");
+        let mut fake = Fake::new(vec![
+            ok(repo_json("main")),
+            ok(json!({"object": {"sha": head}})),
+        ]);
+        let response = run(Some(CONFIG), input, &mut fake, &fx.git_dir());
+        let written = std::fs::read_to_string(fx.git_dir().join("refs/remotes/origin/main"));
+        (response, sent(fake.requests()), written.ok())
+    };
+    let sparse = json!({"op": "fetch"});
+    let expected = run_fetch(&sparse.to_string());
+    let actual = run_fetch(&strict_form(sparse));
+    assert_eq!(data(&actual.0)["ok"], json!(true), "{}", actual.0.data);
+    assert_eq!(
+        data(&actual.0)["branch"],
+        json!("main"),
+        "an empty branch means the default branch"
+    );
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn strict_form_pr_create_sends_what_the_sparse_pr_create_sends() {
+    let script = vec![created(pr_json(9, "open", &"a".repeat(40)))];
+    let sparse = json!({"op": "pr_create", "title": "Add feature", "head": "feature-x", "base": "main", "draft": true});
+    let response = assert_strict_form_matches(CONFIG, sparse, script.clone());
+    assert_eq!(data(&response)["number"], json!(9));
+
+    let mut fake = Fake::new(script);
+    let strict = strict_form(
+        json!({"op": "pr_create", "title": "Add feature", "head": "feature-x", "base": "main"}),
+    );
+    run(Some(CONFIG), &strict, &mut fake, Path::new("."));
+    let body = fake.requests()[0].body.clone().unwrap();
+    assert!(
+        body.get("body").is_none() && body.get("draft").is_none(),
+        "empty body and draft false send neither field: {body}"
+    );
+}
+
+#[test]
+fn strict_form_pr_view_sends_what_the_sparse_pr_view_sends() {
+    let script = vec![
+        ok(pr_json(1, "open", &"a".repeat(40))),
+        ok(json!([{"user": {"login": "ada"}, "state": "APPROVED"}])),
+        ok(json!({"check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}]})),
+    ];
+    let response =
+        assert_strict_form_matches(CONFIG, json!({"op": "pr_view", "number": 1}), script);
+    assert_eq!(data(&response)["reviews"][0]["state"], json!("APPROVED"));
+}
+
+#[test]
+fn strict_form_pr_list_sends_what_the_sparse_pr_list_sends() {
+    let script = vec![ok(json!([pr_json(1, "open", &"a".repeat(40))]))];
+    let sparse = json!({"op": "pr_list", "state": "open", "base": "main"});
+    assert_strict_form_matches(CONFIG, sparse, script.clone());
+
+    let mut fake = Fake::new(script);
+    let strict = strict_form(json!({"op": "pr_list", "state": "open", "base": "main"}));
+    run(Some(CONFIG), &strict, &mut fake, Path::new("."));
+    assert_eq!(
+        fake.requests()[0].path,
+        "/repos/acme/widgets/pulls?state=open&base=main",
+        "an empty head sends no head parameter"
+    );
+}
+
+#[test]
+fn strict_form_pr_merge_sends_what_the_sparse_pr_merge_sends() {
+    let script = vec![
+        ok(pr_json(1, "open", &"b".repeat(40))),
+        ok(json!({"merged": true, "sha": "c".repeat(40)})),
+    ];
+    let sparse = json!({"op": "pr_merge", "number": 1, "expected_head_sha": "b".repeat(40)});
+    let response = assert_strict_form_matches(MERGE_CONFIG, sparse, script);
+    let value = data(&response);
+    assert_eq!(value["merged"], json!(true));
+    assert_eq!(value["trailer"], json!(null));
+}
+
+#[test]
+fn strict_form_with_a_non_empty_foreign_field_is_still_refused() {
+    let mut fake = Fake::new(vec![]);
+    let input = strict_form(json!({"op": "pr_view", "number": 1, "title": "stray"}));
+    let response = run(Some(CONFIG), &input, &mut fake, Path::new("."));
+    let value = data(&response);
+    assert_eq!(value["error_kind"], json!("invalid_input"), "{value}");
+    assert_eq!(
+        value["message"],
+        json!("'title' is not a recognised field for this op")
+    );
+    assert!(fake.requests().is_empty());
+}

@@ -93,7 +93,7 @@ artifacts:
     runtime: driver
 
   - name: murmur/hook-debug
-    version: "0.8.0"
+    version: "0.9.0"
     runtime: hook
     capabilities:
       filesystem:
@@ -208,7 +208,7 @@ ignored.
 ```yaml
 artifacts:
   - name: murmur/hook-eval
-    version: "0.9.0"
+    version: "0.10.0"
     runtime: hook
     capabilities:
       filesystem:
@@ -218,7 +218,7 @@ artifacts:
           - http://localhost:4318   # only for OTel export
 
   - name: murmur/hook-debug
-    version: "0.8.0"
+    version: "0.9.0"
     runtime: hook
     capabilities:
       filesystem:
@@ -517,7 +517,7 @@ description: "Coding agent with shell, git operations, and file editing"
 
 artifacts:
   - name: murmur/tool-git
-    version: "0.4.0"
+    version: "0.5.0"
     runtime: tool
   - name: murmur/tool-editor
     version: "0.10.0"
@@ -667,10 +667,10 @@ narrow them and warns `W-SEC-008`.
 ```yaml
 artifacts:
   - name: murmur/tool-git
-    version: "0.4.0"
+    version: "0.5.0"
     runtime: tool
   - name: murmur/hook-debug
-    version: "0.8.0"
+    version: "0.9.0"
     runtime: hook
     capabilities:
       filesystem:

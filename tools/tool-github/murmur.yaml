@@ -18,6 +18,11 @@ description: |
     pr_list    {state?, head?, base?}  -> {prs}
     pr_merge   {number, expected_head_sha, method?, message?}  -> {merged, merge_sha, trailer}
 
+  A field set to "", 0, false or null counts as absent, so a caller that sends every
+  property on every call (empty for the ones it does not use) sends the same request as one
+  that sends only the op's own fields; number: 0 is refused as a missing number. A field
+  outside the op's own list that holds any other value is refused with invalid_input.
+
   repo_path is the local repository's directory relative to the workdir ("." by default). Any
   self-contained repository works, a shallow clone (git clone --depth 1) included.
 

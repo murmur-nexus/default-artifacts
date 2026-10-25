@@ -2,6 +2,11 @@
 //! "pr_list"|"pr_merge", ...}`. Every op-specific field is validated here; everything about *which* repo
 //! and *whether an op is even allowed* lives in `config:` (see [`crate::config`]) and is
 //! checked by [`crate::ops`], not here.
+//!
+//! A field set to `""`, `0`, `false` or `null` counts as absent, so a model that fills every
+//! schema property on every call (OpenAI's strict function calling does) sends the same request
+//! as one that sends only the op's own fields. No field gives one of those values a meaning of
+//! its own: every boolean defaults to `false`, and an absent string or number means unset.
 
 use serde_json::{Map, Value};
 
@@ -84,6 +89,7 @@ pub fn parse_input(data: &str) -> Result<Input, String> {
         Some(other) => return Err(format!("\"op\" must be a string, got {other}")),
         None => return Err("\"op\" is required".to_string()),
     };
+    map.retain(|_, value| !is_empty_value(value));
     match op.as_str() {
         "push" => parse_push(map).map(Input::Push),
         "fetch" => parse_fetch(map).map(Input::Fetch),
@@ -94,6 +100,17 @@ pub fn parse_input(data: &str) -> Result<Input, String> {
         other => Err(format!(
             "\"op\" must be one of push, fetch, pr_create, pr_view, pr_list, pr_merge, got {other:?}"
         )),
+    }
+}
+
+/// `""`, `0`, `false` or `null`: what a strict-mode caller sends for a field it is not using.
+fn is_empty_value(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Bool(b) => !b,
+        Value::Number(n) => n.as_f64() == Some(0.0),
+        Value::String(s) => s.is_empty(),
+        Value::Array(_) | Value::Object(_) => false,
     }
 }
 
@@ -277,13 +294,18 @@ mod tests {
             "main.lock",
             "has space",
             "a//b",
-            "",
+            " ",
         ] {
             let err = parse_input(&format!(r#"{{"op":"fetch","branch":{bad:?}}}"#)).unwrap_err();
             assert!(err.contains("branch"), "{bad}: {err}");
         }
         let err = parse_input(r#"{"op":"fetch","remote":"../x"}"#).unwrap_err();
         assert!(err.contains("remote"), "{err}");
+        // An empty name is an absent one: the default branch and the `origin` remote.
+        assert_eq!(
+            parse_input(r#"{"op":"fetch","branch":"","remote":""}"#).unwrap(),
+            parse_input(r#"{"op":"fetch"}"#).unwrap()
+        );
     }
 
     #[test]
@@ -312,6 +334,74 @@ mod tests {
     fn rejects_an_unknown_field() {
         let err = parse_input(r#"{"op":"pr_view","number":1,"extra":true}"#).unwrap_err();
         assert!(err.contains("extra"), "{err}");
+    }
+
+    /// Every `input_schema` property, as a strict-mode model sends it on every call.
+    fn strict_form(fields: Value) -> String {
+        let mut full = serde_json::json!({
+            "base": "", "body": "", "branch": "", "draft": false, "expected_head_sha": "",
+            "force": false, "head": "", "head_sha": "", "message": "", "method": "",
+            "number": 0, "op": "", "remote": "", "remote_branch": "", "repo_path": "",
+            "state": "", "title": ""
+        });
+        for (key, value) in fields.as_object().unwrap() {
+            full[key] = value.clone();
+        }
+        full.to_string()
+    }
+
+    #[test]
+    fn empty_values_count_as_absent_for_every_op() {
+        let sha = "a".repeat(40);
+        for sparse in [
+            serde_json::json!({"op": "push", "head_sha": sha, "remote_branch": "feature-x"}),
+            serde_json::json!({"op": "fetch"}),
+            serde_json::json!({"op": "pr_create", "title": "t", "head": "h", "base": "main"}),
+            serde_json::json!({"op": "pr_view", "number": 3}),
+            serde_json::json!({"op": "pr_list", "state": "open"}),
+            serde_json::json!({"op": "pr_merge", "number": 3, "expected_head_sha": sha}),
+        ] {
+            assert_eq!(
+                parse_input(&strict_form(sparse.clone())).unwrap(),
+                parse_input(&sparse.to_string()).unwrap(),
+                "{sparse}"
+            );
+        }
+    }
+
+    #[test]
+    fn null_counts_as_absent() {
+        assert_eq!(
+            parse_input(r#"{"op":"fetch","branch":null,"remote":null,"title":null}"#).unwrap(),
+            parse_input(r#"{"op":"fetch"}"#).unwrap()
+        );
+    }
+
+    #[test]
+    fn number_zero_is_the_missing_number_refusal() {
+        for op in ["pr_view", "pr_merge"] {
+            let zero = parse_input(&format!(r#"{{"op":"{op}","number":0}}"#)).unwrap_err();
+            let missing = parse_input(&format!(r#"{{"op":"{op}"}}"#)).unwrap_err();
+            assert_eq!(zero, missing);
+            assert_eq!(zero, "\"number\" is required");
+        }
+    }
+
+    #[test]
+    fn a_non_empty_foreign_field_is_still_refused() {
+        for (field, value) in [
+            ("title", serde_json::json!("x")),
+            ("force", serde_json::json!(true)),
+            ("number", serde_json::json!(4)),
+        ] {
+            let mut input = serde_json::json!({"op": "fetch"});
+            input[field] = value;
+            let err = parse_input(&strict_form(input)).unwrap_err();
+            assert_eq!(
+                err,
+                format!("'{field}' is not a recognised field for this op")
+            );
+        }
     }
 
     #[test]

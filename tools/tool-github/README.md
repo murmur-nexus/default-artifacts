@@ -203,7 +203,13 @@ sends it to GitHub, and if the PR has moved since, GitHub refuses the merge and 
 
 ## Input
 
-`{"op": …, …}`. A field that does not belong to the op is `invalid_input`.
+`{"op": …, …}`. A field set to `""`, `0`, `false` or `null` counts as absent, so a model that
+fills every schema property on every call, as OpenAI's strict function calling does, sends the
+same request as one that sends only the op's own fields. No field gives one of those values
+a meaning of its own: every boolean defaults to `false`, an empty `branch` is the default
+branch, an empty `method` is the first of `merge_methods`, and `number: 0` is refused as a
+missing `number`. A field that does not belong to the op and holds any other value is
+`invalid_input`.
 
 | Op | Fields |
 |---|---|
@@ -258,7 +264,7 @@ Configuration, input and gateway are checked, in that order, before any request.
 
 ## Changes from nexus-tool-github 0.2.0
 
-This tool is ported from `nexus-tool-github` 0.2.0. The ops, their inputs, the output fields, the
+This tool is ported from `nexus-tool-github` 0.2.0. The ops, their input fields, the output fields, the
 `config:` key names, the `error_kind` values and the gateway contract are unchanged, so a capsule
 moves by changing the artifact name.
 
@@ -268,6 +274,7 @@ moves by changing the artifact name.
 | Merge trailer | `merge_trailer` was a boolean, on by default: every merge and squash got `Co-authored-by: Nexus by Murmur <nexus@murmur.nexus>`, except a squash of a PR the `nexus-by-murmur` account opened | `merge_trailer` is the trailer line to append. Unset or `false` sends none. `true`, or a line that is not `Key: value`, is `config_invalid`. Who opened the PR does not matter |
 | Names | The description, error messages and `User-Agent: nexus-tool-github/0.2.0` named nexus | Every name is `tool-github`. The `gateway_missing` message names "the tool-github entry", and the `User-Agent` is `tool-github` with no version |
 | Unknown `op` message | Listed `push, pr_create, pr_view, pr_list, pr_merge` | Also lists `fetch` |
+| Empty input fields | Every field outside the op's own list was `invalid_input`, empty or not, so a model that sends every schema property on every call could not make a single call. An empty `branch` was `invalid_input`, `number: 0` was sent to GitHub, and `body: ""` or `message: ""` was sent as an empty string | A field set to `""`, `0`, `false` or `null` counts as absent, for every op. An empty `branch` is the default branch, `number: 0` is `invalid_input` ("\"number\" is required"), and an empty `body` or `message` is not sent. A foreign field with any other value is still `invalid_input` |
 
 Not changed:
 
