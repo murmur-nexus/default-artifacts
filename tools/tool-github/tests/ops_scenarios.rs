@@ -45,7 +45,6 @@ fn status(code: u16, body: Value) -> Scripted {
 
 /// A recorded request: method, path and the JSON body sent, if any.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct Recorded {
     method: String,
     path: String,
@@ -661,7 +660,6 @@ impl GithubEcho {
         }
     }
 
-    #[allow(dead_code)]
     fn requests(&self) -> Vec<Recorded> {
         self.requests.borrow().clone()
     }
