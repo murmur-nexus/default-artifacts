@@ -230,12 +230,13 @@ cargo test --workspace --locked
 CI runs both, formatting first. The workspace uses rustfmt's defaults (there is no `rustfmt.toml`);
 run `cargo fmt --all` before committing.
 
-Four suites are `#[ignore]`d because they need something the default run does not have. The three
+Five suites are `#[ignore]`d because they need something the default run does not have. The four
 that drive a real `mur` read it from `MUR_BIN`, else `PATH`, and fail rather than skip without one:
 
 ```bash
 MUR_BIN=$MUR_BIN cargo test -p tool-corpus --test mur_run_state -- --ignored         # 4 tests
 MUR_BIN=$MUR_BIN cargo test -p tool-tavily --test mur_run_gateway -- --ignored       # 2 tests
+MUR_BIN=$MUR_BIN cargo test -p tool-github --test mur_run_gateway -- --ignored       # 2 tests
 MUR_BIN=$MUR_BIN cargo test -p tool-create --test mur_manifest_shape -- --ignored    # 3 tests
 cargo test -p tool-create --test scaffolded_hook_tests -- --ignored  # needs a cargo registry
 ```
@@ -243,6 +244,7 @@ cargo test -p tool-create --test scaffolded_hook_tests -- --ignored  # needs a c
 | Suite | Proves |
 |---|---|
 | `mur_run_state` | the corpus reaches a durable store under a real `mur run`; the `corpus-state` workflow runs it nightly against murmur's default branch |
-| `mur_run_gateway` | the runtime attaches the Tavily key to the tool's request and it appears nowhere in the session |
+| `mur_run_gateway` (tool-tavily) | the runtime attaches the Tavily key to the tool's request and it appears nowhere in the session |
+| `mur_run_gateway` (tool-github) | the runtime attaches the GitHub token to the tool's requests and it appears nowhere in the session |
 | `mur_manifest_shape` | an unedited scaffold packs and publishes as the kind its author asked for |
 | `scaffolded_hook_tests` | a freshly scaffolded hook reports `1 passed`, not `0 passed` |

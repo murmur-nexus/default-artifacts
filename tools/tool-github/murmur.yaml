@@ -1,0 +1,153 @@
+name: tool-github
+version: 0.1.0
+runtime: tool
+implementation: wasm
+description: |
+  Push a local commit range to GitHub, byte-reproducing each commit so the remote branch
+  lands on the identical local SHA, fetch a remote branch back the same way, and open,
+  inspect, list and merge pull requests against exactly one operator-pinned repo. The GitHub
+  token is bound by the operator and attached by the runtime's credential gateway; this tool
+  never holds it.
+
+  Input is {"op": "push"|"fetch"|"pr_create"|"pr_view"|"pr_list"|"pr_merge", ...}:
+
+    push       {repo_path?, head_sha, remote_branch, force?}  -> {remote_branch, head_sha, created, objects_uploaded}
+    fetch      {repo_path?, branch?, remote?}  -> {branch, remote_ref, head_sha, previous_sha, objects_written}
+    pr_create  {title, body?, head, base, draft?}  -> {number, url, head_sha}
+    pr_view    {number}  -> {number, state, mergeable, head_sha, checks, reviews}
+    pr_list    {state?, head?, base?}  -> {prs}
+    pr_merge   {number, expected_head_sha, method?, message?}  -> {merged, merge_sha, trailer}
+
+  repo_path is the local repository's directory relative to the workdir ("." by default). Any
+  self-contained repository works, a shallow clone (git clone --depth 1) included.
+
+  A push reads both loose objects and packfiles (including delta-compressed blobs, whichever
+  pack their base lives in). It uploads only what GitHub lacks: the walk back from head_sha
+  stops at the first commit GitHub already has, so history already there (a signed merge
+  GitHub made included) is never re-sent. A shallow clone pushes as long as GitHub already
+  has the history behind its shallow boundary. A signed commit GitHub does not have yet, or a
+  tree with a gitlink, is refused with invalid_input, naming the object, before anything is
+  uploaded; a repository this tool cannot fully account for (a git-alternates repo, a pack
+  file with no matching index, an object in neither store, or a pack set too large to read
+  into memory) is refused with repo_unreadable, before any of it is read. A non-fast-forward
+  push is refused with conflict unless force: true is given and this entry's config: sets
+  allow_force_push: true. Pushing the repo's default branch is refused with
+  operation_not_allowed unless config: sets allow_push_default_branch: true.
+
+  fetch is git fetch for one branch (the repo's default branch when branch is omitted): it
+  writes every commit, tree and blob the local repository lacks as loose objects, then points
+  refs/remotes/<remote>/<branch> (remote defaults to origin) at the branch's tip. It never
+  touches a local branch, the index or the working tree; merge or reset onto the
+  remote-tracking ref afterwards as usual. Each object is rebuilt from GitHub's API and
+  written only if it hashes to the sha GitHub named; one that does not is refused with
+  response_invalid, and the ref is updated only after every object is written. A blob over
+  about 6 MB exceeds the response size this tool reads.
+
+  pr_create's draft: true opens the pull request as a draft; false or omitted opens it ready
+  for review. head is a branch of the pinned repo; a head naming another owner's fork is
+  refused with repo_not_allowed. The body is sent as given unless config: sets pr_footer.
+
+  pr_merge is refused with operation_not_allowed unless config: sets allow_merge: true and
+  lists the method under merge_methods; method defaults to the first one listed.
+  expected_head_sha is the PR head the caller last saw (from pr_view): if the PR has moved
+  since, GitHub refuses the merge and the tool returns head_moved. A PR GitHub cannot merge
+  is not_mergeable. The commit message is the caller's message, else GitHub's own, unless
+  config: sets merge_trailer; rebase never carries a message or a trailer.
+
+  The operator binds the token on this tool's entry, never in config:
+
+      artifacts:
+        - name: murmur/tool-github
+          runtime: tool
+          gateway:
+            endpoint: https://api.github.com
+            api_key: ${GITHUB_TOKEN}
+          capabilities:
+            network:
+              allow: []
+          config:
+            config_version: 1
+            repo: owner/name
+            allow_merge: true
+            merge_methods: [squash]
+            allow_force_push: false
+            allow_push_default_branch: false
+
+  and stores it with `mur config set -g credentials.GITHUB_TOKEN <token>`. The calls are
+  brokered but not metered by murmur. The config: block (config_version: 1) requires repo
+  ("owner/name") and additionally sets allow_merge, merge_methods, allow_force_push,
+  allow_push_default_branch, pr_footer (a line appended to every PR body this tool opens;
+  unset or false appends nothing) and merge_trailer (a "Key: value" trailer appended to
+  every merge or squash commit message; unset or false appends nothing). A credential-shaped
+  key in it is refused.
+
+  A failure returns {ok: false, error_kind, message, ...} where error_kind is one of
+  invalid_input, config_invalid, gateway_missing, repo_not_allowed, repo_unreadable,
+  repo_unwritable, operation_not_allowed, conflict, not_mergeable, head_moved,
+  upstream_unauthorized, upstream_forbidden, not_found, rate_limited, upstream_error,
+  transport_error, response_invalid.
+
+upstream_auth:
+  header: Authorization
+  value: "Bearer {key}"
+
+input_schema:
+  type: object
+  murmur-destinations: []
+  properties:
+    op:
+      type: string
+      description: "Which operation to run: push, fetch, pr_create, pr_view, pr_list or pr_merge."
+    repo_path:
+      type: string
+      description: "push, fetch only. Where the local git repository is, relative to the workdir. Defaults to \".\"."
+    head_sha:
+      type: string
+      description: "push only. The local commit this push must land on the remote ref, as a 40-character hex SHA."
+    remote_branch:
+      type: string
+      description: "push only. The branch on the pinned repo to update."
+    force:
+      type: boolean
+      description: "push only. Force a non-fast-forward push. Requires config.allow_force_push: true."
+    branch:
+      type: string
+      description: "fetch only. The branch on the pinned repo to fetch. Defaults to the repo's default branch."
+    remote:
+      type: string
+      description: "fetch only. The remote name to record the branch under, as refs/remotes/<remote>/<branch>. Defaults to \"origin\"."
+    title:
+      type: string
+      description: "pr_create only. The pull request's title."
+    body:
+      type: string
+      description: "pr_create only. The pull request's body."
+    head:
+      type: string
+      description: "pr_create only. The branch carrying the change: a bare branch name, or owner:branch for a fork of the pinned repo."
+    base:
+      type: string
+      description: "pr_create only. The branch to merge into."
+    draft:
+      type: boolean
+      description: "pr_create only. Open the pull request as a draft. Defaults to false."
+    number:
+      type: integer
+      description: "pr_view, pr_merge only. The pull request number."
+    state:
+      type: string
+      description: "pr_list only. Filter by state: open, closed or all."
+    method:
+      type: string
+      description: "pr_merge only. One of merge, squash, rebase. Must be listed under config.merge_methods; defaults to the first one listed."
+    expected_head_sha:
+      type: string
+      description: "pr_merge only. The PR's head SHA as you last saw it in pr_view (40 hex characters). The merge is refused with head_moved if the PR has changed since."
+    message:
+      type: string
+      description: "pr_merge only. The merge commit message; defaults to the PR body for squash and the PR title for merge."
+  required: [op]
+  additionalProperties: false
+
+requires_files:
+  - tool_github.wasm

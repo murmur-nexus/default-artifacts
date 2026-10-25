@@ -1,0 +1,45 @@
+[package]
+name = "tool-github"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Compiles `git::test_fixture` (a hand-rolled loose-object repo builder) outside `cfg(test)`,
+# so the integration tests under `tests/` — a separate compilation unit from the unit tests in
+# `src/` — can build fixture repositories too. Pulls in `tempfile`, which is otherwise
+# unused. Never enabled in the shipped `.wasm`: `./scripts/build-wasm.sh` and
+# `cargo build -p tool-github --target wasm32-wasip2 --release` pass no `--features`.
+test-support = ["dep:tempfile"]
+
+[dependencies]
+serde_json.workspace = true
+wit-bindgen.workspace = true
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+sha1 = "0.10"
+tempfile = { version = "3", optional = true }
+gix-pack = { version = "0.74.2", default-features = false }
+gix-object = "0.64.1"
+gix-hash = { version = "0.26.2", features = ["sha1"] }
+gix-zlib = "0.1.0"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasip2 = "1.0.4"
+
+# Host-target-only. wasmtime, wasmtime-wasi and wasmtime-wasi-http are used solely by
+# tests/wasm_component.rs to instantiate the compiled wasm32-wasip2 component with
+# `wasi:http/outgoing-handler` linked, so its requests reach a loopback fake GitHub for real.
+# The self dev-dependency below turns on `test-support` for every test target in this crate,
+# including the integration tests under `tests/`, which build against the compiled rlib as an
+# external crate and so cannot see `#[cfg(test)]` items — `git::test_fixture` needs the feature
+# gate rather than plain `cfg(test)` for exactly that reason.
+[dev-dependencies]
+wasmtime = "46"
+wasmtime-wasi = "46"
+wasmtime-wasi-http = "46"
+tempfile = "3"
+sha1 = "0.10"
+tool-github = { path = ".", features = ["test-support"] }

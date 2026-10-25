@@ -26,6 +26,7 @@ members = [
   "tools/tool-code-coverage",
   "tools/tool-code-graph",
   "tools/tool-git",
+  "tools/tool-github",
   "tools/tool-test-report",
   "tools/tool-registry-search",
   "tools/tool-report",
