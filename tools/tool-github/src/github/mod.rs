@@ -369,7 +369,6 @@ pub struct PullRequest {
     pub base_ref: String,
     pub title: String,
     pub body: String,
-    pub opener_login: String,
 }
 
 pub fn parse_pull_request(body: &Value) -> Result<PullRequest, String> {
@@ -411,12 +410,6 @@ pub fn parse_pull_request(body: &Value) -> Result<PullRequest, String> {
             .to_string(),
         title: text("title"),
         body: text("body"),
-        opener_login: body
-            .get("user")
-            .and_then(|user| user.get("login"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
     })
 }
 
@@ -519,7 +512,6 @@ mod tests {
         let pr = parse_pull_request(&body).unwrap();
         assert_eq!(pr.number, 7);
         assert_eq!(pr.mergeable, Some(true));
-        assert_eq!(pr.opener_login, "release-bot");
         assert_eq!(pr.head_ref, "feature-x");
     }
 
