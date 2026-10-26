@@ -666,6 +666,10 @@ fn translate_murmur_request_to_responses(
                     Value::String(description.to_string()),
                 );
             }
+            // Responses normalises a tool that omits `strict` into strict mode, and the model
+            // then fills every schema property on every call, with empty stand-ins for the
+            // ones it did not mean to set. An explicit `false` keeps calls sparse.
+            obj.insert("strict".to_string(), Value::Bool(false));
             Value::Object(obj)
         })
         .collect::<Vec<_>>();
@@ -2687,6 +2691,20 @@ mod tests {
             translated["tools"][0]["function"]["parameters"],
             json!({"type": "object"})
         );
+        // Chat Completions is non-strict by default; it gets no `strict` key at either level.
+        assert!(translated["tools"][0].get("strict").is_none());
+        assert!(translated["tools"][0]["function"].get("strict").is_none());
+
+        let body = build_provider_request(
+            &request,
+            &DriverConfig::default(),
+            false,
+            ApiSurface::ChatCompletions,
+        )
+        .unwrap();
+        assert_eq!(body["tools"], translated["tools"]);
+        assert!(body["tools"][0].get("strict").is_none());
+        assert!(body["tools"][0]["function"].get("strict").is_none());
     }
 
     #[test]
@@ -3027,7 +3045,108 @@ mod tests {
             translated["tools"][0]["parameters"],
             json!({"type": "object"})
         );
+        assert_eq!(translated["tools"][0]["strict"], json!(false));
         assert!(translated["tools"][0].get("function").is_none());
+    }
+
+    #[test]
+    fn responses_body_sends_every_tool_non_strict_with_its_schema_verbatim() {
+        let optional_schema = json!({
+            "type": "object",
+            "properties": {
+                "op": {"type": "string"},
+                "path": {"type": "string"},
+                "start_line": {"type": "integer"}
+            },
+            "required": ["op"]
+        });
+        let mut request: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-5.6-luna",
+            "max_tokens": 256,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            "tools": [
+                {"name": "editor", "description": "edit files", "parameters": optional_schema},
+                {"name": "clock", "parameters": {"type": "object"}}
+            ]
+        }))
+        .unwrap();
+
+        // Neither the retention grant, a continuation id nor the dials change the tool shape.
+        for (store, continuation, raw_config) in [
+            (false, None, "{}"),
+            (true, Some("resp_1"), r#"{"store":true}"#),
+            (
+                false,
+                None,
+                r#"{"thinking":"enabled","reasoning_effort":"high","verbosity":"low"}"#,
+            ),
+        ] {
+            request.continuation_id = continuation.map(str::to_string);
+            let body =
+                build_provider_request(&request, &config(raw_config), store, ApiSurface::Responses)
+                    .unwrap();
+            let tools = body["tools"].as_array().unwrap();
+            assert_eq!(tools.len(), 2);
+            for tool in tools {
+                assert_eq!(tool["strict"], Value::Bool(false));
+                assert!(tool.get("function").is_none());
+            }
+            assert_eq!(tools[0]["parameters"], optional_schema);
+            assert_eq!(tools[0]["description"], "edit files");
+            assert_eq!(tools[1]["parameters"], json!({"type": "object"}));
+            assert!(tools[1].get("description").is_none());
+            assert!(body.get("strict").is_none());
+        }
+    }
+
+    #[test]
+    fn responses_body_without_tools_has_no_tools_or_strict_member() {
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-5.6-luna",
+            "max_tokens": 256,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            "tools": []
+        }))
+        .unwrap();
+        let body = build_provider_request(
+            &request,
+            &DriverConfig::default(),
+            false,
+            ApiSurface::Responses,
+        )
+        .unwrap();
+        assert!(body.get("tools").is_none());
+        assert!(body.get("strict").is_none());
+    }
+
+    #[test]
+    fn responses_tool_keeps_a_schema_property_named_strict_untouched() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "strict": {"type": "boolean", "description": "fail on the first error"}
+            },
+            "required": ["strict"]
+        });
+        let request: MurmurRequest = serde_json::from_value(json!({
+            "model": "gpt-5.6-luna",
+            "max_tokens": 256,
+            "messages": [],
+            "tools": [{"name": "lint", "parameters": schema}]
+        }))
+        .unwrap();
+        let body = build_provider_request(
+            &request,
+            &DriverConfig::default(),
+            false,
+            ApiSurface::Responses,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_string(&body["tools"][0]["parameters"]).unwrap(),
+            serde_json::to_string(&schema).unwrap()
+        );
+        assert_eq!(body["tools"][0]["strict"], json!(false));
     }
 
     #[test]
