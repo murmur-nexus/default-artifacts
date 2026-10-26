@@ -666,9 +666,10 @@ fn translate_murmur_request_to_responses(
                     Value::String(description.to_string()),
                 );
             }
-            // Responses normalises a tool that omits `strict` into strict mode, and the model
-            // then fills every schema property on every call, with empty stand-ins for the
-            // ones it did not mean to set. An explicit `false` keeps calls sparse.
+            // Responses normalises a tool that omits `strict` into strict mode whenever its
+            // schema allows it, and the model then fills every schema property on every call,
+            // with empty stand-ins for the ones it did not mean to set. An explicit `false`
+            // keeps calls sparse.
             obj.insert("strict".to_string(), Value::Bool(false));
             Value::Object(obj)
         })
