@@ -251,6 +251,28 @@ artifacts:
     config: { my_setting: value }
 ```
 
+## Tool definitions
+
+Each tool goes out with its `parameters` schema copied verbatim. On the Responses surface the
+driver adds `"strict": false` to every tool:
+
+| Surface | Tool object |
+|---|---|
+| Responses | `{"type": "function", "name", "parameters", "description"?, "strict": false}` |
+| Chat Completions | `{"type": "function", "function": {"name", "parameters", "description"?}}`, no `strict` |
+
+`description` is sent only when it is non-blank.
+
+A Responses tool that omits `strict` is normalised into strict mode whenever its schema allows it.
+In strict mode the model fills every schema property on every call, sending `""`, `0` or `false`
+for the ones it did not mean to set. A tool with optional properties then cannot tell an absent
+argument from an empty one, and a tool that refuses keys foreign to the operation refuses every
+call. With `"strict": false` the model sends only the arguments it chose. Chat Completions is
+non-strict by default, so that surface carries no `strict` key.
+
+Neither the capsule nor `params` can change this: the driver builds `tools` itself, and
+`inference.driver.config` has no strict setting.
+
 ## Tool-call progress
 
 While the model is still writing a tool call, the driver reports it to the host through
