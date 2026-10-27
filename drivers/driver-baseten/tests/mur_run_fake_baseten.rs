@@ -46,6 +46,12 @@ const DRIVER_CRATE: &str = "drivers/driver-baseten";
 const CAPSULE_NAME: &str = "baseten-fake-proof";
 const CAPSULE_VERSION: &str = "0.1.0";
 
+/// The driver config most scenarios run with: replaying reasoning, by default.
+const EFFORT_MAX: &[&str] = &["reasoning_effort: max"];
+
+/// [`EFFORT_MAX`] with earlier turns' reasoning left out.
+const EFFORT_MAX_NO_REPLAY: &[&str] = &["reasoning_effort: max", "replay_reasoning: false"];
+
 // ── the runtime under test ───────────────────────────────────────────────────
 
 /// The `mur` binary these tests launch: `MUR_BIN` when set, otherwise the first executable
@@ -184,9 +190,19 @@ impl Staging {
         self.project.path().join("murmur.yaml")
     }
 
-    /// The capsule manifest: `zai-org/GLM-5.3` at `reasoning_effort: max` behind the endpoint,
-    /// with content tracing on so the session's request and response blobs are kept.
+    /// The capsule manifest with [`EFFORT_MAX`] as its driver config.
     fn write_manifest(&self, endpoint: &str) {
+        self.write_manifest_with_config(endpoint, EFFORT_MAX);
+    }
+
+    /// The capsule manifest: `zai-org/GLM-5.3` behind the endpoint with `config` as its
+    /// `inference.driver.config` entries, and content tracing on so the session's request and
+    /// response blobs are kept.
+    fn write_manifest_with_config(&self, endpoint: &str, config: &[&str]) {
+        let config: String = config
+            .iter()
+            .map(|entry| format!("      {entry}\n"))
+            .collect();
         fs::write(
             self.manifest(),
             format!(
@@ -194,8 +210,7 @@ impl Staging {
                  \x20 - name: local/driver-baseten\n    version: {}\n    runtime: driver\n    \
                  gateway:\n      endpoint: {endpoint}\n      api_key: test-key\n\
                  inference:\n  transport: http\n  model: zai-org/GLM-5.3\n  max_tokens: 16384\n  \
-                 driver:\n    artifact: local/driver-baseten\n    config:\n      \
-                 reasoning_effort: max\n\
+                 driver:\n    artifact: local/driver-baseten\n    config:\n{config}\
                  trace:\n  capture: content\n",
                 self.version
             ),
@@ -572,13 +587,19 @@ fn a_tool_round_trip_replays_reasoning_and_keeps_one_session_affinity() {
         let body = request.json();
         assert_eq!(body["model"], json!("zai-org/GLM-5.3"));
         assert_eq!(body["max_tokens"], json!(16384));
+        assert_eq!(
+            body["chat_template_args"],
+            json!({"clear_thinking": false}),
+            "request {} stamps the replaying setting: {}",
+            n + 1,
+            request.body
+        );
         for forbidden in [
             "thinking",
             "clear_thinking",
             "tool_stream",
             "prompt_cache_key",
             "max_completion_tokens",
-            "chat_template_args",
         ] {
             assert!(
                 body.get(forbidden).is_none(),
@@ -662,6 +683,63 @@ fn a_tool_round_trip_replays_reasoning_and_keeps_one_session_affinity() {
             .iter()
             .any(|m| m["role"] == "tool" && m["tool_call_id"] == "call_probe_1"),
         "request 2 carries the tool result: {follow_up}"
+    );
+}
+
+/// The same round trip with `replay_reasoning: false`: request 2's assistant turn carries its
+/// tool call but no reasoning, every request stamps `clear_thinking: true`, and the session
+/// still completes.
+#[test]
+#[ignore = "launches the real mur binary; run with --ignored"]
+fn replay_reasoning_false_sends_no_reasoning_and_stamps_clear_thinking_true() {
+    let staging = stage();
+    let provider = Provider::start(Script::RoundTrip);
+    staging.write_manifest_with_config(&provider.endpoint, EFFORT_MAX_NO_REPLAY);
+
+    let output = run_session(&staging);
+    let text = combined(&output);
+    let requests = provider.requests();
+
+    assert!(output.status.success(), "the session must succeed:\n{text}");
+    assert!(text.contains("status:  ok"), "{text}");
+    assert_no_trap(&text);
+    assert_eq!(requests.len(), 2, "one tool round trip:\n{text}");
+
+    for (n, request) in requests.iter().enumerate() {
+        eprintln!("request {}: body: {}", n + 1, request.body);
+        let body = request.json();
+        assert_eq!(body["reasoning_effort"], json!("max"));
+        assert_eq!(
+            body["chat_template_args"],
+            json!({"clear_thinking": true}),
+            "request {} stamps the setting in force: {}",
+            n + 1,
+            request.body
+        );
+        assert!(
+            !request.body.contains("reasoning_content"),
+            "request {} carries no reasoning_content: {}",
+            n + 1,
+            request.body
+        );
+    }
+
+    let follow_up = requests[1].json();
+    let assistant = follow_up["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .unwrap_or_else(|| panic!("request 2 must carry the assistant turn: {follow_up}"));
+    assert_eq!(
+        assistant,
+        &json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{"id": "call_probe_1", "type": "function",
+                            "function": {"name": "probe", "arguments": "{\"cmd\":\"ls\"}"}}]
+        }),
+        "the tool-call turn goes back without its reasoning"
     );
 }
 

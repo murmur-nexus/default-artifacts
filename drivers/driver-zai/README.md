@@ -6,7 +6,7 @@ Completions surface.
 WASM component (`runtime: driver`, world `driver`, exports `murmur:tool/run`).
 Translates between the Murmur canonical inference format and Z.ai's
 OpenAI-shaped Chat Completions API, including SSE streaming, a full tool-calling
-round trip and preserved reasoning across turns.
+round trip and reasoning preserved across turns unless a capsule turns it off.
 
 The driver reads no provider key and sends no authentication header. Murmur's
 runtime authenticates each call with the header declared under
@@ -28,7 +28,7 @@ set but empty`. Neither reaches the network. Requests go to
 ```yaml
 artifacts:
   - name: murmur/driver-zai
-    version: "0.4.0"
+    version: "0.5.0"
     runtime: driver
     gateway:
       endpoint: https://api.z.ai/api/paas/v4
@@ -92,14 +92,21 @@ Whether the runtime reads that block depends on the murmur release:
 
 ## Config keys
 
-`inference.driver.config` accepts exactly two keys. Every other key is refused
-by name on the first inference call, before any HTTP request is dispatched.
-String values are trimmed and matched case-insensitively.
+`inference.driver.config` accepts exactly three keys. Every other key,
+`clear_thinking` included, is refused by name on the first inference call,
+before any HTTP request is dispatched. String values are trimmed and matched
+case-insensitively.
 
 | Key | Required | Default | Accepted values | Provider body field |
 |---|---|---|---|---|
 | `reasoning_effort` | no | `max` | `low`, `high`, `max` | top-level `reasoning_effort` |
+| `replay_reasoning` | no | `true` | `true`, `false`, as a JSON boolean only | `thinking.clear_thinking`, sent as the opposite value |
 | `thinking` | no | `enabled` | `enabled` | `thinking.type`, always `enabled` |
+
+`replay_reasoning` decides whether earlier turns' reasoning goes back to Z.ai;
+[Reasoning across turns](#reasoning-across-turns) gives what each setting sends
+and costs. A string such as `"false"`, a number or `null` is refused rather
+than read as a boolean.
 
 ## How Z.ai expresses effort
 
@@ -134,25 +141,51 @@ always engages in thinking and cannot be disabled". So:
 
 The key is spelled `thinking`, matching `driver-anthropic` and `driver-deepseek`.
 
-## Preserved reasoning across turns
+## Reasoning across turns
 
-Every request carries `"thinking": {"type": "enabled", "clear_thinking": false}`.
-With `clear_thinking: false` Z.ai keeps earlier turns' reasoning in context, and
-asks for each assistant turn's `reasoning_content` back complete, unmodified and
-in its original order. The driver does that entirely by itself:
+Every request carries `"thinking": {"type": "enabled", "clear_thinking": <bool>}`,
+with `clear_thinking` the opposite of `replay_reasoning`. Z.ai's API reference
+defines the member:
+
+| `thinking.clear_thinking` | Z.ai, for that request |
+|---|---|
+| `false` | "Retains `reasoning_content` from prior turns and includes it in the context sent to the model", and asks for each assistant turn's `reasoning_content` back complete, unmodified and in its original order |
+| `true` | "ignores/removes `reasoning_content` from prior turns, and only keeps non-reasoning context (e.g., user/assistant visible text, tool calls, and tool results)" |
+
+Z.ai's default differs by endpoint: Preserved Thinking, `clear_thinking:
+false`, is on by default on the Coding Plan endpoint and off on the standard
+one. The driver stamps the member on every request, so both endpoints get the
+same behaviour and a recorded request shows which applied.
+
+| `replay_reasoning` | Earlier assistant messages carry | Stamp on every request | Prompt-token cost of earlier turns |
+|---|---|---|---|
+| `true` (default) | their `reasoning_content`, byte for byte, beside `content` and `tool_calls` | `"thinking": {"type": "enabled", "clear_thinking": false}` | each earlier turn's reasoning is sent again as prompt tokens on every later request until a compaction removes it. It is billed as input, at Z.ai's cached rate where Z.ai still holds that prefix |
+| `false` | no `reasoning_content`, on any assistant message | `"thinking": {"type": "enabled", "clear_thinking": true}` | the reasoning is not sent, so earlier turns cost only their visible text, tool calls and tool results |
+
+With `false`, the current tool loop's reasoning is dropped too: the turns since
+the last user message go back without `reasoning_content`, like every other
+assistant message, where Z.ai's `clear_thinking: true` alone would keep them.
+Under both settings the model reasons on the current turn, and that reasoning
+comes back as a `thinking` block and reaches the trace. A recorded request body
+always shows the setting in `thinking.clear_thinking`. An `inference` trace
+event's `driver_config` holds `replay_reasoning` only when the capsule writes
+the key, so an unset key, which means `true`, does not appear there.
+
+The driver does the replay entirely by itself:
 
 | Step | What happens |
 |---|---|
 | Response | the provider's `reasoning_content` becomes a `{"type":"thinking","text":…}` content block |
 | Storage | the runtime stores and replays whatever content blocks a driver emits without inspecting them |
-| Next request | the driver reads the turn's first non-empty `thinking` block back and sends it byte for byte as `reasoning_content` on that assistant message |
+| Next request | with `replay_reasoning: true`, the driver reads the turn's first non-empty `thinking` block back and sends it byte for byte as `reasoning_content` on that assistant message; with `false`, it sends none |
 
-`reasoning_content` is restored on every assistant message, on a turn that ended
-in tool calls and on a plain-text turn alike. A tool-call turn can carry text
-beside its calls ("I'll check the weather for both cities."); the driver keeps
-that text as a `text` block and sends it back as the assistant message's
-`content`, so the turn goes back as Z.ai returned it. `content` is `null` only
-on a tool-call turn with no text.
+On a replaying request, `reasoning_content` is restored on every assistant
+message, on a turn that ended in tool calls and on a plain-text turn alike. A
+tool-call turn can carry text beside its calls ("I'll check the weather for
+both cities."); the driver keeps that text as a `text` block and sends it back
+as the assistant message's `content`, under both settings, so the turn goes
+back as Z.ai returned it. `content` is `null` only on a tool-call turn with no
+text.
 
 `glm-5.3` does not reason on every turn. On a trivial step, such as reading
 one file, Z.ai sends no `reasoning_content` and reports `reasoning_tokens: 0`, so
@@ -347,7 +380,9 @@ any request is sent.
 
 | Check | Refusal |
 |---|---|
-| `inference.driver.config` | the config-key messages above |
+| an unknown config key | `driver: unrecognised inference.driver.config key(s): <keys, sorted>. Accepted keys: reasoning_effort, replay_reasoning, thinking` |
+| a `replay_reasoning` that is not a JSON boolean, `"false"` and `null` included | `driver: inference.driver.config 'replay_reasoning' must be a boolean, got <json>` |
+| any other `inference.driver.config` value | the config-key messages above |
 | `inference.model` | `driver: model '<m>' is not supported by driver-zai. Supported models: glm-5.3.` |
 | `inference.max_tokens` | `driver: inference.max_tokens <n> exceeds the Z.ai max_tokens ceiling of 131072 for glm-5.3` |
 | an `image` block | `driver: model 'glm-5.3' is text-only, so driver-zai refuses an image block` |

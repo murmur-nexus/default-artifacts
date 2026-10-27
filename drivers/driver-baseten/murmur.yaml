@@ -1,7 +1,7 @@
 name: driver-baseten
-version: 0.2.0
+version: 0.3.0
 runtime: driver
-description: "Baseten Model APIs inference driver — zai-org/GLM-5.3 on the Chat Completions surface, with a reasoning_effort config key"
+description: "Baseten Model APIs inference driver — zai-org/GLM-5.3 on the Chat Completions surface, with reasoning_effort and replay_reasoning config keys"
 requires_files:
   - driver_baseten.wasm
 

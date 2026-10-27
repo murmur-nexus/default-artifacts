@@ -6,8 +6,8 @@ Baseten Model APIs inference driver for Murmur agent capsules —
 WASM component (`runtime: driver`, world `driver`, exports `murmur:tool/run`).
 Translates between the Murmur canonical inference format and Baseten's
 OpenAI-compatible Chat Completions API, including SSE streaming, a full
-tool-calling round trip, reasoning sent back on later turns, and Baseten's
-session affinity.
+tool-calling round trip, reasoning sent back on later turns unless a capsule
+turns it off, and Baseten's session affinity.
 
 The driver reads no provider key and sends no authentication header. Murmur's
 runtime authenticates each call with the header declared under
@@ -30,7 +30,7 @@ first.
 ```yaml
 artifacts:
   - name: murmur/driver-baseten
-    version: "0.2.0"
+    version: "0.3.0"
     runtime: driver
     gateway:
       endpoint: https://inference.baseten.co/v1
@@ -96,14 +96,19 @@ Whether the runtime reads that block depends on the murmur release:
 
 ## Config keys
 
-`inference.driver.config` accepts exactly one key. Every other key, `thinking`
-and `chat_template_args` included, is refused by name on the first inference
-call, before any HTTP request is dispatched. The value is trimmed and matched
-case-insensitively.
+`inference.driver.config` accepts exactly two keys. Every other key,
+`thinking`, `clear_thinking` and `chat_template_args` included, is refused by
+name on the first inference call, before any HTTP request is dispatched.
 
 | Key | Required | Default | Accepted values | Provider body field |
 |---|---|---|---|---|
-| `reasoning_effort` | no | `high` | `low`, `high`, `max` | top-level `reasoning_effort` |
+| `reasoning_effort` | no | `high` | `low`, `high`, `max`, trimmed and matched case-insensitively | top-level `reasoning_effort` |
+| `replay_reasoning` | no | `true` | `true`, `false`, as a JSON boolean only | `chat_template_args.clear_thinking`, sent as the opposite value |
+
+`replay_reasoning` decides whether earlier turns' reasoning goes back to
+Baseten; [Reasoning across turns](#reasoning-across-turns) gives what each
+setting sends and costs. A string such as `"false"`, a number or `null` is
+refused rather than read as a boolean.
 
 ## How Baseten expresses effort
 
@@ -111,7 +116,7 @@ case-insensitively.
 |---|---|
 | GLM 5.3 takes `reasoning_effort` of `none`, `low`, `high` or `max`, and defaults to `high` | accepts `low`, `high` and `max`, sent lowercased and top-level on the body |
 | "`none` runs at `low`" on the GLM 5.3 models | refuses `none` with its own message, naming the model and pointing at `low`, before any HTTP call. A capsule asking for no reasoning would otherwise get `low` reasoning and pay for it |
-| Reasoning is on by default for GLM 5.3. `chat_template_args.enable_thinking: false` is accepted, "but responses can still include `reasoning_content`" | sends no `chat_template_args`, and refuses it as a config key: there is no off switch to offer |
+| Reasoning is on by default for GLM 5.3. `chat_template_args.enable_thinking: false` is accepted, "but responses can still include `reasoning_content`" | never sends `enable_thinking`: there is no off switch to offer. The driver's `chat_template_args` holds only `clear_thinking`, from `replay_reasoning`, and `chat_template_args` stays refused as a config key |
 | Baseten's gateway accepts `minimal`, `medium` and `xhigh` too, but the guide lists none of them for GLM 5.3 | refuses each by name, with the rejected value quoted back alongside the accepted set. It never maps one onto another tier |
 
 **`high` is what an operator gets by saying nothing.** That is Baseten's own
@@ -126,23 +131,45 @@ capsule that wants the deepest reasoning sets `max`.
 |---|---|
 | Response | the provider's `reasoning_content`, `delta.reasoning_content` on a stream, becomes a `{"type":"thinking","text":…}` content block |
 | Storage | the runtime stores and replays whatever content blocks a driver emits without inspecting them |
-| Next request | the driver reads the turn's first non-empty `thinking` block back and sends it byte for byte as `reasoning_content` on that assistant message |
+| Next request | with `replay_reasoning: true`, the driver reads the turn's first non-empty `thinking` block back and sends it byte for byte as `reasoning_content` on that assistant message; with `false`, it sends none |
 
-`reasoning_content` goes back on every assistant message, on a turn that ended
-in tool calls and on a plain-text turn alike. A tool-call turn can carry text
-beside its calls; the driver keeps it as a `text` block and sends it back as the
-assistant message's `content`. `content` is `null` only on a tool-call turn
-with no text. The replayed bytes are the ones the model generated, so the
-prompt prefix stays equal to what the replica already holds in its cache.
+`replay_reasoning` sets which of these a request carries:
+
+| `replay_reasoning` | Earlier assistant messages carry | Stamp on every request | Prompt-token cost of earlier turns |
+|---|---|---|---|
+| `true` (default) | their `reasoning_content`, byte for byte, beside `content` and `tool_calls` | `"chat_template_args": {"clear_thinking": false}` | each earlier turn's reasoning is sent again as prompt tokens on every later request until a compaction removes it. It is billed as input, at Baseten's cached rate where the replica still holds that prefix |
+| `false` | no `reasoning_content`, on any assistant message | `"chat_template_args": {"clear_thinking": true}` | the reasoning is not sent, so earlier turns cost only their visible text, tool calls and tool results |
+
+With `false`, the current tool loop's reasoning is dropped too: the turns
+since the last user message go back without `reasoning_content`, like every
+other assistant message. Under both settings the model reasons on the current
+turn, and that reasoning comes back as a `thinking` block and reaches the
+trace. A recorded request body always shows the setting in
+`chat_template_args.clear_thinking`. An `inference` trace event's
+`driver_config` holds `replay_reasoning` only when the capsule writes the key,
+so an unset key, which means `true`, does not appear there.
+
+The stamp sits in `chat_template_args` because Baseten's request object is
+`additionalProperties: false`, which leaves that open member as the only place
+for it, and the GLM-5.3 chat template reads a `clear_thinking` argument that
+defaults to `false` and, when `true`, renders each earlier turn's reasoning
+empty. `{"clear_thinking": false}` is the template's own default, so a
+replaying request reaches the model as it would without the member.
+
+On a replaying request, `reasoning_content` goes back on every assistant
+message, on a turn that ended in tool calls and on a plain-text turn alike. A
+tool-call turn can carry text beside its calls; the driver keeps it as a
+`text` block and sends it back as the assistant message's `content`, under
+both settings. `content` is `null` only on a tool-call turn with no text. The
+replayed bytes are the ones the model generated, so the prompt prefix stays
+equal to what the replica already holds in its cache.
 
 Baseten documents `reasoning_content` on prior assistant messages: its
 reasoning guide's "Beam conversation history" sends it back and answers a Beam
-history without it with HTTP 400. Nothing in Baseten's docs says GLM 5.3
-refuses it. **Not confirmed for `zai-org/GLM-5.3` by a live call at 0.1.0.** The
-probe that confirms it sends a tool-call turn back with its `reasoning_content`,
-non-streamed, and expects HTTP 200 with `"finish_reason":"stop"`. A 400 naming
-`reasoning_content` would mean Baseten refuses the replay, and the member would
-be removed in the next release.
+history without it with HTTP 400. **Confirmed for `zai-org/GLM-5.3` by a live
+call on 2026-10-27:** a capsule run sent a tool-call turn back with its
+`reasoning_content`, streamed, and Baseten answered HTTP 200, as it did for the
+next request carrying two replayed turns. The task ended `end_turn`.
 
 A turn on which the model does not reason carries no `reasoning_content`, so
 nothing is replayed for it. A committed compaction replaces the live context
@@ -363,10 +390,11 @@ any request is sent.
 |---|---|
 | `inference.driver.config` not JSON | `driver: inference.driver.config is not valid JSON: <serde error>` |
 | `inference.driver.config` not an object | `driver: inference.driver.config must be a JSON object` |
-| an unknown config key | `driver: unrecognised inference.driver.config key(s): <keys, sorted>. Accepted keys: reasoning_effort` |
+| an unknown config key | `driver: unrecognised inference.driver.config key(s): <keys, sorted>. Accepted keys: reasoning_effort, replay_reasoning` |
 | `reasoning_effort: none` | `driver: inference.driver.config 'reasoning_effort' cannot be "none" on driver-baseten: Baseten runs none at low on zai-org/GLM-5.3, which always reasons. Set it to "low".` |
 | any other `reasoning_effort` string | `driver: inference.driver.config 'reasoning_effort' must be one of low, high, max, got "<raw>"` |
 | a non-string `reasoning_effort` | `driver: inference.driver.config 'reasoning_effort' must be a string, got <json>` |
+| a `replay_reasoning` that is not a JSON boolean, `"false"` and `null` included | `driver: inference.driver.config 'replay_reasoning' must be a boolean, got <json>` |
 | `inference.model` | `driver: model '<m>' is not supported by driver-baseten. Supported models: zai-org/GLM-5.3.` |
 | `inference.max_tokens` | `driver: inference.max_tokens <n> exceeds the Baseten max_tokens ceiling of 262144 for zai-org/GLM-5.3` |
 | an `image` block in any message | `driver: driver-baseten sends text only and refuses an image block` |
