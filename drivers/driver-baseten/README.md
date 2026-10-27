@@ -144,9 +144,10 @@ With `false`, the current tool loop's reasoning is dropped too: the turns
 since the last user message go back without `reasoning_content`, like every
 other assistant message. Under both settings the model reasons on the current
 turn, and that reasoning comes back as a `thinking` block and reaches the
-trace. Every `inference` trace event records the setting in
-`driver_config`, and a recorded request body shows it in
-`chat_template_args.clear_thinking`.
+trace. A recorded request body always shows the setting in
+`chat_template_args.clear_thinking`. An `inference` trace event's
+`driver_config` holds `replay_reasoning` only when the capsule writes the key,
+so an unset key, which means `true`, does not appear there.
 
 The stamp sits in `chat_template_args` because Baseten's request object is
 `additionalProperties: false`, which leaves that open member as the only place
