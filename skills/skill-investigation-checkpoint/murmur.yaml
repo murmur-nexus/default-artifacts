@@ -1,4 +1,4 @@
 name: skill-investigation-checkpoint
-version: 0.4.0
+version: 0.5.0
 runtime: skill
 description: "Skill artifact: the investigations convention for checkpoints/decisions.json — record and reuse investigative verdicts (ruled-out/confirmed/uncertain) across a session"

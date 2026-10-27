@@ -132,7 +132,7 @@ version: 0.1.0
 
 artifacts:
   - name: murmur/tool-git
-    version: "0.5.0"
+    version: "0.6.0"
 
 capabilities:
   shell:
