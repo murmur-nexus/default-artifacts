@@ -33,7 +33,7 @@ Declare in your capsule `murmur.yaml`:
 ```yaml
 artifacts:
   - name: murmur/hook-compact
-    version: 0.11.0
+    version: 0.12.0
     runtime: hook
 ```
 

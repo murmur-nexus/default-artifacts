@@ -30,7 +30,7 @@ Bind the key on the tool's own entry in the capsule manifest, as `gateway.api_ke
 ```yaml
 artifacts:
   - name: murmur/tool-tavily
-    version: 0.5.0
+    version: 0.6.0
     runtime: tool
     gateway:
       endpoint: https://api.tavily.com

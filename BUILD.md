@@ -51,7 +51,7 @@ own manifest, and is what excludes native and internal crates from the wasm buil
 cargo build -p tool-editor --target wasm32-wasip2 --release   # wasm
 cargo build --release -p tool-git                              # native
 ./scripts/validate-component.sh target/wasm32-wasip2/release/tool_editor.wasm
-./scripts/package-artifact.sh tools/tool-editor release/       # → release/tool-editor-0.10.0.mur.zip
+./scripts/package-artifact.sh tools/tool-editor release/       # → release/tool-editor-0.11.0.mur.zip
 ./scripts/local-install.sh tool-editor /path/to/capsule-folder
 ```
 

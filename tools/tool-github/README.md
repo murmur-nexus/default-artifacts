@@ -12,7 +12,7 @@ supports per-entry credential gateways: the first murmur release after v0.3.0 (m
 ## Install
 
 ```bash
-mur install -g murmur/tool-github@0.1.0
+mur install -g murmur/tool-github@0.2.0
 ```
 
 ## Binding the token
@@ -23,7 +23,7 @@ repo in `config:`:
 ```yaml
 artifacts:
   - name: murmur/tool-github
-    version: 0.1.0
+    version: 0.2.0
     runtime: tool
     gateway:
       endpoint: https://api.github.com

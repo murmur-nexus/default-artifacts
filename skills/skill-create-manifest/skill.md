@@ -85,22 +85,22 @@ entry into the project store.
 ```yaml
 artifacts:
   - name: murmur/tool-editor
-    version: "0.10.0"
+    version: "0.11.0"
     runtime: tool
 
   - name: murmur/driver-anthropic
-    version: "0.15.0"
+    version: "0.16.0"
     runtime: driver
 
   - name: murmur/hook-debug
-    version: "0.9.0"
+    version: "0.10.0"
     runtime: hook
     capabilities:
       filesystem:
         records: true          # hook-debug.jsonl goes in the records directory (§4.3a)
 
   - name: murmur/skill-create-manifest
-    version: "0.6.0"
+    version: "0.7.0"
     runtime: skill
 ```
 
@@ -208,7 +208,7 @@ ignored.
 ```yaml
 artifacts:
   - name: murmur/hook-eval
-    version: "0.10.0"
+    version: "0.11.0"
     runtime: hook
     capabilities:
       filesystem:
@@ -218,7 +218,7 @@ artifacts:
           - http://localhost:4318   # only for OTel export
 
   - name: murmur/hook-debug
-    version: "0.9.0"
+    version: "0.10.0"
     runtime: hook
     capabilities:
       filesystem:
@@ -347,7 +347,7 @@ so the driver never sees it.
 ```yaml
 artifacts:
   - name: murmur/driver-anthropic
-    version: "0.15.0"
+    version: "0.16.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
@@ -393,7 +393,7 @@ cannot.
 ```yaml
 artifacts:
   - name: murmur/driver-openai
-    version: "0.15.0"
+    version: "0.16.0"
     runtime: driver
     gateway:
       endpoint: https://api.openai.com/v1
@@ -483,10 +483,10 @@ description: "Simple file editing capsule — reads and writes files, exits on c
 
 artifacts:
   - name: murmur/tool-editor
-    version: "0.10.0"
+    version: "0.11.0"
     runtime: tool
   - name: murmur/driver-anthropic
-    version: "0.15.0"
+    version: "0.16.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
@@ -520,10 +520,10 @@ artifacts:
     version: "0.5.0"
     runtime: tool
   - name: murmur/tool-editor
-    version: "0.10.0"
+    version: "0.11.0"
     runtime: tool
   - name: murmur/driver-anthropic
-    version: "0.15.0"
+    version: "0.16.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
@@ -564,10 +564,10 @@ description: "Orchestrator that spawns sub-capsules for parallel task execution"
 
 artifacts:
   - name: murmur/tool-editor
-    version: "0.10.0"
+    version: "0.11.0"
     runtime: tool
   - name: murmur/driver-anthropic
-    version: "0.15.0"
+    version: "0.16.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
@@ -670,7 +670,7 @@ artifacts:
     version: "0.5.0"
     runtime: tool
   - name: murmur/hook-debug
-    version: "0.9.0"
+    version: "0.10.0"
     runtime: hook
     capabilities:
       filesystem:

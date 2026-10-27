@@ -30,7 +30,7 @@ first.
 ```yaml
 artifacts:
   - name: murmur/driver-baseten
-    version: "0.1.0"
+    version: "0.2.0"
     runtime: driver
     gateway:
       endpoint: https://inference.baseten.co/v1

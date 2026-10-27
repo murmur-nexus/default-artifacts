@@ -61,7 +61,7 @@ context:
 
 artifacts:
   - name: murmur/hook-memory
-    version: 0.12.0
+    version: 0.13.0
     runtime: hook
     config:
       seed_roles: [user, assistant]

@@ -9,7 +9,7 @@ Declare in your capsule `murmur.yaml`:
 ```yaml
 artifacts:
   - name: murmur/hook-eval
-    version: 0.10.0
+    version: 0.11.0
     runtime: hook
     capabilities:
       filesystem:

@@ -1,5 +1,5 @@
 name: driver-deepseek
-version: 0.14.0
+version: 0.15.0
 runtime: driver
 description: "DeepSeek inference driver — deepseek-flash and deepseek-v4-pro with thinking mode"
 requires_files:
