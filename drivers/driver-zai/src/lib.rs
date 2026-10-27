@@ -70,7 +70,7 @@ fn validate_max_tokens(model: &str, limits: &ModelLimits, max_tokens: u64) -> Re
 
 /// Every key `inference.driver.config` accepts on this driver, sorted so the error message
 /// listing them is stable.
-const ACCEPTED_CONFIG_KEYS: &[&str] = &["reasoning_effort", "thinking"];
+const ACCEPTED_CONFIG_KEYS: &[&str] = &["reasoning_effort", "replay_reasoning", "thinking"];
 
 /// Z.ai's effort vocabulary for `glm-5.3`, in ascending order of spend. Z.ai answers `medium`
 /// on `glm-5.3` with HTTP 400 code `1210` on both its standard and Coding Plan endpoints, so it
@@ -81,6 +81,10 @@ const REASONING_EFFORT_VALUES: &[&str] = &["low", "high", "max"];
 /// request so the effective value is visible in a recorded request rather than left to drift
 /// with the provider's default.
 const DEFAULT_REASONING_EFFORT: &str = "max";
+
+/// Earlier assistant turns carry their `reasoning_content` unless a capsule sets
+/// `replay_reasoning: false`, so an unconfigured capsule sends the history Z.ai produced.
+const DEFAULT_REPLAY_REASONING: bool = true;
 
 /// The one `thinking` value `glm-5.3` accepts.
 const THINKING_ENABLED: &str = "enabled";
@@ -99,12 +103,16 @@ struct DriverConfig {
     /// `reasoning_effort` — one of [`REASONING_EFFORT_VALUES`], lowercased. An unconfigured
     /// capsule gets [`DEFAULT_REASONING_EFFORT`].
     reasoning_effort: String,
+    /// `replay_reasoning` — whether earlier assistant messages carry `reasoning_content`. An
+    /// unconfigured capsule gets [`DEFAULT_REPLAY_REASONING`].
+    replay_reasoning: bool,
 }
 
 impl Default for DriverConfig {
     fn default() -> Self {
         DriverConfig {
             reasoning_effort: DEFAULT_REASONING_EFFORT.to_string(),
+            replay_reasoning: DEFAULT_REPLAY_REASONING,
         }
     }
 }
@@ -143,10 +151,14 @@ fn parse_driver_config(driver_config: Option<&str>) -> Result<DriverConfig, Stri
     }
 
     let reasoning_effort = parse_reasoning_effort(config.get("reasoning_effort"))?;
+    let replay_reasoning = parse_replay_reasoning(config.get("replay_reasoning"))?;
     if let Some(thinking) = config.get("thinking") {
         validate_thinking(thinking)?;
     }
-    Ok(DriverConfig { reasoning_effort })
+    Ok(DriverConfig {
+        reasoning_effort,
+        replay_reasoning,
+    })
 }
 
 /// Trimmed and matched case-insensitively; sent lowercased. The rejected value appears verbatim
@@ -167,6 +179,17 @@ fn parse_reasoning_effort(value: Option<&Value>) -> Result<String, String> {
         }
         Some(other) => Err(format!(
             "driver: inference.driver.config 'reasoning_effort' must be a string, got {other}"
+        )),
+    }
+}
+
+/// Only a JSON boolean is accepted: `"false"`, `0` and `null` are refused rather than coerced.
+fn parse_replay_reasoning(value: Option<&Value>) -> Result<bool, String> {
+    match value {
+        None => Ok(DEFAULT_REPLAY_REASONING),
+        Some(Value::Bool(replay)) => Ok(*replay),
+        Some(other) => Err(format!(
+            "driver: inference.driver.config 'replay_reasoning' must be a boolean, got {other}"
         )),
     }
 }
@@ -333,7 +356,10 @@ fn translate_murmur_request_to_zai(
     for message in &request.messages {
         match message.role.as_str() {
             "user" => messages.push(translate_user_message(message)),
-            "assistant" => messages.push(translate_assistant_message(message)?),
+            "assistant" => messages.push(translate_assistant_message(
+                message,
+                config.replay_reasoning,
+            )?),
             "tool" => messages.push(translate_tool_message(message)?),
             other => return Err(format!("driver: unsupported message role '{other}'")),
         }
@@ -368,11 +394,14 @@ fn translate_murmur_request_to_zai(
         body.insert("tools".to_string(), Value::Array(tools));
     }
 
-    // Preserved thinking: with `clear_thinking: false` Z.ai keeps the reasoning of earlier
-    // assistant turns in context, provided each one comes back complete and unmodified.
+    // `clear_thinking` is stamped on every request because its default differs by endpoint:
+    // Preserved Thinking is on by default on the Coding Plan endpoint and off on the standard
+    // one. With `false` Z.ai keeps the reasoning of earlier assistant turns in context, provided
+    // each one comes back complete and unmodified; with `true` it removes prior turns'
+    // reasoning, and `translate_assistant_message` sends none.
     body.insert(
         "thinking".to_string(),
-        json!({"type": THINKING_ENABLED, "clear_thinking": false}),
+        json!({"type": THINKING_ENABLED, "clear_thinking": !config.replay_reasoning}),
     );
 
     // Top-level, not nested under a `reasoning` object, and stamped on every request including
@@ -397,14 +426,20 @@ fn translate_user_message(message: &MurmurMessage) -> Value {
     json!({"role": "user", "content": joined_text(&message.content)})
 }
 
-/// Rebuild an assistant turn exactly as Z.ai returned it. With `clear_thinking: false` Z.ai asks
-/// for the complete, unmodified `reasoning_content` back, so it is restored on the tool-call turn
-/// and the plain-text turn alike, and the text a tool-call turn carried beside its calls is kept
-/// as `content` rather than dropped.
+/// Rebuild an assistant turn exactly as Z.ai returned it, with its reasoning when
+/// `replay_reasoning` is set. With `clear_thinking: false` Z.ai asks for the complete,
+/// unmodified `reasoning_content` back, so it is restored on the tool-call turn and the
+/// plain-text turn alike. Without `replay_reasoning` (sent as `clear_thinking: true`) no
+/// assistant message carries the member, including the turns of the current tool loop, which
+/// Z.ai's `clear_thinking` alone would keep. The text a tool-call turn carried beside its calls
+/// is kept as `content` rather than dropped.
 ///
 /// When no `thinking` block is present the member is omitted entirely — never sent as an empty
 /// string — because that is the ordinary state of a history that has been compacted.
-fn translate_assistant_message(message: &MurmurMessage) -> Result<Value, String> {
+fn translate_assistant_message(
+    message: &MurmurMessage,
+    replay_reasoning: bool,
+) -> Result<Value, String> {
     let text = joined_text(&message.content);
 
     let mut tool_calls = Vec::new();
@@ -435,8 +470,10 @@ fn translate_assistant_message(message: &MurmurMessage) -> Result<Value, String>
         })
     };
 
-    if let Some(reasoning_content) = thinking_text(&message.content) {
-        msg["reasoning_content"] = json!(reasoning_content);
+    if replay_reasoning {
+        if let Some(reasoning_content) = thinking_text(&message.content) {
+            msg["reasoning_content"] = json!(reasoning_content);
+        }
     }
 
     Ok(msg)
@@ -1661,7 +1698,7 @@ mod tests {
             parse_driver_config(Some(r#"{"response_format":{},"clear_thinking":false}"#))
                 .unwrap_err(),
             "driver: unrecognised inference.driver.config key(s): clear_thinking, \
-             response_format. Accepted keys: reasoning_effort, thinking"
+             response_format. Accepted keys: reasoning_effort, replay_reasoning, thinking"
         );
     }
 
@@ -3075,5 +3112,223 @@ mod tests {
             vec![started("call_1", "bash"), input_bytes("call_1", 14)]
         );
         assert_no_signal_carries(&signals, "ZQXJ");
+    }
+
+    // ── replay_reasoning — earlier turns' reasoning on or off ─────────────────
+
+    /// System, user, a tool-call turn with reasoning and text, its tool result, a plain turn with
+    /// reasoning, then the next user turn.
+    fn replay_request() -> MurmurRequest {
+        request_from(json!({
+            "model": "glm-5.3",
+            "max_tokens": 8192,
+            "system": "You are a careful assistant.",
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "How long is notes.txt?"}]},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "text": "Read the file first. \"Quoted\" — ü."},
+                    {"type": "text", "text": "Reading it."},
+                    {"type": "tool_call", "id": "call_1", "name": "read_file", "input": {"path": "notes.txt"}}
+                ]},
+                {"role": "tool", "tool_call_id": "call_1", "content": [{"type": "text", "text": "a\nb\nc"}]},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "text": "Three lines."},
+                    {"type": "text", "text": "It has three lines."}
+                ]},
+                {"role": "user", "content": [{"type": "text", "text": "And how many words?"}]}
+            ],
+            "tools": [
+                {"name": "read_file", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}
+            ],
+            "params": {},
+            "prompt_cache_key": "replay-check:0.1.0:ctx_01"
+        }))
+    }
+
+    /// The S2 fixture's body as driver-zai 0.4.0 built it, captured from `fc72bb4`.
+    const BODY_AT_0_4_0: &str = r#"{"max_tokens":8192,"messages":[{"content":"You are a careful assistant.","role":"system"},{"content":"How long is notes.txt?","role":"user"},{"content":"Reading it.","reasoning_content":"Read the file first. \"Quoted\" — ü.","role":"assistant","tool_calls":[{"function":{"arguments":"{\"path\":\"notes.txt\"}","name":"read_file"},"id":"call_1","type":"function"}]},{"content":"a\nb\nc","role":"tool","tool_call_id":"call_1"},{"content":"It has three lines.","reasoning_content":"Three lines.","role":"assistant"},{"content":"And how many words?","role":"user"}],"model":"glm-5.3","reasoning_effort":"max","stream":true,"thinking":{"clear_thinking":false,"type":"enabled"},"tool_stream":true,"tools":[{"function":{"name":"read_file","parameters":{"properties":{"path":{"type":"string"}},"type":"object"}},"type":"function"}]}"#;
+
+    /// Drop every `reasoning_content` member from the body's messages.
+    fn without_reasoning_content(mut body: Value) -> Value {
+        for message in body["messages"].as_array_mut().unwrap() {
+            message.as_object_mut().unwrap().remove("reasoning_content");
+        }
+        body
+    }
+
+    #[test]
+    fn the_default_body_is_byte_identical_to_0_4_0_s() {
+        let body = body_for(&replay_request(), &DriverConfig::default());
+        assert_eq!(body.to_string(), BODY_AT_0_4_0);
+        assert_eq!(
+            body["thinking"],
+            json!({"type": "enabled", "clear_thinking": false})
+        );
+    }
+
+    #[test]
+    fn absent_empty_whitespace_empty_object_and_true_configs_build_the_same_body() {
+        for raw in [
+            None,
+            Some(""),
+            Some(" \n "),
+            Some("{}"),
+            Some(r#"{"replay_reasoning":true}"#),
+        ] {
+            let config = parse_driver_config(raw).expect("a replaying config must parse");
+            assert_eq!(config, DriverConfig::default(), "config {raw:?}");
+            assert_eq!(
+                body_for(&replay_request(), &config).to_string(),
+                BODY_AT_0_4_0,
+                "config {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_reasoning_false_sends_no_reasoning_content_and_stamps_clear_thinking_true() {
+        let config = config(r#"{"replay_reasoning":false}"#);
+        assert!(!config.replay_reasoning);
+        let body = body_for(&replay_request(), &config);
+
+        assert!(
+            !contains_key_anywhere(&body, "reasoning_content"),
+            "no assistant message carries reasoning, the current tool loop's included: {body}"
+        );
+        assert_eq!(
+            body["thinking"],
+            json!({"type": "enabled", "clear_thinking": true})
+        );
+
+        let mut expected =
+            without_reasoning_content(body_for(&replay_request(), &DriverConfig::default()));
+        expected["thinking"]["clear_thinking"] = json!(true);
+        assert_eq!(body, expected, "nothing else differs from the default body");
+        assert_eq!(
+            body["messages"][2],
+            json!({
+                "role": "assistant",
+                "content": "Reading it.",
+                "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": "{\"path\":\"notes.txt\"}"}}]
+            })
+        );
+        assert_eq!(
+            body["messages"][4],
+            json!({"role": "assistant", "content": "It has three lines."})
+        );
+    }
+
+    #[test]
+    fn replay_reasoning_false_keeps_null_content_on_a_text_less_tool_call_turn() {
+        let request = request_from(json!({
+            "model": "glm-5.3",
+            "max_tokens": 8192,
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "Read it."}]},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "text": "Read first."},
+                    {"type": "tool_call", "id": "call_1", "name": "read_file", "input": {"path": "a"}}
+                ]},
+                {"role": "tool", "tool_call_id": "call_1", "content": [{"type": "text", "text": "x"}]}
+            ]
+        }));
+        let body = body_for(&request, &config(r#"{"replay_reasoning":false}"#));
+        assert_eq!(
+            body["messages"][1],
+            json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": "{\"path\":\"a\"}"}}]
+            })
+        );
+    }
+
+    #[test]
+    fn a_non_boolean_replay_reasoning_is_refused_by_name() {
+        for (value, shown) in [
+            (r#""false""#, r#""false""#),
+            (r#""true""#, r#""true""#),
+            ("0", "0"),
+            ("1", "1"),
+            ("null", "null"),
+            ("{}", "{}"),
+            ("[]", "[]"),
+        ] {
+            assert_eq!(
+                parse_driver_config(Some(&format!(r#"{{"replay_reasoning":{value}}}"#)))
+                    .unwrap_err(),
+                format!(
+                    "driver: inference.driver.config 'replay_reasoning' must be a boolean, got \
+                     {shown}"
+                ),
+                "value {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_reasoning_false_combines_with_reasoning_effort_and_thinking_enabled() {
+        let config =
+            config(r#"{"reasoning_effort":"high","replay_reasoning":false,"thinking":"enabled"}"#);
+        assert_eq!(
+            config,
+            DriverConfig {
+                reasoning_effort: "high".to_string(),
+                replay_reasoning: false,
+            }
+        );
+        let body = body_for(&replay_request(), &config);
+        assert_eq!(body["reasoning_effort"], json!("high"));
+        assert_eq!(
+            body["thinking"],
+            json!({"type": "enabled", "clear_thinking": true})
+        );
+        assert!(!contains_key_anywhere(&body, "reasoning_content"), "{body}");
+    }
+
+    #[test]
+    fn a_params_thinking_cannot_override_the_replay_stamp() {
+        let mut request = json!({
+            "model": "glm-5.3",
+            "max_tokens": 1000,
+            "messages": [],
+            "params": {"thinking": {"type": "enabled", "clear_thinking": false}}
+        });
+        let body = body_for(
+            &request_from(request.clone()),
+            &config(r#"{"replay_reasoning":false}"#),
+        );
+        assert_eq!(
+            body["thinking"],
+            json!({"type": "enabled", "clear_thinking": true})
+        );
+        request["params"]["thinking"]["clear_thinking"] = json!(true);
+        let body = body_for(&request_from(request), &DriverConfig::default());
+        assert_eq!(
+            body["thinking"],
+            json!({"type": "enabled", "clear_thinking": false})
+        );
+    }
+
+    #[test]
+    fn current_turn_reasoning_parses_to_a_thinking_block_whatever_the_setting() {
+        // Response parsing takes no config, so the setting cannot reach it: both paths emit the
+        // turn's reasoning as a leading `thinking` block.
+        let streamed = parse_quiet(&live_tool_call_stream()).unwrap();
+        assert_eq!(
+            streamed["content"][0],
+            json!({"type": "thinking", "text": REASONING})
+        );
+        let fallback = translate_zai_response_to_murmur(&json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "reasoning_content": "Hm.", "content": "Done."}
+            }]
+        }))
+        .unwrap();
+        assert_eq!(
+            fallback["content"][0],
+            json!({"type": "thinking", "text": "Hm."})
+        );
     }
 }
