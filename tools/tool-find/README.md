@@ -106,8 +106,12 @@ A search that reaches no limit carries no `capped` key. The result's
 
 ## Refused calls
 
-A call is checked in this order, and the first failure is returned. A refused
-call touches no file and declares no `state_effect`.
+Under murmur, a call missing a top-level `required` field (`pattern`) never
+reaches the tool: murmur refuses it before dispatch, records a
+`tool_input_refused` event, and tells the model which field is missing. A call
+that gets past that check is checked by the tool in this order, and the first
+failure is returned. A refused call touches no file and declares no
+`state_effect`.
 
 1. The input is a JSON object (or a JSON string encoding one).
 2. Every key is one of `pattern`, `dir`, `glob`, `recursive` or `context_lines`. Any other key, whatever its value, is
@@ -165,8 +169,11 @@ and murmur raises no `W-SEC-018` for it. Its properties pair no path key with a 
 ## Replaces tool-editor
 
 `tool-find` is one of the four flat tools that replace `tool-editor`, whose 0.12.0
-calls held each operation in its own nested object. There is no alias: the
-nested shape is refused as an unknown field, and so is every earlier shape.
+calls held each operation in its own nested object. There is no alias. A
+nested call carries none of the top-level `required` fields, so under murmur it
+is refused before dispatch for the missing field and the tool never runs.
+Outside that check, or when the call also carries the required fields, the
+tool refuses the nested key as an unknown field, and every earlier shape the same way.
 
 | tool-editor 0.12.0 | `tool-find` 0.1.0 |
 |---|---|
