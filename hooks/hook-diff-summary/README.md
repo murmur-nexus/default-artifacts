@@ -13,7 +13,7 @@ Declare in your capsule `murmur.yaml`:
 ```yaml
 artifacts:
   - name: murmur/hook-diff-summary
-    version: 0.11.0
+    version: 0.12.0
     runtime: hook
     capabilities:
       filesystem:
@@ -32,17 +32,18 @@ error.
 ## Pairing with tool-editor
 
 This hook reads the write target out of each `tool-editor` tool call, so
-the two versions must agree on what that property is called:
+the two versions must agree on where that target sits:
 
 | Hook | Editor | Reads |
 |---|---|---|
-| 0.7.0 and later | 0.3.0 and later | `dest_path` |
+| 0.12.0 and later | 0.12.0 and later | `write.path`, `edit.path` |
+| 0.7.0 to 0.11.0 | 0.3.0 to 0.11.0 | `dest_path` |
 | 0.6.0 and earlier | 0.2.0 and earlier | `path` |
 
-There is no fallback in either direction. Pairing hook 0.7.0 with editor 0.2.0,
-or hook 0.6.0 with editor 0.3.0, produces an empty summary rather than an error:
-the hook finds no write target, takes no snapshot, and emits no file entry.
-Upgrade both together.
+There is no fallback in either direction. Pairing hook 0.12.0 with editor
+0.11.0, or hook 0.11.0 with editor 0.12.0, produces an empty summary rather
+than an error: the hook finds no write target, takes no snapshot, and emits no
+file entry. The same holds across the 0.6.0/0.7.0 line. Upgrade both together.
 
 No write access is needed beyond what the scope grant implies: the hook returns
 its summary as a `HookOutput::Artifact` event and never writes a file itself.

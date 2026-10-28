@@ -45,19 +45,16 @@ pub fn try_extract_write_path(s: &str) -> Option<String> {
 pub fn extract_from_value(v: &Value) -> Option<String> {
     match v {
         Value::Object(map) => {
-            let op = map.get("operation").and_then(|o| o.as_str());
-            // The editor's write operations name their target `dest_path`, the property its
-            // input schema annotates `format: murmur-destination`. `path` on those calls is
-            // the pre-0.3.0 spelling, which the editor now rejects outright, so a write
-            // carrying it never reaches this hook.
-            let path_str = map.get("dest_path").and_then(|p| p.as_str());
-
-            // Direct tool input: {"operation":"write_file","dest_path":"..."}
-            if let Some(op_name) = op {
-                if is_write_op(op_name) {
-                    return path_str.map(str::to_string);
-                }
-                return None; // read_file / find_in_files — not a write
+            // Direct tool input: {"write":{"path":"..."}} or {"edit":{"path":"..."}}. Those two
+            // locations are what the editor's input schema annotates `format:
+            // murmur-destination`. A `read` or `find` call writes nothing, and an object
+            // carrying `operation`/`dest_path` is the pre-0.12.0 shape, which the editor refuses
+            // outright, so neither yields a path.
+            if let Some(op) = write_op(map) {
+                return op.get("path").and_then(Value::as_str).map(str::to_string);
+            }
+            if map.contains_key("read") || map.contains_key("find") {
+                return None;
             }
 
             // Anthropic tool_use block: {"type":"tool_use","input":{...}}
@@ -100,8 +97,15 @@ pub fn is_editor_call(tool_name: Option<&str>) -> bool {
     tool_name == Some(EDITOR_TOOL)
 }
 
-pub fn is_write_op(op: &str) -> bool {
-    matches!(op, "write_file" | "replace_in_file")
+/// The editor's operation keys that write the file their object's `path` names.
+pub const WRITE_OPS: [&str; 2] = ["write", "edit"];
+
+/// The operation object of an editor call whose key is `write` or `edit`, or `None` for any
+/// other call.
+pub fn write_op(call: &serde_json::Map<String, Value>) -> Option<&serde_json::Map<String, Value>> {
+    WRITE_OPS
+        .iter()
+        .find_map(|key| call.get(*key).and_then(Value::as_object))
 }
 
 pub fn normalize_path(path: &str) -> String {
@@ -435,7 +439,7 @@ mod wasm_hook {
                 return Ok(HookOutput::Artifact(payload));
             }
 
-            // Before-state snapshot: only for editor write/replace operations.
+            // Before-state snapshot: only for editor `write`/`edit` calls.
             if !is_editor_call(event.tool_name.as_deref()) {
                 return Ok(HookOutput::None);
             }
@@ -700,55 +704,97 @@ mod tests {
 
     #[test]
     fn extract_write_path_reads_every_layout_the_runtime_delivers() {
-        // Direct operation object.
+        // Direct operation object, for each writing operation.
         assert_eq!(
-            try_extract_write_path(r#"{"operation":"write_file","dest_path":"src/a.rs"}"#),
+            try_extract_write_path(r#"{"write":{"path":"src/a.rs","content":"x"}}"#),
             Some("src/a.rs".to_string())
+        );
+        assert_eq!(
+            try_extract_write_path(
+                r#"{"edit":{"path":"src/e.rs","edits":[{"old":"a","new":"b"}]}}"#
+            ),
+            Some("src/e.rs".to_string())
         );
         // Anthropic tool_use block.
         assert_eq!(
             try_extract_write_path(
-                r#"{"type":"tool_use","input":{"operation":"replace_in_file","dest_path":"src/b.rs"}}"#
+                r#"{"type":"tool_use","input":{"edit":{"path":"src/b.rs","edits":[]}}}"#
             ),
             Some("src/b.rs".to_string())
         );
-        // Runtime envelope carrying the inner JSON as a string.
+        // Runtime envelope carrying the inner JSON as a string, and as an object.
         assert_eq!(
-            try_extract_write_path(
-                r#"{"data":"{\"operation\":\"write_file\",\"dest_path\":\"src/c.rs\"}"}"#
-            ),
+            try_extract_write_path(r#"{"data":"{\"write\":{\"path\":\"src/c.rs\"}}"}"#),
             Some("src/c.rs".to_string())
+        );
+        assert_eq!(
+            try_extract_write_path(r#"{"data":{"edit":{"path":"src/c2.rs"}},"log_path":null}"#),
+            Some("src/c2.rs".to_string())
         );
         // Double-encoded JSON string.
         assert_eq!(
-            try_extract_write_path(
-                r#""{\"operation\":\"write_file\",\"dest_path\":\"src/d.rs\"}""#
-            ),
+            try_extract_write_path(r#""{\"write\":{\"path\":\"src/d.rs\"}}""#),
             Some("src/d.rs".to_string())
+        );
+        // An array of calls yields the first write.
+        assert_eq!(
+            try_extract_write_path(
+                r#"[{"read":{"path":"r.rs"}},{"edit":{"path":"src/f.rs","edits":[]}}]"#
+            ),
+            Some("src/f.rs".to_string())
         );
         // `tools` is consulted before `output`.
         assert_eq!(
             extract_write_path(
-                Some(r#"{"operation":"write_file","dest_path":"from-tools.rs"}"#),
-                Some(r#"{"operation":"write_file","dest_path":"from-output.rs"}"#)
+                Some(r#"{"write":{"path":"from-tools.rs"}}"#),
+                Some(r#"{"write":{"path":"from-output.rs"}}"#)
             ),
             Some("from-tools.rs".to_string())
         );
         // Nothing to find.
         assert_eq!(extract_write_path(None, None), None);
         assert_eq!(try_extract_write_path("not json"), None);
+        assert_eq!(try_extract_write_path(r#"{"write":{"content":"x"}}"#), None);
+        assert_eq!(try_extract_write_path(r#"{"write":"src/a.rs"}"#), None);
     }
 
     #[test]
-    fn only_write_operations_are_snapshotted() {
-        assert!(is_write_op("write_file"));
-        assert!(is_write_op("replace_in_file"));
-        assert!(!is_write_op("read_file"));
-        assert!(!is_write_op("find_in_files"));
-        assert_eq!(
-            try_extract_write_path(r#"{"operation":"read_file","path":"src/a.rs"}"#),
-            None
-        );
+    fn only_write_and_edit_calls_are_snapshotted() {
+        let call = |s: &str| serde_json::from_str::<Value>(s).unwrap();
+        for key in ["write", "edit"] {
+            let v = call(&format!(r#"{{"{key}":{{"path":"a"}}}}"#));
+            assert!(write_op(v.as_object().unwrap()).is_some(), "{key}");
+        }
+        for s in [
+            r#"{"read":{"path":"a"}}"#,
+            r#"{"find":{"pattern":"a"}}"#,
+            r#"{"edit":"a"}"#,
+        ] {
+            assert!(write_op(call(s).as_object().unwrap()).is_none(), "{s}");
+        }
+        for s in [
+            r#"{"read":{"path":"src/a.rs"}}"#,
+            r#"{"find":{"pattern":"x","dir":"src"}}"#,
+            r#"{"type":"tool_use","input":{"read":{"path":"src/a.rs"}}}"#,
+            r#"{"data":"{\"find\":{\"pattern\":\"x\"}}"}"#,
+        ] {
+            assert_eq!(try_extract_write_path(s), None, "{s}");
+        }
+    }
+
+    #[test]
+    fn the_pre_0_12_0_shape_yields_no_path_in_any_wrapping() {
+        // No fallback: the editor refuses this shape, so a call carrying it wrote nothing.
+        for s in [
+            r#"{"operation":"write_file","dest_path":"src/a.rs","content":"x"}"#,
+            r#"{"operation":"replace_in_file","dest_path":"src/a.rs"}"#,
+            r#"{"type":"tool_use","input":{"operation":"write_file","dest_path":"src/b.rs"}}"#,
+            r#"{"data":"{\"operation\":\"write_file\",\"dest_path\":\"src/c.rs\"}"}"#,
+            r#""{\"operation\":\"write_file\",\"dest_path\":\"src/d.rs\"}""#,
+            r#"{"operation":"read_file","path":"src/a.rs"}"#,
+        ] {
+            assert_eq!(try_extract_write_path(s), None, "{s}");
+        }
     }
 
     #[test]

@@ -14,9 +14,16 @@ walkdir = "2"
 wit-bindgen.workspace = true
 
 # Host-target-only. Used solely by tests/wasm_component.rs to instantiate the compiled
-# wasm32-wasip2 component and prove behavior parity + the find_in_files benchmark against
+# wasm32-wasip2 component and prove behavior parity + the find benchmark against
 # the real artifact. Never a build-time dependency of the wasm target itself — a
 # `[dev-dependencies]` entry is excluded from the cdylib the component is built from.
 [dev-dependencies]
 wasmtime = "46"
 wasmtime-wasi = "46"
+# Test-only, like the two above. serde_norway parses murmur.yaml the way murmur does
+# (tests/manifest_declares_destination.rs, tests/definition_token_budget.rs), tiktoken-rs counts
+# the definition with the cl100k encoding murmur counts with, and tempfile gives
+# tests/mur_run_read_only.rs its scratch directories.
+serde_norway = "0.9.42"
+tempfile = "3"
+tiktoken-rs = "0.5"

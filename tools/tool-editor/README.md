@@ -1,29 +1,57 @@
 # tool-editor
 
-Structured file editing for Murmur capsules — read, write, surgical patch, and
-search operations (`read_file`, `write_file`, `replace_in_file`,
-`find_in_files`) without requiring shell capability grants.
+Structured file editing for Murmur capsules — read, write, edit and search
+files without a shell capability grant.
 
 WASM tool component (`runtime: tool`, `implementation: wasm`, world `tool`,
 exports `murmur:tool/run`).
 
-## Operations
+## Calls
 
-Every call takes an `operation` field. All paths are relative to the capsule
-workdir (the component's CWD at dispatch time); an absolute value is
-[refused](#absolute-paths-are-refused).
+A call is an object holding exactly one of four keys, `read`, `write`, `edit`
+or `find`, whose value is an object of that operation's fields. Every file is
+named `path`. All paths are relative to the capsule workdir (the component's CWD
+at dispatch time); an absolute value is [refused](#absolute-paths-are-refused).
 
-| Operation | Required | Optional | Writes to |
+| Key | Required | Optional | Writes to |
 |---|---|---|---|
-| `read_file` | `path` | `start_line`, `end_line` | — |
-| `write_file` | `dest_path`, `content` | — | `dest_path` |
-| `replace_in_file` | `dest_path`, `old_string`, `new_string` | — | `dest_path` |
-| `find_in_files` | `pattern` | `dir`, `glob`, `recursive`, `context_lines` | — |
+| `read` | `path` | `start_line`, `end_line` | — |
+| `write` | `path`, `content` | — | `write.path` |
+| `edit` | `path`, `edits`: a non-empty array of `{old, new}`, both required | — | `edit.path` |
+| `find` | `pattern` | `dir`, `glob`, `recursive`, `context_lines` | — |
 
-The two writing operations name their target `dest_path`; the two reading
-operations take `path` and `dir`. The split is not cosmetic — see below.
+```json
+{"edit": {"path": "src/app.py", "edits": [
+  {"old": "retries = 3", "new": "retries = 5"},
+  {"old": "def run(", "new": "def run_once("}
+]}}
+```
 
-## Reading with `read_file`
+A field whose value is `null` counts as absent. `state_effect` is `read` for a
+successful `read` or `find` and `mutate` for a successful `write` or `edit`; a
+failed call declares none.
+
+### Refused calls
+
+A call is checked in this order, and the first failure is returned. A refused
+call touches no file.
+
+| Check | Refusal | `error_kind` |
+|---|---|---|
+| Every top-level key is `read`, `write`, `edit` or `find` | `unknown field "dest_path", "operation": a call holds exactly one of read, write, edit, find` | `unknown_field` |
+| Exactly one of them is non-null | `a call holds exactly one of read, write, edit, find; got none` (or `got read, write`) | — |
+| Its value is an object | `write must be an object` | — |
+| Every key of that object is one the operation takes | `unknown field "dest_path" in write: write takes path, content` | `unknown_field` |
+| Every key of an `edits` element is `old` or `new` | `unknown field "old_string" in edit 1 of 2: an edit takes old, new` | `unknown_field` |
+| A required field is present | `missing required field: edit.path` | — |
+
+Unknown keys are listed sorted and quoted, with quotes, backslashes and control
+characters escaped, so the message stays on one line. Every refusal is also the result's `summary`, which is what a
+host shows for the call. The input names of 0.11.0 and earlier (`operation`,
+`dest_path`, `old_string`, `new_string`) are refused this way; see
+[Breaking change in 0.12.0](#breaking-change-in-0120).
+
+## Reading with `read`
 
 `start_line` and `end_line` are 1-based and inclusive, and both are optional.
 Every read, with or without them, is held to three limits:
@@ -69,9 +97,44 @@ A read that cuts long lines says so in a second sentence, after the first when
 both apply: `Lines longer than 2000 characters are cut to their first 2000
 characters: 1 in this read, the first at line 10.`
 
-## Searching with `find_in_files`
+## Writing with `write`
 
-`find_in_files` matches `pattern`, a regular expression, against each line of
+`write` creates or replaces the file at `path` with `content`, creating any
+missing parent directories. It returns `wrote <path>` with summary
+`<n> bytes written` and no `data`.
+
+## Editing with `edit`
+
+`edit` applies `edits` to the file at `path`:
+
+- The pairs apply in order, each to the text the one before produced, so a
+  later `old` may match text an earlier `new` inserted.
+- Each `old` must occur exactly once in the text it applies to. Overlapping
+  occurrences count: `aa` occurs twice in `aaa`.
+- `old` must be a non-empty string; `new` is a string and may be empty, which
+  deletes the matched text.
+- All or nothing. The file is read once and written once, only after every pair
+  matched. If any pair fails, the file is left byte-identical.
+
+Every input is validated before the file is read, so an empty `edits`, an empty
+`old` or an unknown key fails the same way whether or not the file exists.
+Positions count from 1 and are written `edit N of M`:
+
+| Failure | `error_kind` | Message |
+|---|---|---|
+| `old` occurs 0 times | `string_not_found` | `edit 2 of 3: old occurs 0 times in src/app.py; the file is unchanged` |
+| `old` occurs 2 or more times | `multiple_matches` | `edit 2 of 2: old occurs 2 times in src/app.py; the file is unchanged` |
+| `old` is `""` | — | `edit 2 of 2: old is empty; it must name the text to replace` |
+| `edits` is `[]` | — | `edit.edits is empty: it takes at least one {old, new} object` |
+| An element carries another key | `unknown_field` | `unknown field "path" in edit 2 of 2: an edit takes old, new` |
+| The file does not exist | `not_found` | `src/app.py: <OS error>` |
+
+A successful edit returns `applied <M> edit(s) to <path>` with summary
+`<M> edits` and no `data`.
+
+## Searching with `find`
+
+`find` matches `pattern`, a regular expression, against each line of
 the files it reads, and returns one `{path, line, text}` per matching line.
 `path` is relative to `dir`, `/`-separated.
 
@@ -137,54 +200,33 @@ A search that reaches no limit carries no `capped` key. The result's
 size is `error_kind: "result_size_exceeded"`, when the first match alone does
 not fit in 500 KB.
 
-## A missing or unknown `operation`
-
-A call whose `operation` the tool cannot dispatch returns `ok: false` with one of
-two messages. Both list the operations it accepts, in the order above:
-
-| `operation` sent | Message |
-|---|---|
-| absent, `null`, any other non-string, or `""` | `missing "operation": expected one of read_file, write_file, replace_in_file, find_in_files` |
-| any other string not in the table | `unknown operation "X": expected one of read_file, write_file, replace_in_file, find_in_files` |
-
-The unrecognised value is quoted with quotes, backslashes and control characters
-escaped, so `"write\nfile"` appears as `"write\nfile"` and the message stays on
-one line. The message is also the result's `summary`, which is what a host shows
-for the call. Neither carries an `error_kind`. The call touches no file and
-declares no `state_effect`. A caller can tell the two apart by their prefixes,
-`missing "operation"` and `unknown operation "`.
-
-Before 0.5.1 both cases returned `unknown operation: <value>`, which for a call
-with no `operation` read `unknown operation: ` with nothing after the colon.
-
 ## Absolute paths are refused
 
-`path`, `dest_path`, `dir` and `glob` are workdir-relative by contract, and a
-value beginning with `/` is refused before the operation touches the filesystem:
+`read.path`, `write.path`, `edit.path`, `find.dir` and `find.glob` are
+workdir-relative by contract, and a value beginning with `/` is refused before
+the operation touches the filesystem:
 
 ```json
 {
   "ok": false,
   "error_kind": "absolute_path",
-  "message": "'dest_path' must be relative to the capsule workdir; got '/app/results.txt' (did you mean 'results.txt'?)"
+  "message": "'write.path' must be relative to the capsule workdir; got '/app/results.txt' (did you mean 'results.txt'?)"
 }
 ```
 
-The message names the property the call actually wrote — `path` for `read_file`,
-`dest_path` for `write_file` and `replace_in_file`, `dir` or `glob` for
-`find_in_files` — and suggests the value's final component. A value with no final component (`/`,
-or one ending in `..`) gets no suggestion, so the message ends at the offending
-value:
+The message names the input the call wrote, as an input location, and suggests
+the value's final component. A value with no final component (`/`, or one
+ending in `..`) gets no suggestion, so the message ends at the offending value:
 
 ```text
-'dir' must be relative to the capsule workdir; got '/'
+'find.dir' must be relative to the capsule workdir; got '/'
 ```
 
 Refusing rather than resolving is deliberate. A tool is dispatched with one WASI
 preopen mapped to the capsule workdir, so an absolute value cannot escape it —
 `/app/results.txt` resolves to `<workdir>/app/results.txt`. Left unchecked,
-`write_file` would create that directory, write the file there, and report
-`ok: true` with a byte count, and a later `read_file` of the same value would
+`write` would create that directory, write the file there, and report
+`ok: true` with a byte count, and a later `read` of the same value would
 return that content: every operation agreeing with every other, while anything
 outside the capsule looking where the manifest said the file would be finds
 nothing. A refused call creates no directory, writes nothing, and declares no
@@ -192,34 +234,77 @@ nothing. A refused call creates no directory, writes nothing, and declares no
 
 ## How `read_only` is enforced
 
-`dest_path` is declared in the manifest with `format: murmur-destination`:
+`write.path` and `edit.path` are declared in the manifest with
+`format: murmur-destination`:
 
 ```yaml
-    dest_path:
-      type: string
-      format: murmur-destination
+    write:
+      type: object
+      properties:
+        path:
+          type: string
+          format: murmur-destination
 ```
 
-That annotation tells the runtime which input is a filesystem write target. When
-a capsule grants `capabilities.filesystem.read_only`, a `write_file` or
-`replace_in_file` call landing under a read-only entry is refused before
-dispatch, and the refusal names the declaration:
+murmur lowers that annotation to an *input location* — the chain of keys from
+the root, `write.path` and `edit.path` — not to the property name `path`. When a
+capsule grants `capabilities.filesystem.read_only`, a `write` or `edit` whose
+path lands under a read-only entry is refused before dispatch, and the refusal
+names the declared location:
 
 ```text
-Refused by the capsule manifest: 'src/notes.txt' is under the read-only path
+Refused by the capsule manifest: 'src/spec.txt' is under the read-only path
 'src' declared in capabilities.filesystem.read_only. Identified as a write by
-destination 'dest_path' declared by the tool's input schema.
+destination 'edit.path' declared by the tool's input schema.
 ```
 
-Without the annotation the runtime falls back to guessing write targets from
-property names and warns with `W-SEC-018`. Because the destination has its own
-property, `read_file` and `find_in_files` stay usable under a `read_only` grant:
-their inputs are not annotated, so reading and searching a read-only subtree
-still succeeds. Sharing one `path` property across all four operations would
-have made every read under that subtree a refusal.
+`read.path` carries no annotation, so reading a read-only subtree still
+succeeds; `find`'s `dir` and `glob` carry none either. The destination is marked
+per location, which is why every operation can name its file `path`: annotating
+the name would have made every read under the subtree a refusal.
 
-`find_in_files` results carry a `path` key per match. That is an output, not an
+murmur's key-name heuristic runs beside the declarations and reads none of the
+reading calls as a write: `read` is `path` plus line numbers, `find` is
+`pattern`/`dir`/`glob`, an `edit` object holds `path` and `edits` (not a content
+key), and an `{old, new}` pair holds no path key. `write`'s `path` beside
+`content` is a write by that heuristic too, but the declared destination is
+checked first and is what the refusal names.
+
+Because `read.path` is a path-shaped property with no annotation, a capsule
+that declares `read_only` still sees `W-SEC-018` name `path` for this tool. The
+warning is about `read.path`, which is a read by design.
+
+`find` results carry a `path` key per match. That is an output, not an
 input — the runtime scans tool input only.
+
+## Breaking change in 0.12.0
+
+0.12.0 breaks every existing call: a call now holds one of `read`, `write`, `edit` or `find` instead of an `operation`, every operation names its file `path` instead of `dest_path`, and `edit` takes a list of `{old, new}` pairs, each matching exactly once and all applied or none, in place of `replace_in_file`'s single `old_string`/`new_string`, which replaced every occurrence.
+
+| 0.11.0 | 0.12.0 |
+|---|---|
+| `{"operation": "read_file", "path": P, ...}` | `{"read": {"path": P, ...}}` |
+| `{"operation": "write_file", "dest_path": P, "content": C}` | `{"write": {"path": P, "content": C}}` |
+| `{"operation": "replace_in_file", "dest_path": P, "old_string": O, "new_string": N}` | `{"edit": {"path": P, "edits": [{"old": O, "new": N}]}}` |
+| `{"operation": "find_in_files", "pattern": R, ...}` | `{"find": {"pattern": R, ...}}` |
+
+- There is no alias or fallback. `operation`, `dest_path`, `old_string`,
+  `new_string` and every other unknown key are refused with
+  `error_kind: unknown_field`, and the call touches no file.
+- `replace_in_file` replaced every occurrence and returned `{count}`. An `edit`
+  pair must match exactly once; two or more occurrences return
+  `multiple_matches`. A caller that relied on replace-all must send one pair per
+  occurrence with enough surrounding text to make each unique.
+- An unknown input inside an operation used to be ignored; it is now refused.
+- Messages that name an input name its location: `'read.path' must be relative
+  …`, `missing required field: find.pattern`, `'find.dir' resolves outside the
+  capsule workdir`.
+- `hook-diff-summary` 0.12.0 reads `write.path` and `edit.path`; 0.11.0 and
+  earlier find no write target in a 0.12.0 call. Upgrade both together.
+- Update any capsule manifest, system prompt, fixture or saved conversation
+  that calls the editor.
+
+The sections below describe earlier versions in the input names of their time.
 
 ## Breaking change in 0.10.0
 
@@ -262,5 +347,4 @@ by key name again. Update any capsule manifest, system prompt, fixture or saved
 conversation that calls either operation to use `dest_path`. `read_file`
 (`path`) and `find_in_files` (`dir`) are unchanged.
 
-See [murmur.yaml](./murmur.yaml) for the full manifest and per-operation
-input/output schemas.
+See [murmur.yaml](./murmur.yaml) for the full manifest and its input schema.

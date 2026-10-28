@@ -85,7 +85,7 @@ entry into the project store.
 ```yaml
 artifacts:
   - name: murmur/tool-editor
-    version: "0.11.0"
+    version: "0.12.0"
     runtime: tool
 
   - name: murmur/driver-anthropic
@@ -100,7 +100,7 @@ artifacts:
         records: true          # hook-debug.jsonl goes in the records directory (§4.3a)
 
   - name: murmur/skill-create-manifest
-    version: "0.7.0"
+    version: "0.8.0"
     runtime: skill
 ```
 
@@ -483,7 +483,7 @@ description: "Simple file editing capsule — reads and writes files, exits on c
 
 artifacts:
   - name: murmur/tool-editor
-    version: "0.11.0"
+    version: "0.12.0"
     runtime: tool
   - name: murmur/driver-anthropic
     version: "0.16.0"
@@ -520,7 +520,7 @@ artifacts:
     version: "0.6.0"
     runtime: tool
   - name: murmur/tool-editor
-    version: "0.11.0"
+    version: "0.12.0"
     runtime: tool
   - name: murmur/driver-anthropic
     version: "0.16.0"
@@ -564,7 +564,7 @@ description: "Orchestrator that spawns sub-capsules for parallel task execution"
 
 artifacts:
   - name: murmur/tool-editor
-    version: "0.11.0"
+    version: "0.12.0"
     runtime: tool
   - name: murmur/driver-anthropic
     version: "0.16.0"
@@ -638,7 +638,7 @@ name its `artifacts:` entry uses. For live discovery, use `mur search <keyword>`
 | `murmur/driver-zai` | driver | Z.ai inference driver: `glm-5.3` only, on the Chat Completions surface, with `reasoning_effort` and `thinking` config keys; its reasoning goes back to Z.ai on every later turn. Use with `gateway.endpoint: https://api.z.ai/api/paas/v4` |
 | `murmur/hook-compact` | hook | Context compaction hook. Fires when token usage crosses the compaction threshold; replaces conversation history with a summary. Declared as a `runtime: hook` entry; it binds `on-compaction`. |
 | `murmur/hook-debug` | hook | Debug event logger. Writes every lifecycle event (session start, inference, tool call, shell, session end) to `hooks/hook-debug.jsonl` in the session records directory. Needs `filesystem.records: true`. |
-| `murmur/hook-diff-summary` | hook | Edit summary. Snapshots each file `murmur/tool-editor` writes and emits a unified-diff summary at end of turn. Needs `filesystem.scope: "."`. Pairs with `murmur/tool-editor` 0.3.0 or later. |
+| `murmur/hook-diff-summary` | hook | Edit summary. Snapshots each file `murmur/tool-editor` writes and emits a unified-diff summary at end of turn. Needs `filesystem.scope: "."`. Pairs with `murmur/tool-editor` 0.12.0 or later. |
 | `murmur/hook-eval` | hook | Evaluation scorer. Runs configured scorers (exit_ok, max_turns, tool_sequence, llm_judge) and writes results to `hooks/eval.jsonl` in the session records directory, where `mur eval` reads them. Needs `filesystem.records: true`. |
 | `murmur/hook-grafana` | hook | OTel span emitter. Sends structured telemetry to Grafana Tempo. Requires `observability.otel_endpoint` in the capsule manifest. |
 | `murmur/hook-memory` | hook | Conversation memory. At `on-task-start`, seeds the task with a budget-bounded slice of the earlier conversation. Needs `conversation.read: true` and a context window: `context.max_tokens`, or the driver's `models:` entry for the model. `task_io.read: true` is optional and selects by relevance instead of recency. |
@@ -648,7 +648,7 @@ name its `artifacts:` entry uses. For live discovery, use `mur search <keyword>`
 | `murmur/tool-code-graph` | tool | Native binary. Indexes a Rust and/or Python repository into a SQLite symbol and call graph at `<repo_path>/.murmur/code-graph.db`, and answers `find_symbol`, `get_symbol`, `slice_symbol`, `explain_path` and `impact_analysis` by stable symbol identity. Needs no grant beyond the session workdir, which must hold `repo_path`. |
 | `murmur/tool-corpus` | tool | Append-only record store at `state/corpus.jsonl`: `append`, `get`, `read_recent`, `search`, `verify`. Needs `capabilities.state: {}` on its entry, and a `config:` block (`config_version: 1`) declaring each record type and the JSON Schema its body must satisfy. |
 | `murmur/tool-create` | tool | Scaffolds a new tool or hook artifact directory with `murmur.yaml`, a stub implementation and a README, under `tools/<name>/` in the capsule workdir. |
-| `murmur/tool-editor` | tool | File read/write/patch operations: read_file, write_file, replace_in_file, find_in_files. Prefer over shell-based file editing. |
+| `murmur/tool-editor` | tool | File operations, one per call: `read`, `write`, `edit` (a list of exact `{old, new}` replacements, all or nothing) and `find`. Prefer over shell-based file editing. |
 | `murmur/tool-git` | tool | Native binary. Structured git interface: status, add, diff, commit, branch, checkout, fetch, pull, push, clone, worktree, and more. Needs `git` in `capabilities.shell.allow`; `fetch`, `pull`, `push` and `clone` also need the remote's host in `capabilities.network.allow` and a `capabilities.shell.interpreter_runtime` grant for `git` naming its remote-helper directory. Prefer over granting `bash` for git work. |
 | `murmur/tool-github` | tool | Pushes a local commit range to one pinned GitHub repo so the remote branch lands on the identical SHA (a `git clone --depth 1` works), fetches a branch back, and opens, inspects, lists and merges pull requests. Needs `gateway: {endpoint: https://api.github.com, api_key: ${GITHUB_TOKEN}}` on its entry and a `config:` block with `config_version: 1` and `repo: owner/name`; the runtime attaches the token, and without the gateway every call returns `gateway_missing`. Merging needs `allow_merge: true` and `merge_methods` in `config:`. |
 | `murmur/tool-registry-search` | tool | Native binary. Searches a Murmur artifact index for artifacts matching a keyword; each result is a full `<scope>/<name>` with every published version, newest first. The default index, on the latest default-artifacts release, needs `https://github.com` and `https://release-assets.githubusercontent.com` in `capabilities.network.allow`. |
