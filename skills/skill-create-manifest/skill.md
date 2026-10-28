@@ -84,8 +84,17 @@ entry into the project store.
 
 ```yaml
 artifacts:
-  - name: murmur/tool-editor
-    version: "0.12.0"
+  - name: murmur/tool-read
+    version: "0.1.0"
+    runtime: tool
+  - name: murmur/tool-write
+    version: "0.1.0"
+    runtime: tool
+  - name: murmur/tool-edit
+    version: "0.1.0"
+    runtime: tool
+  - name: murmur/tool-find
+    version: "0.1.0"
     runtime: tool
 
   - name: murmur/driver-anthropic
@@ -100,7 +109,7 @@ artifacts:
         records: true          # hook-debug.jsonl goes in the records directory (§4.3a)
 
   - name: murmur/skill-create-manifest
-    version: "0.8.0"
+    version: "0.9.0"
     runtime: skill
 ```
 
@@ -108,10 +117,10 @@ artifacts:
 
 | Scope | Artifacts | Example |
 |---|---|---|
-| `murmur` | Murmur's default artifacts (§10), published by `murmur-nexus/default-artifacts` | `murmur/tool-editor` |
+| `murmur` | Murmur's default artifacts (§10), published by `murmur-nexus/default-artifacts` | `murmur/tool-read` |
 | `local` | An artifact installed from a `.mur.zip` file (`mur install ./x.mur.zip`) or by `mur publish` | `local/my-tool` |
 
-A bare name such as `tool-editor` is refused with `E-MAN-003`, with a hint naming the scoped
+A bare name such as `tool-read` is refused with `E-MAN-003`, with a hint naming the scoped
 forms. The bare part is the tool name the model calls, so two entries may not share one. An entry
 that declares `source:` is the one exception: it takes the bare name.
 
@@ -225,7 +234,7 @@ artifacts:
         records: true
 ```
 
-`murmur/hook-diff-summary` snapshots every file the editor touches, so its entry is granted
+`murmur/hook-diff-summary` snapshots every file `tool-write` and `tool-edit` touch, so its entry is granted
 `filesystem.scope: "."`. Do not give a scoring or logging hook `scope` instead of `records`: it
 would write into the work folder, where the capsule's commands can edit the file and `mur eval`
 does not look.
@@ -473,7 +482,7 @@ with `E-MAN-003`, whatever its value.
 
 ### Example 1: Minimal Single-Tool Capsule
 
-A capsule that edits files using `tool-editor` and exits when done.
+A capsule that edits files using the four file tools and exits when done.
 
 ```yaml
 name: notes-editor
@@ -482,8 +491,17 @@ runtime: tool
 description: "Simple file editing capsule — reads and writes files, exits on completion"
 
 artifacts:
-  - name: murmur/tool-editor
-    version: "0.12.0"
+  - name: murmur/tool-read
+    version: "0.1.0"
+    runtime: tool
+  - name: murmur/tool-write
+    version: "0.1.0"
+    runtime: tool
+  - name: murmur/tool-edit
+    version: "0.1.0"
+    runtime: tool
+  - name: murmur/tool-find
+    version: "0.1.0"
     runtime: tool
   - name: murmur/driver-anthropic
     version: "0.16.0"
@@ -507,7 +525,7 @@ deploy:
 
 ### Example 2: Shell-Capable Coding Capsule
 
-A capsule with shell, git, and editor for coding tasks. Grants only the binaries actually needed.
+A capsule with shell, git, and the file tools for coding tasks. Grants only the binaries actually needed.
 
 ```yaml
 name: coding-agent
@@ -519,8 +537,17 @@ artifacts:
   - name: murmur/tool-git
     version: "0.6.0"
     runtime: tool
-  - name: murmur/tool-editor
-    version: "0.12.0"
+  - name: murmur/tool-read
+    version: "0.1.0"
+    runtime: tool
+  - name: murmur/tool-write
+    version: "0.1.0"
+    runtime: tool
+  - name: murmur/tool-edit
+    version: "0.1.0"
+    runtime: tool
+  - name: murmur/tool-find
+    version: "0.1.0"
     runtime: tool
   - name: murmur/driver-anthropic
     version: "0.16.0"
@@ -554,7 +581,8 @@ context:
 ### Example 3: Orchestrator Capsule
 
 A capsule that decomposes tasks into parallel sub-capsules using mur-roost.
-`spawn.allow` names every sub-capsule it may spawn.
+`spawn.allow` names every sub-capsule it may spawn. It only reads the work folder to plan, so it
+takes `tool-read` and `tool-find`; the sub-capsules do the editing.
 
 ```yaml
 name: orchestrator
@@ -563,8 +591,11 @@ runtime: tool
 description: "Orchestrator that spawns sub-capsules for parallel task execution"
 
 artifacts:
-  - name: murmur/tool-editor
-    version: "0.12.0"
+  - name: murmur/tool-read
+    version: "0.1.0"
+    runtime: tool
+  - name: murmur/tool-find
+    version: "0.1.0"
     runtime: tool
   - name: murmur/driver-anthropic
     version: "0.16.0"
@@ -593,9 +624,10 @@ lifecycle:
 
 ## 9. Least-Privilege Guidance
 
-**Do not grant `bash` when only `git` or `editor` is needed.**
+**Do not grant `bash` when only `git` or file access is needed.**
 `tool-git` covers git operations as typed tool calls; it needs `git` in `shell.allow`, not `bash`.
-`tool-editor` covers file read/write/patch without shell access.
+`tool-read`, `tool-write`, `tool-edit` and `tool-find` cover reading, writing, editing and
+searching files without shell access.
 Add `capabilities.shell.allow: [bash]` only when the task genuinely requires arbitrary shell
 commands that no structured tool can handle.
 
@@ -638,7 +670,7 @@ name its `artifacts:` entry uses. For live discovery, use `mur search <keyword>`
 | `murmur/driver-zai` | driver | Z.ai inference driver: `glm-5.3` only, on the Chat Completions surface, with `reasoning_effort` and `thinking` config keys; its reasoning goes back to Z.ai on every later turn. Use with `gateway.endpoint: https://api.z.ai/api/paas/v4` |
 | `murmur/hook-compact` | hook | Context compaction hook. Fires when token usage crosses the compaction threshold; replaces conversation history with a summary. Declared as a `runtime: hook` entry; it binds `on-compaction`. |
 | `murmur/hook-debug` | hook | Debug event logger. Writes every lifecycle event (session start, inference, tool call, shell, session end) to `hooks/hook-debug.jsonl` in the session records directory. Needs `filesystem.records: true`. |
-| `murmur/hook-diff-summary` | hook | Edit summary. Snapshots each file `murmur/tool-editor` writes and emits a unified-diff summary at end of turn. Needs `filesystem.scope: "."`. Pairs with `murmur/tool-editor` 0.12.0 or later. |
+| `murmur/hook-diff-summary` | hook | Edit summary. Snapshots each file `murmur/tool-write` and `murmur/tool-edit` write and emits a unified-diff summary at end of turn. Needs `filesystem.scope: "."`. Pairs with `murmur/tool-write` and `murmur/tool-edit` 0.1.0 or later. |
 | `murmur/hook-eval` | hook | Evaluation scorer. Runs configured scorers (exit_ok, max_turns, tool_sequence, llm_judge) and writes results to `hooks/eval.jsonl` in the session records directory, where `mur eval` reads them. Needs `filesystem.records: true`. |
 | `murmur/hook-grafana` | hook | OTel span emitter. Sends structured telemetry to Grafana Tempo. Requires `observability.otel_endpoint` in the capsule manifest. |
 | `murmur/hook-memory` | hook | Conversation memory. At `on-task-start`, seeds the task with a budget-bounded slice of the earlier conversation. Needs `conversation.read: true` and a context window: `context.max_tokens`, or the driver's `models:` entry for the model. `task_io.read: true` is optional and selects by relevance instead of recency. |
@@ -648,14 +680,17 @@ name its `artifacts:` entry uses. For live discovery, use `mur search <keyword>`
 | `murmur/tool-code-graph` | tool | Native binary. Indexes a Rust and/or Python repository into a SQLite symbol and call graph at `<repo_path>/.murmur/code-graph.db`, and answers `find_symbol`, `get_symbol`, `slice_symbol`, `explain_path` and `impact_analysis` by stable symbol identity. Needs no grant beyond the session workdir, which must hold `repo_path`. |
 | `murmur/tool-corpus` | tool | Append-only record store at `state/corpus.jsonl`: `append`, `get`, `read_recent`, `search`, `verify`. Needs `capabilities.state: {}` on its entry, and a `config:` block (`config_version: 1`) declaring each record type and the JSON Schema its body must satisfy. |
 | `murmur/tool-create` | tool | Scaffolds a new tool or hook artifact directory with `murmur.yaml`, a stub implementation and a README, under `tools/<name>/` in the capsule workdir. |
-| `murmur/tool-editor` | tool | File operations, one per call: `read`, `write`, `edit` (a list of exact `{old, new}` replacements, all or nothing) and `find`. Prefer over shell-based file editing. |
+| `murmur/tool-edit` | tool | Replaces text in a file: `path` and `edits`, a list of exact `{old, new}` replacements applied in order, each matching once, all or nothing. Its `path` is a declared write destination, so `filesystem.read_only` refuses an edit under a read-only entry. Prefer over shell-based file editing. |
+| `murmur/tool-find` | tool | Searches file contents for a regex: `pattern`, optional `dir`, `glob`, `recursive`, `context_lines`; stops at 200 matches with a `capped` note. Declares that it writes nothing. |
 | `murmur/tool-git` | tool | Native binary. Structured git interface: status, add, diff, commit, branch, checkout, fetch, pull, push, clone, worktree, and more. Needs `git` in `capabilities.shell.allow`; `fetch`, `pull`, `push` and `clone` also need the remote's host in `capabilities.network.allow` and a `capabilities.shell.interpreter_runtime` grant for `git` naming its remote-helper directory. Prefer over granting `bash` for git work. |
 | `murmur/tool-github` | tool | Pushes a local commit range to one pinned GitHub repo so the remote branch lands on the identical SHA (a `git clone --depth 1` works), fetches a branch back, and opens, inspects, lists and merges pull requests. Needs `gateway: {endpoint: https://api.github.com, api_key: ${GITHUB_TOKEN}}` on its entry and a `config:` block with `config_version: 1` and `repo: owner/name`; the runtime attaches the token, and without the gateway every call returns `gateway_missing`. Merging needs `allow_merge: true` and `merge_methods` in `config:`. |
+| `murmur/tool-read` | tool | Reads a file: `path`, optional `start_line`/`end_line`; at most 2000 lines and 100 KB, with a `truncated` note naming the `start_line` that continues it. Declares that it writes nothing, so it reads under `filesystem.read_only`. |
 | `murmur/tool-registry-search` | tool | Native binary. Searches a Murmur artifact index for artifacts matching a keyword; each result is a full `<scope>/<name>` with every published version, newest first. The default index, on the latest default-artifacts release, needs `https://github.com` and `https://release-assets.githubusercontent.com` in `capabilities.network.allow`. |
 | `murmur/tool-report` | tool | States the session's own conclusion in `state/reports/<session_id>.json` (host: `~/.murmur/state/<store>/reports/<session_id>.json`, `<session_id>` = `MURMUR_SESSION_ID` verbatim; at most 64 files kept, never the caller's own or one written in the last 7 days): `progress` notes, then one terminal `report` whose outcome is `success`, `rejected`, `blocked` or `failed`. Needs `capabilities.state: {}` on its entry; an optional `config:` block closes the deliverable kinds and note stages. |
 | `murmur/tool-request-input` | tool | HITL pause gate. Emits an `input-required` signal; the capsule waits for a human reply before continuing. Use with `lifecycle.input_timeout_secs` to avoid indefinite waits. |
 | `murmur/tool-tavily` | tool | Web search through Tavily, returning bounded plain text: a header, an optional answer, then numbered results with title, URL and snippet. Needs `gateway: {endpoint: https://api.tavily.com, api_key: ${TAVILY_API_KEY}}` on its entry; the runtime attaches the key, and without the gateway every call returns `gateway_missing`. |
 | `murmur/tool-test-report` | tool | Native binary. Parses a test-runner output file the agent already captured (`cargo_test`, `pytest`, `go_test`, `jest`, or `auto`) into a structured failure list; never runs tests. Needs no grant beyond the session workdir, which must hold `input_path`. |
+| `murmur/tool-write` | tool | Creates or replaces a file and any missing directories: `path`, `content`. Its `path` is a declared write destination, so `filesystem.read_only` refuses a write under a read-only entry. |
 | `murmur/skill-create-manifest` | skill | This artifact. Provides complete manifest generation guidance. |
 | `murmur/skill-investigation-checkpoint` | skill | The investigations convention for `checkpoints/decisions.json`: record and reuse investigative verdicts (ruled-out, confirmed, uncertain) across a session instead of re-deriving them. |
 

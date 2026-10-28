@@ -1,7 +1,7 @@
 # hook-diff-summary
 
-Snapshots files before each editor tool call and emits a structured
-unified-diff summary as an artifact event at end of turn.
+Snapshots files before each `tool-write` and `tool-edit` call and emits a
+structured unified-diff summary as an artifact event at end of turn.
 
 WASM hook component (`runtime: hook`, exports `murmur:hook/lifecycle`).
 Binding: all events · mode: blocking · commit policy: none.
@@ -13,7 +13,7 @@ Declare in your capsule `murmur.yaml`:
 ```yaml
 artifacts:
   - name: murmur/hook-diff-summary
-    version: 0.12.0
+    version: 0.13.0
     runtime: hook
     capabilities:
       filesystem:
@@ -22,28 +22,32 @@ artifacts:
 
 `capabilities.filesystem.scope: "."` is required — read access over the whole
 workdir. A narrower scope silently breaks diffing for every file outside it:
-the hook reads the path reported by each `tool-editor` call to take the
-"before" snapshot, and reads it again at end of turn for the "after" snapshot.
-That path comes out of the tool-call payload and changes turn to turn, so the
-hook cannot know in advance which subtree the editor will touch — anything it
-cannot read is simply omitted from the summary rather than reported as an
-error.
+the hook reads the path reported by each `tool-write` and `tool-edit` call to
+take the "before" snapshot, and reads it again at end of turn for the "after"
+snapshot. That path comes out of the tool-call payload and changes turn to
+turn, so the hook cannot know in advance which subtree those calls will
+touch — anything it cannot read is simply omitted from the summary rather than
+reported as an error.
 
-## Pairing with tool-editor
+## Pairing with the file tools
 
-This hook reads the write target out of each `tool-editor` tool call, so
-the two versions must agree on where that target sits:
+This hook reads the write target out of each file-writing tool call, so the
+hook and the tools must agree on which tools write and where the target sits:
 
-| Hook | Editor | Reads |
+| Hook | Tools | Reads |
 |---|---|---|
-| 0.12.0 and later | 0.12.0 and later | `write.path`, `edit.path` |
-| 0.7.0 to 0.11.0 | 0.3.0 to 0.11.0 | `dest_path` |
-| 0.6.0 and earlier | 0.2.0 and earlier | `path` |
+| 0.13.0 and later | `tool-write` and `tool-edit` 0.1.0 and later | `path` |
+| 0.12.0 | `tool-editor` 0.12.0 | `write.path`, `edit.path` |
+| 0.7.0 to 0.11.0 | `tool-editor` 0.3.0 to 0.11.0 | `dest_path` |
+| 0.6.0 and earlier | `tool-editor` 0.2.0 and earlier | `path` |
 
-There is no fallback in either direction. Pairing hook 0.12.0 with editor
-0.11.0, or hook 0.11.0 with editor 0.12.0, produces an empty summary rather
-than an error: the hook finds no write target, takes no snapshot, and emits no
-file entry. The same holds across the 0.6.0/0.7.0 line. Upgrade both together.
+From 0.13.0 the hook snapshots only calls whose tool name is exactly
+`tool-write` or `tool-edit`; a `tool-read` or `tool-find` call writes nothing.
+There is no fallback in either direction. Pairing hook 0.13.0 with
+`tool-editor`, or hook 0.12.0 with the file tools, produces an empty summary
+rather than an error: the hook finds no write target, takes no snapshot, and
+emits no file entry. The same holds across the 0.11.0/0.12.0 and 0.6.0/0.7.0
+lines. Upgrade the hook and the tools together.
 
 No write access is needed beyond what the scope grant implies: the hook returns
 its summary as a `HookOutput::Artifact` event and never writes a file itself.

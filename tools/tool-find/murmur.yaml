@@ -1,0 +1,25 @@
+name: tool-find
+version: 0.1.0
+runtime: tool
+implementation: wasm
+description: |
+  Searches file contents for a regex, skipping hidden directories, target, node_modules and binary files. Stops at 200 matches, 5000 files walked, 32 MiB read or a 500 KB result, returning the matches so far with a capped note naming the limit. dir is relative to the work folder, and match paths to dir.
+input_schema:
+  type: object
+  properties:
+    pattern:
+      type: string
+    dir:
+      type: string
+    glob:
+      type: string
+      description: "*.py or src/**/*.rs"
+    recursive:
+      type: boolean
+    context_lines:
+      type: integer
+      description: max 20
+  required: [pattern]
+  murmur-destinations: []
+requires_files:
+  - tool_find.wasm

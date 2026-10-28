@@ -1,8 +1,8 @@
 name: hook-diff-summary
-version: 0.12.0
+version: 0.13.0
 runtime: hook
 execution_mode: blocking
 commit_policy: none
-description: Snapshots files before each editor tool call and emits a structured unified-diff summary as an artifact event at end of turn.
+description: Snapshots files before each tool-write and tool-edit call and emits a structured unified-diff summary as an artifact event at end of turn.
 requires_files:
   - hook_diff_summary.wasm

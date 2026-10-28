@@ -1,0 +1,33 @@
+[package]
+name = "murmur-file-tools"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+
+# Internal-only shared library: the file logic of tool-read, tool-write, tool-edit and
+# tool-find, the four flat file tools. Each of those crates is a thin wasm32-wasip2 component
+# that binds its own WIT world and calls `dispatch` with its `Tool` variant; every limit,
+# message and filesystem call lives here once. NOT an artifact: it has no murmur.yaml, so
+# nothing publishes it.
+
+[lib]
+name = "murmur_file_tools"
+path = "src/lib.rs"
+
+[dependencies]
+serde_json.workspace = true
+regex = "1"
+walkdir = "2"
+
+# Host-target-only test dependencies; a `[dev-dependencies]` entry is never linked into the
+# wasm32-wasip2 components built from the tool crates. wasmtime and wasmtime-wasi instantiate
+# the four compiled components (tests/wasm_components.rs). serde_norway parses each tool's
+# murmur.yaml the way murmur does (tests/manifests.rs, tests/definition_token_budget.rs),
+# tiktoken-rs counts the definitions with the cl100k encoding murmur counts with, and tempfile
+# gives tests/mur_run_read_only.rs its scratch directories.
+[dev-dependencies]
+wasmtime = "46"
+wasmtime-wasi = "46"
+serde_norway = "0.9.42"
+tempfile = "3"
+tiktoken-rs = "0.5"

@@ -1,5 +1,5 @@
-//! hook-diff-summary: emit a unified diff of every file the editor tool wrote
-//! during a turn, as an artifact on `end_turn`.
+//! hook-diff-summary: emit a unified diff of every file `tool-write` and `tool-edit`
+//! wrote during a turn, as an artifact on `end_turn`.
 //!
 //! Everything except the filesystem read and the `Guest` impl lives here at the crate
 //! root. Everything under `wasm_hook` is gated on `target_arch = "wasm32"` and so is
@@ -28,7 +28,7 @@ pub const MAX_FILE_BYTES: usize = 512 * 1024;
 //
 // The inference event carries the tool call data in `tools` and/or `output`.
 // We try multiple JSON layouts because the runtime may deliver the data as a
-// raw operation object, an Anthropic tool_use block, or a wrapping envelope.
+// raw tool input, an Anthropic tool_use block, or a wrapping envelope.
 
 pub fn extract_write_path(tools: Option<&str>, output: Option<&str>) -> Option<String> {
     [tools, output]
@@ -45,16 +45,12 @@ pub fn try_extract_write_path(s: &str) -> Option<String> {
 pub fn extract_from_value(v: &Value) -> Option<String> {
     match v {
         Value::Object(map) => {
-            // Direct tool input: {"write":{"path":"..."}} or {"edit":{"path":"..."}}. Those two
-            // locations are what the editor's input schema annotates `format:
-            // murmur-destination`. A `read` or `find` call writes nothing, and an object
-            // carrying `operation`/`dest_path` is the pre-0.12.0 shape, which the editor refuses
-            // outright, so neither yields a path.
-            if let Some(op) = write_op(map) {
-                return op.get("path").and_then(Value::as_str).map(str::to_string);
-            }
-            if map.contains_key("read") || map.contains_key("find") {
-                return None;
+            // Direct tool input: {"path":"...", ...}. The top-level `path` is the location
+            // `tool-write`'s and `tool-edit`'s input schemas annotate `format:
+            // murmur-destination`. A nested `{"write":{"path":...}}` (tool-editor 0.12.0) or a
+            // `dest_path` (earlier) is a shape both tools refuse, so neither yields a path.
+            if let Some(path) = map.get("path") {
+                return path.as_str().map(str::to_string);
             }
 
             // Anthropic tool_use block: {"type":"tool_use","input":{...}}
@@ -88,24 +84,14 @@ pub fn extract_from_value(v: &Value) -> Option<String> {
     }
 }
 
-/// The tool whose writes are snapshotted: the bare name the model calls it by, which is
-/// what the runtime reports as an event's `tool_name`.
-pub const EDITOR_TOOL: &str = "tool-editor";
+/// The tools whose writes are snapshotted: the bare names the model calls them by, which is
+/// what the runtime reports as an event's `tool_name`. Each writes the file its input's
+/// top-level `path` names.
+pub const WRITE_TOOLS: [&str; 2] = ["tool-write", "tool-edit"];
 
-/// Whether a tool call's `tool_name` is the editor's, and so a write this hook diffs.
-pub fn is_editor_call(tool_name: Option<&str>) -> bool {
-    tool_name == Some(EDITOR_TOOL)
-}
-
-/// The editor's operation keys that write the file their object's `path` names.
-pub const WRITE_OPS: [&str; 2] = ["write", "edit"];
-
-/// The operation object of an editor call whose key is `write` or `edit`, or `None` for any
-/// other call.
-pub fn write_op(call: &serde_json::Map<String, Value>) -> Option<&serde_json::Map<String, Value>> {
-    WRITE_OPS
-        .iter()
-        .find_map(|key| call.get(*key).and_then(Value::as_object))
+/// Whether a tool call's `tool_name` is one of [`WRITE_TOOLS`], and so a write this hook diffs.
+pub fn is_write_call(tool_name: Option<&str>) -> bool {
+    tool_name.is_some_and(|name| WRITE_TOOLS.contains(&name))
 }
 
 pub fn normalize_path(path: &str) -> String {
@@ -356,7 +342,7 @@ mod wasm_hook {
     use std::cell::RefCell;
 
     use super::{
-        build_file_entry, build_summary, extract_write_path, is_editor_call, normalize_path,
+        build_file_entry, build_summary, extract_write_path, is_write_call, normalize_path,
     };
 
     wit_bindgen::generate!({
@@ -439,8 +425,8 @@ mod wasm_hook {
                 return Ok(HookOutput::Artifact(payload));
             }
 
-            // Before-state snapshot: only for editor `write`/`edit` calls.
-            if !is_editor_call(event.tool_name.as_deref()) {
+            // Before-state snapshot: only for `tool-write` and `tool-edit` calls.
+            if !is_write_call(event.tool_name.as_deref()) {
                 return Ok(HookOutput::None);
             }
 
@@ -704,79 +690,91 @@ mod tests {
 
     #[test]
     fn extract_write_path_reads_every_layout_the_runtime_delivers() {
-        // Direct operation object, for each writing operation.
+        // Direct tool input, for each writing tool.
         assert_eq!(
-            try_extract_write_path(r#"{"write":{"path":"src/a.rs","content":"x"}}"#),
+            try_extract_write_path(r#"{"path":"src/a.rs","content":"x"}"#),
             Some("src/a.rs".to_string())
         );
         assert_eq!(
-            try_extract_write_path(
-                r#"{"edit":{"path":"src/e.rs","edits":[{"old":"a","new":"b"}]}}"#
-            ),
+            try_extract_write_path(r#"{"path":"src/e.rs","edits":[{"old":"a","new":"b"}]}"#),
             Some("src/e.rs".to_string())
         );
         // Anthropic tool_use block.
         assert_eq!(
             try_extract_write_path(
-                r#"{"type":"tool_use","input":{"edit":{"path":"src/b.rs","edits":[]}}}"#
+                r#"{"type":"tool_use","name":"tool-edit","input":{"path":"src/b.rs","edits":[]}}"#
             ),
             Some("src/b.rs".to_string())
         );
         // Runtime envelope carrying the inner JSON as a string, and as an object.
         assert_eq!(
-            try_extract_write_path(r#"{"data":"{\"write\":{\"path\":\"src/c.rs\"}}"}"#),
+            try_extract_write_path(r#"{"data":"{\"path\":\"src/c.rs\",\"content\":\"\"}"}"#),
             Some("src/c.rs".to_string())
         );
         assert_eq!(
-            try_extract_write_path(r#"{"data":{"edit":{"path":"src/c2.rs"}},"log_path":null}"#),
+            try_extract_write_path(r#"{"data":{"path":"src/c2.rs","edits":[]},"log_path":null}"#),
             Some("src/c2.rs".to_string())
         );
         // Double-encoded JSON string.
         assert_eq!(
-            try_extract_write_path(r#""{\"write\":{\"path\":\"src/d.rs\"}}""#),
+            try_extract_write_path(r#""{\"path\":\"src/d.rs\",\"content\":\"x\"}""#),
             Some("src/d.rs".to_string())
         );
-        // An array of calls yields the first write.
+        // An array of inputs yields the first path.
         assert_eq!(
-            try_extract_write_path(
-                r#"[{"read":{"path":"r.rs"}},{"edit":{"path":"src/f.rs","edits":[]}}]"#
-            ),
+            try_extract_write_path(r#"[{"content":"x"},{"path":"src/f.rs","edits":[]}]"#),
             Some("src/f.rs".to_string())
         );
         // `tools` is consulted before `output`.
         assert_eq!(
             extract_write_path(
-                Some(r#"{"write":{"path":"from-tools.rs"}}"#),
-                Some(r#"{"write":{"path":"from-output.rs"}}"#)
+                Some(r#"{"path":"from-tools.rs"}"#),
+                Some(r#"{"path":"from-output.rs"}"#)
             ),
             Some("from-tools.rs".to_string())
         );
         // Nothing to find.
         assert_eq!(extract_write_path(None, None), None);
         assert_eq!(try_extract_write_path("not json"), None);
-        assert_eq!(try_extract_write_path(r#"{"write":{"content":"x"}}"#), None);
-        assert_eq!(try_extract_write_path(r#"{"write":"src/a.rs"}"#), None);
+        assert_eq!(try_extract_write_path(r#"{"content":"x"}"#), None);
+        assert_eq!(try_extract_write_path(r#"{"path":["src/a.rs"]}"#), None);
+        assert_eq!(try_extract_write_path(r#"{"path":null}"#), None);
     }
 
     #[test]
-    fn only_write_and_edit_calls_are_snapshotted() {
-        let call = |s: &str| serde_json::from_str::<Value>(s).unwrap();
-        for key in ["write", "edit"] {
-            let v = call(&format!(r#"{{"{key}":{{"path":"a"}}}}"#));
-            assert!(write_op(v.as_object().unwrap()).is_some(), "{key}");
+    fn only_tool_write_and_tool_edit_are_snapshotted_under_their_bare_names() {
+        for tool in WRITE_TOOLS {
+            assert!(is_write_call(Some(tool)), "{tool}");
         }
-        for s in [
-            r#"{"read":{"path":"a"}}"#,
-            r#"{"find":{"pattern":"a"}}"#,
-            r#"{"edit":"a"}"#,
+        // The file tools that only read, the tool they replace, the names the write tools would go
+        // by with the dropped `murmur-` prefix or as a scoped install name, and a tool that
+        // creates files through its own schema.
+        for tool in [
+            "tool-read",
+            "tool-find",
+            "tool-editor",
+            "murmur-tool-write",
+            "murmur/tool-write",
+            "murmur-tool-edit",
+            "murmur/tool-edit",
+            "tool-create",
         ] {
-            assert!(write_op(call(s).as_object().unwrap()).is_none(), "{s}");
+            assert!(!is_write_call(Some(tool)), "{tool}");
         }
+        assert!(!is_write_call(None));
+    }
+
+    #[test]
+    fn the_nested_0_12_0_shape_yields_no_path_in_any_wrapping() {
+        // No fallback: tool-write and tool-edit refuse tool-editor 0.12.0's nested shape, so a
+        // call carrying it wrote nothing.
         for s in [
-            r#"{"read":{"path":"src/a.rs"}}"#,
-            r#"{"find":{"pattern":"x","dir":"src"}}"#,
-            r#"{"type":"tool_use","input":{"read":{"path":"src/a.rs"}}}"#,
-            r#"{"data":"{\"find\":{\"pattern\":\"x\"}}"}"#,
+            r#"{"write":{"path":"src/a.rs","content":"x"}}"#,
+            r#"{"edit":{"path":"src/e.rs","edits":[{"old":"a","new":"b"}]}}"#,
+            r#"{"type":"tool_use","input":{"edit":{"path":"src/b.rs","edits":[]}}}"#,
+            r#"{"data":"{\"write\":{\"path\":\"src/c.rs\"}}"}"#,
+            r#"{"data":{"edit":{"path":"src/c2.rs"}},"log_path":null}"#,
+            r#""{\"write\":{\"path\":\"src/d.rs\"}}""#,
         ] {
             assert_eq!(try_extract_write_path(s), None, "{s}");
         }
@@ -784,28 +782,16 @@ mod tests {
 
     #[test]
     fn the_pre_0_12_0_shape_yields_no_path_in_any_wrapping() {
-        // No fallback: the editor refuses this shape, so a call carrying it wrote nothing.
+        // No fallback: `dest_path` names nothing either tool takes.
         for s in [
             r#"{"operation":"write_file","dest_path":"src/a.rs","content":"x"}"#,
             r#"{"operation":"replace_in_file","dest_path":"src/a.rs"}"#,
             r#"{"type":"tool_use","input":{"operation":"write_file","dest_path":"src/b.rs"}}"#,
             r#"{"data":"{\"operation\":\"write_file\",\"dest_path\":\"src/c.rs\"}"}"#,
             r#""{\"operation\":\"write_file\",\"dest_path\":\"src/d.rs\"}""#,
-            r#"{"operation":"read_file","path":"src/a.rs"}"#,
         ] {
             assert_eq!(try_extract_write_path(s), None, "{s}");
         }
-    }
-
-    #[test]
-    fn only_the_editor_tool_is_snapshotted_under_its_bare_name() {
-        assert!(is_editor_call(Some("tool-editor")));
-        // The name it went by before the default artifacts dropped their `murmur-` prefix, and
-        // its scoped install name: neither is what the model calls it.
-        assert!(!is_editor_call(Some(&format!("murmur-{EDITOR_TOOL}"))));
-        assert!(!is_editor_call(Some(&format!("murmur/{EDITOR_TOOL}"))));
-        assert!(!is_editor_call(Some("tool-create")));
-        assert!(!is_editor_call(None));
     }
 
     #[test]

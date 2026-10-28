@@ -20,7 +20,7 @@
 # repo's .murmur/ at index/slice time; a runtime artifact, never committed.
 **/.murmur/
 
-# Host-test fixture trees. The editor tool refuses absolute path inputs, so its host tests
+# Host-test fixture trees. The file tools refuse absolute path inputs, so their host tests
 # address fixtures relative to the crate root instead of under /tmp; a runtime artifact of
 # `cargo test`, never committed.
 **/.test-scratch/

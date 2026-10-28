@@ -17,8 +17,9 @@
 #   hook-*                             -> HOOK   category
 #   driver-claude-code                 -> PROCESS-DRIVER category
 #   driver-*                           -> TOOL   category
-#   tool-{request-input,create,editor, -> TOOL   category (wasm32-wasip2 components
-#     corpus,report,tavily}                     that export murmur:tool/run)
+#   tool-{request-input,create,read,   -> TOOL   category (wasm32-wasip2 components
+#     write,edit,find,corpus,report,            that export murmur:tool/run)
+#     tavily}
 #   tool-{git,git-validate,            -> SKIP   (native bin crates the workspace build
 #     registry-search}                          may still leave a .wasm for; shipped as
 #                                               native binaries, they export
@@ -140,7 +141,7 @@ validate_one() {
       expected_export="murmur:driver/process"
       expected_version="$process_driver_version"
       ;;
-    driver-*|tool-request-input|tool-create|tool-editor|tool-corpus|tool-report|tool-tavily|tool-github)
+    driver-*|tool-request-input|tool-create|tool-read|tool-write|tool-edit|tool-find|tool-corpus|tool-report|tool-tavily|tool-github)
       category="tool"
       expected_export="murmur:tool/run"
       expected_version="$tool_version"

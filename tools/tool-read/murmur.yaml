@@ -1,0 +1,21 @@
+name: tool-read
+version: 0.1.0
+runtime: tool
+implementation: wasm
+description: |
+  Reads a file. path is relative to the work folder; an absolute path is refused.
+  Returns content and total_lines: at most 2000 lines and 100 KB, lines cut to 2000 characters. A cut read adds a truncated note naming the limit and the start_line that continues it. A range over 2000 lines is refused.
+input_schema:
+  type: object
+  properties:
+    path:
+      type: string
+    start_line:
+      type: integer
+      description: 1-based
+    end_line:
+      type: integer
+  required: [path]
+  murmur-destinations: []
+requires_files:
+  - tool_read.wasm

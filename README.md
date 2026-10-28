@@ -4,17 +4,17 @@
 
 Default Murmur artifacts shipped with the runtime.
 
-Every artifact here is published under scope `murmur`: the artifact in `tools/tool-editor/` is
-`murmur/tool-editor`, which is how a capsule's `artifacts:` names it and how it installs:
+Every artifact here is published under scope `murmur`: the artifact in `tools/tool-read/` is
+`murmur/tool-read`, which is how a capsule's `artifacts:` names it and how it installs:
 
 ```bash
-mur install -g murmur/tool-editor@0.12.0
+mur install -g murmur/tool-read@0.1.0
 ```
 
 ```yaml
 artifacts:
-  - name: murmur/tool-editor
-    version: "0.12.0"
+  - name: murmur/tool-read
+    version: "0.1.0"
 ```
 
 Installing by scoped name needs `mur` 0.7.0 or later. `mur` v0.6.0 and earlier have no
@@ -102,7 +102,7 @@ WASM components (`runtime: hook`) that attach to lifecycle events. Each hook dec
 |---|---|---|---|---|---|
 | `hook-debug` | `hooks/hook-debug/` | *(all events)* | async | none | Writes a JSONL event log to `hook-debug.jsonl` in the session records directory's `hooks/` |
 | `hook-compact` | `hooks/hook-compact/` | `on-compaction` | blocking | replace-context | Compacts conversation history when the session token threshold is reached |
-| `hook-diff-summary` | `hooks/hook-diff-summary/` | *(all events)* | blocking | none | Snapshots files before each editor tool call and emits a structured unified-diff summary at end of turn; requires `tool-editor` 0.12.0 or later |
+| `hook-diff-summary` | `hooks/hook-diff-summary/` | *(all events)* | blocking | none | Snapshots files before each `tool-write` and `tool-edit` call and emits a structured unified-diff summary at end of turn; requires `tool-write` and `tool-edit` 0.1.0 or later |
 | `hook-memory` | `hooks/hook-memory/` | `on-task-start` | blocking | seed-context | Seeds a task with the relevant part of the conversation that came before it, read from the runtime's durable conversation record |
 | `hook-shell-desc` | `hooks/hook-shell-desc/` | `on-stage` | blocking | write-manifests | Returns tool manifests for common non-interpreter shell binaries at staging time, stating what each takes and returns; shell interpreters keep the runtime's own description |
 | `hook-eval` | `hooks/hook-eval/` | *(all events)* | async | none | Scores sessions against configured scorers and writes `eval.jsonl` in the session records directory's `hooks/`, where `mur eval` reads it |
@@ -130,8 +130,8 @@ driver.
 ## Tools
 
 Tool artifacts (`runtime: tool`) exposed to the agent as callable functions. `tool-corpus`,
-`tool-create`, `tool-editor`, `tool-github`, `tool-report`, `tool-request-input`, and
-`tool-tavily` are WASM components (`wasm32-wasip2`, exporting `murmur:tool/run`); the
+`tool-create`, `tool-read`, `tool-write`, `tool-edit`, `tool-find`, `tool-github`,
+`tool-report`, `tool-request-input`, and `tool-tavily` are WASM components (`wasm32-wasip2`, exporting `murmur:tool/run`); the
 remaining five are native binaries whose C dependencies (SQLite, tree-sitter, TLS) do not
 cross-compile to wasm32-wasip2 (see [BUILD.md](./BUILD.md)).
 
@@ -139,7 +139,10 @@ cross-compile to wasm32-wasip2 (see [BUILD.md](./BUILD.md)).
 |---|---|---|---|
 | `tool-corpus` | `tools/tool-corpus/` | WASM | Append-only record store (`append`, `get`, `read_recent`, `search`, `verify`); requires a `capabilities.state` grant and a `config:` block on its manifest entry declaring the record types |
 | `tool-create` | `tools/tool-create/` | WASM | Scaffolds a new artifact directory (`murmur.yaml`, stub payload, README) for a `native` tool, a `wasm` tool, or a `hook` |
-| `tool-editor` | `tools/tool-editor/` | WASM | File read, write, edit and search without shell access. A call holds exactly one of `read` (`path`, optional `start_line`/`end_line`), `write` (`path`, `content`), `edit` (`path`, `edits`: a list of `{old, new}` replacements) or `find` (`pattern`, optional `dir`, `glob`, `recursive`, `context_lines`); every file is named `path`. `write.path` and `edit.path` are declared `format: murmur-destination`, so a `capabilities.filesystem.read_only` grant refuses a write by those locations while `read.path` stays readable. `edit` applies its pairs in order, each `old` matching exactly once, all or nothing: one failing pair leaves the file unchanged. Every path is workdir-relative; an absolute one is refused with `error_kind: absolute_path` before any filesystem call. `read` returns at most 2000 lines and 100 KB and cuts lines over 2000 characters, with a `truncated` note naming the `start_line` that continues the read. `find` stops at 200 matches, 5000 files walked, 32 MiB read or a 500 KB result, returning what it found with a `capped` note; see its README |
+| `tool-read` | `tools/tool-read/` | WASM | Reads a file: `path`, optional `start_line`/`end_line`. Returns at most 2000 lines and 100 KB and cuts lines over 2000 characters, with a `truncated` note naming the `start_line` that continues the read. Declares `murmur-destinations: []`, so a `capabilities.filesystem.read_only` grant leaves it free to read; see its [README](./tools/tool-read/README.md) |
+| `tool-write` | `tools/tool-write/` | WASM | Creates or replaces a file and any missing directories: `path`, `content`. `path` is declared `format: murmur-destination`, so a `read_only` grant refuses a write under it; see its [README](./tools/tool-write/README.md) |
+| `tool-edit` | `tools/tool-edit/` | WASM | Replaces text in a file: `path`, `edits`, a list of `{old, new}`. The pairs apply in order, each `old` matching exactly once, all or nothing: one failing pair leaves the file unchanged and the error names it `edit N of M`. `path` is declared `format: murmur-destination`; see its [README](./tools/tool-edit/README.md) |
+| `tool-find` | `tools/tool-find/` | WASM | Searches file contents for a regex: `pattern`, optional `dir`, `glob`, `recursive`, `context_lines`. Stops at 200 matches, 5000 files walked, 32 MiB read or a 500 KB result, returning what it found with a `capped` note. Declares `murmur-destinations: []`; see its [README](./tools/tool-find/README.md) |
 | `tool-github` | `tools/tool-github/` | WASM | Pushes a local commit range to one operator-pinned GitHub repo so the remote branch lands on the identical SHA, fetches a branch back, and opens, inspects, lists and merges pull requests on that repo; the GitHub token is bound on the entry as `gateway.api_key` and attached by the runtime, never held by the tool |
 | `tool-report` | `tools/tool-report/` | WASM | The capsule states its own conclusion (`report`, `progress`) into `state/reports/<session_id>.json`, one file per session named by `MURMUR_SESSION_ID`, keeping at most 64 and never the caller's own or one written in the last 7 days; requires a `capabilities.state` grant, and takes an optional `config:` block closing the deliverable-kind and note-stage vocabularies |
 | `tool-request-input` | `tools/tool-request-input/` | WASM | HITL pause gate — suspends the agent loop and waits for human input via `SendMessage` |

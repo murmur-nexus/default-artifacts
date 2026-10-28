@@ -48,11 +48,11 @@ own manifest, and is what excludes native and internal crates from the wasm buil
 ## Build one artifact
 
 ```bash
-cargo build -p tool-editor --target wasm32-wasip2 --release   # wasm
+cargo build -p tool-read --target wasm32-wasip2 --release     # wasm
 cargo build --release -p tool-git                              # native
-./scripts/validate-component.sh target/wasm32-wasip2/release/tool_editor.wasm
-./scripts/package-artifact.sh tools/tool-editor release/       # → release/tool-editor-0.12.0.mur.zip
-./scripts/local-install.sh tool-editor /path/to/capsule-folder
+./scripts/validate-component.sh target/wasm32-wasip2/release/tool_read.wasm
+./scripts/package-artifact.sh tools/tool-read release/         # → release/tool-read-0.1.0.mur.zip
+./scripts/local-install.sh tool-read /path/to/capsule-folder
 ```
 
 `validate-component.sh` checks a component's world-level imports and exports against its category

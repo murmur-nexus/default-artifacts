@@ -1866,6 +1866,20 @@ name = "murmur-driver-stream"
 version = "0.0.0"
 
 [[package]]
+name = "murmur-file-tools"
+version = "0.0.0"
+dependencies = [
+ "regex",
+ "serde_json",
+ "serde_norway",
+ "tempfile",
+ "tiktoken-rs",
+ "walkdir",
+ "wasmtime",
+ "wasmtime-wasi",
+]
+
+[[package]]
 name = "murmur-hook-transcript"
 version = "0.0.0"
 dependencies = [
@@ -2706,17 +2720,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "tool-editor"
+name = "tool-edit"
 version = "0.0.0"
 dependencies = [
- "regex",
- "serde_json",
- "serde_norway",
- "tempfile",
- "tiktoken-rs",
- "walkdir",
- "wasmtime",
- "wasmtime-wasi",
+ "murmur-file-tools",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "tool-find"
+version = "0.0.0"
+dependencies = [
+ "murmur-file-tools",
  "wit-bindgen 0.59.0",
 ]
 
@@ -2755,6 +2770,14 @@ dependencies = [
  "wasmtime",
  "wasmtime-wasi",
  "wasmtime-wasi-http",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "tool-read"
+version = "0.0.0"
+dependencies = [
+ "murmur-file-tools",
  "wit-bindgen 0.59.0",
 ]
 
@@ -2809,6 +2832,14 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "tool-write"
+version = "0.0.0"
+dependencies = [
+ "murmur-file-tools",
+ "wit-bindgen 0.59.0",
 ]
 
 [[package]]
