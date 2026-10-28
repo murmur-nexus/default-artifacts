@@ -18,8 +18,9 @@ Binding: all events · mode: blocking · commit policy: reopen-task.
   snapshot for a command seen **before the task's first source edit** is that
   command's *baseline*; every later snapshot for the same command is its
   *current* result.
-- **`on-tool-call`** — a call to `tool-editor` or `tool-create`
-  marks that the task's first source edit has occurred.
+- **`on-tool-call`** — a call to `tool-write`, `tool-edit` or `tool-create`
+  marks that the task's first source edit has occurred. A `tool-read` or
+  `tool-find` call only reads, so it does not.
 - **`on-task-end`** — diffs each command's latest current snapshot against its
   baseline. A previously-passing test now failing is a **regression**. When
   essentially the entire baseline-passing set stops passing at once (≥90% of it),
@@ -41,7 +42,7 @@ Declare in your capsule `murmur.yaml`:
 ```yaml
 artifacts:
   - name: murmur/hook-regression-verifier
-    version: 0.10.0
+    version: 0.11.0
     runtime: hook
     capabilities:
       filesystem:

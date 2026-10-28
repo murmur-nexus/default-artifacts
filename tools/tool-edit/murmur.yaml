@@ -1,0 +1,25 @@
+name: tool-edit
+version: 0.1.0
+runtime: tool
+implementation: wasm
+description: |
+  Replaces text in a file. Edits apply in order, each to the result of the one before; each old must match exactly once. All or nothing: if one fails, the file is unchanged and the error names its position, from 1. path is relative to the work folder; an absolute path is refused.
+input_schema:
+  type: object
+  properties:
+    path:
+      type: string
+      format: murmur-destination
+    edits:
+      type: array
+      items:
+        type: object
+        properties:
+          old:
+            type: string
+          new:
+            type: string
+        required: [old, new]
+  required: [path, edits]
+requires_files:
+  - tool_edit.wasm

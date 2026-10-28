@@ -29,7 +29,8 @@
 #                    `implementation:` key at all (drivers and hooks).
 #   internal-lib     No murmur.yaml, no `[[bin]]`, but a library — it is linked
 #                    into wasm artifacts, so it must cross-compile.
-#                    Catches: murmur-{driver-env,hook-transcript,test-parse,time}.
+#                    Catches: murmur-{driver-env,driver-stream,file-tools,
+#                    hook-transcript,test-parse,time}.
 #
 # A member matching none of the four is a hard error rather than a silent guess
 # in either direction: excluding it would drop an artifact out of the build, and

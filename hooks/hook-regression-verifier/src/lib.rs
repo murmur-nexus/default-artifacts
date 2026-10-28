@@ -9,8 +9,9 @@
 //!     result as a per-command snapshot. The FIRST snapshot for a command seen
 //!     *before the task's first source edit* is that command's baseline; every
 //!     later snapshot for the same command is its current result.
-//!   • `on-tool-call` — a call to `tool-editor` or `tool-create`
-//!     marks that the task's first source edit has occurred.
+//!   • `on-tool-call` — a call to `tool-write`, `tool-edit` or `tool-create`
+//!     marks that the task's first source edit has occurred. A `tool-read` or
+//!     `tool-find` call reads, so it does not.
 //!   • `on-task-end` — diffs each command's latest current snapshot against its
 //!     baseline. A previously-passing test that is now failing (or a wholesale
 //!     collapse of the baseline-passing set — the "0/644" collection-failure
@@ -40,8 +41,8 @@ use serde_json::{json, Value};
 /// collection-error string matching.
 const COLLECTION_FAILURE_RATIO: f64 = 0.9;
 
-/// The two tool names that mean "the agent edited a source file this task".
-const EDIT_TOOLS: [&str; 2] = ["tool-editor", "tool-create"];
+/// The tool names that mean "the agent edited a source file this task".
+const EDIT_TOOLS: [&str; 3] = ["tool-write", "tool-edit", "tool-create"];
 
 /// Substrings in a shell command that mark it as a test-runner invocation. The
 /// runner *format* is then resolved from the command's OUTPUT via
@@ -347,17 +348,18 @@ mod tests {
 
     #[test]
     fn edits_are_recognised_by_the_bare_tool_names_only() {
-        for tool in ["tool-editor", "tool-create"] {
+        for tool in ["tool-write", "tool-edit", "tool-create"] {
             let mut st = RegressionState::new();
             st.observe_tool(tool);
             assert!(st.first_edit_seen, "{tool} should count as a source edit");
         }
-        // The names they went by before the `murmur-` prefix was dropped, a scoped install name,
-        // and a tool that edits nothing.
+        // The file tools that only read, the tool the file tools replace, the names the edit tools
+        // would go by with the dropped `murmur-` prefix or as a scoped install name, and a tool
+        // that edits nothing.
         let others = EDIT_TOOLS
             .iter()
             .flat_map(|tool| [format!("murmur-{tool}"), format!("murmur/{tool}")])
-            .chain(["tool-git".to_string()]);
+            .chain(["tool-read", "tool-find", "tool-editor", "tool-git"].map(str::to_string));
         for tool in others {
             let tool = tool.as_str();
             let mut st = RegressionState::new();
@@ -373,7 +375,7 @@ mod tests {
     fn scenario_1_no_regression_is_clean() {
         let mut st = RegressionState::new();
         st.observe_shell("cargo test", &cargo_output(3, &[]), "");
-        st.observe_tool("tool-editor");
+        st.observe_tool("tool-edit");
         st.observe_shell("cargo test", &cargo_output(3, &[]), "");
         let v = st.derive_verdict();
         assert!(!v.reopen);
@@ -385,7 +387,7 @@ mod tests {
     fn scenario_2_single_test_regression_reopens() {
         let mut st = RegressionState::new();
         st.observe_shell("cargo test", &cargo_output(3, &[]), "");
-        st.observe_tool("tool-editor");
+        st.observe_tool("tool-edit");
         st.observe_shell("cargo test", &cargo_output(2, &["beta"]), "");
         let v = st.derive_verdict();
         assert!(v.reopen);
@@ -425,7 +427,7 @@ mod tests {
         let mut st = RegressionState::new();
         // baseline: 2 passing, `beta` failing.
         st.observe_shell("cargo test", &cargo_output(2, &["beta"]), "");
-        st.observe_tool("tool-editor");
+        st.observe_tool("tool-edit");
         // current: `beta` fixed, now 3 passing, none failing.
         st.observe_shell("cargo test", &cargo_output(3, &[]), "");
         let v = st.derive_verdict();
@@ -438,7 +440,7 @@ mod tests {
     fn scenario_5_no_test_command_observed_is_clean() {
         let mut st = RegressionState::new();
         st.observe_shell("ls -la", "a\nb\nc", "");
-        st.observe_tool("tool-editor");
+        st.observe_tool("tool-edit");
         st.observe_shell("echo hi", "hi", "");
         let v = st.derive_verdict();
         assert!(!v.reopen);
@@ -449,7 +451,7 @@ mod tests {
     fn scenario_6_task_start_resets_state() {
         let mut st = RegressionState::new();
         st.observe_shell("cargo test", &cargo_output(3, &[]), "");
-        st.observe_tool("tool-editor");
+        st.observe_tool("tool-edit");
         st.observe_shell("cargo test", &cargo_output(2, &["beta"]), "");
         assert!(st.derive_verdict().reopen);
         // A new task resets: prior baseline/current/edit flag are gone.
@@ -457,7 +459,7 @@ mod tests {
         assert!(st.derive_verdict().commands.is_empty());
         // Fresh baseline taken pre-edit again (proves first_edit_seen was reset).
         st.observe_shell("cargo test", &cargo_output(5, &[]), "");
-        st.observe_tool("tool-editor");
+        st.observe_tool("tool-edit");
         st.observe_shell("cargo test", &cargo_output(5, &[]), "");
         assert!(!st.derive_verdict().reopen);
     }
@@ -466,7 +468,7 @@ mod tests {
     fn scenario_7_reopen_does_not_reset_state() {
         let mut st = RegressionState::new();
         st.observe_shell("cargo test", &cargo_output(3, &[]), "");
-        st.observe_tool("tool-editor");
+        st.observe_tool("tool-edit");
         st.observe_shell("cargo test", &cargo_output(2, &["beta"]), "");
         // First on-task-end: regression → reopen.
         let v1 = st.derive_verdict();
@@ -484,7 +486,7 @@ mod tests {
     #[test]
     fn command_seen_only_post_edit_has_no_baseline() {
         let mut st = RegressionState::new();
-        st.observe_tool("tool-editor");
+        st.observe_tool("tool-edit");
         // First sighting of this command is after the edit → no baseline.
         st.observe_shell(
             "go test ./...",

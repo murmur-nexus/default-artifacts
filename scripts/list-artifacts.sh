@@ -23,7 +23,7 @@
 #
 #   <dir>\t<name>\t<version>\t<runtime>\t<impl>
 #
-# where <dir> is repo-relative (`tools/tool-editor`) and <impl> is `native` for
+# where <dir> is repo-relative (`tools/tool-read`) and <impl> is `native` for
 # `implementation: native`, `skill` for `runtime: skill`, and `wasm` otherwise.
 # On any refusal nothing is printed to stdout, so a caller never acts on a
 # partial list.

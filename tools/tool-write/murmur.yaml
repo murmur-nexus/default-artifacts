@@ -1,0 +1,17 @@
+name: tool-write
+version: 0.1.0
+runtime: tool
+implementation: wasm
+description: |
+  Creates or replaces a file and any missing directories. path is relative to the work folder; an absolute path is refused.
+input_schema:
+  type: object
+  properties:
+    path:
+      type: string
+      format: murmur-destination
+    content:
+      type: string
+  required: [path, content]
+requires_files:
+  - tool_write.wasm
