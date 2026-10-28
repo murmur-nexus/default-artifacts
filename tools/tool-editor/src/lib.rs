@@ -21,17 +21,17 @@ pub mod logic {
 
     // ── Configuration ──────────────────────────────────────────────────────────
 
-    // find_in_files limits. A search stops at the first one it reaches and still succeeds,
-    // returning the matches found so far with a `capped` note; see `cap_note`.
-    const FIND_RESULT_SIZE_LIMIT: usize = 500 * 1024; // 500 KB ceiling for find_in_files output
+    // find limits. A search stops at the first one it reaches and still succeeds, returning the
+    // matches found so far with a `capped` note; see `cap_note`.
+    const FIND_RESULT_SIZE_LIMIT: usize = 500 * 1024; // 500 KB ceiling for find output
     const FIND_MAX_MATCHES: usize = 200;
     // Files walked: every file the walk reaches below `dir`, whether or not the `glob` admits it.
     const FIND_MAX_FILES: usize = 5_000;
     const FIND_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
-    // read_file limits. Every read, with or without a range, returns at most this many lines,
-    // this many bytes of `content`, and no line longer than `MAX_LINE_CHARS`; a read cut by one
-    // of them still succeeds, with a `truncated` note built by `read_cut_note`.
+    // read limits. Every read, with or without a range, returns at most this many lines, this
+    // many bytes of `content`, and no line longer than `MAX_LINE_CHARS`; a read cut by one of
+    // them still succeeds, with a `truncated` note built by `read_cut_note`.
     const MAX_READ_LINES: usize = 2000;
     // About 25,000 tokens at about 4 bytes per token, and above 2000 lines of ordinary source
     // (30-45 bytes per line), so on normal code the line limit binds first.
@@ -40,9 +40,9 @@ pub mod logic {
     // bytes, so the first line of a read always fits under `MAX_READ_BYTES`.
     const MAX_LINE_CHARS: usize = 2000;
 
-    // Upper bound on `find_in_files` `context_lines`, mirroring the range a `grep -C` user
-    // would realistically ask for. Beyond this the context stops being "the surrounding
-    // function" and starts re-transmitting whole files, defeating the bounded-read intent.
+    // Upper bound on `find` `context_lines`, mirroring the range a `grep -C` user would
+    // realistically ask for. Beyond this the context stops being "the surrounding function" and
+    // starts re-transmitting whole files, defeating the bounded-read intent.
     const MAX_CONTEXT_LINES: i64 = 20;
 
     // ── Error kind constants ────────────────────────────────────────────────────
@@ -51,33 +51,43 @@ pub mod logic {
         pub const NOT_FOUND: &str = "not_found";
         pub const PERMISSION_DENIED: &str = "permission_denied";
         pub const IO_ERROR: &str = "io_error";
+        // An `edit` pair whose `old` occurs nowhere in the text it applies to.
         pub const STRING_NOT_FOUND: &str = "string_not_found";
+        // An `edit` pair whose `old` occurs more than once in the text it applies to.
+        pub const MULTIPLE_MATCHES: &str = "multiple_matches";
+        // A key the call, an operation object or an `edits` element does not accept.
+        pub const UNKNOWN_FIELD: &str = "unknown_field";
         pub const INVALID_PATTERN: &str = "invalid_pattern";
         pub const RESULT_SIZE_EXCEEDED: &str = "result_size_exceeded";
-        // read_file range validation: start_line < 1, an inverted span (start > end), or a
+        // read range validation: start_line < 1, an inverted span (start > end), or a
         // start_line past the end of the file. All three are caller mistakes about *which*
         // lines to read, so they share one kind; the message states which one occurred.
         pub const INVALID_RANGE: &str = "invalid_range";
-        // read_file explicit start_line/end_line span exceeds MAX_READ_LINES — a valid but
+        // read explicit start_line/end_line span exceeds MAX_READ_LINES — a valid but
         // too-wide range.
         pub const RANGE_TOO_LARGE: &str = "range_too_large";
-        // find_in_files context_lines is negative or exceeds MAX_CONTEXT_LINES.
+        // find context_lines is negative or exceeds MAX_CONTEXT_LINES.
         pub const CONTEXT_TOO_LARGE: &str = "context_too_large";
-        // A path input (`path`, `dest_path`, `dir` or `glob`) was given as an absolute value,
-        // which the manifest's contract forbids: every path this tool takes is relative to the
-        // capsule workdir.
+        // A path input (`read.path`, `write.path`, `edit.path`, `find.dir` or `find.glob`) was
+        // given as an absolute value, which the manifest's contract forbids: every path this
+        // tool takes is relative to the capsule workdir.
         pub const ABSOLUTE_PATH: &str = "absolute_path";
-        // find_in_files `dir` has a `..` that climbs above the capsule workdir.
+        // find `dir` has a `..` that climbs above the capsule workdir.
         pub const OUTSIDE_WORKDIR: &str = "outside_workdir";
     }
 
     // ── Dispatch entry point ────────────────────────────────────────────────────
 
     /// Parse a stdin-envelope string `{"data": <string-or-object>, "log_path": ...}`,
-    /// dispatch on `data.operation`, and return the old-protocol result `Value`. This is
-    /// the exact contract the native binary's `main` fed from stdin; the `wasm_tool`
-    /// adapter reconstructs the same envelope from the WIT `ToolInput` so behavior is
-    /// identical across the port.
+    /// dispatch on the one operation key `data` holds, and return the old-protocol result
+    /// `Value`. This is the exact contract the native binary's `main` fed from stdin; the
+    /// `wasm_tool` adapter reconstructs the same envelope from the WIT `ToolInput` so behavior
+    /// is identical across the port.
+    ///
+    /// The call is checked in this order, and the first failure is returned: `data` is an
+    /// object; it holds no key but the [`OPERATIONS`] names; exactly one of those is non-null;
+    /// its value is an object; that object holds no key its operation does not accept (checked
+    /// first thing in each handler). Only then does the handler touch the filesystem.
     pub fn run(raw: &str) -> Value {
         if raw.trim().is_empty() {
             return fail_msg("missing input on stdin");
@@ -94,7 +104,7 @@ pub mod logic {
         };
 
         // data may be a JSON-encoded string (double-encoded) or a JSON object directly
-        let op: Value = match &data_value {
+        let call: Value = match &data_value {
             Value::String(s) => match serde_json::from_str(s) {
                 Ok(v) => v,
                 Err(e) => return fail_msg(format!("invalid data JSON string: {e}")),
@@ -102,28 +112,56 @@ pub mod logic {
             Value::Object(_) => data_value.clone(),
             _ => return fail_msg("data must be a JSON string or object"),
         };
-
-        // An absent, non-string or empty `operation` is "missing", the same as every other
-        // required string input in this tool.
-        let name = match op.get("operation") {
-            Some(Value::String(name)) if !name.is_empty() => name,
-            _ => return fail_msg(format!("missing \"operation\": {}", expected_operations())),
+        let Value::Object(call) = call else {
+            return fail_msg("data must be a JSON string or object");
         };
-        match OPERATIONS.iter().find(|(known, _, _)| known == name) {
-            Some((_, handler, effect)) => with_state_effect(handler(&op), effect),
-            None => fail_msg(format!(
-                "unknown operation {name:?}: {}",
-                expected_operations()
-            )),
+
+        // Every key that names no operation, whatever its value: this is how a field of an
+        // earlier input shape (`operation`, `dest_path`, …) is refused.
+        let mut unknown: Vec<&str> = call
+            .keys()
+            .map(String::as_str)
+            .filter(|key| !OPERATIONS.iter().any(|(name, _, _)| name == key))
+            .collect();
+        if !unknown.is_empty() {
+            unknown.sort_unstable();
+            return err_result(
+                err::UNKNOWN_FIELD,
+                format!("unknown field {}: {}", quoted(&unknown), one_operation()),
+            );
+        }
+
+        // A declared key whose value is null counts as absent.
+        let given: Vec<_> = OPERATIONS
+            .iter()
+            .filter_map(|(name, handler, effect)| {
+                call.get(*name)
+                    .filter(|value| !value.is_null())
+                    .map(|value| (*name, handler, *effect, value))
+            })
+            .collect();
+        match given.as_slice() {
+            [(name, handler, effect, value)] => {
+                if !value.is_object() {
+                    return fail_msg(format!("{name} must be an object"));
+                }
+                with_state_effect(handler(value), effect)
+            }
+            [] => fail_msg(format!("{}; got none", one_operation())),
+            several => {
+                let names: Vec<&str> = several.iter().map(|(name, _, _, _)| *name).collect();
+                fail_msg(format!("{}; got {}", one_operation(), names.join(", ")))
+            }
         }
     }
 
-    /// An operation's entry point: the `data` object in, the old-protocol result out.
+    /// An operation's entry point: the operation's object in, the old-protocol result out.
     type Handler = fn(&Value) -> Value;
 
-    /// Every operation this tool dispatches: its name, its handler, and the `state_effect` a
-    /// successful call declares. The names are listed, in this order, in every error that
-    /// rejects an `operation`, and must equal the `operation` enum in `murmur.yaml`.
+    /// Every operation this tool dispatches: the call key that selects it, its handler, and
+    /// the `state_effect` a successful call declares. The names are listed, in this order, in
+    /// every error that rejects a call's keys, and must equal the top-level properties of
+    /// `input_schema` in `murmur.yaml`, in the same order.
     ///
     /// The effect goes out via the runtime's reserved `state_effect` metadata key (see the
     /// host's wit/tool.wit). This is what lets `mur trace` redundant-call detection reason
@@ -131,17 +169,56 @@ pub mod logic {
     /// declare an effect — a failed read did not read, and a failed write did not mutate, so
     /// those stay undeclared.
     const OPERATIONS: [(&str, Handler, &str); 4] = [
-        ("read_file", op_read_file, "read"),
-        ("write_file", op_write_file, "mutate"),
-        ("replace_in_file", op_replace_in_file, "mutate"),
-        ("find_in_files", op_find_in_files, "read"),
+        ("read", op_read, "read"),
+        ("write", op_write, "mutate"),
+        ("edit", op_edit, "mutate"),
+        ("find", op_find, "read"),
     ];
 
-    /// `expected one of ` followed by the [`OPERATIONS`] names, comma-separated — the tail of
-    /// every message that rejects an `operation`.
-    fn expected_operations() -> String {
+    /// `a call holds exactly one of ` followed by the [`OPERATIONS`] names, comma-separated —
+    /// the tail of every message that rejects a call's keys.
+    fn one_operation() -> String {
         let names: Vec<&str> = OPERATIONS.iter().map(|(name, _, _)| *name).collect();
-        format!("expected one of {}", names.join(", "))
+        format!("a call holds exactly one of {}", names.join(", "))
+    }
+
+    /// `keys` quoted, with quotes, backslashes and control characters escaped, and
+    /// comma-separated, so a key holding a quote or a newline keeps the message on one line.
+    fn quoted(keys: &[&str]) -> String {
+        keys.iter()
+            .map(|key| format!("{key:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// The `unknown_field` refusal for an object holding a key outside `accepted`, or `None`.
+    /// `place` names where the keys were found (`write`, `edit 2 of 3`) and `subject` what
+    /// takes the accepted keys (`write`, `an edit`): `unknown field "x" in <place>: <subject>
+    /// takes <accepted>`. A non-object holds no keys and is left to the caller.
+    fn reject_unknown_fields(
+        object: &Value,
+        place: &str,
+        subject: &str,
+        accepted: &[&str],
+    ) -> Option<Value> {
+        let mut unknown: Vec<&str> = object
+            .as_object()?
+            .keys()
+            .map(String::as_str)
+            .filter(|key| !accepted.contains(key))
+            .collect();
+        if unknown.is_empty() {
+            return None;
+        }
+        unknown.sort_unstable();
+        Some(err_result(
+            err::UNKNOWN_FIELD,
+            format!(
+                "unknown field {} in {place}: {subject} takes {}",
+                quoted(&unknown),
+                accepted.join(", ")
+            ),
+        ))
     }
 
     /// Attach the reserved `state_effect` metadata key to a successful result. Failures are
@@ -154,14 +231,28 @@ pub mod logic {
         result
     }
 
+    /// A non-empty string `field` of `op`, or the missing-field failure naming `location`.
+    fn required_path(op: &Value, field: &str, location: &str) -> Result<String, Value> {
+        match op.get(field).and_then(Value::as_str) {
+            Some(p) if !p.is_empty() => Ok(p.to_string()),
+            _ => Err(fail_msg(format!("missing required field: {location}"))),
+        }
+    }
+
     // ── FILE operations ─────────────────────────────────────────────────────────
 
-    fn op_read_file(op: &Value) -> Value {
-        let path = match op.get("path").and_then(|v| v.as_str()) {
-            Some(p) if !p.is_empty() => p.to_string(),
-            _ => return fail_msg("missing required field: path"),
+    /// The keys a `read` object accepts.
+    const READ_FIELDS: &[&str] = &["path", "start_line", "end_line"];
+
+    fn op_read(op: &Value) -> Value {
+        if let Some(refusal) = reject_unknown_fields(op, "read", "read", READ_FIELDS) {
+            return refusal;
+        }
+        let path = match required_path(op, "path", "read.path") {
+            Ok(p) => p,
+            Err(failure) => return failure,
         };
-        if let Some(refusal) = reject_absolute("path", &path) {
+        if let Some(refusal) = reject_absolute("read.path", &path) {
             return refusal;
         }
 
@@ -294,7 +385,7 @@ pub mod logic {
         ok_with(format!("read {path} lines {start}-{end}"), data, summary)
     }
 
-    /// The read_file limit that stopped a read before the lines it asked for ran out.
+    /// The read limit that stopped a read before the lines it asked for ran out.
     #[derive(Clone, Copy)]
     enum ReadLimit {
         Lines,
@@ -334,19 +425,25 @@ pub mod logic {
         }
     }
 
-    fn op_write_file(op: &Value) -> Value {
-        let path = match op.get("dest_path").and_then(|v| v.as_str()) {
-            Some(p) if !p.is_empty() => p.to_string(),
-            _ => return fail_msg("missing required field: dest_path"),
+    /// The keys a `write` object accepts.
+    const WRITE_FIELDS: &[&str] = &["path", "content"];
+
+    fn op_write(op: &Value) -> Value {
+        if let Some(refusal) = reject_unknown_fields(op, "write", "write", WRITE_FIELDS) {
+            return refusal;
+        }
+        let path = match required_path(op, "path", "write.path") {
+            Ok(p) => p,
+            Err(failure) => return failure,
         };
         // Before `content` is read and before `create_dir_all` below, so an absolute
         // destination never manufactures the directory tree it names.
-        if let Some(refusal) = reject_absolute("dest_path", &path) {
+        if let Some(refusal) = reject_absolute("write.path", &path) {
             return refusal;
         }
         let content = match op.get("content").and_then(|v| v.as_str()) {
             Some(c) => c.to_string(),
-            None => return fail_msg("missing required field: content"),
+            None => return fail_msg("missing required field: write.content"),
         };
 
         if let Some(parent) = std::path::Path::new(&path).parent() {
@@ -370,54 +467,142 @@ pub mod logic {
         }
     }
 
-    fn op_replace_in_file(op: &Value) -> Value {
-        let path = match op.get("dest_path").and_then(|v| v.as_str()) {
-            Some(p) if !p.is_empty() => p.to_string(),
-            _ => return fail_msg("missing required field: dest_path"),
-        };
-        if let Some(refusal) = reject_absolute("dest_path", &path) {
+    /// The keys an `edit` object accepts.
+    const EDIT_FIELDS: &[&str] = &["path", "edits"];
+    /// The keys an element of `edit.edits` accepts.
+    const EDIT_PAIR_FIELDS: &[&str] = &["old", "new"];
+
+    /// Apply `edits` to one file, all or nothing. Every input is validated before the file is
+    /// read; the file is then read once, each `{old, new}` pair is applied in order to the
+    /// result of the one before, and the file is written once, only after every pair matched
+    /// exactly once. A failing pair is named `edit N of M`, counted from 1.
+    fn op_edit(op: &Value) -> Value {
+        if let Some(refusal) = reject_unknown_fields(op, "edit", "edit", EDIT_FIELDS) {
             return refusal;
         }
-        let old_string = match op.get("old_string").and_then(|v| v.as_str()) {
-            Some(s) => s.to_string(),
-            None => return fail_msg("missing required field: old_string"),
+        let path = match required_path(op, "path", "edit.path") {
+            Ok(p) => p,
+            Err(failure) => return failure,
         };
-        let new_string = match op.get("new_string").and_then(|v| v.as_str()) {
-            Some(s) => s.to_string(),
-            None => return fail_msg("missing required field: new_string"),
+        if let Some(refusal) = reject_absolute("edit.path", &path) {
+            return refusal;
+        }
+        let pairs = match edit_pairs(op) {
+            Ok(pairs) => pairs,
+            Err(failure) => return failure,
         };
+        let total = pairs.len();
 
-        let contents = match std::fs::read_to_string(&path) {
+        let mut text = match std::fs::read_to_string(&path) {
             Ok(c) => c,
             Err(e) => return err_result(io_error_kind(&e), format!("{path}: {e}")),
         };
-
-        // Count BEFORE replacing; bail out without writing if absent.
-        let count = contents.matches(old_string.as_str()).count();
-        if count == 0 {
-            return err_result(
-                err::STRING_NOT_FOUND,
-                format!("old_string not found in {path}"),
-            );
+        for (index, (old, new)) in pairs.iter().enumerate() {
+            let position = index + 1;
+            let count = occurrences(&text, old);
+            if count != 1 {
+                let kind = if count == 0 {
+                    err::STRING_NOT_FOUND
+                } else {
+                    err::MULTIPLE_MATCHES
+                };
+                return err_result(
+                    kind,
+                    format!(
+                        "edit {position} of {total}: old occurs {count} times in {path}; the file is unchanged"
+                    ),
+                );
+            }
+            // The one occurrence is the first.
+            if let Some(at) = text.find(old.as_str()) {
+                text.replace_range(at..at + old.len(), new);
+            }
         }
 
-        let new_contents = contents.replace(old_string.as_str(), new_string.as_str());
-
-        match std::fs::write(&path, new_contents) {
-            Ok(()) => ok_with(
-                format!("{count} replacement(s) in {path}"),
-                json!({ "count": count }),
-                format!("{count} replacements"),
+        match std::fs::write(&path, text) {
+            Ok(()) => ok_summary_only(
+                format!("applied {total} edit(s) to {path}"),
+                format!("{total} edits"),
             ),
             Err(e) => err_result(io_error_kind(&e), format!("{path}: {e}")),
         }
     }
 
-    fn op_find_in_files(op: &Value) -> Value {
-        find_in_files(op, Limits::PRODUCTION)
+    /// The `(old, new)` pairs of `edit.edits`, every one validated: a non-empty array of
+    /// objects holding only `old`, a non-empty string, and `new`, a string that may be empty.
+    fn edit_pairs(op: &Value) -> Result<Vec<(String, String)>, Value> {
+        let edits = match op.get("edits") {
+            None | Some(Value::Null) => return Err(fail_msg("missing required field: edit.edits")),
+            Some(Value::Array(edits)) => edits,
+            Some(_) => {
+                return Err(fail_msg(
+                    "edit.edits must be an array of {old, new} objects",
+                ))
+            }
+        };
+        if edits.is_empty() {
+            return Err(fail_msg(
+                "edit.edits is empty: it takes at least one {old, new} object",
+            ));
+        }
+        let total = edits.len();
+        let mut pairs = Vec::with_capacity(total);
+        for (index, pair) in edits.iter().enumerate() {
+            let place = format!("edit {} of {total}", index + 1);
+            if !pair.is_object() {
+                return Err(fail_msg(format!(
+                    "{place} must be an object with old and new"
+                )));
+            }
+            if let Some(refusal) = reject_unknown_fields(pair, &place, "an edit", EDIT_PAIR_FIELDS)
+            {
+                return Err(refusal);
+            }
+            let old = match pair.get("old").and_then(Value::as_str) {
+                Some("") => {
+                    return Err(fail_msg(format!(
+                        "{place}: old is empty; it must name the text to replace"
+                    )))
+                }
+                Some(old) => old.to_string(),
+                None => return Err(fail_msg(format!("{place}: missing required field: old"))),
+            };
+            let new = match pair.get("new").and_then(Value::as_str) {
+                Some(new) => new.to_string(),
+                None => return Err(fail_msg(format!("{place}: missing required field: new"))),
+            };
+            pairs.push((old, new));
+        }
+        Ok(pairs)
     }
 
-    /// The bounds one `find_in_files` call works within. Production calls use
+    /// How many times `needle` occurs in `text`, overlapping occurrences included: every char
+    /// boundary at which `text` continues with `needle` counts, so `"aa"` occurs twice in
+    /// `"aaa"`. `needle` must be non-empty.
+    fn occurrences(text: &str, needle: &str) -> usize {
+        let mut count = 0;
+        let mut from = 0;
+        while let Some(at) = text[from..].find(needle) {
+            count += 1;
+            let start = from + at;
+            // Step one character past this occurrence's start, so the next search can find one
+            // that overlaps it.
+            from = start + text[start..].chars().next().map_or(1, char::len_utf8);
+        }
+        count
+    }
+
+    /// The keys a `find` object accepts.
+    const FIND_FIELDS: &[&str] = &["pattern", "dir", "glob", "recursive", "context_lines"];
+
+    fn op_find(op: &Value) -> Value {
+        if let Some(refusal) = reject_unknown_fields(op, "find", "find", FIND_FIELDS) {
+            return refusal;
+        }
+        find_with_limits(op, Limits::PRODUCTION)
+    }
+
+    /// The bounds one `find` call works within. Production calls use
     /// [`Limits::PRODUCTION`]; unit tests pass smaller ones so a budget can be reached with a
     /// fixture of a few files.
     #[derive(Clone, Copy, Debug)]
@@ -447,27 +632,30 @@ pub mod logic {
         ResultSize,
     }
 
-    fn find_in_files(op: &Value, limits: Limits) -> Value {
+    fn find_with_limits(op: &Value, limits: Limits) -> Value {
         let pattern = match op.get("pattern").and_then(|v| v.as_str()) {
             Some(p) if !p.is_empty() => p.to_string(),
-            _ => return fail_msg("missing required field: pattern"),
+            _ => return fail_msg("missing required field: find.pattern"),
         };
         // Absent or null means the workdir root, the same as "" or ".".
         let dir = match op.get("dir") {
             None | Some(Value::Null) => String::new(),
             Some(Value::String(d)) => d.clone(),
-            Some(_) => return fail_msg("dir must be a string"),
+            Some(_) => return fail_msg("find.dir must be a string"),
         };
-        if let Some(refusal) = reject_absolute("dir", &dir) {
+        if let Some(refusal) = reject_absolute("find.dir", &dir) {
             return refusal;
         }
         let glob = match op.get("glob") {
             None | Some(Value::Null) => None,
             Some(Value::String(g)) if g.is_empty() => None,
             Some(Value::String(g)) => Some(g.clone()),
-            Some(_) => return fail_msg("glob must be a string"),
+            Some(_) => return fail_msg("find.glob must be a string"),
         };
-        if let Some(refusal) = glob.as_deref().and_then(|g| reject_absolute("glob", g)) {
+        if let Some(refusal) = glob
+            .as_deref()
+            .and_then(|g| reject_absolute("find.glob", g))
+        {
             return refusal;
         }
         let recursive = op
@@ -495,7 +683,7 @@ pub mod logic {
             None => {
                 return err_result(
                     err::OUTSIDE_WORKDIR,
-                    format!("'dir' resolves outside the capsule workdir: '{dir}'"),
+                    format!("'find.dir' resolves outside the capsule workdir: '{dir}'"),
                 )
             }
         };
@@ -661,7 +849,7 @@ pub mod logic {
     /// to a successful result after the handler returns.
     const METADATA_RESERVE: usize = 64;
 
-    /// The serialized size of a `find_in_files` result with no matches, at its largest: the
+    /// The serialized size of a `find` result with no matches, at its largest: the
     /// longest cap note, and a summary whose counts are as wide as the limits allow.
     fn envelope_overhead(limits: Limits) -> usize {
         [
@@ -750,7 +938,7 @@ pub mod logic {
 
     fn size_exceeded_message(limits: Limits) -> String {
         format!(
-            "a single match exceeds the find_in_files result size limit of {} bytes ({}).",
+            "a single match exceeds the find result size limit of {} bytes ({}).",
             limits.result_size,
             format_result_size(limits.result_size)
         )
@@ -970,13 +1158,14 @@ pub mod logic {
     /// contract in `murmur.yaml` — every path is relative to the capsule workdir — is
     /// observable at all.
     ///
-    /// `property` is the key the caller actually wrote (`path`, `dest_path`, `dir` or `glob`), so the
-    /// message names the field to fix. The suggestion is the value's final component: the tool
+    /// `location` is the input the caller actually wrote, as murmur renders an input location
+    /// (`read.path`, `write.path`, `edit.path`, `find.dir` or `find.glob`), so the message names
+    /// the field to fix. The suggestion is the value's final component: the tool
     /// cannot know which leading components the caller mistook for a root, but under a
     /// `Sealed` capsule the workdir is the only writable location, so the bare file name is
     /// the likely intended target. Values with no final component (`/`, or one ending in
     /// `..`) get no suggestion rather than an empty one.
-    fn reject_absolute(property: &str, value: &str) -> Option<Value> {
+    fn reject_absolute(location: &str, value: &str) -> Option<Value> {
         let path = Path::new(value);
         if !path.is_absolute() {
             return None;
@@ -988,7 +1177,7 @@ pub mod logic {
         Some(err_result(
             err::ABSOLUTE_PATH,
             format!(
-                "'{property}' must be relative to the capsule workdir; got '{value}'{suggestion}"
+                "'{location}' must be relative to the capsule workdir; got '{value}'{suggestion}"
             ),
         ))
     }
@@ -1037,6 +1226,8 @@ pub mod logic {
                 err::PERMISSION_DENIED,
                 err::IO_ERROR,
                 err::STRING_NOT_FOUND,
+                err::MULTIPLE_MATCHES,
+                err::UNKNOWN_FIELD,
                 err::INVALID_PATTERN,
                 err::RESULT_SIZE_EXCEEDED,
                 err::INVALID_RANGE,
@@ -1072,130 +1263,180 @@ pub mod logic {
         }
 
         #[test]
-        fn run_returns_error_for_unknown_operation() {
-            let input = r#"{"data":{"operation":"bogus_op_xyz"}}"#;
-            let out = run(input);
+        fn run_refuses_unknown_top_level_keys_sorted_and_quoted() {
+            let out = run(r#"{"data":{"operation":"read_file","dest_path":"a.txt"}}"#);
             assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::UNKNOWN_FIELD);
             assert_eq!(
                 out["message"],
-                "unknown operation \"bogus_op_xyz\": expected one of read_file, write_file, \
-                 replace_in_file, find_in_files"
+                "unknown field \"dest_path\", \"operation\": a call holds exactly one of read, \
+                 write, edit, find"
+            );
+            assert_eq!(out["summary"], out["message"]);
+            assert!(out["metadata"].is_null(), "{out:?}");
+
+            // Refused whatever its value, null included, and ahead of a valid operation key.
+            let out = run(r#"{"data":{"read":{"path":"a.txt"},"no_cache":null}}"#);
+            assert_eq!(out["error_kind"], err::UNKNOWN_FIELD, "{out:?}");
+            assert_eq!(
+                out["message"],
+                "unknown field \"no_cache\": a call holds exactly one of read, write, edit, find"
             );
         }
 
-        const MISSING_OPERATION: &str = "missing \"operation\": expected one of read_file, \
-                                         write_file, replace_in_file, find_in_files";
+        #[test]
+        fn an_unknown_key_is_quoted_with_escapes_on_one_line() {
+            let out = run(&json!({ "data": { "write\"file": 1, "write\nfile": 2 } }).to_string());
+            let message = out["message"].as_str().unwrap();
+            assert!(!message.contains('\n'), "{message:?}");
+            assert_eq!(
+                message,
+                r#"unknown field "write\nfile", "write\"file": a call holds exactly one of read, write, edit, find"#
+            );
+        }
+
+        const ONE_OPERATION: &str = "a call holds exactly one of read, write, edit, find";
 
         #[test]
-        fn run_names_a_missing_operation_and_writes_nothing() {
-            // Write-shaped input with every field but `operation`.
-            let dir = scratch("missing_operation");
+        fn run_refuses_a_call_with_no_operation_or_several() {
+            // S5. A null operation key counts as absent.
+            for (data, got) in [
+                (json!({}), "got none"),
+                (json!({ "read": null }), "got none"),
+                (json!({ "read": null, "write": null }), "got none"),
+                (
+                    json!({ "read": { "path": "a" }, "write": { "path": "b", "content": "" } }),
+                    "got read, write",
+                ),
+                (
+                    json!({ "find": { "pattern": "x" }, "edit": {}, "read": {}, "write": {} }),
+                    "got read, write, edit, find",
+                ),
+            ] {
+                let out = run(&json!({ "data": data }).to_string());
+                assert_eq!(out["ok"], false, "{data}");
+                assert_eq!(out["status"], "error", "{data}");
+                assert_eq!(out["message"], format!("{ONE_OPERATION}; {got}"), "{data}");
+                assert!(out.get("error_kind").is_none(), "{data}: {out:?}");
+                assert!(out["metadata"].is_null(), "{data}");
+            }
+        }
+
+        #[test]
+        fn a_null_operation_key_beside_a_real_one_is_absent() {
+            let dir = scratch("null_beside_real");
             let path = dir.join("out.txt");
-            let envelope = json!({
-                "data": { "dest_path": path.to_str().unwrap(), "content": "x" },
-            });
-            let out = run(&envelope.to_string());
-            assert_eq!(out["ok"], false);
-            assert_eq!(out["status"], "error");
-            assert_eq!(out["message"], MISSING_OPERATION);
-            assert_eq!(out["summary"], MISSING_OPERATION);
-            assert!(out.get("error_kind").is_none(), "got {out:?}");
-            assert!(out["metadata"].is_null(), "got {out:?}");
-            assert!(
-                !path.exists(),
-                "a rejected operation must not reach the filesystem"
-            );
+            let out = run(&json!({
+                "data": { "read": null, "write": { "path": path.to_str().unwrap(), "content": "x" } }
+            })
+            .to_string());
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(out["metadata"]["state_effect"], "mutate");
+            assert_eq!(fs::read_to_string(&path).unwrap(), "x");
             let _ = fs::remove_dir_all(&dir);
         }
 
         #[test]
-        fn run_treats_a_non_string_or_empty_operation_as_missing() {
-            for operation in [
-                json!(null),
-                json!(42),
-                json!(true),
-                json!(["write_file"]),
-                json!({}),
-                json!(""),
+        fn an_operation_value_must_be_an_object() {
+            for (name, value) in [
+                ("read", json!("a.txt")),
+                ("write", json!(["a.txt", "x"])),
+                ("edit", json!(1)),
+                ("find", json!(true)),
             ] {
-                let envelope = json!({ "data": { "operation": operation } });
-                let out = run(&envelope.to_string());
-                assert_eq!(out["ok"], false, "operation {operation}");
-                assert_eq!(out["status"], "error", "operation {operation}");
-                assert_eq!(out["message"], MISSING_OPERATION, "operation {operation}");
-                assert!(out["metadata"].is_null(), "operation {operation}");
+                let out = run(&json!({ "data": { name: value } }).to_string());
+                assert_eq!(out["ok"], false, "{name}");
+                assert_eq!(out["message"], format!("{name} must be an object"));
+                assert!(out.get("error_kind").is_none(), "{out:?}");
             }
         }
 
         #[test]
-        fn run_escapes_an_unknown_operation_name() {
-            let out = run(&json!({ "data": { "operation": "write\"file" } }).to_string());
-            let message = out["message"].as_str().unwrap();
-            assert!(
-                message.starts_with(r#"unknown operation "write\"file": expected one of "#),
-                "got {message}"
-            );
-
-            let out = run(&json!({ "data": { "operation": "write\nfile" } }).to_string());
-            let message = out["message"].as_str().unwrap();
-            assert!(!message.contains('\n'), "got {message:?}");
-            assert!(
-                message.starts_with(r#"unknown operation "write\nfile": "#),
-                "got {message:?}"
-            );
-        }
-
-        #[test]
-        fn a_rejected_operation_never_ends_in_a_dangling_colon() {
-            let dir = scratch("dangling_colon");
-            let dest = dir.join("out.txt");
-            let inputs = [
-                json!({ "data": { "dest_path": dest.to_str().unwrap(), "content": "x" } })
-                    .to_string(),
-                json!({ "data": { "operation": null } }).to_string(),
-                json!({ "data": { "operation": 42 } }).to_string(),
-                json!({ "data": { "operation": true } }).to_string(),
-                json!({ "data": { "operation": ["write_file"] } }).to_string(),
-                json!({ "data": { "operation": {} } }).to_string(),
-                json!({ "data": { "operation": "" } }).to_string(),
-                json!({ "data": { "operation": "bogus_op_xyz" } }).to_string(),
-                json!({ "data": r#"{"operation":"bogus_double_enc"}"# }).to_string(),
-                json!({ "data": { "operation": "write\"file" } }).to_string(),
-                json!({ "data": { "operation": "write\nfile" } }).to_string(),
-            ];
-            for input in inputs {
-                let out = run(&input);
-                let message = out["message"].as_str().unwrap();
-                assert!(
-                    !message.ends_with(':') && !message.ends_with(": "),
-                    "{input}: {message}"
+        fn each_operation_refuses_a_key_it_does_not_accept() {
+            for (name, accepted) in [
+                ("read", "path, start_line, end_line"),
+                ("write", "path, content"),
+                ("edit", "path, edits"),
+                ("find", "pattern, dir, glob, recursive, context_lines"),
+            ] {
+                let out = run(&json!({ "data": { name: { "zz": 1, "aa": null } } }).to_string());
+                assert_eq!(out["ok"], false, "{name}");
+                assert_eq!(out["error_kind"], err::UNKNOWN_FIELD, "{name}");
+                assert_eq!(
+                    out["message"],
+                    format!("unknown field \"aa\", \"zz\" in {name}: {name} takes {accepted}")
                 );
-                assert!(message.ends_with("find_in_files"), "{input}: {message}");
+                assert!(out["metadata"].is_null(), "{name}");
             }
+        }
+
+        #[test]
+        fn every_field_of_an_earlier_shape_is_refused_and_nothing_is_touched() {
+            // S4. The removed names reach the tool (murmur validates nothing nested), and each is
+            // refused as an unknown field before any file is created or changed.
+            let dir = scratch("old_shapes");
+            let file = dir.join("patch.txt");
+            fs::write(&file, "hello\n").unwrap();
+            let fresh = dir.join("fresh.txt");
+            let file = file.to_str().unwrap();
+            let fresh_s = fresh.to_str().unwrap();
+
+            for (data, message) in [
+                (
+                    json!({ "operation": "replace_in_file", "dest_path": file, "old_string": "hello", "new_string": "bye" }),
+                    format!("unknown field \"dest_path\", \"new_string\", \"old_string\", \"operation\": {ONE_OPERATION}"),
+                ),
+                (
+                    json!({ "write": { "dest_path": fresh_s, "content": "x" } }),
+                    "unknown field \"dest_path\" in write: write takes path, content".to_string(),
+                ),
+                (
+                    json!({ "edit": { "path": file, "old_string": "hello", "new_string": "bye" } }),
+                    "unknown field \"new_string\", \"old_string\" in edit: edit takes path, edits".to_string(),
+                ),
+                (
+                    json!({ "edit": { "path": file, "edits": [{ "old_string": "hello", "new_string": "bye" }] } }),
+                    "unknown field \"new_string\", \"old_string\" in edit 1 of 1: an edit takes old, new".to_string(),
+                ),
+                (
+                    json!({ "operation": "read_file", "path": file }),
+                    format!("unknown field \"operation\", \"path\": {ONE_OPERATION}"),
+                ),
+                (
+                    json!({ "operation": "write_file", "dest_path": fresh_s, "content": "x" }),
+                    format!("unknown field \"content\", \"dest_path\", \"operation\": {ONE_OPERATION}"),
+                ),
+            ] {
+                let out = run(&json!({ "data": data }).to_string());
+                assert_eq!(out["ok"], false, "{data}");
+                assert_eq!(out["error_kind"], err::UNKNOWN_FIELD, "{data}");
+                assert_eq!(out["message"], message, "{data}");
+                assert!(out["metadata"].is_null(), "{data}");
+            }
+            assert_eq!(fs::read_to_string(file).unwrap(), "hello\n");
             assert!(
-                !dest.exists(),
-                "a rejected operation must not reach the filesystem"
+                !fresh.exists(),
+                "a refused call must not reach the filesystem"
             );
             let _ = fs::remove_dir_all(&dir);
         }
 
         #[test]
         fn every_listed_operation_reaches_its_handler() {
-            // With no other fields, each handler refuses on its own first required input —
-            // proof the name passed both the missing and the unknown check and reached the
-            // handler it is paired with.
+            // With an empty object, each handler refuses on its own first required input —
+            // proof the key passed every dispatch check and reached the handler it is paired with.
             let first_required = [
-                ("read_file", "path"),
-                ("write_file", "dest_path"),
-                ("replace_in_file", "dest_path"),
-                ("find_in_files", "pattern"),
+                ("read", "read.path"),
+                ("write", "write.path"),
+                ("edit", "edit.path"),
+                ("find", "find.pattern"),
             ];
             for (name, _, _) in OPERATIONS {
                 let (_, field) = first_required
                     .iter()
                     .find(|(op, _)| *op == name)
                     .unwrap_or_else(|| panic!("no expected first required field for {name}"));
-                let out = run(&json!({ "data": { "operation": name } }).to_string());
+                let out = run(&json!({ "data": { name: {} } }).to_string());
                 assert_eq!(out["ok"], false, "{name}");
                 assert_eq!(
                     out["message"],
@@ -1206,13 +1447,14 @@ pub mod logic {
         }
 
         // One half of the drift check: the message lists OPERATIONS, in order. The other half,
-        // in tests/manifest_declares_destination.rs, holds the manifest's enum to the message.
+        // in tests/manifest_declares_destination.rs, holds the manifest's properties to it.
         #[test]
         fn the_rejection_message_lists_exactly_the_operations_table() {
             let out = run(r#"{"data":{}}"#);
             let message = out["message"].as_str().unwrap();
-            let (_, listed) = message
-                .split_once("expected one of ")
+            let listed = message
+                .strip_prefix("a call holds exactly one of ")
+                .and_then(|rest| rest.strip_suffix("; got none"))
                 .unwrap_or_else(|| panic!("no list in {message}"));
             let listed: Vec<&str> = listed.split(", ").collect();
             let table: Vec<&str> = OPERATIONS.iter().map(|(name, _, _)| *name).collect();
@@ -1232,12 +1474,12 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_declares_read_effect() {
+        fn read_declares_read_effect() {
             let dir = scratch("state_effect_read");
             let path = dir.join("hello.txt");
             fs::write(&path, "hi\n").unwrap();
             let envelope = json!({
-                "data": { "operation": "read_file", "path": path.to_str().unwrap() },
+                "data": { "read": { "path": path.to_str().unwrap() } },
                 "log_path": null,
             });
             let out = run(&envelope.to_string());
@@ -1247,82 +1489,52 @@ pub mod logic {
         }
 
         #[test]
-        fn write_file_declares_mutate_effect() {
+        fn write_declares_mutate_effect() {
             let dir = scratch("state_effect_write");
             let path = dir.join("out.txt");
             let envelope = json!({
-                "data": { "operation": "write_file", "dest_path": path.to_str().unwrap(), "content": "x" },
+                "data": { "write": { "path": path.to_str().unwrap(), "content": "x" } },
                 "log_path": null,
             });
             let out = run(&envelope.to_string());
             assert_eq!(out["ok"], true, "write should succeed: {out:?}");
             assert_eq!(out["metadata"]["state_effect"], "mutate");
+            assert_eq!(out["message"], format!("wrote {}", path.display()));
+            assert_eq!(out["summary"], "1 bytes written");
             let _ = fs::remove_dir_all(&dir);
         }
 
         #[test]
-        fn write_file_rejects_the_legacy_path_spelling() {
-            // 0.2.0 spelled the write destination `path`. Falling back to it would leave the
-            // call judged by key name rather than by the `dest_path` destination the input
-            // schema declares, so the old spelling is rejected outright.
-            let dir = scratch("write_legacy_spelling");
-            let path = dir.join("out.txt");
-            let out = op_write_file(&json!({
-                "operation": "write_file",
-                "path": path.to_str().unwrap(),
-                "content": "x",
-            }));
-            assert_eq!(out["ok"], false);
-            assert_eq!(out["message"], "missing required field: dest_path");
-            assert!(
-                !path.exists(),
-                "a rejected write must not reach the filesystem"
-            );
+        fn write_creates_missing_directories() {
+            let dir = scratch("write_dirs");
+            let path = dir.join("a/b/out.txt");
+            let out = op_write(&json!({ "path": path.to_str().unwrap(), "content": "deep" }));
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), "deep");
             let _ = fs::remove_dir_all(&dir);
         }
 
         #[test]
-        fn replace_in_file_rejects_the_legacy_path_spelling() {
-            let dir = scratch("replace_legacy_spelling");
-            let path = dir.join("patch.txt");
-            fs::write(&path, "hello\n").unwrap();
-            let out = op_replace_in_file(&json!({
-                "operation": "replace_in_file",
-                "path": path.to_str().unwrap(),
-                "old_string": "hello",
-                "new_string": "goodbye",
-            }));
-            assert_eq!(out["ok"], false);
-            assert_eq!(out["message"], "missing required field: dest_path");
-            assert_eq!(fs::read_to_string(&path).unwrap(), "hello\n");
-            let _ = fs::remove_dir_all(&dir);
-        }
+        fn a_null_field_counts_as_absent() {
+            let dir = scratch("null_fields");
+            let path = write_numbered_file(&dir, "f.txt", 3);
+            let out = op_read(&json!({ "path": &path, "start_line": null, "end_line": null }));
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_data_keys(&out, &["content", "total_lines"]);
 
-        #[test]
-        fn write_and_replace_take_dest_path() {
-            let dir = scratch("dest_path_roundtrip");
-            let path = dir.join("out.txt");
-            let written = op_write_file(&json!({
-                "operation": "write_file",
-                "dest_path": path.to_str().unwrap(),
-                "content": "hello\n",
-            }));
-            assert_eq!(written["ok"], true, "write should succeed: {written:?}");
+            let out =
+                op_write(&json!({ "path": dir.join("w.txt").to_str().unwrap(), "content": null }));
+            assert_eq!(out["message"], "missing required field: write.content");
+            assert!(!dir.join("w.txt").exists());
 
-            let replaced = op_replace_in_file(&json!({
-                "operation": "replace_in_file",
-                "dest_path": path.to_str().unwrap(),
-                "old_string": "hello",
-                "new_string": "goodbye",
-            }));
-            assert_eq!(replaced["ok"], true, "replace should succeed: {replaced:?}");
-            assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye\n");
+            let out = op_edit(&json!({ "path": &path, "edits": null }));
+            assert_eq!(out["message"], "missing required field: edit.edits");
             let _ = fs::remove_dir_all(&dir);
         }
 
         #[test]
         fn run_handles_double_encoded_data() {
-            let inner = r#"{"operation":"bogus_double_enc"}"#;
+            let inner = r#"{"bogus_double_enc":{}}"#;
             let envelope = format!(
                 r#"{{"data":"{}","log_path":null}}"#,
                 inner.replace('"', "\\\"")
@@ -1331,9 +1543,204 @@ pub mod logic {
             assert_eq!(out["ok"], false);
             assert_eq!(
                 out["message"],
-                "unknown operation \"bogus_double_enc\": expected one of read_file, write_file, \
-                 replace_in_file, find_in_files"
+                format!("unknown field \"bogus_double_enc\": {ONE_OPERATION}")
             );
+
+            let dir = scratch("double_encoded_read");
+            let path = write_numbered_file(&dir, "f.txt", 2);
+            let inner = json!({ "read": { "path": &path } }).to_string();
+            let out = run(&json!({ "data": inner }).to_string());
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(out["content"], "line 1\nline 2\n");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn data_that_decodes_to_a_non_object_is_refused() {
+            for data in [json!("[1,2]"), json!("\"read\""), json!(3)] {
+                let out = run(&json!({ "data": data }).to_string());
+                assert_eq!(out["ok"], false, "{data}");
+                assert_eq!(
+                    out["message"], "data must be a JSON string or object",
+                    "{data}"
+                );
+            }
+        }
+
+        // ── edit ────────────────────────────────────────────────────────────────
+
+        // `{"edit": {"path": path, "edits": [{old, new}, …]}}` through `run`.
+        fn edit_call(path: &str, pairs: &[(&str, &str)]) -> Value {
+            let edits: Vec<Value> = pairs
+                .iter()
+                .map(|(old, new)| json!({ "old": old, "new": new }))
+                .collect();
+            run(&json!({ "data": { "edit": { "path": path, "edits": edits } } }).to_string())
+        }
+
+        #[test]
+        fn edit_applies_its_pairs_in_order_each_to_the_result_of_the_one_before() {
+            // S1. The second pair only matches the text the first produced.
+            let dir = scratch("edit_in_order");
+            let file = dir.join("f.txt");
+            fs::write(&file, "one two three\n").unwrap();
+            let path = file.to_str().unwrap();
+
+            let out = edit_call(path, &[("one", "1x"), ("1x two", "12"), ("three", "3")]);
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(fs::read_to_string(&file).unwrap(), "12 3\n");
+            assert_eq!(out["metadata"]["state_effect"], "mutate");
+            assert_eq!(out["message"], format!("applied 3 edit(s) to {path}"));
+            assert_eq!(out["summary"], "3 edits");
+            assert!(out["data"].is_null(), "{out:?}");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn edit_with_a_missing_old_changes_nothing_and_names_the_pair() {
+            // S2. The first pair matched in memory; the file still holds the original bytes.
+            let dir = scratch("edit_not_found");
+            let file = dir.join("f.txt");
+            fs::write(&file, "one two three\n").unwrap();
+            let path = file.to_str().unwrap();
+
+            let out = edit_call(path, &[("one", "1"), ("absent", "x"), ("three", "3")]);
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::STRING_NOT_FOUND);
+            assert_eq!(
+                out["message"],
+                format!("edit 2 of 3: old occurs 0 times in {path}; the file is unchanged")
+            );
+            assert!(out["metadata"].is_null(), "{out:?}");
+            assert_eq!(fs::read(&file).unwrap(), b"one two three\n");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn edit_with_an_ambiguous_old_changes_nothing_and_counts_overlaps() {
+            // S3. `aa` occurs twice in `aaa` (at 0 and 1); `dup` twice in `dup dup`.
+            let dir = scratch("edit_multiple");
+            for (content, pairs) in [
+                ("x aaa\n", [("x", "y"), ("aa", "b")]),
+                ("x dup dup\n", [("x", "y"), ("dup", "one")]),
+            ] {
+                let file = dir.join("f.txt");
+                fs::write(&file, content).unwrap();
+                let path = file.to_str().unwrap();
+
+                let out = edit_call(path, &pairs);
+                assert_eq!(out["ok"], false, "{content}");
+                assert_eq!(out["error_kind"], err::MULTIPLE_MATCHES, "{content}");
+                assert_eq!(
+                    out["message"],
+                    format!("edit 2 of 2: old occurs 2 times in {path}; the file is unchanged")
+                );
+                assert_eq!(fs::read_to_string(&file).unwrap(), content);
+            }
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn edit_replaces_only_the_one_occurrence() {
+            let dir = scratch("edit_one_occurrence");
+            let file = dir.join("f.txt");
+            fs::write(&file, "keep hello keep\n").unwrap();
+
+            let out = edit_call(
+                file.to_str().unwrap(),
+                &[("hello", ""), ("keep\n", "end\n")],
+            );
+            assert_eq!(out["ok"], true, "{out:?}");
+            assert_eq!(fs::read_to_string(&file).unwrap(), "keep  end\n");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn occurrences_counts_overlaps_at_char_boundaries() {
+            assert_eq!(occurrences("aaa", "aa"), 2);
+            assert_eq!(occurrences("aaaa", "aa"), 3);
+            assert_eq!(occurrences("dup dup", "dup"), 2);
+            assert_eq!(occurrences("abc", "d"), 0);
+            assert_eq!(occurrences("ééé", "éé"), 2);
+            assert_eq!(occurrences("aéaéa", "aéa"), 2);
+            assert_eq!(occurrences("x", "x"), 1);
+        }
+
+        #[test]
+        fn edit_refuses_bad_edits_before_reading_the_file() {
+            // The file does not exist: a refusal other than not_found proves the inputs were
+            // checked before the read.
+            let dir = scratch("edit_validation");
+            let path = dir.join("absent.txt");
+            let path = path.to_str().unwrap();
+            for (edits, message) in [
+                (
+                    json!([]),
+                    "edit.edits is empty: it takes at least one {old, new} object",
+                ),
+                (
+                    json!("old→new"),
+                    "edit.edits must be an array of {old, new} objects",
+                ),
+                (
+                    json!([{ "old": "a", "new": "b" }, { "old": "", "new": "x" }]),
+                    "edit 2 of 2: old is empty; it must name the text to replace",
+                ),
+                (
+                    json!([{ "new": "x" }]),
+                    "edit 1 of 1: missing required field: old",
+                ),
+                (
+                    json!([{ "old": "x" }]),
+                    "edit 1 of 1: missing required field: new",
+                ),
+                (
+                    json!([{ "old": "x", "new": 3 }]),
+                    "edit 1 of 1: missing required field: new",
+                ),
+                (
+                    json!(["x"]),
+                    "edit 1 of 1 must be an object with old and new",
+                ),
+            ] {
+                let out = run(
+                    &json!({ "data": { "edit": { "path": path, "edits": edits } } }).to_string(),
+                );
+                assert_eq!(out["ok"], false, "{edits}");
+                assert_eq!(out["message"], message, "{edits}");
+                assert!(out.get("error_kind").is_none(), "{edits}: {out:?}");
+            }
+
+            let out = run(&json!({ "data": { "edit": { "path": path, "edits": [
+                { "old": "a", "new": "b" }, { "old": "c", "new": "d", "path": "x" }
+            ] } } })
+            .to_string());
+            assert_eq!(out["error_kind"], err::UNKNOWN_FIELD);
+            assert_eq!(
+                out["message"],
+                "unknown field \"path\" in edit 2 of 2: an edit takes old, new"
+            );
+            assert!(!dir.join("absent.txt").exists());
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn edit_of_a_missing_file_is_not_found_and_declares_no_effect() {
+            let dir = scratch("edit_missing");
+            let path = dir.join("absent.txt");
+            let out = edit_call(path.to_str().unwrap(), &[("a", "b")]);
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::NOT_FOUND);
+            assert!(
+                out["message"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("{}: ", path.display())),
+                "{out:?}"
+            );
+            assert!(out["metadata"].is_null());
+            assert!(!path.exists(), "a failed edit creates nothing");
+            let _ = fs::remove_dir_all(&dir);
         }
 
         // ── Absolute path refusal ───────────────────────────────────────────────
@@ -1345,42 +1752,42 @@ pub mod logic {
         // therefore refuses an absolute value before it reaches the filesystem.
 
         #[test]
-        fn reject_absolute_renders_one_message_shape_for_every_property() {
+        fn reject_absolute_renders_one_message_shape_for_every_location() {
             assert!(
-                reject_absolute("path", "src/main.rs").is_none(),
+                reject_absolute("read.path", "src/main.rs").is_none(),
                 "a relative value is not refused"
             );
             assert!(
-                reject_absolute("dir", "").is_none(),
+                reject_absolute("find.dir", "").is_none(),
                 "an empty value is not absolute — it names the workdir root"
             );
 
-            for (property, value, expected) in [
+            for (location, value, expected) in [
                 (
-                    "path",
+                    "read.path",
                     "/etc/hosts",
-                    "'path' must be relative to the capsule workdir; got '/etc/hosts' (did you mean 'hosts'?)",
+                    "'read.path' must be relative to the capsule workdir; got '/etc/hosts' (did you mean 'hosts'?)",
                 ),
                 (
-                    "dest_path",
+                    "write.path",
                     "/app/results.txt",
-                    "'dest_path' must be relative to the capsule workdir; got '/app/results.txt' (did you mean 'results.txt'?)",
+                    "'write.path' must be relative to the capsule workdir; got '/app/results.txt' (did you mean 'results.txt'?)",
                 ),
                 (
-                    "dir",
+                    "find.dir",
                     "/app",
-                    "'dir' must be relative to the capsule workdir; got '/app' (did you mean 'app'?)",
+                    "'find.dir' must be relative to the capsule workdir; got '/app' (did you mean 'app'?)",
                 ),
                 // No final component to suggest: the parenthetical is omitted entirely rather
                 // than rendered empty.
-                ("dir", "/", "'dir' must be relative to the capsule workdir; got '/'"),
+                ("find.dir", "/", "'find.dir' must be relative to the capsule workdir; got '/'"),
                 (
-                    "dest_path",
+                    "edit.path",
                     "/app/..",
-                    "'dest_path' must be relative to the capsule workdir; got '/app/..'",
+                    "'edit.path' must be relative to the capsule workdir; got '/app/..'",
                 ),
             ] {
-                let out = reject_absolute(property, value).expect("an absolute value is refused");
+                let out = reject_absolute(location, value).expect("an absolute value is refused");
                 assert_eq!(out["ok"], false);
                 assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
                 assert_eq!(out["message"], expected);
@@ -1389,7 +1796,75 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_refuses_an_absolute_path_even_when_the_file_exists() {
+        fn every_path_location_refuses_an_absolute_value_through_dispatch() {
+            // S8. Each fixture exists at the absolute value's real location, so a not-found
+            // cannot stand in for the refusal, and nothing is created, changed or declared.
+            let dir = scratch("absolute_every_location");
+            let file = dir.join("results.txt");
+            fs::write(&file, "original\n").unwrap();
+            let absolute = fs::canonicalize(&file)
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            let absolute_dir = fs::canonicalize(&dir)
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            let fresh = format!("{absolute_dir}/app/new.txt");
+
+            for (data, location, value) in [
+                (
+                    json!({ "read": { "path": &absolute } }),
+                    "read.path",
+                    absolute.as_str(),
+                ),
+                (
+                    json!({ "write": { "path": &fresh, "content": "x" } }),
+                    "write.path",
+                    fresh.as_str(),
+                ),
+                (
+                    json!({ "edit": { "path": &absolute, "edits": [{ "old": "original", "new": "x" }] } }),
+                    "edit.path",
+                    absolute.as_str(),
+                ),
+                (
+                    json!({ "find": { "pattern": "original", "dir": &absolute_dir } }),
+                    "find.dir",
+                    absolute_dir.as_str(),
+                ),
+                (
+                    json!({ "find": { "pattern": "original", "glob": "/src/*.rs" } }),
+                    "find.glob",
+                    "/src/*.rs",
+                ),
+            ] {
+                let out = run(&json!({ "data": data }).to_string());
+                assert_eq!(out["ok"], false, "{data}");
+                assert_eq!(out["error_kind"], err::ABSOLUTE_PATH, "{data}");
+                let message = out["message"].as_str().unwrap();
+                assert!(
+                    message.starts_with(&format!(
+                        "'{location}' must be relative to the capsule workdir; got '{value}'"
+                    )),
+                    "{message}"
+                );
+                assert!(out["metadata"].is_null(), "{data}");
+                assert!(
+                    out["content"].is_null() && out["matches"].is_null(),
+                    "{out:?}"
+                );
+            }
+            assert_eq!(fs::read_to_string(&file).unwrap(), "original\n");
+            assert!(
+                !dir.join("app").exists(),
+                "a refused write creates no directory"
+            );
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn read_refuses_an_absolute_path_even_when_the_file_exists() {
             // The behaviour this refusal removes: an absolute value that a previous write
             // already created reads back "correctly" from the wrong place. The fixture exists,
             // so a not-found cannot stand in for the contract error.
@@ -1401,7 +1876,7 @@ pub mod logic {
                 .to_string_lossy()
                 .to_string();
 
-            let out = op_read_file(&json!({ "operation": "read_file", "path": &absolute }));
+            let out = op_read(&json!({ "path": &absolute }));
             assert_eq!(out["ok"], false);
             assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
             assert!(
@@ -1410,8 +1885,8 @@ pub mod logic {
             );
             let msg = out["message"].as_str().unwrap();
             assert!(
-                msg.starts_with("'path' must be relative to the capsule workdir"),
-                "the refusal names the property the caller wrote: {msg}"
+                msg.starts_with("'read.path' must be relative to the capsule workdir"),
+                "the refusal names the location the caller wrote: {msg}"
             );
             assert!(msg.contains("did you mean 'results.txt'"), "{msg}");
 
@@ -1419,8 +1894,8 @@ pub mod logic {
         }
 
         #[test]
-        fn write_file_refuses_an_absolute_dest_path_before_creating_directories() {
-            // The `create_dir_all` in op_write_file is what manufactured `<workdir>/app/` for
+        fn write_refuses_an_absolute_path_before_creating_directories() {
+            // The `create_dir_all` in op_write is what manufactured `<workdir>/app/` for
             // `/app/results.txt`. The refusal lands ahead of it, so a rejected write leaves no
             // stray directory behind.
             let dir = scratch("absolute_write");
@@ -1431,16 +1906,15 @@ pub mod logic {
                 .to_string_lossy()
                 .to_string();
 
-            let out = op_write_file(&json!({
-                "operation": "write_file",
-                "dest_path": &absolute,
+            let out = op_write(&json!({
+                "path": &absolute,
                 "content": "written to the wrong place",
             }));
             assert_eq!(out["ok"], false);
             assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
             assert!(
-                out["message"].as_str().unwrap().contains("'dest_path'"),
-                "the refusal names dest_path, not path: {out:?}"
+                out["message"].as_str().unwrap().starts_with("'write.path'"),
+                "the refusal names write.path: {out:?}"
             );
             assert!(
                 !dir.join("app").exists(),
@@ -1456,9 +1930,7 @@ pub mod logic {
             // recorded as a mutation.
             let envelope = json!({
                 "data": {
-                    "operation": "write_file",
-                    "dest_path": "/app/results.txt",
-                    "content": "written to the wrong place",
+                    "write": { "path": "/app/results.txt", "content": "written to the wrong place" },
                 },
                 "log_path": null,
             });
@@ -1472,8 +1944,8 @@ pub mod logic {
         }
 
         #[test]
-        fn replace_in_file_refuses_an_absolute_dest_path_and_edits_nothing() {
-            let dir = scratch("absolute_replace");
+        fn edit_refuses_an_absolute_path_and_edits_nothing() {
+            let dir = scratch("absolute_edit");
             let file = dir.join("patch.txt");
             fs::write(&file, "hello world\n").unwrap();
             let absolute = fs::canonicalize(&file)
@@ -1481,31 +1953,28 @@ pub mod logic {
                 .to_string_lossy()
                 .to_string();
 
-            let out = op_replace_in_file(&json!({
-                "operation": "replace_in_file",
-                "dest_path": &absolute,
-                "old_string": "hello",
-                "new_string": "goodbye",
+            let out = op_edit(&json!({
+                "path": &absolute,
+                "edits": [{ "old": "hello", "new": "goodbye" }],
             }));
             assert_eq!(out["ok"], false);
             assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
             assert!(
-                out["message"].as_str().unwrap().contains("'dest_path'"),
+                out["message"].as_str().unwrap().starts_with("'edit.path'"),
                 "{out:?}"
             );
             assert_eq!(
                 fs::read_to_string(&file).unwrap(),
                 "hello world\n",
-                "a refused replacement leaves the file byte-identical"
+                "a refused edit leaves the file byte-identical"
             );
 
             let _ = fs::remove_dir_all(&dir);
         }
 
         #[test]
-        fn find_in_files_refuses_an_absolute_dir() {
-            let out = op_find_in_files(&json!({
-                "operation": "find_in_files",
+        fn find_refuses_an_absolute_dir() {
+            let out = op_find(&json!({
                 "pattern": "needle",
                 "dir": "/app",
                 "recursive": true,
@@ -1513,7 +1982,7 @@ pub mod logic {
             assert_eq!(out["ok"], false);
             assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
             let msg = out["message"].as_str().unwrap();
-            assert!(msg.contains("'dir'"), "{msg}");
+            assert!(msg.contains("'find.dir'"), "{msg}");
             assert!(msg.contains("did you mean 'app'"), "{msg}");
             assert!(
                 out["matches"].is_null(),
@@ -1522,12 +1991,11 @@ pub mod logic {
         }
 
         #[test]
-        fn find_in_files_refuses_the_bare_root_slash_as_absolute() {
+        fn find_refuses_the_bare_root_slash_as_absolute() {
             // Under the preopen "/" resolves to the workdir root, which a relative "" or "."
             // already names; spelled absolutely it is refused like any other absolute dir. With
             // no final component there is nothing to suggest.
-            let out = op_find_in_files(&json!({
-                "operation": "find_in_files",
+            let out = op_find(&json!({
                 "pattern": "needle",
                 "dir": "/",
                 "recursive": true,
@@ -1535,7 +2003,7 @@ pub mod logic {
             assert_eq!(out["ok"], false);
             assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
             let msg = out["message"].as_str().unwrap();
-            assert!(msg.contains("'dir'"), "{msg}");
+            assert!(msg.contains("'find.dir'"), "{msg}");
             assert!(msg.contains("got '/'"), "{msg}");
             assert!(
                 !msg.contains("did you mean"),
@@ -1547,44 +2015,46 @@ pub mod logic {
         fn an_absent_path_input_still_reports_the_missing_field() {
             // The absolute check only runs on a value that was successfully extracted, so an
             // absent input keeps its missing-field message and carries no error_kind.
-            for out in [
-                op_read_file(&json!({ "operation": "read_file" })),
-                op_write_file(&json!({ "operation": "write_file", "content": "x" })),
-                op_find_in_files(&json!({ "operation": "find_in_files", "dir": "src" })),
+            for (out, location) in [
+                (op_read(&json!({})), "read.path"),
+                (op_write(&json!({ "content": "x" })), "write.path"),
+                (op_edit(&json!({ "edits": [] })), "edit.path"),
+                (op_find(&json!({ "dir": "src" })), "find.pattern"),
             ] {
                 assert_eq!(out["ok"], false);
                 assert!(
                     out["error_kind"].is_null(),
                     "a missing field is not an absolute-path refusal: {out:?}"
                 );
-                assert!(
-                    out["message"]
-                        .as_str()
-                        .unwrap()
-                        .starts_with("missing required field: "),
+                assert_eq!(
+                    out["message"],
+                    format!("missing required field: {location}"),
                     "{out:?}"
                 );
             }
         }
 
         #[test]
-        fn an_absolute_dest_path_is_reported_ahead_of_a_missing_sibling_field() {
-            // dest_path is validated at its extraction site, before `content` is read, so the
-            // caller hears about the path they cannot use rather than a second field.
-            let out = op_write_file(&json!({
-                "operation": "write_file",
-                "dest_path": "/app/results.txt",
-            }));
-            assert_eq!(out["ok"], false);
-            assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
-            assert!(
-                !out["message"].as_str().unwrap().contains("content"),
-                "the absolute path is the first thing reported: {out:?}"
-            );
+        fn an_absolute_path_is_reported_ahead_of_a_missing_sibling_field() {
+            // write.path and edit.path are validated at their extraction site, before
+            // `content` or `edits` is read, so the caller hears about the path they cannot use
+            // rather than a second field.
+            for out in [
+                op_write(&json!({ "path": "/app/results.txt" })),
+                op_edit(&json!({ "path": "/app/results.txt" })),
+            ] {
+                assert_eq!(out["ok"], false);
+                assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
+                let message = out["message"].as_str().unwrap();
+                assert!(
+                    !message.contains("content") && !message.contains("edits"),
+                    "the absolute path is the first thing reported: {out:?}"
+                );
+            }
         }
 
         #[test]
-        fn find_in_files_caps_at_the_result_ceiling() {
+        fn find_caps_at_the_result_ceiling() {
             // 200 matching lines of ~2,000 bytes each: under the match limit, but the result
             // (every match emitted twice by `ok_with`) would be ~800 KB. The search returns the
             // matches that fit and says why it stopped.
@@ -1596,8 +2066,7 @@ pub mod logic {
             }
             fs::write(dir.join("large_match_file.txt"), content).unwrap();
 
-            let out = op_find_in_files(&json!({
-                "operation": "find_in_files",
+            let out = op_find(&json!({
                 "pattern": "marker",
                 "dir": dir.to_str().unwrap(),
                 "recursive": false,
@@ -1621,11 +2090,10 @@ pub mod logic {
             }
             // With the metadata `run` attaches, the result still fits.
             let via_run = run(&json!({
-                "data": {
-                    "operation": "find_in_files",
+                "data": { "find": {
                     "pattern": "marker",
                     "dir": dir.to_str().unwrap(),
-                }
+                } }
             })
             .to_string());
             assert_eq!(via_run["metadata"]["state_effect"], "read");
@@ -1635,14 +2103,13 @@ pub mod logic {
         }
 
         #[test]
-        fn find_in_files_refuses_a_single_match_over_the_ceiling() {
+        fn find_refuses_a_single_match_over_the_ceiling() {
             // No partial answer exists: the first match alone does not fit.
             let dir = scratch("find_single_oversized");
             let line = format!("marker {}\n", "x".repeat(FIND_RESULT_SIZE_LIMIT));
             fs::write(dir.join("huge.txt"), line).unwrap();
 
-            let out = op_find_in_files(&json!({
-                "operation": "find_in_files",
+            let out = op_find(&json!({
                 "pattern": "marker",
                 "dir": dir.to_str().unwrap(),
             }));
@@ -1650,7 +2117,7 @@ pub mod logic {
             assert_eq!(out["error_kind"], err::RESULT_SIZE_EXCEEDED);
             assert_eq!(
                 out["message"],
-                "a single match exceeds the find_in_files result size limit of 512000 bytes \
+                "a single match exceeds the find result size limit of 512000 bytes \
                  (500 KB)."
             );
 
@@ -1658,7 +2125,7 @@ pub mod logic {
         }
 
         #[test]
-        fn find_in_files_respects_specific_dir() {
+        fn find_respects_specific_dir() {
             // This test verifies that find works with a valid specific directory
             let temp_dir = scratch("find_valid");
 
@@ -1667,13 +2134,12 @@ pub mod logic {
 
             let dir_name = temp_dir.to_string_lossy().to_string();
             let op = json!({
-                "operation": "find_in_files",
                 "pattern": "world",
                 "dir": &dir_name,
                 "recursive": false,
             });
 
-            let out = op_find_in_files(&op);
+            let out = op_find(&op);
             assert_eq!(out["ok"], true);
             assert!(out["matches"].is_array());
             assert_eq!(out["matches"].as_array().unwrap().len(), 1);
@@ -1698,7 +2164,7 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_returns_content_and_total_lines_only() {
+        fn read_returns_content_and_total_lines_only() {
             let temp_dir = scratch("read");
 
             let test_file = temp_dir.join("test.txt");
@@ -1706,11 +2172,10 @@ pub mod logic {
 
             let path = test_file.to_string_lossy().to_string();
             let op = json!({
-                "operation": "read_file",
                 "path": &path,
             });
 
-            let out = op_read_file(&op);
+            let out = op_read(&op);
             assert_eq!(out["ok"], true);
             assert_eq!(out["content"], "test content");
             assert_data_keys(&out, &["content", "total_lines"]);
@@ -1718,7 +2183,7 @@ pub mod logic {
             let _ = fs::remove_dir_all(&temp_dir);
         }
 
-        // ── Bounded read_file (start_line / end_line) ────────────────────────────
+        // ── Bounded read (start_line / end_line) ────────────────────────────
         //
         // A shared helper writes a file of `n` numbered lines ("line 1".."line n"), the fixture
         // every range test slices.
@@ -1736,14 +2201,14 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_whole_file_reports_total_lines() {
+        fn read_whole_file_reports_total_lines() {
             // A whole-file read (no start/end) returns its content and total_lines — but NO
             // start_line/end_line keys.
             let dir = scratch("read_wholefile_total");
             let path = write_numbered_file(&dir, "f.txt", 5);
-            let op = json!({ "operation": "read_file", "path": &path });
+            let op = json!({ "path": &path });
 
-            let out = op_read_file(&op);
+            let out = op_read(&op);
             assert_eq!(out["ok"], true, "{out:?}");
             assert_eq!(out["content"], "line 1\nline 2\nline 3\nline 4\nline 5\n");
             assert_eq!(out["total_lines"], 5);
@@ -1761,13 +2226,12 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_ranged_happy_path() {
+        fn read_ranged_happy_path() {
             let dir = scratch("read_ranged");
             let path = write_numbered_file(&dir, "f.txt", 10);
-            let op =
-                json!({ "operation": "read_file", "path": &path, "start_line": 2, "end_line": 4 });
+            let op = json!({ "path": &path, "start_line": 2, "end_line": 4 });
 
-            let out = op_read_file(&op);
+            let out = op_read(&op);
             assert_eq!(out["ok"], true, "{out:?}");
             // Sliced span, joined with "\n" (no trailing newline — lines() strips terminators).
             assert_eq!(out["content"], "line 2\nline 3\nline 4");
@@ -1780,12 +2244,12 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_ranged_start_only_reads_to_eof() {
+        fn read_ranged_start_only_reads_to_eof() {
             let dir = scratch("read_start_only");
             let path = write_numbered_file(&dir, "f.txt", 6);
-            let op = json!({ "operation": "read_file", "path": &path, "start_line": 5 });
+            let op = json!({ "path": &path, "start_line": 5 });
 
-            let out = op_read_file(&op);
+            let out = op_read(&op);
             assert_eq!(out["ok"], true, "{out:?}");
             assert_eq!(out["content"], "line 5\nline 6");
             assert_eq!(out["start_line"], 5);
@@ -1795,12 +2259,12 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_ranged_end_only_reads_from_top() {
+        fn read_ranged_end_only_reads_from_top() {
             let dir = scratch("read_end_only");
             let path = write_numbered_file(&dir, "f.txt", 6);
-            let op = json!({ "operation": "read_file", "path": &path, "end_line": 3 });
+            let op = json!({ "path": &path, "end_line": 3 });
 
-            let out = op_read_file(&op);
+            let out = op_read(&op);
             assert_eq!(out["ok"], true, "{out:?}");
             assert_eq!(out["content"], "line 1\nline 2\nline 3");
             assert_eq!(out["start_line"], 1); // resolved default
@@ -1810,13 +2274,12 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_ranged_inverted_span_errors() {
+        fn read_ranged_inverted_span_errors() {
             let dir = scratch("read_inverted");
             let path = write_numbered_file(&dir, "f.txt", 10);
-            let op =
-                json!({ "operation": "read_file", "path": &path, "start_line": 5, "end_line": 2 });
+            let op = json!({ "path": &path, "start_line": 5, "end_line": 2 });
 
-            let out = op_read_file(&op);
+            let out = op_read(&op);
             assert_eq!(out["ok"], false);
             assert_eq!(out["error_kind"], err::INVALID_RANGE);
             assert!(out["message"].as_str().unwrap().contains("inverted"));
@@ -1825,12 +2288,12 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_ranged_start_below_one_errors() {
+        fn read_ranged_start_below_one_errors() {
             let dir = scratch("read_start_zero");
             let path = write_numbered_file(&dir, "f.txt", 10);
-            let op = json!({ "operation": "read_file", "path": &path, "start_line": 0 });
+            let op = json!({ "path": &path, "start_line": 0 });
 
-            let out = op_read_file(&op);
+            let out = op_read(&op);
             assert_eq!(out["ok"], false);
             assert_eq!(out["error_kind"], err::INVALID_RANGE);
             assert!(out["message"].as_str().unwrap().contains(">= 1"));
@@ -1839,14 +2302,14 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_ranged_start_beyond_eof_errors() {
+        fn read_ranged_start_beyond_eof_errors() {
             // start past EOF errors and states the real line count — never silently falls back
             // to the whole file.
             let dir = scratch("read_start_eof");
             let path = write_numbered_file(&dir, "f.txt", 4);
-            let op = json!({ "operation": "read_file", "path": &path, "start_line": 99 });
+            let op = json!({ "path": &path, "start_line": 99 });
 
-            let out = op_read_file(&op);
+            let out = op_read(&op);
             assert_eq!(out["ok"], false);
             assert_eq!(out["error_kind"], err::INVALID_RANGE);
             let msg = out["message"].as_str().unwrap();
@@ -1860,13 +2323,13 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_ranged_end_beyond_eof_clamps() {
+        fn read_ranged_end_beyond_eof_clamps() {
             // The one asymmetric case: end past EOF clamps to total_lines rather than erroring.
             let dir = scratch("read_end_eof");
             let path = write_numbered_file(&dir, "f.txt", 4);
-            let op = json!({ "operation": "read_file", "path": &path, "start_line": 3, "end_line": 999 });
+            let op = json!({ "path": &path, "start_line": 3, "end_line": 999 });
 
-            let out = op_read_file(&op);
+            let out = op_read(&op);
             assert_eq!(out["ok"], true, "{out:?}");
             assert_eq!(out["content"], "line 3\nline 4");
             assert_eq!(out["end_line"], 4); // clamped, reported as resolved
@@ -1876,18 +2339,17 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_ranged_oversized_span_errors() {
+        fn read_ranged_oversized_span_errors() {
             let dir = scratch("read_oversized");
             // A file larger than the cap, requested whole via an explicit span.
             let path = write_numbered_file(&dir, "big.txt", MAX_READ_LINES + 500);
             let op = json!({
-                "operation": "read_file",
                 "path": &path,
                 "start_line": 1,
                 "end_line": MAX_READ_LINES + 500,
             });
 
-            let out = op_read_file(&op);
+            let out = op_read(&op);
             assert_eq!(out["ok"], false);
             assert_eq!(out["error_kind"], err::RANGE_TOO_LARGE);
             assert!(out["message"]
@@ -1899,12 +2361,12 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_end_only_span_over_the_line_limit_errors() {
+        fn read_end_only_span_over_the_line_limit_errors() {
             let dir = scratch("read_end_only_oversized");
             let path = write_numbered_file(&dir, "big.txt", 2500);
-            let op = json!({ "operation": "read_file", "path": &path, "end_line": 2500 });
+            let op = json!({ "path": &path, "end_line": 2500 });
 
-            let out = op_read_file(&op);
+            let out = op_read(&op);
             assert_eq!(out["ok"], false, "{out:?}");
             assert_eq!(out["error_kind"], err::RANGE_TOO_LARGE);
             assert_eq!(
@@ -1915,7 +2377,7 @@ pub mod logic {
             let _ = fs::remove_dir_all(&dir);
         }
 
-        // ── read_file limits: lines, bytes and line length ───────────────────────
+        // ── read limits: lines, bytes and line length ───────────────────────
 
         // `first..=last` of a `write_numbered_file` fixture, joined as a read returns them.
         fn numbered_lines(first: usize, last: usize) -> String {
@@ -1926,12 +2388,11 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_with_no_range_stops_at_the_line_limit() {
+        fn read_with_no_range_stops_at_the_line_limit() {
             let dir = scratch("read_line_limit");
             let path = write_numbered_file(&dir, "big.txt", 5000);
 
-            let out =
-                run(&json!({ "data": { "operation": "read_file", "path": &path } }).to_string());
+            let out = run(&json!({ "data": { "read": { "path": &path } } }).to_string());
             assert_eq!(out["ok"], true, "{out:?}");
             assert_eq!(out["content"], numbered_lines(1, 2000));
             assert!(out["content"].as_str().unwrap().ends_with("line 2000"));
@@ -1966,13 +2427,11 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_start_line_named_in_the_note_continues_the_read() {
+        fn read_start_line_named_in_the_note_continues_the_read() {
             let dir = scratch("read_continue");
             let path = write_numbered_file(&dir, "big.txt", 5000);
 
-            let second = op_read_file(
-                &json!({ "operation": "read_file", "path": &path, "start_line": 2001 }),
-            );
+            let second = op_read(&json!({ "path": &path, "start_line": 2001 }));
             assert_eq!(second["ok"], true, "{second:?}");
             assert_eq!(second["content"], numbered_lines(2001, 4000));
             assert_eq!(second["start_line"], 2001);
@@ -1985,9 +2444,7 @@ pub mod logic {
                 "{second:?}"
             );
 
-            let last = op_read_file(
-                &json!({ "operation": "read_file", "path": &path, "start_line": 4001 }),
-            );
+            let last = op_read(&json!({ "path": &path, "start_line": 4001 }));
             assert_eq!(last["ok"], true, "{last:?}");
             assert_eq!(last["content"], numbered_lines(4001, 5000));
             assert_eq!(last["start_line"], 4001);
@@ -2005,13 +2462,13 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_with_no_range_within_every_limit_is_verbatim() {
+        fn read_with_no_range_within_every_limit_is_verbatim() {
             let dir = scratch("read_fits");
             let path = write_numbered_file(&dir, "f.txt", MAX_READ_LINES);
             let expected = fs::read_to_string(&path).unwrap();
             assert!(expected.len() <= MAX_READ_BYTES);
 
-            let out = op_read_file(&json!({ "operation": "read_file", "path": &path }));
+            let out = op_read(&json!({ "path": &path }));
             assert_eq!(out["ok"], true, "{out:?}");
             assert_eq!(out["content"], expected.as_str());
             assert!(out["content"].as_str().unwrap().ends_with("line 2000\n"));
@@ -2022,8 +2479,7 @@ pub mod logic {
 
             let empty = dir.join("empty.txt");
             fs::write(&empty, "").unwrap();
-            let out =
-                op_read_file(&json!({ "operation": "read_file", "path": empty.to_string_lossy() }));
+            let out = op_read(&json!({ "path": empty.to_string_lossy() }));
             assert_eq!(out["ok"], true, "{out:?}");
             assert_eq!(out["content"], "");
             assert_eq!(out["total_lines"], 0);
@@ -2043,12 +2499,12 @@ pub mod logic {
         const WIDE_NOTE: &str = "Read stopped at the limit of 100 KB. Lines 1-53 of 60 are returned; start_line 54 continues the read.";
 
         #[test]
-        fn read_file_with_no_range_stops_at_the_byte_limit() {
+        fn read_with_no_range_stops_at_the_byte_limit() {
             let dir = scratch("read_byte_limit");
             let path = write_wide_file(&dir);
             assert_eq!(fs::metadata(&path).unwrap().len(), 114_060);
 
-            let out = op_read_file(&json!({ "operation": "read_file", "path": &path }));
+            let out = op_read(&json!({ "path": &path }));
             assert_eq!(out["ok"], true, "{out:?}");
             assert_eq!(out["start_line"], 1);
             assert_eq!(out["end_line"], 53);
@@ -2061,13 +2517,11 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_explicit_span_stops_at_the_byte_limit() {
+        fn read_explicit_span_stops_at_the_byte_limit() {
             let dir = scratch("read_byte_limit_span");
             let path = write_wide_file(&dir);
 
-            let out = op_read_file(
-                &json!({ "operation": "read_file", "path": &path, "start_line": 1, "end_line": 60 }),
-            );
+            let out = op_read(&json!({ "path": &path, "start_line": 1, "end_line": 60 }));
             assert_eq!(out["ok"], true, "{out:?}");
             assert_eq!(out["start_line"], 1);
             assert_eq!(out["end_line"], 53);
@@ -2078,13 +2532,12 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_cuts_a_long_line_to_its_first_2000_characters() {
+        fn read_cuts_a_long_line_to_its_first_2000_characters() {
             let dir = scratch("read_long_line");
             let one = dir.join("one.txt");
             fs::write(&one, "a".repeat(50_000)).unwrap();
 
-            let out =
-                op_read_file(&json!({ "operation": "read_file", "path": one.to_string_lossy() }));
+            let out = op_read(&json!({ "path": one.to_string_lossy() }));
             assert_eq!(out["ok"], true, "{out:?}");
             assert_eq!(out["content"], "a".repeat(2000));
             assert_eq!(out["start_line"], 1);
@@ -2098,9 +2551,7 @@ pub mod logic {
             // Multi-byte characters are cut on a char boundary: 2000 `é` are 4000 bytes.
             let accents = dir.join("accents.txt");
             fs::write(&accents, format!("first\n{}\nthird\n", "é".repeat(3000))).unwrap();
-            let out = op_read_file(
-                &json!({ "operation": "read_file", "path": accents.to_string_lossy() }),
-            );
+            let out = op_read(&json!({ "path": accents.to_string_lossy() }));
             assert_eq!(out["ok"], true, "{out:?}");
             assert_eq!(
                 out["content"],
@@ -2120,7 +2571,7 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_note_names_the_line_limit_then_the_cut_lines() {
+        fn read_note_names_the_line_limit_then_the_cut_lines() {
             let dir = scratch("read_both_notes");
             let path = write_numbered_file(&dir, "f.txt", 2500);
             let mut lines: Vec<String> = fs::read_to_string(&path)
@@ -2131,7 +2582,7 @@ pub mod logic {
             lines[9] = "b".repeat(2500);
             fs::write(&path, lines.join("\n") + "\n").unwrap();
 
-            let out = op_read_file(&json!({ "operation": "read_file", "path": &path }));
+            let out = op_read(&json!({ "path": &path }));
             assert_eq!(out["ok"], true, "{out:?}");
             assert_eq!(out["end_line"], 2000);
             assert_eq!(
@@ -2148,13 +2599,13 @@ pub mod logic {
         // state between calls and writes nothing, so each read reflects the file as it is now.
 
         #[test]
-        fn read_file_repeat_whole_file_read_returns_content_again() {
+        fn read_repeat_whole_file_read_returns_content_again() {
             let dir = scratch("read_repeat_whole");
             let path = write_numbered_file(&dir, "f.txt", 5);
-            let op = json!({ "operation": "read_file", "path": &path });
+            let op = json!({ "path": &path });
 
-            let first = op_read_file(&op);
-            let second = op_read_file(&op);
+            let first = op_read(&op);
+            let second = op_read(&op);
             for out in [&first, &second] {
                 assert_eq!(out["ok"], true, "{out:?}");
                 assert_eq!(out["content"], "line 1\nline 2\nline 3\nline 4\nline 5\n");
@@ -2168,14 +2619,13 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_repeat_ranged_read_returns_content_again() {
+        fn read_repeat_ranged_read_returns_content_again() {
             let dir = scratch("read_repeat_ranged");
             let path = write_numbered_file(&dir, "f.txt", 10);
-            let op =
-                json!({ "operation": "read_file", "path": &path, "start_line": 3, "end_line": 5 });
+            let op = json!({ "path": &path, "start_line": 3, "end_line": 5 });
 
             for _ in 0..2 {
-                let out = op_read_file(&op);
+                let out = op_read(&op);
                 assert_eq!(out["ok"], true, "{out:?}");
                 assert_eq!(out["content"], "line 3\nline 4\nline 5");
                 assert_eq!(out["total_lines"], 10);
@@ -2189,20 +2639,20 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_sees_a_same_second_same_length_edit() {
+        fn read_sees_a_same_second_same_length_edit() {
             // No pause: the rewrite lands within the same second as the first read and keeps
             // the byte length, so neither a whole-second mtime nor the size tells them apart.
             let dir = scratch("read_same_second_edit");
             let file = dir.join("f.txt");
             fs::write(&file, "aaaa").unwrap();
             let path = file.to_string_lossy().to_string();
-            let op = json!({ "operation": "read_file", "path": &path });
+            let op = json!({ "path": &path });
 
-            let before = op_read_file(&op);
+            let before = op_read(&op);
             assert_eq!(before["content"], "aaaa", "{before:?}");
 
             fs::write(&file, "bbbb").unwrap();
-            let after = op_read_file(&op);
+            let after = op_read(&op);
             assert_eq!(after["ok"], true, "{after:?}");
             assert_eq!(after["content"], "bbbb");
 
@@ -2210,16 +2660,16 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_of_a_missing_file_is_not_found_and_declares_no_effect() {
+        fn read_of_a_missing_file_is_not_found_and_declares_no_effect() {
             let dir = scratch("read_missing");
             let path = dir.join("absent.txt").to_string_lossy().to_string();
 
             for extra in [json!({}), json!({ "start_line": 1, "end_line": 2 })] {
-                let mut data = json!({ "operation": "read_file", "path": &path });
+                let mut data = json!({ "path": &path });
                 data.as_object_mut()
                     .unwrap()
                     .extend(extra.as_object().unwrap().clone());
-                let out = run(&json!({ "data": data }).to_string());
+                let out = run(&json!({ "data": { "read": data } }).to_string());
                 assert_eq!(out["ok"], false, "{out:?}");
                 assert_eq!(out["error_kind"], err::NOT_FOUND, "{out:?}");
                 let message = out["message"].as_str().unwrap();
@@ -2234,22 +2684,29 @@ pub mod logic {
         }
 
         #[test]
-        fn read_file_ignores_unknown_inputs() {
+        fn read_refuses_an_unknown_input() {
             let dir = scratch("read_unknown_inputs");
             let path = write_numbered_file(&dir, "f.txt", 3);
 
             let out = run(&json!({
-                "data": { "operation": "read_file", "path": &path, "no_cache": true }
+                "data": { "read": { "path": &path, "no_cache": true } }
             })
             .to_string());
-            assert_eq!(out["ok"], true, "{out:?}");
-            assert_eq!(out["content"], "line 1\nline 2\nline 3\n");
-            assert_eq!(out["metadata"]["state_effect"], "read");
+            assert_eq!(out["ok"], false, "{out:?}");
+            assert_eq!(out["error_kind"], err::UNKNOWN_FIELD);
+            assert_eq!(
+                out["message"],
+                "unknown field \"no_cache\" in read: read takes path, start_line, end_line"
+            );
+            assert!(
+                out["content"].is_null() && out["metadata"].is_null(),
+                "{out:?}"
+            );
 
             let _ = fs::remove_dir_all(&dir);
         }
 
-        // ── find_in_files context_lines ─────────────────────────────────────────
+        // ── find context_lines ─────────────────────────────────────────
 
         fn write_find_fixture(dir: &std::path::Path, name: &str, content: &str) -> String {
             let _ = fs::remove_dir_all(dir);
@@ -2259,14 +2716,14 @@ pub mod logic {
         }
 
         #[test]
-        fn find_in_files_default_has_no_context_keys() {
+        fn find_default_has_no_context_keys() {
             // context_lines omitted → the match shape is byte-for-byte the historical one:
             // {path, line, text} with NO context_before/context_after keys at all.
             let dir = scratch("find_no_ctx");
             let dir_name = write_find_fixture(&dir, "a.txt", "one\ntwo needle\nthree\n");
-            let op = json!({ "operation": "find_in_files", "pattern": "needle", "dir": &dir_name, "recursive": false });
+            let op = json!({ "pattern": "needle", "dir": &dir_name, "recursive": false });
 
-            let out = op_find_in_files(&op);
+            let out = op_find(&op);
             assert_eq!(out["ok"], true, "{out:?}");
             let m = &out["matches"][0];
             assert_eq!(m["line"], 2);
@@ -2284,15 +2741,15 @@ pub mod logic {
         }
 
         #[test]
-        fn find_in_files_context_lines_happy_path() {
+        fn find_context_lines_happy_path() {
             let dir = scratch("find_ctx");
             let dir_name = write_find_fixture(&dir, "a.txt", "L1\nL2\nL3 needle\nL4\nL5\n");
             let op = json!({
-                "operation": "find_in_files", "pattern": "needle",
+                "pattern": "needle",
                 "dir": &dir_name, "recursive": false, "context_lines": 1
             });
 
-            let out = op_find_in_files(&op);
+            let out = op_find(&op);
             assert_eq!(out["ok"], true, "{out:?}");
             let m = &out["matches"][0];
             assert_eq!(m["line"], 3);
@@ -2303,17 +2760,17 @@ pub mod logic {
         }
 
         #[test]
-        fn find_in_files_context_clamped_at_boundaries() {
+        fn find_context_clamped_at_boundaries() {
             // A match on the first line gets an empty context_before (clamped, never padded)
             // and a context_after shortened to the lines that exist.
             let dir = scratch("find_ctx_boundary");
             let dir_name = write_find_fixture(&dir, "a.txt", "head needle\nb\nc\n");
             let op = json!({
-                "operation": "find_in_files", "pattern": "needle",
+                "pattern": "needle",
                 "dir": &dir_name, "recursive": false, "context_lines": 5
             });
 
-            let out = op_find_in_files(&op);
+            let out = op_find(&op);
             assert_eq!(out["ok"], true, "{out:?}");
             let m = &out["matches"][0];
             assert_eq!(m["line"], 1);
@@ -2332,15 +2789,15 @@ pub mod logic {
         }
 
         #[test]
-        fn find_in_files_rejects_oversized_context() {
+        fn find_rejects_oversized_context() {
             let dir = scratch("find_ctx_toobig");
             let dir_name = write_find_fixture(&dir, "a.txt", "needle\n");
             for bad in [MAX_CONTEXT_LINES + 1, -1] {
                 let op = json!({
-                    "operation": "find_in_files", "pattern": "needle",
+                    "pattern": "needle",
                     "dir": &dir_name, "recursive": false, "context_lines": bad
                 });
-                let out = op_find_in_files(&op);
+                let out = op_find(&op);
                 assert_eq!(out["ok"], false, "context_lines {bad} must be rejected");
                 assert_eq!(out["error_kind"], err::CONTEXT_TOO_LARGE);
             }
@@ -2349,7 +2806,7 @@ pub mod logic {
         }
 
         #[test]
-        fn find_in_files_size_ceiling_accounts_for_context() {
+        fn find_size_ceiling_accounts_for_context() {
             // The same search with a context window carries the neighbouring lines in every
             // match, so it reaches the result ceiling after fewer matches than without one —
             // proving the size accounting measures the context text, not just the match lines.
@@ -2369,12 +2826,12 @@ pub mod logic {
             fs::write(dir.join("big.txt"), content).expect("failed to write fixture");
             let dir_name = dir.to_string_lossy().to_string();
 
-            let no_ctx = op_find_in_files(&json!({
-                "operation": "find_in_files", "pattern": "marker",
+            let no_ctx = op_find(&json!({
+                "pattern": "marker",
                 "dir": &dir_name, "recursive": false, "context_lines": 0
             }));
-            let with_ctx = op_find_in_files(&json!({
-                "operation": "find_in_files", "pattern": "marker",
+            let with_ctx = op_find(&json!({
+                "pattern": "marker",
                 "dir": &dir_name, "recursive": false, "context_lines": 3
             }));
             for out in [&no_ctx, &with_ctx] {
@@ -2392,7 +2849,7 @@ pub mod logic {
             let _ = fs::remove_dir_all(&dir);
         }
 
-        // ── find_in_files: dir normalization ────────────────────────────────────
+        // ── find: dir normalization ────────────────────────────────────
 
         #[test]
         fn normalize_dir_resolves_dot_segments_lexically() {
@@ -2415,25 +2872,25 @@ pub mod logic {
         }
 
         #[test]
-        fn find_in_files_refuses_a_dir_above_the_workdir() {
+        fn find_refuses_a_dir_above_the_workdir() {
             // `pattern` is an invalid regex: the refusal lands ahead of compiling it, and so
             // ahead of any walk.
             for climb in ["..", "../x", "src/../.."] {
-                let out = op_find_in_files(&json!({
-                    "operation": "find_in_files", "pattern": "(", "dir": climb,
+                let out = op_find(&json!({
+                    "pattern": "(", "dir": climb,
                 }));
                 assert_eq!(out["ok"], false, "{climb}");
                 assert_eq!(out["error_kind"], err::OUTSIDE_WORKDIR, "{climb}: {out:?}");
                 assert_eq!(
                     out["message"],
-                    format!("'dir' resolves outside the capsule workdir: '{climb}'")
+                    format!("'find.dir' resolves outside the capsule workdir: '{climb}'")
                 );
                 assert!(out["matches"].is_null());
             }
         }
 
         #[test]
-        fn find_in_files_resolves_dot_segments_inside_dir() {
+        fn find_resolves_dot_segments_inside_dir() {
             let dir = scratch("find_dot_segments");
             fs::create_dir_all(dir.join("sub")).unwrap();
             fs::write(dir.join("top.txt"), "needle\n").unwrap();
@@ -2445,8 +2902,8 @@ pub mod logic {
                 format!("./{base}/."),
                 format!("{base}/"),
             ] {
-                let out = op_find_in_files(&json!({
-                    "operation": "find_in_files", "pattern": "needle", "dir": spelling,
+                let out = op_find(&json!({
+                    "pattern": "needle", "dir": spelling,
                 }));
                 assert_eq!(out["ok"], true, "{spelling}: {out:?}");
                 assert_eq!(
@@ -2463,20 +2920,20 @@ pub mod logic {
         }
 
         #[test]
-        fn find_in_files_rejects_a_non_string_dir_or_glob() {
-            let out = op_find_in_files(&json!({
-                "operation": "find_in_files", "pattern": "x", "dir": 3,
+        fn find_rejects_a_non_string_dir_or_glob() {
+            let out = op_find(&json!({
+                "pattern": "x", "dir": 3,
             }));
-            assert_eq!(out["message"], "dir must be a string");
+            assert_eq!(out["message"], "find.dir must be a string");
             assert!(out["error_kind"].is_null());
-            let out = op_find_in_files(&json!({
-                "operation": "find_in_files", "pattern": "x", "glob": ["*.py"],
+            let out = op_find(&json!({
+                "pattern": "x", "glob": ["*.py"],
             }));
-            assert_eq!(out["message"], "glob must be a string");
+            assert_eq!(out["message"], "find.glob must be a string");
             assert!(out["error_kind"].is_null());
         }
 
-        // ── find_in_files: glob ─────────────────────────────────────────────────
+        // ── find: glob ─────────────────────────────────────────────────
 
         #[test]
         fn glob_to_regex_translates_each_wildcard() {
@@ -2520,7 +2977,7 @@ pub mod logic {
         }
 
         #[test]
-        fn find_in_files_glob_filters_by_name_or_relative_path() {
+        fn find_glob_filters_by_name_or_relative_path() {
             let dir = scratch("find_glob");
             fs::create_dir_all(dir.join("lib")).unwrap();
             fs::create_dir_all(dir.join("src/a")).unwrap();
@@ -2528,8 +2985,8 @@ pub mod logic {
                 fs::write(dir.join(file), "needle\n").unwrap();
             }
             let paths = |glob: &str| -> Vec<String> {
-                let out = op_find_in_files(&json!({
-                    "operation": "find_in_files", "pattern": "needle",
+                let out = op_find(&json!({
+                    "pattern": "needle",
                     "dir": dir.to_str().unwrap(), "glob": glob,
                 }));
                 assert_eq!(out["ok"], true, "{glob}: {out:?}");
@@ -2552,15 +3009,15 @@ pub mod logic {
         }
 
         #[test]
-        fn find_in_files_refuses_an_absolute_glob() {
-            let out = op_find_in_files(&json!({
-                "operation": "find_in_files", "pattern": "needle", "glob": "/src/*.rs",
+        fn find_refuses_an_absolute_glob() {
+            let out = op_find(&json!({
+                "pattern": "needle", "glob": "/src/*.rs",
             }));
             assert_eq!(out["ok"], false);
             assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
             assert_eq!(
                 out["message"],
-                "'glob' must be relative to the capsule workdir; got '/src/*.rs' (did you mean '*.rs'?)"
+                "'find.glob' must be relative to the capsule workdir; got '/src/*.rs' (did you mean '*.rs'?)"
             );
             assert!(
                 out["matches"].is_null(),
@@ -2568,10 +3025,10 @@ pub mod logic {
             );
         }
 
-        // ── find_in_files: walk rules and budgets ───────────────────────────────
+        // ── find: walk rules and budgets ───────────────────────────────
 
         #[test]
-        fn find_in_files_skips_hidden_build_and_binary_entries_below_the_root() {
+        fn find_skips_hidden_build_and_binary_entries_below_the_root() {
             let dir = scratch("find_skip_rules");
             for sub in [".git", ".hidden", "target", "node_modules/m"] {
                 fs::create_dir_all(dir.join(sub)).unwrap();
@@ -2591,8 +3048,8 @@ pub mod logic {
             let base = dir.to_str().unwrap();
 
             let paths = |dir: &str| -> Vec<String> {
-                let out = op_find_in_files(&json!({
-                    "operation": "find_in_files", "pattern": "needle", "dir": dir,
+                let out = op_find(&json!({
+                    "pattern": "needle", "dir": dir,
                 }));
                 assert_eq!(out["ok"], true, "{out:?}");
                 out["matches"]
@@ -2628,15 +3085,15 @@ pub mod logic {
         }
 
         #[test]
-        fn find_in_files_caps_at_the_file_limit() {
+        fn find_caps_at_the_file_limit() {
             let dir = write_five_needles("find_file_limit");
             let limits = Limits {
                 files: 3,
                 ..Limits::PRODUCTION
             };
-            let op = json!({ "operation": "find_in_files", "pattern": "needle", "dir": dir.to_str().unwrap() });
+            let op = json!({ "pattern": "needle", "dir": dir.to_str().unwrap() });
 
-            let out = find_in_files(&op, limits);
+            let out = find_with_limits(&op, limits);
             assert_eq!(out["ok"], true, "{out:?}");
             assert_eq!(matched_paths(&out), ["f0", "f1", "f2"]);
             assert_eq!(
@@ -2650,7 +3107,7 @@ pub mod logic {
             // stops before it reaches f4.
             let mut globbed = op.clone();
             globbed["glob"] = json!("f4");
-            let out = find_in_files(&globbed, limits);
+            let out = find_with_limits(&globbed, limits);
             assert_eq!(out["ok"], true, "{out:?}");
             assert!(matched_paths(&out).is_empty(), "{out:?}");
             assert_eq!(out["summary"], "0 matches in 0 files (capped)");
@@ -2660,7 +3117,7 @@ pub mod logic {
             );
 
             // A walk that ends on exactly the limit was not stopped by it.
-            let out = find_in_files(
+            let out = find_with_limits(
                 &op,
                 Limits {
                     files: 5,
@@ -2675,7 +3132,7 @@ pub mod logic {
             assert_eq!(out["summary"], "5 matches in 5 files");
 
             // The same holds when the glob admits only the last file walked.
-            let out = find_in_files(
+            let out = find_with_limits(
                 &globbed,
                 Limits {
                     files: 5,
@@ -2689,11 +3146,10 @@ pub mod logic {
         }
 
         #[test]
-        fn find_in_files_non_recursive_walk_counts_files_the_glob_excludes() {
+        fn find_non_recursive_walk_counts_files_the_glob_excludes() {
             let dir = write_five_needles("find_file_limit_flat");
-            let out = find_in_files(
+            let out = find_with_limits(
                 &json!({
-                    "operation": "find_in_files",
                     "pattern": "needle",
                     "dir": dir.to_str().unwrap(),
                     "recursive": false,
@@ -2716,15 +3172,15 @@ pub mod logic {
         }
 
         #[test]
-        fn find_in_files_caps_at_the_byte_limit() {
+        fn find_caps_at_the_byte_limit() {
             let dir = write_five_needles("find_byte_limit");
             // Two 7-byte files fit in 20 bytes; the third would take the total to 21.
             let limits = Limits {
                 bytes: 20,
                 ..Limits::PRODUCTION
             };
-            let out = find_in_files(
-                &json!({ "operation": "find_in_files", "pattern": "needle", "dir": dir.to_str().unwrap() }),
+            let out = find_with_limits(
+                &json!({ "pattern": "needle", "dir": dir.to_str().unwrap() }),
                 limits,
             );
             assert_eq!(out["ok"], true, "{out:?}");
@@ -2738,12 +3194,12 @@ pub mod logic {
         }
 
         #[test]
-        fn find_in_files_caps_at_the_match_limit_and_reads_no_further_file() {
+        fn find_caps_at_the_match_limit_and_reads_no_further_file() {
             let dir = write_five_needles("find_match_limit");
             fs::write(dir.join("f1"), "needle\nneedle\nneedle\n").unwrap();
-            let op = json!({ "operation": "find_in_files", "pattern": "needle", "dir": dir.to_str().unwrap() });
+            let op = json!({ "pattern": "needle", "dir": dir.to_str().unwrap() });
 
-            let out = find_in_files(
+            let out = find_with_limits(
                 &op,
                 Limits {
                     matches: 3,
@@ -2850,7 +3306,7 @@ mod wasm_tool {
             // reproduces the pre-port `ToolResult.data` byte-for-byte (e.g. whole-file read ->
             // `{"content":...,"total_lines":...}`, ranged read -> the same plus
             // `start_line`/`end_line`, cut read -> the ranged shape plus `truncated`,
-            // write/error -> None). Status/summary/state_effect carry the rest.
+            // write/edit/error -> None). Status/summary/state_effect carry the rest.
             let data = result
                 .get("data")
                 .and_then(Value::as_str)
@@ -2862,8 +3318,8 @@ mod wasm_tool {
                         .map(|d| d.to_string())
                 });
 
-            // A find_in_files search stopped by one of its limits carries a `capped` note in
-            // `data`, and a read_file cut by one of its limits a `truncated` note; `truncated`
+            // A find stopped by one of its limits carries a `capped` note in `data`, and a read
+            // cut by one of its limits a `truncated` note; `truncated`
             // tells a UI the same without parsing either.
             let truncated = result
                 .get("data")

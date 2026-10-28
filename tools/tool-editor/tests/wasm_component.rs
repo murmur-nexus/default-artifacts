@@ -3,14 +3,14 @@
 //!
 //! Every call runs in its own Wasmtime `Store`/instantiation against a preopened workdir —
 //! the component-model analogue of the one-op-per-dispatch reality of this tool. Across
-//! separate instantiations it proves that a repeat `read_file` of an unchanged file returns
+//! separate instantiations it proves that a repeat `read` of an unchanged file returns
 //! the content again, that reads leave the workdir's entries exactly as they found them, and
 //! that a `.tool-editor-cache/` left behind by an earlier version is neither read nor
 //! modified.
 //!
 //! It also validates the compiled artifact loads as a real component
 //! (`Component::from_file` is the validation gate — there is no `wasm-tools` CLI dependency
-//! here) and benchmarks a `find_in_files` walk over a large synthetic tree against the
+//! here) and benchmarks a `find` walk over a large synthetic tree against the
 //! identical host-native `logic::run` path, to prove no order-of-magnitude regression.
 
 use std::path::{Path, PathBuf};
@@ -131,7 +131,7 @@ fn wasi_store(
 }
 
 /// One independent instantiation + `run` call against `workdir`. `data_payload` is the
-/// operation object (what the host places in `ToolInput.data`). Returns the decoded
+/// call object (what the host places in `ToolInput.data`). Returns the decoded
 /// old-protocol JSON envelope carried in `ToolResult.data`, plus status and metadata.
 fn run_editor(
     engine: &Engine,
@@ -211,7 +211,7 @@ fn unique_workdir(tag: &str) -> PathBuf {
 }
 
 #[test]
-fn component_loads_and_runs_read_file() {
+fn component_loads_and_runs_read() {
     // `Component::from_file` succeeding IS the artifact-validation gate.
     let eng = engine();
     let component = Component::from_file(&eng, component_path()).expect("load component");
@@ -224,7 +224,7 @@ fn component_loads_and_runs_read_file() {
         &component,
         &lnk,
         &workdir,
-        r#"{"operation":"read_file","path":"hello.txt"}"#,
+        r#"{"read":{"path":"hello.txt"}}"#,
     );
     assert!(matches!(status, Status::Passed), "status: {status:?}");
     // ToolResult.data carries the operation's `data` field (as the host's native dispatch
@@ -244,7 +244,7 @@ fn component_loads_and_runs_read_file() {
         &component,
         &lnk,
         &workdir,
-        r#"{"operation":"read_file","path":"hello.txt"}"#,
+        r#"{"read":{"path":"hello.txt"}}"#,
     );
     assert!(
         !result.truncated,
@@ -268,7 +268,7 @@ fn a_read_with_no_range_of_a_large_file_stops_at_the_line_limit() {
         &component,
         &lnk,
         &workdir,
-        r#"{"operation":"read_file","path":"big.txt"}"#,
+        r#"{"read":{"path":"big.txt"}}"#,
     );
     assert!(
         matches!(result.status, Status::Passed),
@@ -298,7 +298,7 @@ fn a_read_with_no_range_of_a_large_file_stops_at_the_line_limit() {
 }
 
 #[test]
-fn component_loads_and_runs_write_file() {
+fn component_loads_and_runs_write() {
     let eng = engine();
     let component = Component::from_file(&eng, component_path()).expect("load component");
     let lnk = linker(&eng);
@@ -309,10 +309,10 @@ fn component_loads_and_runs_write_file() {
         &component,
         &lnk,
         &workdir,
-        r#"{"operation":"write_file","dest_path":"out.txt","content":"written via wasm"}"#,
+        r#"{"write":{"path":"out.txt","content":"written via wasm"}}"#,
     );
     assert!(matches!(status, Status::Passed), "status: {status:?}");
-    // write_file's `data` field is null in the old protocol, so ToolResult.data is None.
+    // write's `data` field is null in the old protocol, so ToolResult.data is None.
     assert!(payload.is_null(), "payload: {payload}");
     assert!(
         meta.iter()
@@ -327,37 +327,141 @@ fn component_loads_and_runs_write_file() {
     let _ = std::fs::remove_dir_all(&workdir);
 }
 
+// S1: three pairs, each applied to the result of the one before.
 #[test]
-fn component_loads_and_runs_replace_in_file() {
+fn component_applies_edits_in_order() {
     let eng = engine();
     let component = Component::from_file(&eng, component_path()).expect("load component");
     let lnk = linker(&eng);
-    let workdir = unique_workdir("replace");
-    std::fs::write(workdir.join("patch.txt"), "hello world, hello again").unwrap();
+    let workdir = unique_workdir("edit_in_order");
+    std::fs::write(workdir.join("f.txt"), "one two three\n").unwrap();
 
-    let (status, payload, meta) = run_editor(
+    let (status, payload, summary, meta) = run_editor_reporting(
         &eng,
         &component,
         &lnk,
         &workdir,
-        r#"{"operation":"replace_in_file","dest_path":"patch.txt","old_string":"hello","new_string":"goodbye"}"#,
+        r#"{"edit":{"path":"f.txt","edits":[{"old":"one","new":"1x"},{"old":"1x two","new":"12"},{"old":"three","new":"3"}]}}"#,
     );
     assert!(matches!(status, Status::Passed), "status: {status:?}");
-    assert_eq!(payload["count"], 2, "payload: {payload}");
+    assert!(payload.is_null(), "payload: {payload}");
+    assert_eq!(summary.as_deref(), Some("3 edits"));
     assert!(
         meta.iter()
             .any(|(k, v)| k == "state_effect" && v == "mutate"),
         "expected state_effect=mutate, got {meta:?}"
     );
     assert_eq!(
-        std::fs::read_to_string(workdir.join("patch.txt")).unwrap(),
-        "goodbye world, goodbye again"
+        std::fs::read_to_string(workdir.join("f.txt")).unwrap(),
+        "12 3\n"
     );
 
     let _ = std::fs::remove_dir_all(&workdir);
 }
 
-// The two absolute-path tests below are the ones that need the real preopen. On the host an
+/// One `edit` call that must fail with `summary`, leaving `f.txt` holding `content`.
+fn assert_edit_refused(tag: &str, content: &str, call: &str, summary: &str) {
+    let eng = engine();
+    let component = Component::from_file(&eng, component_path()).expect("load component");
+    let lnk = linker(&eng);
+    let workdir = unique_workdir(tag);
+    std::fs::write(workdir.join("f.txt"), content).unwrap();
+    let before = dir_entries(&workdir);
+
+    let (status, payload, got, meta) = run_editor_reporting(&eng, &component, &lnk, &workdir, call);
+    assert!(matches!(status, Status::Error), "{call}: {status:?}");
+    assert!(payload.is_null(), "{call}: {payload}");
+    assert_eq!(got.as_deref(), Some(summary), "{call}");
+    assert!(
+        meta.is_empty(),
+        "a failed edit declares no state_effect: {meta:?}"
+    );
+    assert_eq!(
+        std::fs::read(workdir.join("f.txt")).unwrap(),
+        content.as_bytes(),
+        "{call}: a failed edit leaves the file byte-identical"
+    );
+    assert_eq!(dir_entries(&workdir), before, "{call}");
+
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+// S2: the second of three pairs occurs nowhere; the first, already applied in memory, is not
+// written.
+#[test]
+fn component_edit_with_a_missing_old_changes_nothing() {
+    assert_edit_refused(
+        "edit_not_found",
+        "one two three\n",
+        r#"{"edit":{"path":"f.txt","edits":[{"old":"one","new":"1"},{"old":"absent","new":"x"},{"old":"three","new":"3"}]}}"#,
+        "edit 2 of 3: old occurs 0 times in f.txt; the file is unchanged",
+    );
+}
+
+// S3: overlapping occurrences count, so `aa` occurs twice in `aaa`.
+#[test]
+fn component_edit_with_an_ambiguous_old_changes_nothing() {
+    assert_edit_refused(
+        "edit_multiple_overlap",
+        "x aaa\n",
+        r#"{"edit":{"path":"f.txt","edits":[{"old":"x","new":"y"},{"old":"aa","new":"b"}]}}"#,
+        "edit 2 of 2: old occurs 2 times in f.txt; the file is unchanged",
+    );
+    assert_edit_refused(
+        "edit_multiple_dup",
+        "x dup dup\n",
+        r#"{"edit":{"path":"f.txt","edits":[{"old":"x","new":"y"},{"old":"dup","new":"one"}]}}"#,
+        "edit 2 of 2: old occurs 2 times in f.txt; the file is unchanged",
+    );
+}
+
+#[test]
+fn component_refuses_empty_edits_and_an_empty_old() {
+    assert_edit_refused(
+        "edit_empty_edits",
+        "abc\n",
+        r#"{"edit":{"path":"f.txt","edits":[]}}"#,
+        "edit.edits is empty: it takes at least one {old, new} object",
+    );
+    assert_edit_refused(
+        "edit_empty_old",
+        "abc\n",
+        r#"{"edit":{"path":"f.txt","edits":[{"old":"a","new":"z"},{"old":"","new":"x"}]}}"#,
+        "edit 2 of 2: old is empty; it must name the text to replace",
+    );
+}
+
+#[test]
+fn component_edit_of_a_missing_file_creates_nothing() {
+    let eng = engine();
+    let component = Component::from_file(&eng, component_path()).expect("load component");
+    let lnk = linker(&eng);
+    let workdir = unique_workdir("edit_missing");
+
+    let (status, _payload, summary, meta) = run_editor_reporting(
+        &eng,
+        &component,
+        &lnk,
+        &workdir,
+        r#"{"edit":{"path":"absent.txt","edits":[{"old":"a","new":"b"}]}}"#,
+    );
+    assert!(matches!(status, Status::Error), "status: {status:?}");
+    assert!(
+        summary
+            .as_deref()
+            .is_some_and(|s| s.starts_with("absent.txt: ")),
+        "{summary:?}"
+    );
+    assert!(meta.is_empty(), "{meta:?}");
+    assert!(
+        dir_entries(&workdir).is_empty(),
+        "a failed edit creates nothing"
+    );
+
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+// The absolute-path tests below are the ones that need the real preopen. On the host an
 // absolute value escapes the fixture tree and fails on its own; under the single preopen a tool
 // is dispatched with, `/app/results.txt` resolves to `<workdir>/app/results.txt` — which is
 // exactly why the tool used to create it, report success, and read it back "correctly" after.
@@ -367,7 +471,7 @@ fn component_loads_and_runs_replace_in_file() {
 // `ToolResult.data` is None). These assert what crosses the component boundary; the
 // `error_kind: "absolute_path"` value itself is pinned by the unit tests in `src/lib.rs`.
 #[test]
-fn component_refuses_an_absolute_dest_path_and_leaves_the_workdir_untouched() {
+fn component_refuses_an_absolute_write_path_and_leaves_the_workdir_untouched() {
     let eng = engine();
     let component = Component::from_file(&eng, component_path()).expect("load component");
     let lnk = linker(&eng);
@@ -379,14 +483,14 @@ fn component_refuses_an_absolute_dest_path_and_leaves_the_workdir_untouched() {
         &component,
         &lnk,
         &workdir,
-        r#"{"operation":"write_file","dest_path":"/app/results.txt","content":"written to the wrong place"}"#,
+        r#"{"write":{"path":"/app/results.txt","content":"written to the wrong place"}}"#,
     );
     assert!(matches!(status, Status::Error), "status: {status:?}");
     assert!(payload.is_null(), "payload: {payload}");
     assert_eq!(
         summary.as_deref(),
         Some(
-            "'dest_path' must be relative to the capsule workdir; got '/app/results.txt' \
+            "'write.path' must be relative to the capsule workdir; got '/app/results.txt' \
              (did you mean 'results.txt'?)"
         ),
     );
@@ -406,41 +510,152 @@ fn component_refuses_an_absolute_dest_path_and_leaves_the_workdir_untouched() {
     let _ = std::fs::remove_dir_all(&workdir);
 }
 
-// A call with every `write_file` field but `operation` — the shape a model sends when it leaves
-// the discriminator out. The message names the field and the values to send, and arrives in
-// `ToolResult.summary`, the field a host displays.
+// S8: every path location, through the component. Each target exists under the preopen at the
+// place the absolute value resolves to, so a not-found cannot stand in for the refusal.
 #[test]
-fn component_names_a_missing_operation_and_leaves_the_workdir_untouched() {
+fn component_refuses_an_absolute_value_at_every_path_location() {
     let eng = engine();
     let component = Component::from_file(&eng, component_path()).expect("load component");
     let lnk = linker(&eng);
-    let workdir = unique_workdir("missing_operation");
+    let workdir = unique_workdir("absolute_every_location");
+    std::fs::create_dir_all(workdir.join("app")).unwrap();
+    std::fs::write(workdir.join("app/results.txt"), "original\n").unwrap();
+
+    for (call, location, value) in [
+        (
+            r#"{"read":{"path":"/app/results.txt"}}"#,
+            "read.path",
+            "/app/results.txt",
+        ),
+        (
+            r#"{"write":{"path":"/app/new/x.txt","content":"x"}}"#,
+            "write.path",
+            "/app/new/x.txt",
+        ),
+        (
+            r#"{"edit":{"path":"/app/results.txt","edits":[{"old":"original","new":"x"}]}}"#,
+            "edit.path",
+            "/app/results.txt",
+        ),
+        (
+            r#"{"find":{"pattern":"original","dir":"/app"}}"#,
+            "find.dir",
+            "/app",
+        ),
+        (
+            r#"{"find":{"pattern":"original","glob":"/app/*.txt"}}"#,
+            "find.glob",
+            "/app/*.txt",
+        ),
+    ] {
+        let (status, payload, summary, meta) =
+            run_editor_reporting(&eng, &component, &lnk, &workdir, call);
+        assert!(matches!(status, Status::Error), "{call}: {status:?}");
+        assert!(payload.is_null(), "{call}: {payload}");
+        let summary = summary.unwrap_or_default();
+        assert!(
+            summary.starts_with(&format!(
+                "'{location}' must be relative to the capsule workdir; got '{value}'"
+            )),
+            "{call}: {summary}"
+        );
+        assert!(meta.is_empty(), "{call}: {meta:?}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(workdir.join("app/results.txt")).unwrap(),
+        "original\n"
+    );
+    assert_eq!(dir_entries(&workdir.join("app")), ["results.txt"]);
+
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+// S4: every field of an earlier input shape is refused as an unknown field, at every level, and
+// leaves the workdir exactly as it found it.
+#[test]
+fn component_refuses_every_earlier_field_and_leaves_the_workdir_untouched() {
+    let eng = engine();
+    let component = Component::from_file(&eng, component_path()).expect("load component");
+    let lnk = linker(&eng);
+    let workdir = unique_workdir("old_shapes");
+    std::fs::write(workdir.join("patch.txt"), "hello\n").unwrap();
     let before = dir_entries(&workdir);
 
-    let (status, payload, summary, meta) = run_editor_reporting(
-        &eng,
-        &component,
-        &lnk,
-        &workdir,
-        r#"{"dest_path":"out.txt","content":"x"}"#,
-    );
-    assert!(matches!(status, Status::Error), "status: {status:?}");
-    assert!(payload.is_null(), "payload: {payload}");
-    assert_eq!(
-        summary.as_deref(),
-        Some(
-            "missing \"operation\": expected one of read_file, write_file, replace_in_file, \
-             find_in_files"
+    for (call, summary) in [
+        (
+            r#"{"operation":"replace_in_file","dest_path":"patch.txt","old_string":"hello","new_string":"bye"}"#,
+            "unknown field \"dest_path\", \"new_string\", \"old_string\", \"operation\": a call \
+             holds exactly one of read, write, edit, find",
         ),
+        (
+            r#"{"write":{"dest_path":"new.txt","content":"x"}}"#,
+            "unknown field \"dest_path\" in write: write takes path, content",
+        ),
+        (
+            r#"{"edit":{"path":"patch.txt","old_string":"hello","new_string":"bye"}}"#,
+            "unknown field \"new_string\", \"old_string\" in edit: edit takes path, edits",
+        ),
+        (
+            r#"{"edit":{"path":"patch.txt","edits":[{"old_string":"hello","new_string":"bye"}]}}"#,
+            "unknown field \"new_string\", \"old_string\" in edit 1 of 1: an edit takes old, new",
+        ),
+        (
+            r#"{"operation":"read_file","path":"patch.txt"}"#,
+            "unknown field \"operation\", \"path\": a call holds exactly one of read, write, \
+             edit, find",
+        ),
+    ] {
+        let (status, payload, got, meta) =
+            run_editor_reporting(&eng, &component, &lnk, &workdir, call);
+        assert!(matches!(status, Status::Error), "{call}: {status:?}");
+        assert!(payload.is_null(), "{call}: {payload}");
+        assert_eq!(got.as_deref(), Some(summary), "{call}");
+        assert!(meta.is_empty(), "{call}: {meta:?}");
+    }
+    assert_eq!(dir_entries(&workdir), before);
+    assert_eq!(
+        std::fs::read_to_string(workdir.join("patch.txt")).unwrap(),
+        "hello\n"
     );
-    assert!(
-        meta.is_empty(),
-        "a rejected operation declares no state_effect, got {meta:?}"
-    );
+
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+// S5: zero operation keys, a null one, or several. The message arrives in
+// `ToolResult.summary`, the field a host displays.
+#[test]
+fn component_refuses_zero_or_several_operations_and_leaves_the_workdir_untouched() {
+    let eng = engine();
+    let component = Component::from_file(&eng, component_path()).expect("load component");
+    let lnk = linker(&eng);
+    let workdir = unique_workdir("operation_count");
+    let before = dir_entries(&workdir);
+
+    for (call, got) in [
+        ("{}", "got none"),
+        (r#"{"read":null}"#, "got none"),
+        (
+            r#"{"read":{"path":"a.txt"},"write":{"path":"out.txt","content":"x"}}"#,
+            "got read, write",
+        ),
+    ] {
+        let (status, payload, summary, meta) =
+            run_editor_reporting(&eng, &component, &lnk, &workdir, call);
+        assert!(matches!(status, Status::Error), "{call}: {status:?}");
+        assert!(payload.is_null(), "{call}: {payload}");
+        assert_eq!(
+            summary,
+            Some(format!(
+                "a call holds exactly one of read, write, edit, find; {got}"
+            )),
+            "{call}"
+        );
+        assert!(meta.is_empty(), "{call}: {meta:?}");
+    }
     assert_eq!(
         dir_entries(&workdir),
         before,
-        "a rejected operation must leave the workdir exactly as it found it"
+        "a refused call must leave the workdir exactly as it found it"
     );
 
     let _ = std::fs::remove_dir_all(&workdir);
@@ -466,7 +681,7 @@ fn component_refuses_an_absolute_read_path_even_when_the_file_exists() {
         &component,
         &lnk,
         &workdir,
-        r#"{"operation":"read_file","path":"/app/results.txt"}"#,
+        r#"{"read":{"path":"/app/results.txt"}}"#,
     );
     assert!(matches!(status, Status::Error), "status: {status:?}");
     assert!(
@@ -475,8 +690,10 @@ fn component_refuses_an_absolute_read_path_even_when_the_file_exists() {
     );
     let msg = summary.expect("a refusal carries its message in summary");
     assert!(
-        msg.starts_with("'path' must be relative to the capsule workdir; got '/app/results.txt'"),
-        "the refusal names `path`, the property this operation reads: {msg}"
+        msg.starts_with(
+            "'read.path' must be relative to the capsule workdir; got '/app/results.txt'"
+        ),
+        "the refusal names `read.path`, the location the call wrote: {msg}"
     );
 
     // The same value read relatively still resolves — the refusal is about the spelling of the
@@ -486,7 +703,7 @@ fn component_refuses_an_absolute_read_path_even_when_the_file_exists() {
         &component,
         &lnk,
         &workdir,
-        r#"{"operation":"read_file","path":"app/results.txt"}"#,
+        r#"{"read":{"path":"app/results.txt"}}"#,
     );
     assert!(matches!(ok_status, Status::Passed), "status: {ok_status:?}");
     assert_eq!(ok_payload["content"], "content from the wrong place");
@@ -503,8 +720,8 @@ fn repeat_reads_across_instantiations_return_content_and_leave_the_workdir_untou
     std::fs::write(workdir.join("target.txt"), "l1\nl2\nl3\nl4\nl5\n").unwrap();
     let before = dir_entries(&workdir);
 
-    let whole = r#"{"operation":"read_file","path":"target.txt"}"#;
-    let ranged = r#"{"operation":"read_file","path":"target.txt","start_line":2,"end_line":3}"#;
+    let whole = r#"{"read":{"path":"target.txt"}}"#;
+    let ranged = r#"{"read":{"path":"target.txt","start_line":2,"end_line":3}}"#;
 
     // Each call is a separate Store against the same preopened workdir, so nothing an earlier
     // instantiation held in memory can reach a later one.
@@ -543,7 +760,7 @@ fn repeat_reads_across_instantiations_return_content_and_leave_the_workdir_untou
     assert_eq!(
         dir_entries(&workdir),
         before,
-        "read_file must leave the workdir's entries exactly as it found them"
+        "read must leave the workdir's entries exactly as it found them"
     );
     assert!(!workdir.join(".tool-editor-cache").exists());
 
@@ -579,7 +796,7 @@ fn a_leftover_cache_directory_from_an_earlier_version_is_inert() {
         &component,
         &lnk,
         &workdir,
-        r#"{"operation":"read_file","path":"target.txt"}"#,
+        r#"{"read":{"path":"target.txt"}}"#,
     );
     assert!(matches!(status, Status::Passed), "status: {status:?}");
     assert_eq!(payload["content"], "fresh bytes", "payload: {payload}");
@@ -601,7 +818,7 @@ fn a_leftover_cache_directory_from_an_earlier_version_is_inert() {
 }
 
 #[test]
-fn component_loads_and_runs_ranged_read_file() {
+fn component_loads_and_runs_ranged_read() {
     // A bounded read through the real compiled component: only the requested line span comes
     // back, alongside the file's total_lines and the resolved range.
     let eng = engine();
@@ -615,7 +832,7 @@ fn component_loads_and_runs_ranged_read_file() {
         &component,
         &lnk,
         &workdir,
-        r#"{"operation":"read_file","path":"mod.txt","start_line":2,"end_line":4}"#,
+        r#"{"read":{"path":"mod.txt","start_line":2,"end_line":4}}"#,
     );
     assert!(matches!(status, Status::Passed), "status: {status:?}");
     assert_eq!(payload["content"], "b\nc\nd", "payload: {payload}");
@@ -644,7 +861,7 @@ fn component_loads_and_runs_find_with_context_lines() {
         &component,
         &lnk,
         &workdir,
-        r#"{"operation":"find_in_files","pattern":"needle","dir":"src","recursive":false,"context_lines":2}"#,
+        r#"{"find":{"pattern":"needle","dir":"src","recursive":false,"context_lines":2}}"#,
     );
     assert!(matches!(status, Status::Passed), "status: {status:?}");
     let m = &payload["matches"][0];
@@ -658,7 +875,7 @@ fn component_loads_and_runs_find_with_context_lines() {
         &component,
         &lnk,
         &workdir,
-        r#"{"operation":"find_in_files","pattern":"needle","dir":"src","recursive":false}"#,
+        r#"{"find":{"pattern":"needle","dir":"src","recursive":false}}"#,
     );
     assert!(matches!(status2, Status::Passed), "status: {status2:?}");
     let m2 = &payload2["matches"][0];
@@ -674,19 +891,15 @@ fn component_loads_and_runs_find_with_context_lines() {
     let _ = std::fs::remove_dir_all(&workdir);
 }
 
-// ── find_in_files at the workdir root ───────────────────────────────────────────
+// ── find at the workdir root ───────────────────────────────────────────
 //
 // A root search walks the whole preopen, so it can only be exercised here, where the preopen is
 // a fixture workdir; under `cargo test` the unit tests' CWD is the crate root.
 
-/// `find_in_files` with `fields` merged into `{"operation":"find_in_files"}`.
+/// A `find` call whose object is `fields`.
 fn find_payload(fields: Value) -> String {
-    let mut payload = serde_json::json!({ "operation": "find_in_files" });
-    payload
-        .as_object_mut()
-        .unwrap()
-        .extend(fields.as_object().expect("fields is an object").clone());
-    payload.to_string()
+    assert!(fields.is_object(), "fields is an object");
+    serde_json::json!({ "find": fields }).to_string()
 }
 
 /// Write each `(path, content)` under `workdir`, creating parent directories.
@@ -709,7 +922,7 @@ fn match_paths(payload: &Value) -> Vec<String> {
 }
 
 #[test]
-fn find_in_files_searches_the_workdir_root_for_every_root_spelling() {
+fn find_searches_the_workdir_root_for_every_root_spelling() {
     let eng = engine();
     let component = Component::from_file(&eng, component_path()).expect("load component");
     let lnk = linker(&eng);
@@ -761,7 +974,7 @@ fn find_in_files_searches_the_workdir_root_for_every_root_spelling() {
 }
 
 #[test]
-fn find_in_files_root_search_skips_hidden_build_and_binary_entries() {
+fn find_root_search_skips_hidden_build_and_binary_entries() {
     let eng = engine();
     let component = Component::from_file(&eng, component_path()).expect("load component");
     let lnk = linker(&eng);
@@ -807,7 +1020,7 @@ fn find_in_files_root_search_skips_hidden_build_and_binary_entries() {
 }
 
 #[test]
-fn find_in_files_glob_filters_a_root_search() {
+fn find_glob_filters_a_root_search() {
     let eng = engine();
     let component = Component::from_file(&eng, component_path()).expect("load component");
     let lnk = linker(&eng);
@@ -842,7 +1055,7 @@ fn find_in_files_glob_filters_a_root_search() {
 }
 
 #[test]
-fn find_in_files_root_search_caps_at_200_matches() {
+fn find_root_search_caps_at_200_matches() {
     let eng = engine();
     let component = Component::from_file(&eng, component_path()).expect("load component");
     let lnk = linker(&eng);
@@ -896,7 +1109,7 @@ fn find_in_files_root_search_caps_at_200_matches() {
 }
 
 #[test]
-fn find_in_files_glob_search_stops_at_5000_files_walked() {
+fn find_glob_search_stops_at_5000_files_walked() {
     let eng = engine();
     let component = Component::from_file(&eng, component_path()).expect("load component");
     let lnk = linker(&eng);
@@ -965,7 +1178,7 @@ fn build_tree(root: &Path, dirs: usize, files_per_dir: usize) -> usize {
 }
 
 #[test]
-fn find_in_files_benchmark_no_orders_of_magnitude_regression() {
+fn find_benchmark_no_orders_of_magnitude_regression() {
     const SAMPLES: usize = 5;
     const MAX_RATIO: f64 = 30.0;
 
@@ -977,15 +1190,14 @@ fn find_in_files_benchmark_no_orders_of_magnitude_regression() {
     let n_files = build_tree(&tree, 60, 50); // 3000 files
 
     // wasm: the walk uses a workdir-relative dir under the single preopen.
-    let rel_payload =
-        r#"{"operation":"find_in_files","pattern":"NEEDLE","dir":"bench_tree","recursive":true}"#;
+    let rel_payload = r#"{"find":{"pattern":"NEEDLE","dir":"bench_tree","recursive":true}}"#;
 
     // Host-native baseline: the SAME logic, host-compiled, over the same tree. The dir is
     // workdir-relative like the wasm payload's — the tool refuses an absolute value — so both
     // sides walk the identical tree (host `logic::run` takes the stdin-envelope shape).
     let host_dir = tree.to_string_lossy().to_string();
     let envelope = serde_json::json!({
-        "data": { "operation": "find_in_files", "pattern": "NEEDLE", "dir": host_dir, "recursive": true }
+        "data": { "find": { "pattern": "NEEDLE", "dir": host_dir, "recursive": true } }
     })
     .to_string();
 
@@ -1043,7 +1255,7 @@ fn find_in_files_benchmark_no_orders_of_magnitude_regression() {
 
     let ratio = wasm_walk_min.as_secs_f64() / host_walk_min.as_secs_f64().max(1e-9);
     eprintln!(
-        "BENCH find_in_files files={n_files} samples={SAMPLES} host_walk_min={host_walk_min:?} \
+        "BENCH find files={n_files} samples={SAMPLES} host_walk_min={host_walk_min:?} \
          host_walk_max={host_walk_max:?} wasm_walk_min={wasm_walk_min:?} \
          wasm_walk_max={wasm_walk_max:?} wasm_instantiate+call={wasm_full:?} ratio={ratio:.2}x"
     );
@@ -1060,7 +1272,7 @@ fn find_in_files_benchmark_no_orders_of_magnitude_regression() {
     // (see the build summary).
     assert!(
         wasm_walk_min.as_secs_f64() < host_walk_min.as_secs_f64() * MAX_RATIO + 0.5,
-        "wasm find_in_files regressed by >{MAX_RATIO}x (fastest of {SAMPLES}): \
+        "wasm find regressed by >{MAX_RATIO}x (fastest of {SAMPLES}): \
          host={host_walk_min:?} wasm={wasm_walk_min:?}"
     );
 
