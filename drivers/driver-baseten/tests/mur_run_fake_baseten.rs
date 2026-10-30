@@ -945,13 +945,13 @@ fn assert_large_request_reaches_the_provider(
     content_length
 }
 
-/// A task of 2.5 MiB makes a request body over 2 MiB, more than the host's two 1 MiB body
+/// A task of 5 MiB makes a request body over 5 MiB, far more than the host's two 1 MiB body
 /// chunks hold: the driver must dispatch the request before it writes the body, or the write
 /// loop blocks forever with no connection open.
 #[test]
 #[ignore = "launches the real mur binary; run with --ignored"]
-fn a_request_body_over_two_mib_reaches_the_provider() {
-    assert_large_request_reaches_the_provider(2_621_440, (2 << 20) + 1..=usize::MAX);
+fn a_request_body_over_five_mib_reaches_the_provider() {
+    assert_large_request_reaches_the_provider(5_242_880, 5_242_880..=usize::MAX);
 }
 
 /// A task of 1.5 MiB fills both of the host's body chunks without overflowing them: writing

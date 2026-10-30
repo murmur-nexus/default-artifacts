@@ -21,6 +21,7 @@ members = [
   "libs/murmur-hook-transcript",
   "libs/murmur-test-parse",
   "libs/murmur-time",
+  "libs/murmur-wasi-http",
   "tools/tool-corpus",
   "tools/tool-create",
   "tools/tool-edit",

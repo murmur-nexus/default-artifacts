@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 serde_json.workspace = true
 wit-bindgen.workspace = true
+murmur-wasi-http = { path = "../../libs/murmur-wasi-http" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasip2 = "1.0.4"

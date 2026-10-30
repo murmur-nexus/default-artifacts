@@ -53,6 +53,7 @@ mod wasm_tool {
     use std::path::Path;
 
     use exports::murmur::tool::run::{Guest, Status, ToolInput, ToolResult};
+    use murmur_wasi_http::{write_body, BodyWrite};
 
     use crate::ops::{self, HttpReply, OpStatus, Transport};
 
@@ -170,58 +171,6 @@ mod wasm_tool {
         }
 
         await_response(future)
-    }
-
-    /// Why a request body was not written whole.
-    enum BodyWrite {
-        /// The host closed the body stream.
-        Closed,
-        /// Any other failure, as its error message.
-        Failed(String),
-    }
-
-    /// Stream `body` into `outgoing_body`, after `outgoing-handler.handle`: nothing drains the
-    /// host's bounded body buffer before then. The output stream is a child of `outgoing_body`
-    /// and drops when this returns, before the caller finishes or drops its parent.
-    fn write_body(
-        outgoing_body: &wasip2::http::types::OutgoingBody,
-        body: &[u8],
-    ) -> Result<(), BodyWrite> {
-        let stream = outgoing_body
-            .write()
-            .map_err(|()| BodyWrite::Failed("failed to open request body stream".to_string()))?;
-        let mut remaining: &[u8] = body;
-        while !remaining.is_empty() {
-            let budget = stream
-                .check_write()
-                .map_err(|e| body_write(e, |e| format!("check-write failed: {e:?}")))?
-                as usize;
-            if budget == 0 {
-                stream.subscribe().block();
-                continue;
-            }
-            let n = budget.min(remaining.len());
-            stream
-                .write(&remaining[..n])
-                .map_err(|e| body_write(e, |e| format!("write failed: {e:?}")))?;
-            remaining = &remaining[n..];
-        }
-        stream
-            .flush()
-            .map_err(|e| body_write(e, |e| format!("flush failed: {e:?}")))?;
-        stream.subscribe().block();
-        Ok(())
-    }
-
-    /// [`BodyWrite::Closed`] for a closed stream, otherwise `failed`'s message.
-    fn body_write(
-        err: wasip2::io::streams::StreamError,
-        failed: fn(wasip2::io::streams::StreamError) -> String,
-    ) -> BodyWrite {
-        match err {
-            wasip2::io::streams::StreamError::Closed => BodyWrite::Closed,
-            err => BodyWrite::Failed(failed(err)),
-        }
     }
 
     fn parse_method(method: &str) -> wasip2::http::types::Method {
