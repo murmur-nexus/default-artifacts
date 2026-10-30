@@ -14,6 +14,10 @@
 //! They are `#[ignore]`d because the default `cargo test --workspace` has no `mur` to launch.
 //! `MUR_BIN=… cargo test -p driver-openai --test mur_run_tool_call_limit -- --ignored` runs
 //! them.
+//!
+//! Unix only: it spawns a host `mur` and reads Unix permission bits, so a `wasm32-wasip2` build
+//! of the test targets compiles it to nothing.
+#![cfg(unix)]
 
 use std::{
     fs,

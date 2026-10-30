@@ -14,6 +14,7 @@ sha2.workspace = true
 wit-bindgen.workspace = true
 murmur-driver-env = { path = "../../libs/murmur-driver-env" }
 murmur-driver-stream = { path = "../../libs/murmur-driver-stream" }
+murmur-wasi-http = { path = "../../libs/murmur-wasi-http" }
 
 # tempfile gives tests/mur_run_fake_baseten.rs scratch directories. A `[dev-dependencies]` entry is
 # excluded from the cdylib the component is built from.

@@ -224,7 +224,7 @@ impl Staging {
                  endpoint: {llm}\n      api_key: test-key\n\
                  \x20 - name: {}\n    version: {}\n    runtime: tool\n{tool_gateway}    \
                  capabilities:\n      network:\n        allow: []\n\
-                 inference:\n  transport: http\n  model: test-model\n  driver:\n    artifact: {}\n",
+                 inference:\n  transport: http\n  model: test-model\n  max_tokens: 1024\n  driver:\n    artifact: {}\n",
                 driver.reference(),
                 driver.version,
                 tool.reference(),

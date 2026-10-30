@@ -696,9 +696,11 @@ version = "0.0.0"
 dependencies = [
  "murmur-driver-env",
  "murmur-driver-stream",
+ "murmur-wasi-http",
  "serde",
  "serde_json",
  "serde_norway",
+ "tempfile",
  "wasip2",
  "wit-bindgen 0.59.0",
 ]
@@ -709,6 +711,7 @@ version = "0.0.0"
 dependencies = [
  "murmur-driver-env",
  "murmur-driver-stream",
+ "murmur-wasi-http",
  "serde",
  "serde_json",
  "sha2",
@@ -731,9 +734,11 @@ version = "0.0.0"
 dependencies = [
  "murmur-driver-env",
  "murmur-driver-stream",
+ "murmur-wasi-http",
  "serde",
  "serde_json",
  "serde_norway",
+ "tempfile",
  "wasip2",
  "wit-bindgen 0.59.0",
 ]
@@ -744,9 +749,11 @@ version = "0.0.0"
 dependencies = [
  "murmur-driver-env",
  "murmur-driver-stream",
+ "murmur-wasi-http",
  "serde",
  "serde_json",
  "serde_norway",
+ "tempfile",
  "wasip2",
  "wit-bindgen 0.59.0",
 ]
@@ -757,6 +764,7 @@ version = "0.0.0"
 dependencies = [
  "murmur-driver-env",
  "murmur-driver-stream",
+ "murmur-wasi-http",
  "serde",
  "serde_json",
  "serde_norway",
@@ -771,8 +779,10 @@ version = "0.0.0"
 dependencies = [
  "murmur-driver-env",
  "murmur-driver-stream",
+ "murmur-wasi-http",
  "serde",
  "serde_json",
+ "tempfile",
  "wasip2",
  "wit-bindgen 0.59.0",
 ]
@@ -1898,6 +1908,13 @@ name = "murmur-time"
 version = "0.0.0"
 
 [[package]]
+name = "murmur-wasi-http"
+version = "0.0.0"
+dependencies = [
+ "wasip2",
+]
+
+[[package]]
 name = "object"
 version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2762,6 +2779,7 @@ dependencies = [
  "gix-object",
  "gix-pack",
  "gix-zlib",
+ "murmur-wasi-http",
  "serde_json",
  "sha1",
  "tempfile",
@@ -2815,6 +2833,7 @@ dependencies = [
 name = "tool-tavily"
 version = "0.0.0"
 dependencies = [
+ "murmur-wasi-http",
  "serde_json",
  "tempfile",
  "wasip2",

@@ -28,10 +28,10 @@ use std::{
     net::{TcpListener, TcpStream},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
     sync::{Arc, Mutex, Once},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde_json::{json, Value};
@@ -266,6 +266,96 @@ fn run_session(staging: &Staging) -> Output {
         .expect("spawning `mur run`")
 }
 
+/// How long a large-body run may take before it counts as the hang: the body is a few MiB on
+/// loopback, so a healthy run finishes in seconds.
+const LARGE_BODY_DEADLINE: Duration = Duration::from_secs(180);
+
+/// Run the task held in `task_file`, polling `mur run` every 250 ms. Once `deadline` passes,
+/// kill it by its PID and panic: a guest that writes the whole body before dispatching never
+/// opens a connection once the body outgrows the host's buffer, so the run never ends.
+fn run_task_file_within(
+    staging: &Staging,
+    task_file: &Path,
+    provider: &Provider,
+    deadline: Duration,
+) -> Output {
+    let workdir = staging.project.path().join("work");
+    fs::create_dir_all(&workdir).unwrap();
+    let stdout_path = staging.project.path().join("mur-run.stdout");
+    let stderr_path = staging.project.path().join("mur-run.stderr");
+    let mut child = mur(&staging.home)
+        .current_dir(staging.project.path())
+        .args([
+            "run",
+            "--manifest",
+            staging.manifest().to_str().unwrap(),
+            "--task",
+            task_file.to_str().unwrap(),
+            "--workdir",
+            workdir.to_str().unwrap(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(fs::File::create(&stdout_path).unwrap())
+        .stderr(fs::File::create(&stderr_path).unwrap())
+        .spawn()
+        .expect("spawning `mur run`");
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("polling `mur run`") {
+            break status;
+        }
+        if started.elapsed() >= deadline {
+            let pid = child.id();
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "the request body never left the guest: `mur run` (pid {pid}) was still running \
+                 after {deadline:?} and was killed; the fake recorded {} request(s)\n--- stdout \
+                 ---\n{}\n--- stderr ---\n{}",
+                provider.requests().len(),
+                fs::read_to_string(&stdout_path).unwrap_or_default(),
+                fs::read_to_string(&stderr_path).unwrap_or_default()
+            );
+        }
+        thread::sleep(Duration::from_millis(250));
+    };
+    Output {
+        status,
+        stdout: fs::read(&stdout_path).unwrap(),
+        stderr: fs::read(&stderr_path).unwrap(),
+    }
+}
+
+/// Write a task of at least `min_bytes` of English prose into the staging project, opening with
+/// `marker` on its own line. Prose tokenises at about 4–5 bytes per token, so a few MiB stays
+/// inside `zai-org/GLM-5.3`'s 1,048,576-token window.
+fn write_prose_task(staging: &Staging, marker: &str, min_bytes: usize) -> PathBuf {
+    const SENTENCES: [&str; 8] = [
+        "The river keeps its course past the old mill, and the miller counts the sacks again.",
+        "A gardener walks the rows at dawn, pulling weeds before the sun climbs over the wall.",
+        "Every evening the baker banks the oven and writes tomorrow's order on a slate.",
+        "The ferry waits at the pier while a boy carries crates of apples down the ramp.",
+        "Rain drums on the station roof as the last train of the night pulls slowly away.",
+        "In the library a clerk files returned books and sweeps the dust from the shelves.",
+        "The shepherd whistles twice, and the dog brings the flock down from the high field.",
+        "A lighthouse keeper trims the wick, then logs the wind and the height of the tide.",
+    ];
+    let mut task = format!("{marker}\n");
+    let mut paragraph = 0usize;
+    while task.len() < min_bytes {
+        paragraph += 1;
+        task.push_str(&format!("Paragraph {paragraph}. "));
+        for offset in 0..SENTENCES.len() {
+            task.push_str(SENTENCES[(paragraph + offset) % SENTENCES.len()]);
+            task.push(' ');
+        }
+        task.push('\n');
+    }
+    let path = staging.project.path().join("large-task.md");
+    fs::write(&path, task).unwrap();
+    path
+}
+
 fn combined(output: &Output) -> String {
     format!(
         "{}{}",
@@ -360,6 +450,8 @@ enum Script {
     NoDone,
     /// Every request gets [`stream_with_error_chunk`].
     ErrorChunk,
+    /// Every request gets [`text_stop_stream`].
+    TextStop,
 }
 
 /// One request as the fake received it, header names lowercased.
@@ -419,6 +511,7 @@ impl Provider {
                     Script::RoundTrip => reasoning_tool_call_stream(),
                     Script::NoDone => stream_without_done(),
                     Script::ErrorChunk => stream_with_error_chunk(),
+                    Script::TextStop => text_stop_stream(),
                 };
                 let response = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\
@@ -789,4 +882,82 @@ fn an_error_chunk_fails_the_task_in_the_component() {
     let requests = provider.requests().len();
     eprintln!("requests the fake received: {requests}");
     assert!(requests > 0, "{text}");
+}
+
+/// Send a task of `task_bytes` and require the one request to reach the fake whole: its byte
+/// count equal to its `content-length` and inside `body_range`, its last user message carrying
+/// the task's marker. Returns the recorded body length.
+fn assert_large_request_reaches_the_provider(
+    task_bytes: usize,
+    body_range: std::ops::RangeInclusive<usize>,
+) -> usize {
+    let staging = stage();
+    let provider = Provider::start(Script::TextStop);
+    staging.write_manifest(&provider.endpoint);
+    let marker = format!("LARGE-BODY-MARKER-{task_bytes}-{}", std::process::id());
+    let task_file = write_prose_task(&staging, &marker, task_bytes);
+
+    let output = run_task_file_within(&staging, &task_file, &provider, LARGE_BODY_DEADLINE);
+    let text = combined(&output);
+    let requests = provider.requests();
+
+    assert!(output.status.success(), "the session must succeed:\n{text}");
+    assert!(text.contains("status:  ok"), "{text}");
+    assert_no_trap(&text);
+    assert_eq!(requests.len(), 1, "one text turn:\n{text}");
+
+    let request = &requests[0];
+    let content_length: usize = request
+        .header("content-length")
+        .expect("the request carries content-length")
+        .parse()
+        .expect("content-length is a number");
+    eprintln!(
+        "task bytes: {}; body bytes received: {}; content-length: {content_length}",
+        fs::metadata(&task_file).unwrap().len(),
+        request.body.len()
+    );
+    assert_eq!(
+        request.body.len(),
+        content_length,
+        "the fake must receive the whole body"
+    );
+    assert!(
+        body_range.contains(&content_length),
+        "body of {content_length} bytes outside {body_range:?}"
+    );
+    let body = request.json();
+    let last_user = body["messages"]
+        .as_array()
+        .expect("the body carries messages")
+        .iter()
+        .rev()
+        .find(|m| m["role"] == "user")
+        .expect("the body carries a user message");
+    let content = match &last_user["content"] {
+        Value::String(content) => content.clone(),
+        other => other.to_string(),
+    };
+    assert!(
+        content.contains(&marker),
+        "the last user message must carry the task's marker"
+    );
+    content_length
+}
+
+/// A task of 5 MiB makes a request body over 5 MiB, far more than the host's two 1 MiB body
+/// chunks hold: the driver must dispatch the request before it writes the body, or the write
+/// loop blocks forever with no connection open.
+#[test]
+#[ignore = "launches the real mur binary; run with --ignored"]
+fn a_request_body_over_five_mib_reaches_the_provider() {
+    assert_large_request_reaches_the_provider(5_242_880, 5_242_880..=usize::MAX);
+}
+
+/// A task of 1.5 MiB fills both of the host's body chunks without overflowing them: writing
+/// before dispatch gets through the write loop and then blocks forever in the final flush.
+#[test]
+#[ignore = "launches the real mur binary; run with --ignored"]
+fn a_request_body_between_one_and_two_mib_reaches_the_provider() {
+    assert_large_request_reaches_the_provider(1_572_864, (1 << 20) + 1..=2 << 20);
 }

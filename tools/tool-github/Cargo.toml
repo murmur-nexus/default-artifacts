@@ -25,6 +25,7 @@ gix-pack = { version = "0.74.2", default-features = false }
 gix-object = "0.64.1"
 gix-hash = { version = "0.26.2", features = ["sha1"] }
 gix-zlib = "0.1.0"
+murmur-wasi-http = { path = "../../libs/murmur-wasi-http" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasip2 = "1.0.4"

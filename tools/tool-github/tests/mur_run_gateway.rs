@@ -17,6 +17,10 @@
 //! They are `#[ignore]`d: a launch needs a `mur` carrying the per-entry credential gateway,
 //! which the default `cargo test --workspace` has no reason to have.
 //! `MUR_BIN=… cargo test -p tool-github --test mur_run_gateway -- --ignored` runs them.
+//!
+//! One test also sends a `pr_create` body over 5 MiB through the gateway: the host buffers an
+//! outgoing request body in two 1 MiB chunks that only a dispatched request drains, so a tool
+//! that writes its whole body before dispatching hangs with no connection open.
 
 use std::{
     collections::BTreeSet,
@@ -25,10 +29,10 @@ use std::{
     net::{TcpListener, TcpStream},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
     sync::{Arc, Mutex, Once},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::{json, Value};
@@ -329,6 +333,75 @@ fn run_session(staging: &Staging) -> Session {
     }
 }
 
+/// How long a large-body run may take before it counts as the hang: the body is a few MiB on
+/// loopback, so a healthy run finishes in seconds.
+const LARGE_BODY_DEADLINE: Duration = Duration::from_secs(180);
+
+/// Run `task` in a scratch workdir, polling `mur run` every 250 ms. Once `deadline` passes, kill
+/// it by its PID and panic: a guest that writes the whole body before dispatching never opens a
+/// connection once the body outgrows the host's buffer, so the run never ends.
+fn run_session_within(
+    staging: &Staging,
+    task: &str,
+    github: &Upstream,
+    deadline: Duration,
+) -> Output {
+    let workdir = staging.project.path().join("work");
+    fs::create_dir_all(&workdir).unwrap();
+    let stdout_path = staging.project.path().join("mur-run.stdout");
+    let stderr_path = staging.project.path().join("mur-run.stderr");
+    let mut child = mur(&staging.home)
+        .current_dir(staging.project.path())
+        .args([
+            "run",
+            "--manifest",
+            staging.manifest().to_str().unwrap(),
+            "--task",
+            task,
+            "--workdir",
+            workdir.to_str().unwrap(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(fs::File::create(&stdout_path).unwrap())
+        .stderr(fs::File::create(&stderr_path).unwrap())
+        .spawn()
+        .expect("spawning `mur run`");
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("polling `mur run`") {
+            break status;
+        }
+        if started.elapsed() >= deadline {
+            let pid = child.id();
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "the request body never left the guest: `mur run` (pid {pid}) was still running \
+                 after {deadline:?} and was killed; the fake GitHub recorded {} request(s)\n--- \
+                 stdout ---\n{}\n--- stderr ---\n{}",
+                github.requests().len(),
+                fs::read_to_string(&stdout_path).unwrap_or_default(),
+                fs::read_to_string(&stderr_path).unwrap_or_default()
+            );
+        }
+        thread::sleep(Duration::from_millis(250));
+    };
+    eprintln!("`mur run` ended in {:?}", started.elapsed());
+    Output {
+        status,
+        stdout: fs::read(&stdout_path).unwrap(),
+        stderr: fs::read(&stderr_path).unwrap(),
+    }
+}
+
+fn combined(output: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
 // ── the scripted LLM ─────────────────────────────────────────────────────────
 
 fn tool_use_response(tool_id: &str, input: Value) -> String {
@@ -367,7 +440,13 @@ struct Upstream {
 }
 
 impl Upstream {
+    /// An upstream answering every request `200 OK`.
     fn start(responses: Vec<String>) -> Self {
+        Self::start_with_status("200 OK", responses)
+    }
+
+    /// An upstream answering every request with `status`, such as `201 Created`.
+    fn start_with_status(status: &'static str, responses: Vec<String>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -381,7 +460,7 @@ impl Upstream {
                 recorded.lock().unwrap().push(request);
                 let body = &responses[index.min(responses.len() - 1)];
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
                      connection: close\r\n\r\n{body}",
                     body.len()
                 );
@@ -547,6 +626,28 @@ fn fake_github_pr_response() -> String {
         "base": {"ref": "main"},
     })
     .to_string()
+}
+
+/// At least `min_bytes` of ASCII prose, opening with `marker` on its own line.
+fn prose(marker: &str, min_bytes: usize) -> String {
+    const SENTENCES: [&str; 4] = [
+        "The river keeps its course past the old mill, and the miller counts the sacks again.",
+        "A gardener walks the rows at dawn, pulling weeds before the sun climbs over the wall.",
+        "Every evening the baker banks the oven and writes the next order on a slate.",
+        "The ferry waits at the pier while a boy carries crates of apples down the ramp.",
+    ];
+    let mut text = format!("{marker}\n");
+    let mut paragraph = 0usize;
+    while text.len() < min_bytes {
+        paragraph += 1;
+        text.push_str(&format!("Paragraph {paragraph}. "));
+        for offset in 0..SENTENCES.len() {
+            text.push_str(SENTENCES[(paragraph + offset) % SENTENCES.len()]);
+            text.push(' ');
+        }
+        text.push('\n');
+    }
+    text
 }
 
 // ── scenarios ────────────────────────────────────────────────────────────────
@@ -723,4 +824,93 @@ fn without_a_gateway_the_tool_fails_closed() {
         !String::from_utf8_lossy(&output.stderr).contains("W-SEC-030"),
         "no gateway, so nothing unmetered to warn about"
     );
+}
+
+/// A `pr_create` whose body is over 5 MiB reaches GitHub whole through the gateway, far more
+/// than the host's two 1 MiB body chunks hold: the tool must dispatch the request before it
+/// writes the body, or the write loop blocks forever with no connection open.
+#[test]
+#[ignore = "launches the real mur binary; run with --ignored"]
+fn a_five_mib_pr_body_reaches_github_through_the_gateway() {
+    const BODY_BYTES: usize = 5 * 1024 * 1024;
+    let staging = stage();
+    let marker = format!("LARGE-PR-BODY-MARKER-{}", std::process::id());
+    let body = prose(&marker, BODY_BYTES);
+    let github = Upstream::start_with_status("201 Created", vec![fake_github_pr_response()]);
+    let llm = Upstream::start(vec![
+        tool_use_response(
+            "toolu_big",
+            json!({
+                "op": "pr_create", "title": "large body", "head": "feature-x", "base": "main",
+                "body": body,
+            }),
+        ),
+        end_turn_response(),
+    ]);
+    staging.write_manifest(&llm.endpoint, Some(&github.endpoint));
+
+    let output = run_session_within(
+        &staging,
+        "open the pull request",
+        &github,
+        LARGE_BODY_DEADLINE,
+    );
+    let text = combined(&output);
+    assert!(output.status.success(), "the session must succeed:\n{text}");
+    assert!(
+        !text.contains("E-RUN-007") && !text.contains("trapped"),
+        "the guest must not trap:\n{text}"
+    );
+
+    let requests = github.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "one request reached GitHub: {requests:?}"
+    );
+    let request = &requests[0];
+    assert!(
+        request
+            .request_line
+            .starts_with("POST /repos/acme/widgets/pulls "),
+        "{}",
+        request.request_line
+    );
+    let content_length: usize = request
+        .headers
+        .iter()
+        .find(|(name, _)| name == "content-length")
+        .map(|(_, value)| value.parse().expect("content-length is a number"))
+        .expect("the request carries content-length");
+    eprintln!(
+        "pr body bytes: {}; request body bytes received: {}; content-length: {content_length}",
+        body.len(),
+        request.body.len()
+    );
+    assert_eq!(
+        request.body.len(),
+        content_length,
+        "the fake GitHub must receive the whole body"
+    );
+    assert!(
+        content_length >= BODY_BYTES,
+        "body of {content_length} bytes is under {BODY_BYTES}"
+    );
+    let authorization: Vec<&str> = request
+        .headers
+        .iter()
+        .filter(|(name, _)| name == "authorization")
+        .map(|(_, value)| value.as_str())
+        .collect();
+    assert_eq!(
+        authorization,
+        [format!("Bearer {}", staging.marker)],
+        "exactly one, the runtime's"
+    );
+    let sent: Value = serde_json::from_str(&request.body).expect("the request body is JSON");
+    assert!(sent["body"] == body, "the PR body must arrive unchanged");
+
+    let result = tool_result_text(&llm, "toolu_big");
+    assert!(result.contains(r#""ok":true"#), "{result}");
+    assert!(result.contains(r#""number":1"#), "{result}");
 }

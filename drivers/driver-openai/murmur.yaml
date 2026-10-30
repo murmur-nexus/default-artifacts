@@ -1,5 +1,5 @@
 name: driver-openai
-version: 0.16.0
+version: 0.17.0
 runtime: driver
 description: OpenAI inference driver for Murmur agent capsules — routes each listed OpenAI model to the Responses or Chat Completions endpoint its model page lists, and refuses any other model. Reads store, thinking, reasoning_effort and verbosity from inference.driver.config and rejects any other key; store grants server-side retention and with it stateful continuation via previous_response_id.
 requires_files:

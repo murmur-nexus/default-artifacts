@@ -53,6 +53,7 @@ mod wasm_tool {
     use std::path::Path;
 
     use exports::murmur::tool::run::{Guest, Status, ToolInput, ToolResult};
+    use murmur_wasi_http::{write_body, BodyWrite};
 
     use crate::ops::{self, HttpReply, OpStatus, Transport};
 
@@ -158,34 +159,16 @@ mod wasm_tool {
         let outgoing_body = request
             .body()
             .map_err(|()| "failed to acquire request body".to_string())?;
-        {
-            let stream = outgoing_body
-                .write()
-                .map_err(|()| "failed to open request body stream".to_string())?;
-            let mut remaining: &[u8] = body;
-            while !remaining.is_empty() {
-                let budget = stream
-                    .check_write()
-                    .map_err(|e| format!("check-write failed: {e:?}"))?
-                    as usize;
-                if budget == 0 {
-                    stream.subscribe().block();
-                    continue;
-                }
-                let n = budget.min(remaining.len());
-                stream
-                    .write(&remaining[..n])
-                    .map_err(|e| format!("write failed: {e:?}"))?;
-                remaining = &remaining[n..];
-            }
-            stream.flush().map_err(|e| format!("flush failed: {e:?}"))?;
-            stream.subscribe().block();
-        }
-        wasip2::http::types::OutgoingBody::finish(outgoing_body, None)
-            .map_err(|err| format!("failed to finalize request body: {err:?}"))?;
-
         let future = wasip2::http::outgoing_handler::handle(request, None)
             .map_err(|err| format!("failed to dispatch HTTP request: {err:?}"))?;
+        match write_body(&outgoing_body, body) {
+            Ok(()) => wasip2::http::types::OutgoingBody::finish(outgoing_body, None)
+                .map_err(|err| format!("failed to finalize request body: {err:?}"))?,
+            // The host dropped the request without reading the rest of its body; the response
+            // future reports why.
+            Err(BodyWrite::Closed) => drop(outgoing_body),
+            Err(BodyWrite::Failed(message)) => return Err(message),
+        }
 
         await_response(future)
     }
@@ -383,5 +366,33 @@ mod tests {
                 .contains(needle),
             "tools/tool-github/murmur.yaml must not contain {needle}"
         );
+    }
+
+    #[test]
+    fn dispatch_request_sends_the_request_before_it_writes_the_body() {
+        // Nothing drains the request body until `handle` passes the request to the host, so a
+        // body written first blocks forever once it outgrows the host's buffer.
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("fn dispatch_request(")
+            .expect("lib.rs defines dispatch_request");
+        let rest = &source[start..];
+        let dispatch = &rest[..rest.find("\n    fn ").unwrap_or(rest.len())];
+        let position = |needle: &str| {
+            dispatch
+                .find(needle)
+                .unwrap_or_else(|| panic!("dispatch_request must contain {needle}"))
+        };
+        let handle = position("outgoing_handler::handle(");
+        let write = position("write_body(");
+        let finish = position("OutgoingBody::finish(");
+        let awaited = position("await_response(");
+        assert!(handle < write, "handle must precede the body write");
+        assert!(
+            !dispatch[..handle].contains("check_write"),
+            "no body write may precede handle"
+        );
+        assert!(write < finish, "the body is finished after it is written");
+        assert!(finish < awaited, "the response is awaited after the body");
     }
 }
