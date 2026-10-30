@@ -1525,38 +1525,70 @@ mod wasm_driver {
         let outgoing_body = request
             .body()
             .map_err(|()| "driver: failed to acquire request body".to_string())?;
-        {
-            let stream = outgoing_body
-                .write()
-                .map_err(|()| "driver: failed to open request body stream".to_string())?;
-            let mut remaining: &[u8] = body;
-            while !remaining.is_empty() {
-                let budget = stream
-                    .check_write()
-                    .map_err(|e| format!("driver: check-write failed: {e:?}"))?
-                    as usize;
-                if budget == 0 {
-                    stream.subscribe().block();
-                    continue;
-                }
-                let n = budget.min(remaining.len());
-                stream
-                    .write(&remaining[..n])
-                    .map_err(|e| format!("driver: write failed: {e:?}"))?;
-                remaining = &remaining[n..];
-            }
-            stream
-                .flush()
-                .map_err(|e| format!("driver: flush failed: {e:?}"))?;
-            stream.subscribe().block();
-        }
-        wasip2::http::types::OutgoingBody::finish(outgoing_body, None)
-            .map_err(|err| format!("driver: failed to finalize request body: {err:?}"))?;
-
         let future = wasip2::http::outgoing_handler::handle(request, None)
             .map_err(|err| format!("driver: failed to dispatch HTTP request: {err:?}"))?;
+        match write_body(&outgoing_body, body) {
+            Ok(()) => wasip2::http::types::OutgoingBody::finish(outgoing_body, None)
+                .map_err(|err| format!("driver: failed to finalize request body: {err:?}"))?,
+            // The host dropped the request without reading the rest of its body; the response
+            // future reports why.
+            Err(BodyWrite::Closed) => drop(outgoing_body),
+            Err(BodyWrite::Failed(message)) => return Err(message),
+        }
 
         await_response(future)
+    }
+
+    /// Why a request body was not written whole.
+    enum BodyWrite {
+        /// The host closed the body stream.
+        Closed,
+        /// Any other failure, as its error message.
+        Failed(String),
+    }
+
+    /// Stream `body` into `outgoing_body`, after `outgoing-handler.handle`: nothing drains the
+    /// host's bounded body buffer before then. The output stream is a child of `outgoing_body`
+    /// and drops when this returns, before the caller finishes or drops its parent.
+    fn write_body(
+        outgoing_body: &wasip2::http::types::OutgoingBody,
+        body: &[u8],
+    ) -> Result<(), BodyWrite> {
+        let stream = outgoing_body.write().map_err(|()| {
+            BodyWrite::Failed("driver: failed to open request body stream".to_string())
+        })?;
+        let mut remaining: &[u8] = body;
+        while !remaining.is_empty() {
+            let budget = stream
+                .check_write()
+                .map_err(|e| body_write(e, |e| format!("driver: check-write failed: {e:?}")))?
+                as usize;
+            if budget == 0 {
+                stream.subscribe().block();
+                continue;
+            }
+            let n = budget.min(remaining.len());
+            stream
+                .write(&remaining[..n])
+                .map_err(|e| body_write(e, |e| format!("driver: write failed: {e:?}")))?;
+            remaining = &remaining[n..];
+        }
+        stream
+            .flush()
+            .map_err(|e| body_write(e, |e| format!("driver: flush failed: {e:?}")))?;
+        stream.subscribe().block();
+        Ok(())
+    }
+
+    /// [`BodyWrite::Closed`] for a closed stream, otherwise `failed`'s message.
+    fn body_write(
+        err: wasip2::io::streams::StreamError,
+        failed: fn(wasip2::io::streams::StreamError) -> String,
+    ) -> BodyWrite {
+        match err {
+            wasip2::io::streams::StreamError::Closed => BodyWrite::Closed,
+            err => BodyWrite::Failed(failed(err)),
+        }
     }
 
     fn consume_body_as_string(
@@ -3624,5 +3656,33 @@ mod tests {
         assert!(run.contains("Ok(value) => (value, vec![])"));
         assert!(run.contains("Err(failure) => failure_result(&failure)"));
         assert!(!run.contains(TRANSIENT_METADATA_KEY));
+    }
+
+    #[test]
+    fn dispatch_request_sends_the_request_before_it_writes_the_body() {
+        // Nothing drains the request body until `handle` passes the request to the host, so a
+        // body written first blocks forever once it outgrows the host's buffer.
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("fn dispatch_request(")
+            .expect("lib.rs defines dispatch_request");
+        let rest = &source[start..];
+        let dispatch = &rest[..rest.find("\n    fn ").unwrap_or(rest.len())];
+        let position = |needle: &str| {
+            dispatch
+                .find(needle)
+                .unwrap_or_else(|| panic!("dispatch_request must contain {needle}"))
+        };
+        let handle = position("outgoing_handler::handle(");
+        let write = position("write_body(");
+        let finish = position("OutgoingBody::finish(");
+        let awaited = position("await_response(");
+        assert!(handle < write, "handle must precede the body write");
+        assert!(
+            !dispatch[..handle].contains("check_write"),
+            "no body write may precede handle"
+        );
+        assert!(write < finish, "the body is finished after it is written");
+        assert!(finish < awaited, "the response is awaited after the body");
     }
 }

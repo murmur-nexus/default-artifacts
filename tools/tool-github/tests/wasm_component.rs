@@ -9,9 +9,9 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{mpsc, Arc, Mutex, Once};
 use std::thread;
 use std::time::Duration;
 
@@ -102,7 +102,7 @@ fn run_component(gateway: Option<&str>, config: Option<&str>, data: &str) -> Too
 /// through actual WASI filesystem calls inside the compiled `wasm32-wasip2` component, not just
 /// a host-native `cargo test`.
 fn run_component_in_dir(
-    dir: &std::path::Path,
+    dir: &Path,
     gateway: Option<&str>,
     config: Option<&str>,
     data: &str,
@@ -142,6 +142,33 @@ fn run_component_in_dir(
     tool.murmur_tool_run()
         .call_run(&mut store, &input)
         .expect("call run")
+}
+
+/// [`run_component_in_dir`] on a spawned thread, failing once `deadline` passes: a guest that
+/// writes a body over the host's two 1 MiB body chunks before dispatching the request never
+/// returns, because nothing drains the body until the request is handed to the host.
+fn run_component_within(
+    dir: PathBuf,
+    gateway: Option<String>,
+    config: Option<String>,
+    data: String,
+    deadline: Duration,
+) -> ToolResult {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = run_component_in_dir(&dir, gateway.as_deref(), config.as_deref(), &data);
+        let _ = sender.send(result);
+    });
+    match receiver.recv_timeout(deadline) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+            "the component was still running after {deadline:?}: the request body never left \
+             the guest"
+        ),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("the component thread panicked; see its message above")
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -769,5 +796,141 @@ fn the_wasm_component_fetches_a_branch_into_an_empty_repository() {
             }
             _ => {}
         }
+    }
+}
+
+// ── request bodies past the host's body buffer ───────────────────────────────────────────────
+
+/// How long a large-body call may take before it counts as the hang: the body is a few MiB on
+/// loopback, so a healthy call finishes in seconds.
+const LARGE_BODY_DEADLINE: Duration = Duration::from_secs(90);
+
+/// `n` bytes that do not repeat over any short period, so neither git nor base64 shrinks them.
+fn noise(n: usize) -> Vec<u8> {
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    (0..n)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 24) as u8
+        })
+        .collect()
+}
+
+/// `git <args>` in `dir`, isolated from the user's and the system's git config; panics unless
+/// it succeeds and returns stdout, trimmed.
+fn git(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .args(args)
+        .output()
+        .expect("spawning git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+/// A 2.5 MiB file uploads as a blob whose base64 body is about 3.4 MiB, past both of the host's
+/// 1 MiB body chunks. The fake recomputes every sha from what it received, so the ref it ends
+/// up holding the head commit proves the blob arrived whole.
+#[test]
+fn a_push_whose_blob_body_passes_two_mib_completes() {
+    let repo = tempfile::tempdir().unwrap();
+    git(repo.path(), &["init", "-q"]);
+    std::fs::write(repo.path().join("big.bin"), noise(5 << 19)).unwrap();
+    git(repo.path(), &["add", "big.bin"]);
+    git(
+        repo.path(),
+        &[
+            "-c",
+            "user.name=Large Body",
+            "-c",
+            "user.email=large-body@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "add a file larger than two MiB",
+        ],
+    );
+    let head_sha = git(repo.path(), &["rev-parse", "HEAD"]);
+
+    let fake = EchoGithub::start("main");
+    let result = run_component_within(
+        repo.path().join(".git"),
+        Some(fake.endpoint.clone()),
+        Some(CONFIG.to_string()),
+        format!(r#"{{"op":"push","head_sha":"{head_sha}","remote_branch":"big-blob"}}"#),
+        LARGE_BODY_DEADLINE,
+    );
+
+    assert!(
+        matches!(result.status, Status::Passed),
+        "{:?} {:?}",
+        result.summary,
+        result.data
+    );
+    assert_eq!(
+        fake.refs.lock().unwrap().get("big-blob"),
+        Some(&head_sha),
+        "the fake recomputed the same sha for every object the guest uploaded"
+    );
+}
+
+/// A gateway address that refuses connections: the host drops the request, and the body
+/// channel with it, without reading any of the body. A 3 MiB body keeps the guest blocked in
+/// its write loop until then, so the write deterministically sees the stream closed, and the
+/// result must report the host's refusal rather than a body-write error.
+#[test]
+fn a_request_refused_before_its_body_is_read_reports_the_refusal() {
+    let refused = {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("http://{}", listener.local_addr().unwrap())
+    };
+    let input = json!({
+        "op": "pr_create",
+        "title": "Add feature",
+        "body": "a long pull request description ".repeat(3 << 15),
+        "head": "feature-x",
+        "base": "main",
+    });
+    let workdir = tempfile::tempdir().unwrap();
+    let result = run_component_within(
+        workdir.path().to_path_buf(),
+        Some(refused),
+        Some(CONFIG.to_string()),
+        input.to_string(),
+        LARGE_BODY_DEADLINE,
+    );
+
+    assert!(!matches!(result.status, Status::Passed), "{result:?}");
+    let data: Value = serde_json::from_str(result.data.as_deref().unwrap()).unwrap();
+    assert_eq!(data["error_kind"], json!("transport_error"), "{data}");
+    let text = format!("{} {data}", result.summary.as_deref().unwrap_or_default());
+    assert!(text.contains("ConnectionRefused"), "{text}");
+    for body_write_error in [
+        "check-write failed",
+        "write failed",
+        "flush failed",
+        "failed to finalize request body",
+    ] {
+        assert!(
+            !text.contains(body_write_error),
+            "the refusal must not surface as a body-write error: {text}"
+        );
     }
 }

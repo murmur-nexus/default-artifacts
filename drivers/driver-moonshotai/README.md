@@ -30,7 +30,7 @@ set but empty`. Neither reaches the network. Requests go to
 ```yaml
 artifacts:
   - name: murmur/driver-moonshotai
-    version: "0.14.0"
+    version: "0.15.0"
     runtime: driver
     gateway:
       endpoint: https://api.moonshot.ai/v1
