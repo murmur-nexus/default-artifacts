@@ -31,11 +31,11 @@ WASM components (`runtime: driver`). Export `murmur:tool/run` (`world driver`) a
 
 | Artifact | Location | Description |
 |---|---|---|
-| `driver-anthropic` | `drivers/driver-anthropic/` | Anthropic Messages API, with extended thinking and prompt-cache breakpoints; caching is tuned by a `config:` block on its manifest entry |
+| `driver-anthropic` | `drivers/driver-anthropic/` | Anthropic Messages API, with extended thinking and prompt-cache breakpoints; caching is tuned by a `config:` block on its manifest entry. Sizes each image to the model's resolution tier and sends a tool's image inside its `tool_result` |
 | `driver-baseten` | `drivers/driver-baseten/` | Baseten Model APIs Chat Completions — `zai-org/GLM-5.3` only, which always reasons; reasoning effort is tuned by `inference.driver.config`, which rejects any key it does not read; the reasoning goes back on later turns unless the capsule sets `replay_reasoning: false`, and a task's turns share Baseten's session affinity |
 | `driver-deepseek` | `drivers/driver-deepseek/` | DeepSeek API — `deepseek-flash` and `deepseek-v4-pro`, with thinking mode; any other model is refused |
 | `driver-moonshotai` | `drivers/driver-moonshotai/` | Moonshot AI Chat Completions API — the K3 models `kimi-k3.1-pro`, `kimi-k3.1-pro-highspeed` and `kimi-k3`, and the K2 models `kimi-k2.7-code`, `kimi-k2.7-code-highspeed` and `kimi-k2.6`, which Moonshot retires by the end of December 2026; reasoning effort (K3), the thinking switch (`kimi-k2.6`) and `json_schema` structured output are tuned by `inference.driver.config`, which rejects any key it does not read or the model cannot honour |
-| `driver-openai` | `drivers/driver-openai/` | OpenAI API — sends each model it lists to the Responses or Chat Completions endpoint that model's page lists, and refuses any other model; reasoning summaries, effort and verbosity are tuned by `inference.driver.config`, which rejects any key it does not read |
+| `driver-openai` | `drivers/driver-openai/` | OpenAI API — sends each model it lists to the Responses or Chat Completions endpoint that model's page lists, and refuses any other model; reasoning summaries, effort and verbosity are tuned by `inference.driver.config`, which rejects any key it does not read. Sizes each image to the model's dimension and patch limits, and sends a tool's image in its `function_call_output` (Responses) or in a user message after the tool messages (Chat Completions) |
 | `driver-zai` | `drivers/driver-zai/` | Z.ai Chat Completions API — `glm-5.3` only, which always reasons; reasoning effort is tuned by `inference.driver.config`, which rejects any key it does not read; the reasoning goes back to Z.ai on every later turn unless the capsule sets `replay_reasoning: false` |
 
 All six report the provider's own token counts on an optional top-level `usage` object of the response — `input_tokens`, `output_tokens`, `cached_tokens`, `cache_write_tokens` — which Murmur carries onto the `inference` trace event. `input_tokens` counts only the request tokens neither read from nor written to the prompt cache, so `input_tokens + cached_tokens + cache_write_tokens` is the provider's total request count, whichever way the provider itself splits it. Each member is independently optional and is omitted, never zero-filled, when the provider did not report it. Murmur also sends a `prompt_cache_key` routing hint: `driver-openai` forwards it into the provider body, `driver-baseten` sends a SHA-256 of it as Baseten's `x-session-affinity` header, and the other four drop it, because none of those provider APIs defines a cache-key field. See each driver's own README for the per-provider field mapping.
@@ -204,6 +204,35 @@ ungranted hook still links and still runs, and its functions return
 needs one has to detect the refusal itself and say so.
 [`hook-memory`](./hooks/hook-memory/) calls all three of
 `murmur:conversation/read`, `murmur:runtime/tokens` and `murmur:task-io/read`.
+
+### WIT level 3
+
+`wit/guest/` is at WIT level 3: `murmur:tool@0.2.0`, whose `tool-result` carries an `attachments`
+list a tool names its image files in. Every WASM tool and every `transport: http` driver here
+exports `murmur:tool/run@0.2.0` from the release below on, and loads only on a `mur` that serves
+WIT level 3 (`mur version` prints the level). murmur `a9ea4726` is the first commit that does; no
+murmur release has it yet (v0.8.0, the newest tag, serves level 2). An older `mur` refuses these
+releases at install or launch with `E-WIT-LEVEL-001`, so keep the previous release of each until your `mur`
+serves level 3. Hooks, process drivers and native tools did not move.
+
+| Artifact | First release on WIT level 3 |
+|---|---|
+| `driver-anthropic` | 0.18.0 |
+| `driver-baseten` | 0.5.0 |
+| `driver-deepseek` | 0.17.0 |
+| `driver-moonshotai` | 0.16.0 |
+| `driver-openai` | 0.18.0 |
+| `driver-zai` | 0.7.0 |
+| `tool-corpus` | 0.8.0 |
+| `tool-create` | 0.10.0 |
+| `tool-edit` | 0.2.0 |
+| `tool-find` | 0.2.0 |
+| `tool-github` | 0.4.0 |
+| `tool-read` | 0.2.0 |
+| `tool-report` | 0.7.0 |
+| `tool-request-input` | 0.7.0 |
+| `tool-tavily` | 0.8.0 |
+| `tool-write` | 0.2.0 |
 
 The `wit-sync` CI job verifies the mirror stays byte-identical to the murmur commit pinned by
 `MURMUR_REV` in [.github/workflows/build.yml](./.github/workflows/build.yml); the mirror and the

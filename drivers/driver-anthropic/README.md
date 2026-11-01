@@ -130,10 +130,10 @@ nothing is decoded.
 
 | murmur message | Where the image goes |
 |---|---|
-| `tool` | Inside the `tool_result` that answers the call, after its text. Each text block of the message still makes its own `tool_result`, and the images join the last one. A tool message with images and no text makes one `tool_result` holding only them |
+| `tool` | Inside the one `tool_result` that answers the call. It holds the message's text and image blocks in the order murmur sent them, including any `[image not shown: …]` or `[image unavailable: …]` line. Anthropic refuses a second `tool_result` for the same `tool_use_id` with HTTP 400, so the driver never sends one |
 | `user` | An `image` block in the user message, where murmur put it |
 
-The prompt-cache marker stays on the last `tool_result`, never on an image inside it.
+The prompt-cache marker stays on the `tool_result`, never on a block inside it.
 
 ### Sizing
 
@@ -251,6 +251,12 @@ load average of 7 to 8.
 On 2026-11-01 a `claude-haiku-4-5` Messages request whose `tool_result` held a text block and a PNG
 of the word LANTERN, shaped as this driver sends it with the cache marker on the `tool_result`,
 returned HTTP 200, and the model answered with the word.
+
+Also on 2026-11-01, a request answering one `tool_use` with two `tool_result` blocks, one holding
+the tool's text and one an `[image not shown: …]` line, returned HTTP 400: "each tool_use must
+have a single result. Found multiple `tool_result` blocks with id". A `claude-sonnet-5-5` run with
+`context.images.keep: 1` and two tool images, where every later request carries an aged image line
+beside the tool's text in one `tool_result`, ran seven turns without an error.
 
 ## Prompt caching
 

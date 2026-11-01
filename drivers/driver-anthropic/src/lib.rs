@@ -2,10 +2,7 @@
 // or from cfg(test). Suppress dead_code noise in plain host library builds.
 #![cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
 
-use murmur_driver_image::{
-    largest_fit, prepare_image, prepare_unmeasured, reports_json, Action, ImageReport, Rule,
-    SizeRule,
-};
+use murmur_driver_image::{largest_fit, prepare_source, Action, ImageReport, Rule, SizeRule};
 use murmur_driver_stream::Failure;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -437,26 +434,15 @@ fn prepare_images(request: &mut MurmurRequest, tier: ImageTier) -> Vec<ImageRepo
             let MurmurContentBlock::Image { source } = block else {
                 continue;
             };
-            let base64 = source.r#type.as_deref().is_none_or(|kind| kind == "base64");
-            let prepared = if base64 {
-                prepare_image(
-                    index,
-                    block_index,
-                    &source.media_type,
-                    &source.data,
-                    placement,
-                    &rule,
-                )
-            } else {
-                prepare_unmeasured(
-                    index,
-                    block_index,
-                    &source.media_type,
-                    &source.data,
-                    placement,
-                    &rule,
-                )
-            };
+            let prepared = prepare_source(
+                index,
+                block_index,
+                source.r#type.as_deref(),
+                &source.media_type,
+                &source.data,
+                placement,
+                &rule,
+            );
             match prepared.action {
                 Action::Keep => {}
                 Action::Replace { media_type, data } => {
@@ -480,17 +466,6 @@ fn image_block(source: &MurmurImageSource) -> Value {
             "data": source.data,
         }
     })
-}
-
-/// Add the image report to a successful response as its top-level `images` list. A response to a
-/// request without images gains no key.
-fn attach_image_report(response: &mut Value, reports: &[ImageReport]) {
-    if reports.is_empty() {
-        return;
-    }
-    if let Some(response) = response.as_object_mut() {
-        response.insert("images".to_string(), reports_json(reports));
-    }
 }
 
 /// The provider body for one request — `tool-input.data` as `raw`, under the given
@@ -541,35 +516,30 @@ fn translate_murmur_request_to_anthropic(
                     "driver: tool message is missing required field 'tool_call_id'".to_string()
                 })?;
 
-                // Each text block makes its own `tool_result`. Images join the content of the
-                // last one, after its text, or make one of their own when the message holds no
-                // text.
-                let mut content = Vec::new();
-                let mut images = Vec::new();
-                for block in &message.content {
-                    match block {
-                        MurmurContentBlock::Text { text } => content.push(json!({
-                            "type": "tool_result",
-                            "tool_use_id": tool_use_id,
-                            "content": [{"type": "text", "text": text}],
-                        })),
-                        MurmurContentBlock::Image { source } => images.push(image_block(source)),
-                        _ => {}
-                    }
-                }
-                if !images.is_empty() {
-                    match content
-                        .last_mut()
-                        .and_then(|last| last["content"].as_array_mut())
-                    {
-                        Some(last) => last.extend(images),
-                        None => content.push(json!({
-                            "type": "tool_result",
-                            "tool_use_id": tool_use_id,
-                            "content": images,
-                        })),
-                    }
-                }
+                // One `tool_result` answers the call, holding the message's text and image blocks
+                // in their order: Anthropic refuses a second `tool_result` for the same
+                // `tool_use_id` with HTTP 400. A tool message holds several text blocks once
+                // murmur, or the image pre-pass, turns an image into a line.
+                let parts = message
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        MurmurContentBlock::Text { text } => {
+                            Some(json!({"type": "text", "text": text}))
+                        }
+                        MurmurContentBlock::Image { source } => Some(image_block(source)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let content = if parts.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![json!({
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": parts,
+                    })]
+                };
 
                 messages.push(json!({
                     "role": "user",
@@ -1474,10 +1444,11 @@ fn error_payload(message: &str) -> Value {
 #[cfg(target_arch = "wasm32")]
 mod wasm_driver {
     use super::{
-        assemble_anthropic_streaming_response, attach_image_report, build_provider_body,
-        error_payload, parse_beta_features, process_anthropic_sse_bytes, status_failure,
+        assemble_anthropic_streaming_response, build_provider_body, error_payload,
+        parse_beta_features, process_anthropic_sse_bytes, status_failure,
         translate_anthropic_response_to_murmur, AnthropicSseState, Failure, ToolCallSignal,
     };
+    use murmur_driver_image::attach_image_report;
     use murmur_wasi_http::{write_body, BodyWrite};
     use serde_json::Value;
 

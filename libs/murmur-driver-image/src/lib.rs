@@ -382,6 +382,17 @@ pub fn reports_json(reports: &[ImageReport]) -> Value {
     Value::Array(reports.iter().map(ImageReport::to_json).collect())
 }
 
+/// Add `reports` to a driver's successful response as its top-level `images` list. A response to
+/// a request that held no image gains no key, so its bytes are unchanged.
+pub fn attach_image_report(response: &mut Value, reports: &[ImageReport]) {
+    if reports.is_empty() {
+        return;
+    }
+    if let Some(response) = response.as_object_mut() {
+        response.insert("images".to_string(), reports_json(reports));
+    }
+}
+
 /// How one model takes images.
 pub enum Rule<'a> {
     /// The model reads no image; every image becomes a [`not_shown_line`] with this reason.
@@ -525,6 +536,25 @@ pub fn prepare_image(
         placement,
     });
     Prepared { action, report }
+}
+
+/// Measure and size the image at `messages[message].content[block]` whatever its source:
+/// [`prepare_image`] for a base64 source, which is what `source_type` absent means, and
+/// [`prepare_unmeasured`] for any other.
+pub fn prepare_source(
+    message: usize,
+    block: usize,
+    source_type: Option<&str>,
+    media_type: &str,
+    data: &str,
+    placement: &'static str,
+    rule: &Rule<'_>,
+) -> Prepared {
+    if source_type.is_none_or(|kind| kind == "base64") {
+        prepare_image(message, block, media_type, data, placement, rule)
+    } else {
+        prepare_unmeasured(message, block, media_type, data, placement, rule)
+    }
 }
 
 /// An image block whose source is not base64 (a URL, a file id): sent as it is and unmeasured,

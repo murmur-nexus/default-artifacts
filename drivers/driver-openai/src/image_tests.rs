@@ -1,12 +1,13 @@
 //! Images: sizing to each model's rule, placement on both surfaces, and the report.
 
 use super::{
-    attach_image_report, build_request_body, openai_image_size, DriverConfig, ImageRule,
-    MurmurRequest, GPT_5_2_2048_PX, HIGH_2048_PX, MODEL_ROUTES, ORIGINAL_6000_PX,
-    ORIGINAL_65535_PX,
+    build_request_body, openai_image_size, DriverConfig, ImageRule, MurmurRequest, GPT_5_2_2048_PX,
+    HIGH_2048_PX, MODEL_ROUTES, ORIGINAL_6000_PX, ORIGINAL_65535_PX,
 };
 use murmur_driver_image::fixtures::{gif, jpeg, png, png_header_only, screenshot_like};
-use murmur_driver_image::{decode_base64, dimensions, encode_base64, not_shown_line, sha256_hex};
+use murmur_driver_image::{
+    attach_image_report, decode_base64, dimensions, encode_base64, not_shown_line, sha256_hex,
+};
 use serde_json::{json, Value};
 
 fn png_base64(width: u32, height: u32) -> String {
@@ -329,6 +330,48 @@ fn responses_keeps_a_fitting_image_byte_for_byte_and_sizes_user_images() {
     assert_eq!(reports[0]["outcome"], "sent");
     assert_eq!(reports[0]["placement"], "user");
     assert_eq!(reports[0]["scale"], json!(1.0));
+}
+
+#[test]
+fn responses_continuation_keeps_the_image_in_the_function_call_output() {
+    // With `store` granted and an id held, the assistant turn is retained server-side and left
+    // out; the tool's image still rides in its function_call_output, sized as without the id.
+    let data = png_base64(3000, 2000);
+    let mut request = tool_request(
+        "gpt-5.4",
+        vec![
+            (
+                "call_a",
+                json!([{"type": "text", "text": "attached"}, image("image/png", &data)]),
+            ),
+            ("call_b", json!([{"type": "text", "text": "plain"}])),
+        ],
+    );
+    request["continuation_id"] = json!("resp_prev_1");
+    let request: MurmurRequest = serde_json::from_value(request).unwrap();
+    let (_, body, reports) = build_request_body(request, &DriverConfig::default(), true).unwrap();
+    assert_eq!(body["previous_response_id"], "resp_prev_1");
+    let input = body["input"].as_array().unwrap();
+    assert!(
+        input.iter().all(|item| item["type"] != "function_call"),
+        "the retained assistant turn is not resent: {body}"
+    );
+    let outputs: Vec<&Value> = input
+        .iter()
+        .filter(|item| item["type"] == "function_call_output")
+        .collect();
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(outputs[0]["call_id"], "call_a");
+    let parts = outputs[0]["output"].as_array().unwrap();
+    assert_eq!(parts[0], json!({"type": "input_text", "text": "attached"}));
+    assert_eq!(
+        data_url_size(parts[1]["image_url"].as_str().unwrap()),
+        ("image/png".to_string(), (1920, 1280))
+    );
+    assert_eq!(outputs[1]["output"], "plain");
+    let report = reports[0].to_json();
+    assert_eq!(report["placement"], "function_call_output");
+    assert_eq!(report["outcome"], "resized");
 }
 
 #[test]

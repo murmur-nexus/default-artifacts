@@ -2,10 +2,7 @@
 // or from cfg(test). Suppress dead_code noise in plain host library builds.
 #![cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
 
-use murmur_driver_image::{
-    largest_fit, prepare_image, prepare_unmeasured, reports_json, Action, ImageReport, Rule,
-    SizeRule,
-};
+use murmur_driver_image::{largest_fit, prepare_source, Action, ImageReport, Rule, SizeRule};
 use murmur_driver_stream::Failure;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -138,7 +135,7 @@ fn route(model: &str) -> Result<ApiSurface, String> {
         .ok_or_else(|| {
             format!(
                 "driver: model '{model}' is not supported by driver-openai. \
-             Supported models: {}.",
+                 Supported models: {}.",
                 MODEL_ROUTES
                     .iter()
                     .map(|route| route.id)
@@ -306,26 +303,15 @@ fn prepare_images(
             let MurmurContentBlock::Image { source } = block else {
                 continue;
             };
-            let base64 = source.r#type.as_deref().is_none_or(|kind| kind == "base64");
-            let prepared = if !base64 {
-                prepare_unmeasured(
-                    index,
-                    block_index,
-                    &source.media_type,
-                    &source.data,
-                    placement,
-                    &rule,
-                )
-            } else {
-                prepare_image(
-                    index,
-                    block_index,
-                    &source.media_type,
-                    &source.data,
-                    placement,
-                    &rule,
-                )
-            };
+            let prepared = prepare_source(
+                index,
+                block_index,
+                source.r#type.as_deref(),
+                &source.media_type,
+                &source.data,
+                placement,
+                &rule,
+            );
             match prepared.action {
                 Action::Keep => {}
                 Action::Replace { media_type, data } => {
@@ -343,17 +329,6 @@ fn prepare_images(
 /// The `data:` URL both surfaces carry an image as.
 fn image_data_url(source: &MurmurImageSource) -> String {
     format!("data:{};base64,{}", source.media_type, source.data)
-}
-
-/// Add the image report to a successful response as its top-level `images` list. A response to a
-/// request without images gains no key.
-fn attach_image_report(response: &mut Value, reports: &[ImageReport]) {
-    if reports.is_empty() {
-        return;
-    }
-    if let Some(response) = response.as_object_mut() {
-        response.insert("images".to_string(), reports_json(reports));
-    }
 }
 
 /// Route a parsed request, size its images and build its provider body: the surface it goes to,
@@ -2302,11 +2277,12 @@ fn assemble_responses_streaming_response(
 mod wasm_driver {
     use super::{
         assemble_openai_streaming_response, assemble_responses_streaming_response,
-        attach_image_report, build_request_body, parse_driver_config, process_openai_sse_line,
+        build_request_body, parse_driver_config, process_openai_sse_line,
         process_responses_sse_line, render_outcome, status_failure, store_opt_in,
         translate_openai_response_to_murmur, translate_responses_to_murmur, ApiSurface,
         MurmurRequest, ThinkingState, ToolCallSignal, ToolCallState, UsageTokens,
     };
+    use murmur_driver_image::attach_image_report;
     use murmur_driver_stream::Failure;
     use murmur_wasi_http::{write_body, BodyWrite};
     use serde_json::Value;

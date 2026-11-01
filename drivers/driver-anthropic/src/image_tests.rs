@@ -1,12 +1,14 @@
 //! Images: sizing to each model's tier, placement in the provider body, and the report.
 
 use super::{
-    anthropic_image_size, attach_image_report, build_provider_body, prepare_images,
+    anthropic_image_size, build_provider_body, prepare_images,
     translate_murmur_request_to_anthropic, ImageTier, ModelFamily, MurmurContentBlock,
     MurmurRequest, PromptCacheConfig, ThinkingConfig, MAX_IMAGE_BASE64_BYTES, MODEL_IMAGE_TIERS,
 };
 use murmur_driver_image::fixtures::{gif, png, png_header_only, screenshot_like};
-use murmur_driver_image::{decode_base64, dimensions, encode_base64, not_shown_line, sha256_hex};
+use murmur_driver_image::{
+    attach_image_report, decode_base64, dimensions, encode_base64, not_shown_line, sha256_hex,
+};
 use serde_json::{json, Value};
 
 fn png_base64(width: u32, height: u32) -> String {
@@ -155,7 +157,7 @@ fn a_tool_image_joins_the_tool_result_after_its_text() {
 }
 
 #[test]
-fn several_text_blocks_keep_their_results_and_images_join_the_last_in_order() {
+fn several_text_blocks_and_images_share_one_tool_result_in_order() {
     let first = png_base64(40, 30);
     let second = png_base64(20, 10);
     let raw = tool_request(
@@ -169,16 +171,15 @@ fn several_text_blocks_keep_their_results_and_images_join_the_last_in_order() {
     );
     let (body, reports) = body(&raw);
     let results = body["messages"][2]["content"].as_array().unwrap();
-    assert_eq!(results.len(), 2);
-    assert_eq!(
-        results[0]["content"],
-        json!([{"type": "text", "text": "one"}])
-    );
-    let last = results[1]["content"].as_array().unwrap();
-    assert_eq!(last[0], json!({"type": "text", "text": "two"}));
-    // Both fit the tier: sent byte for byte, in their original order.
-    assert_eq!(last[1]["source"]["data"], first);
-    assert_eq!(last[2]["source"]["data"], second);
+    assert_eq!(results.len(), 1, "one tool_result per tool_use_id");
+    assert_eq!(results[0]["tool_use_id"], "toolu_1");
+    let content = results[0]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 4);
+    assert_eq!(content[0], json!({"type": "text", "text": "one"}));
+    // Both fit the tier: sent byte for byte, each where murmur put it.
+    assert_eq!(content[1]["source"]["data"], first);
+    assert_eq!(content[2], json!({"type": "text", "text": "two"}));
+    assert_eq!(content[3]["source"]["data"], second);
     assert_eq!(reports[0]["outcome"], "sent");
     assert_eq!(reports[0]["block"], 1);
     assert_eq!(reports[1]["block"], 3);
@@ -265,7 +266,7 @@ fn a_model_without_vision_gets_one_line_per_image() {
         "nothing past the bytes is read"
     );
 
-    // The line is a text block, so it makes its own tool_result.
+    // The line joins the tool's text in the call's one tool_result.
     let body = translate_murmur_request_to_anthropic(
         &request,
         ModelFamily::Claude4Plus,
@@ -274,8 +275,11 @@ fn a_model_without_vision_gets_one_line_per_image() {
     )
     .unwrap();
     let results = body["messages"][2]["content"].as_array().unwrap();
-    assert_eq!(results.len(), 2);
-    assert_eq!(results[1]["content"][0]["text"], line);
+    assert_eq!(results.len(), 1, "one tool_result per tool_use_id");
+    assert_eq!(
+        results[0]["content"],
+        json!([{"type": "text", "text": "attached a.png"}, {"type": "text", "text": line}])
+    );
 }
 
 // ── S7: unusable images ──────────────────────────────────────────────────────
@@ -293,8 +297,10 @@ fn an_unusable_image_becomes_a_line_and_the_request_is_still_built() {
         ]),
     );
     let (body, reports) = body(&raw);
-    let content = body["messages"][2]["content"].as_array().unwrap();
-    assert_eq!(content.len(), 3, "each line makes its own tool_result");
+    let results = body["messages"][2]["content"].as_array().unwrap();
+    assert_eq!(results.len(), 1, "one tool_result per tool_use_id");
+    let content = results[0]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 3, "one line per image");
     let reasons: Vec<&str> = reports
         .iter()
         .map(|r| r["reason"].as_str().unwrap())
@@ -314,8 +320,8 @@ fn an_unusable_image_becomes_a_line_and_the_request_is_still_built() {
         "{}",
         reasons[2]
     );
-    for (result, report) in content.iter().zip(&reports) {
-        let text = result["content"][0]["text"].as_str().unwrap();
+    for (block, report) in content.iter().zip(&reports) {
+        let text = block["text"].as_str().unwrap();
         assert!(text.starts_with("[image not shown: image/png, "), "{text}");
         assert!(text.ends_with(&format!("; {}]", report["reason"].as_str().unwrap())));
         assert_eq!(report["outcome"], "replaced");
@@ -382,17 +388,38 @@ fn murmurs_aged_and_unavailable_lines_are_never_touched() {
     );
     let (body, reports) = body(&raw);
     let results = body["messages"][2]["content"].as_array().unwrap();
-    assert_eq!(
-        results[0]["content"],
-        json!([{"type": "text", "text": aged}])
-    );
-    assert_eq!(
-        results[1]["content"][0],
-        json!({"type": "text", "text": missing})
-    );
-    assert_eq!(results[1]["content"][1]["type"], "image");
+    assert_eq!(results.len(), 1, "one tool_result per tool_use_id");
+    let content = results[0]["content"].as_array().unwrap();
+    assert_eq!(content[0], json!({"type": "text", "text": aged}));
+    assert_eq!(content[1], json!({"type": "text", "text": missing}));
+    assert_eq!(content[2]["type"], "image");
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0]["block"], 2);
+}
+
+#[test]
+fn a_tool_message_whose_images_all_aged_out_answers_with_one_tool_result() {
+    // No image block is left, only murmur's line beside the tool's text: still one tool_result,
+    // which is the only shape Anthropic accepts for one tool_use_id.
+    let aged = "[image not shown: image/png, 5120 bytes, sha256 ab; the 5 newer images in this conversation are shown instead]";
+    let raw = tool_request(
+        "claude-sonnet-5-5",
+        json!([{"type": "text", "text": "attached a.png"}, {"type": "text", "text": aged}]),
+    );
+    let (body, reports) = body(&raw);
+    assert!(reports.is_empty(), "no image block, no report");
+    assert_eq!(
+        body["messages"][2]["content"],
+        json!([{
+            "type": "tool_result",
+            "tool_use_id": "toolu_1",
+            "content": [
+                {"type": "text", "text": "attached a.png"},
+                {"type": "text", "text": aged}
+            ],
+            "cache_control": {"type": "ephemeral"}
+        }])
+    );
 }
 
 // ── S8: determinism ──────────────────────────────────────────────────────────
