@@ -951,7 +951,10 @@ fn component_refuses_an_image_path_outside_the_work_folder() {
     let image = refusal("outside.png");
     assert_eq!(image, refusal("outside.txt"));
     assert!(
-        !image.as_deref().unwrap_or_default().contains("named as an image"),
+        !image
+            .as_deref()
+            .unwrap_or_default()
+            .contains("named as an image"),
         "{image:?}"
     );
 

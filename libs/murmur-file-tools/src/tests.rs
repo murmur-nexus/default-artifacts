@@ -1988,11 +1988,7 @@ fn read_refuses_a_text_file_named_as_an_image() {
         .iter()
         .map(|name| write_bytes(&dir, name, b"hello world\n"))
         .collect();
-    cases.push(write_bytes(
-        &dir,
-        "cut.png",
-        b"\x89PNG\r\n\x1a\n\0\0\0\x0d",
-    ));
+    cases.push(write_bytes(&dir, "cut.png", b"\x89PNG\r\n\x1a\n\0\0\0\x0d"));
 
     for path in cases {
         let out = call(Tool::Read, &json!({ "path": &path }));

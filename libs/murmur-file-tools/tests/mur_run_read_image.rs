@@ -480,11 +480,16 @@ fn a_read_png_reaches_the_model_as_an_image() {
     let second: Value = serde_json::from_str(&requests[1]).expect("the request body is JSON");
     let results = tool_results(&requests[1]);
     println!("tool results: {results:?}");
+    // murmur fences every tool result as untrusted content before the driver sees it.
     assert_eq!(
         results,
         [(
             "call_1".to_string(),
-            format!("image/png, {} bytes, 64x48 pixels", png.len())
+            format!(
+                "<untrusted-content source=tool:tool-read>\nimage/png, {} bytes, 64x48 \
+                 pixels\n</untrusted-content>",
+                png.len()
+            )
         )]
     );
     let urls = image_urls(&second);

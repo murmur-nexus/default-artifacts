@@ -3,9 +3,9 @@
 //!
 //! Each tool crate is a thin `wasm32-wasip2` component: it binds its own WIT world, calls
 //! [`dispatch`] with its [`Tool`] variant, and maps the [`ToolOutcome`] field for field onto the
-//! WIT `ToolResult`, its [`attachments`](ToolOutcome::attachments) included. Everything else — the stdin envelope, the field checks, every limit,
-//! message and filesystem call — lives here, with no WASM bindings and no `cfg`, so it is unit
-//! tested on the host with `cargo test`.
+//! WIT `ToolResult`, its [`attachments`](ToolOutcome::attachments) included. Everything else —
+//! the stdin envelope, the field checks, every limit, message and filesystem call — lives here,
+//! with no WASM bindings and no `cfg`, so it is unit tested on the host with `cargo test`.
 //!
 //! The crate root holds the envelope, the dispatch, the output constructors and the helpers the
 //! tools share; each tool's handler lives in its own module.

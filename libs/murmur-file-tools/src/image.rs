@@ -507,11 +507,26 @@ mod tests {
     #[test]
     fn has_image_name_matches_the_final_extension_without_case() {
         for name in [
-            "a.png", "a.jpg", "a.jpeg", "a.gif", "a.webp", "X.PNG", "d/e.JpEg", "x.tar.gif",
+            "a.png",
+            "a.jpg",
+            "a.jpeg",
+            "a.gif",
+            "a.webp",
+            "X.PNG",
+            "d/e.JpEg",
+            "x.tar.gif",
         ] {
             assert!(has_image_name(name), "{name}");
         }
-        for name in ["a.txt", "png", "a.png.txt", "a.pdf", "dir.png/a", "a.svg", ""] {
+        for name in [
+            "a.txt",
+            "png",
+            "a.png.txt",
+            "a.pdf",
+            "dir.png/a",
+            "a.svg",
+            "",
+        ] {
             assert!(!has_image_name(name), "{name}");
         }
     }

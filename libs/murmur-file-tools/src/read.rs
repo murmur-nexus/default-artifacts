@@ -6,8 +6,8 @@ use serde_json::{json, Value};
 
 use crate::image::{has_image_name, image_header};
 use crate::{
-    err, err_result, format_result_size, io_error_kind, ok_summary_only, ok_with,
-    reject_absolute, required_path,
+    err, err_result, format_result_size, io_error_kind, ok_summary_only, ok_with, reject_absolute,
+    required_path,
 };
 
 // read limits. Every read, with or without a range, returns at most this many lines, this
