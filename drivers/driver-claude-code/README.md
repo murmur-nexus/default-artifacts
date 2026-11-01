@@ -50,6 +50,8 @@ inference:
   system_prompt_file: ./instructions.md
   driver:
     artifact: murmur/driver-claude-code
+    config:                      # optional; see "Driver config" below
+      prompt_suggestions: true
   # command: /usr/local/bin/claude   # optional; overrides the `claude` this driver names
 
 capabilities:
@@ -59,13 +61,47 @@ capabilities:
 artifacts:
   - name: murmur/driver-claude-code
     runtime: driver
-    version: "0.8.0"
+    version: "0.9.0"
 ```
 
 The harness starts from an **empty** environment and sees exactly the variables
 `capabilities.env.allow` declares. That is what keeps the subscription the thing being spent: an
 API key sitting in the operator's shell reaches `claude` only if the operator writes it down
 here.
+
+## Driver config
+
+`inference.driver.config` is optional. murmur hands it to the driver as JSON, and the driver
+reads it once per turn, before it plans anything.
+
+| Key | Type | Default | What it does |
+|---|---|---|---|
+| `prompt_suggestions` | boolean | `false` | Starts `claude` with `--prompt-suggestions true`, and reads each `prompt_suggestion` line it prints as a `suggested-prompt` event |
+
+No config, `{}` or a whitespace-only value leaves every key at its default. Anything else the
+driver cannot read refuses the turn, with a message naming the problem:
+
+| Config | Refusal |
+|---|---|
+| not JSON | `driver: inference.driver.config is not valid JSON: <error>` |
+| JSON that is not an object | `driver: inference.driver.config must be a JSON object` |
+| a key not in the table | `driver: unrecognised inference.driver.config key(s): <keys, sorted>. Accepted keys: prompt_suggestions` |
+| `prompt_suggestions` that is not a JSON boolean, such as `"yes"`, `"true"`, `1` or `null` | `driver: inference.driver.config 'prompt_suggestions' must be a boolean, got <value>` |
+
+**A suggestion costs one more model call on the subscription after each turn.** `claude` makes
+it as a second, forked call once the turn's `result` line is printed, so the suggestion always
+arrives after `result`. murmur reads the harness's output after the terminal event only until
+the harness exits or its 3 s exit grace runs out. A suggestion that takes longer than that is
+lost. In the three recorded runs, `claude` exited 823 ms, 1,883 ms and 2,003 ms after the last
+`result`. None of them printed a suggestion, so no suggestion delay is measured yet: see
+[The recordings this is tested against](#the-recordings-this-is-tested-against).
+
+`claude` also skips the suggestion on its own:
+
+- for a turn before the conversation holds two assistant messages, so a session's first turn
+  never gets one;
+- when the prompt cache is cold;
+- when the model answers with no suggestion at all.
 
 ## Required variables, and why each one stays
 
@@ -127,6 +163,7 @@ point a turn at a mock endpoint for testing, which is how this driver was exerci
 claude --print --output-format stream-json --verbose
        --input-format stream-json --include-partial-messages
        --setting-sources ""
+       [--prompt-suggestions true]
        [--model <model>]
        --session-id <id> | --resume <id>
        --tools mcp__<server>__<tool>,…  --mcp-config {files_dir}/mcp-config.json
@@ -141,6 +178,9 @@ claude --print --output-format stream-json --verbose
   loading into a capsule's turn. The capsule's manifest is the only configuration a run answers
   to. (`--safe-mode` and `--bare` were tested upstream and rejected for this job; do not
   reach for them.)
+- `--prompt-suggestions true` appears only when `prompt_suggestions` is `true` in the
+  [driver config](#driver-config). Without it the argv is exactly what it was before the key
+  existed.
 - `--model` appears only when the manifest names a non-blank model, carrying it trimmed. A blank
   model leaves the choice to the harness rather than passing `--model ""`, which `claude`
   rejects.
@@ -178,11 +218,12 @@ that directory's path.
 ## Reading what the harness prints
 
 `parse` takes a batch of complete stdout lines and returns the events they carry. Two things
-are carried from one `parse` call to the next: the bridge's tool prefix, which `launch` records
-so `parse` can strip it off again, and the open tool calls of the message being streamed, which
-tie an `input_json_delta` to the call its block started. The run's token totals are carried the
-same way. `launch` starts the open calls and the totals afresh, because a new process is a new
-stream. Because what one line leaves for a later one is carried rather than dropped at a batch
+are carried from one `parse` call to the next: what `launch` decided, and the open tool calls of
+the message being streamed, which tie an `input_json_delta` to the call its block started.
+`launch` records the bridge's tool prefix, so `parse` can strip it off again, and whether
+suggestions are on. It records them only for a config it accepted. The run's token totals are
+carried the same way. `launch` starts the open calls and the totals afresh, because a new
+process is a new stream. Because what one line leaves for a later one is carried rather than dropped at a batch
 boundary, the same lines split into different batches still produce the same events.
 
 | Line | Events |
@@ -201,6 +242,9 @@ boundary, the same lines split into different batches still produce the same eve
 | `user` `tool_result` block | `tool-result` |
 | `user` any other block, such as the `[Request interrupted by user]` marker | none |
 | `result` | one `usage`, then `turn-end` or `turn-failed` — see [The tokens a turn spent](#the-tokens-a-turn-spent) |
+| `rate_limit_event` | one `quota` — see [Subscription windows](#subscription-windows) |
+| `rate_limit_event` whose `rate_limit_info` is missing, is not an object, or names no window | exactly one `note` |
+| `prompt_suggestion` | `suggested-prompt` when `prompt_suggestions` is on; one `note` when it is off or the line has no string `suggestion` |
 | a blank or whitespace-only line | none |
 | anything else | exactly one `note` |
 
@@ -338,14 +382,79 @@ The `usage` event is emitted **immediately before** the `turn-end` or `turn-fail
 `result` line: the runtime attributes a reading to the turn open when it arrives, and both
 terminal events close that turn.
 
+### Subscription windows
+
+A subscription run of `claude` prints a `rate_limit_event` line at its first API response, and
+again whenever a window's rounded percentage, reset time, status or threshold moves. An API-key
+run never prints one. The driver turns each line into **exactly one `quota` event**, built from
+the line's `rate_limit_info`. That mapping is the only place Claude's spelling of a window
+appears.
+
+| quota-window | From claude |
+|---|---|
+| `name` | the `unifiedWindows` key, or the top-level `rateLimitType`, lowercased with `_` written as `-`: `five_hour` → `five-hour`, `seven_day` → `seven-day`, `seven_day_opus` → `seven-day-opus`. The overage fields give the window `overage` |
+| `used` | `utilization`. A value above 1 is reported as `1`; a negative value, or one that is not a number, is absent |
+| `resets-at` | `resetsAt` × 1000, so epoch seconds become epoch milliseconds. `overageResetsAt` × 1000 for `overage`. A value that is not a non-negative integer, or overflows as milliseconds, is absent |
+| `window-minutes` | `300` for `five_hour` and `10080` for `seven_day`. Absent for every other window: `claude` never sends a length, and the driver states one only for the two it knows |
+| `state` | `status`, or `overageStatus` for `overage`: `allowed` → `ok`, `allowed_warning` → `warning`, `rejected` → `exhausted`. Any other value is absent |
+
+The windows come in this order:
+
+1. **One per `unifiedWindows` entry** whose value is an object, in key order. Each window's
+   members come from that entry.
+2. **The window the top-level `rateLimitType` names.** The top-level `status`, `resetsAt` and
+   `utilization` describe that window. When step 1 produced it, they fill only the members it
+   left absent. Otherwise they make a window of their own, after the step-1 windows. With no
+   `rateLimitType` they name no window and are not read.
+3. **`overage`, last.** It appears when `overageStatus` or `overageResetsAt` is present and not
+   `null`, or when `rateLimitType` is `overage`. In that last case the top-level fields fill the
+   members the overage fields left absent.
+
+Every member but `name` is optional, and **absent means the line did not carry it**, never zero.
+A line that produces no window becomes one `note`, never an empty `quota`. The driver does not
+check names against the runtime's rule; the runtime notes a window whose name it refuses.
+
+`used` is capped at 1 because `claude` reports utilization above 1 when use runs past a
+window's cap, and the runtime refuses a whole window whose fraction is above 1.
+
+Not read, because the interface has no member for them: `surpassedThreshold`,
+`overageDisabledReason`, `isUsingOverage`, `overageInUse`, `overageEnabled`, `limitScope`,
+`rateLimitGraceActive`, `uuid`, `session_id` and any other field.
+
+**Each line is sent whole, and nothing is carried from one line to the next.** The runtime
+replaces a window of the same name whole and leaves the others standing. So a line naming only
+`seven_day` updates `seven-day` and leaves an earlier `five-hour` as it was. The runtime records
+the windows, shows them in `session-status`, `mur trace show` and the task stream, and never
+acts on them.
+
+The verbatim line from a subscription run, and the windows it gives:
+
+```json
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1790900400,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.01,"resetsAt":1790900400},"seven_day":{"utilization":0.11,"resetsAt":1791399600}}},"uuid":"…","session_id":"…"}
+```
+
+| name | used | resets-at | window-minutes | state |
+|---|---|---|---|---|
+| `five-hour` | `0.01` | `1790900400000` | `300` | `ok`, from the top-level `status` |
+| `seven-day` | `0.11` | `1791399600000` | `10080` | absent |
+| `overage` | absent | absent | absent | `exhausted` |
+
+### The suggested next prompt
+
+With `prompt_suggestions` on, `claude` prints a `prompt_suggestion` line after a turn's
+`result`. Its `suggestion` becomes one `suggested-prompt`, verbatim and even when empty; the
+runtime drops an empty one itself. With the key off, the driver never asks for suggestions, and
+a `prompt_suggestion` line is noted like any other line it does not read.
+
 ### The other events
 
 - **`session-started`** takes its id from `session_id` and its model from `model`. `auth` is
   `subscription` only when the harness reports `apiKeySource: "none"`; every other value reads
   as `api-key`, **absent included**. The runtime warns on anything that is not `subscription`,
   so the ambiguous case fails towards being warned about rather than towards a quiet
-  subscription claim. Every recording in `tests/fixtures/` authenticated with an API key, so
-  every one reads `api-key`; the subscription reading is covered by a unit test.
+  subscription claim. The ten mock recordings in `tests/fixtures/` authenticated with an API
+  key and read `api-key`. `11-subscription-rate-limit` ran on a subscription login and reads
+  `subscription`.
 - **`retry`** takes `attempt` from the line and reads its reason as `<error> (<error_status>)`,
   falling back to whichever of the two the line carries, and to `unknown` with neither.
 - **`tool-call`** strips the prefix `launch` added, and **only** that prefix. A generic
@@ -372,12 +481,33 @@ canceled turn from a finished one.
 
 ## The recordings this is tested against
 
-`tests/fixtures/` holds ten recordings of real `claude` 2.1.278 output, byte-identical copies of
-the roadmap's, each with its stdout, its stderr and its exit code. `tests/golden.rs` asserts the
-**complete** event list for every one, and asserts across all ten that no recording produces a
-`note`, that every one ends with a terminal event — so the runtime never reaches `classify-exit`
-for any of them, including the two that exit `1` — and that no recording whose `result` line
-says `is_error: true` ends the turn successfully.
+`tests/fixtures/` holds eleven recordings of real `claude` output, each with its stdout, its
+stderr and its exit code:
+
+| Recordings | claude | Auth | Launched with |
+|---|---|---|---|
+| `01` to `10` | 2.1.278, against a mock endpoint and a mock bridge; byte-identical copies of the roadmap's | API key | the bridge `claude_bridge`, no config |
+| `11-subscription-rate-limit` | 2.1.314, a real subscription turn on `--model haiku` | subscription | no bridge, `prompt_suggestions: true` |
+
+`tests/golden.rs` asserts the **complete** event list for every one. It also asserts, across
+every recording:
+
+- no recording produces a `note`;
+- every one ends with a terminal event, so the runtime never reaches `classify-exit` for any of
+  them, including the two that exit `1`;
+- no recording whose `result` line says `is_error: true` ends the turn successfully;
+- each `rate_limit_event` line gives one `quota`, and only the subscription recording has one.
+
+`11-subscription-rate-limit` gives `session-started` with `auth: "subscription"` and one `quota`.
+Its line names only `seven_day` in `unifiedWindows`. Read with suggestions off, it gives the same
+events, with each `suggested-prompt` replaced by one `note`.
+
+**No recorded run printed a `prompt_suggestion`.** Three runs were made, of one, two and three
+turns. `claude` skips a session's first turn by rule. The second turn of the two-turn run had a
+cold cache, because the login's claude.ai connector tools reached the tool list between turns.
+The third turn of the three-turn run read a warm cache and still printed none. The
+`suggested-prompt` unit tests use a line in the shape claude 2.1.314's bundle declares. The
+three-turn run is not committed, because its later `init` lines list the login's own connectors.
 
 Each recording is parsed four ways, each partition with its own fresh parse state carried
 across its batches: all lines in one batch, one line per batch, a two-batch split whose boundary

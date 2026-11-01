@@ -1,15 +1,18 @@
-//! The ten recordings of real `claude` 2.1.278 output in `tests/fixtures/`, read into the exact
-//! event list each one produces.
+//! The recordings of real `claude` output in `tests/fixtures/`, read into the exact event list
+//! each one produces.
 //!
-//! The recordings are byte-identical copies of `.nexus/roadmap/fixtures/claude-code-2.1.278/`,
-//! recorded against a mock Anthropic endpoint and a mock MCP bridge named `claude_bridge`. Every
-//! one authenticated with an API key, so every one reports `auth: "api-key"`; the subscription
-//! reading is covered by a unit test instead.
+//! The first ten are byte-identical copies of `.nexus/roadmap/fixtures/claude-code-2.1.278/`,
+//! recorded with `claude` 2.1.278 against a mock Anthropic endpoint and a mock MCP bridge named
+//! `claude_bridge`. Every one authenticated with an API key, so every one reports
+//! `auth: "api-key"` and none prints a `rate_limit_event`.
+//!
+//! `11-subscription-rate-limit` is `claude` 2.1.314 on a real subscription login, with no bridge
+//! and `prompt_suggestions` on: it reports `auth: "subscription"` and one `quota`.
 
 use driver_claude_code::{
-    describe, parse_line, parse_lines, tool_name_prefix, Event, FailureKind, ParseContext,
-    ParseState, RetryInfo, SessionInfo, TokenUsage, ToolCallInfo, ToolCallProgress, ToolCallStart,
-    ToolResultInfo, TurnFailure,
+    describe, parse_context_for, parse_line, parse_lines, tool_name_prefix, DriverConfig, Event,
+    FailureKind, ParseContext, ParseState, QuotaState, QuotaWindow, RetryInfo, SessionInfo,
+    TokenUsage, ToolCallInfo, ToolCallProgress, ToolCallStart, ToolResultInfo, TurnFailure,
 };
 use serde_json::Value;
 
@@ -17,13 +20,16 @@ use serde_json::Value;
 /// from the bridge the runtime names, and `parse` strips that same prefix back off.
 const RECORDED_SERVER: &str = "claude_bridge";
 
-/// The model every recording's `init` line reports.
+/// The model every mock recording's `init` line reports.
 const RECORDED_MODEL: &str = "claude-opus-5[1m]";
+
+/// The model the subscription recording's `init` line reports, for `--model haiku`.
+const SUBSCRIPTION_MODEL: &str = "claude-haiku-5-5";
 
 /// Every recording, with the line index a mid-message batch boundary falls on: between a
 /// message's `content_block_delta` lines and the `assistant` line carrying its full text, or —
 /// for the three recordings that stream no deltas — immediately before the `result` line.
-const RECORDINGS: [(&str, usize); 10] = [
+const RECORDINGS: [(&str, usize); 11] = [
     ("01-text-new-session", 5),
     ("02-resume-same-session", 5),
     ("03-bridge-tool-call", 14),
@@ -34,7 +40,12 @@ const RECORDINGS: [(&str, usize); 10] = [
     ("08-interrupt-control-request", 9),
     ("09-interrupt-sigint", 9),
     ("10-resume-after-sigint", 5),
+    ("11-subscription-rate-limit", 5),
 ];
+
+/// The recordings made on a subscription login, launched with no bridge and with
+/// `prompt_suggestions: true`. Every other recording was launched bridged, with no config.
+const SUBSCRIPTION_RECORDINGS: [&str; 1] = ["11-subscription-rate-limit"];
 
 /// The recordings that stream a tool call's input, with the line index a batch boundary falls
 /// on between a `tool_use` block start and its first `input_json_delta` — the case a parser
@@ -45,9 +56,28 @@ const TOOL_INPUT_SPLITS: [(&str, usize); 1] = [("03-bridge-tool-call", 4)];
 
 // ── reading a recording ──────────────────────────────────────────────────────
 
-/// The context a run bridged the way the recordings were reads its output against.
+/// The context a run bridged the way the mock recordings were reads its output against.
 fn recorded_context() -> ParseContext {
     ParseContext::with_prefix(&tool_name_prefix(RECORDED_SERVER))
+}
+
+/// The context the subscription recordings were launched with: no bridge, suggestions on.
+fn suggesting_context() -> ParseContext {
+    parse_context_for(
+        None,
+        &DriverConfig {
+            prompt_suggestions: true,
+        },
+    )
+}
+
+/// The context `name` was launched with.
+fn context_of(name: &str) -> ParseContext {
+    if SUBSCRIPTION_RECORDINGS.contains(&name) {
+        suggesting_context()
+    } else {
+        recorded_context()
+    }
 }
 
 fn recorded_lines(name: &str) -> Vec<String> {
@@ -70,16 +100,20 @@ fn recorded_lines(name: &str) -> Vec<String> {
 /// inside a message, and — for a recording in [`TOOL_INPUT_SPLITS`] — a boundary between a tool
 /// call's block start and its input.
 fn events_of(name: &str, split: usize) -> Vec<Event> {
+    events_under(name, split, &context_of(name))
+}
+
+/// [`events_of`], read against `context` rather than the one `name` was launched with.
+fn events_under(name: &str, split: usize, context: &ParseContext) -> Vec<Event> {
     let lines = recorded_lines(name);
-    let context = recorded_context();
     assert_split_is_mid_message(name, &lines, split);
 
-    let whole = parse_lines(&lines, &context, &mut ParseState::new());
+    let whole = parse_lines(&lines, context, &mut ParseState::new());
 
     let mut one_by_one = ParseState::new();
     let one_at_a_time: Vec<Event> = lines
         .iter()
-        .flat_map(|line| parse_line(line, &context, &mut one_by_one))
+        .flat_map(|line| parse_line(line, context, &mut one_by_one))
         .collect();
     assert_eq!(
         one_at_a_time, whole,
@@ -88,8 +122,8 @@ fn events_of(name: &str, split: usize) -> Vec<Event> {
 
     let (head, tail) = lines.split_at(split);
     let mut across = ParseState::new();
-    let mut split_in_two = parse_lines(head, &context, &mut across);
-    split_in_two.extend(parse_lines(tail, &context, &mut across));
+    let mut split_in_two = parse_lines(head, context, &mut across);
+    split_in_two.extend(parse_lines(tail, context, &mut across));
     assert_eq!(
         split_in_two, whole,
         "{name}: a batch boundary inside a message must produce the same events as one batch"
@@ -100,8 +134,8 @@ fn events_of(name: &str, split: usize) -> Vec<Event> {
             assert_split_is_mid_tool_call(name, &lines, split);
             let (head, tail) = lines.split_at(split);
             let mut across = ParseState::new();
-            let mut split_in_two = parse_lines(head, &context, &mut across);
-            split_in_two.extend(parse_lines(tail, &context, &mut across));
+            let mut split_in_two = parse_lines(head, context, &mut across);
+            split_in_two.extend(parse_lines(tail, context, &mut across));
             assert_eq!(
                 split_in_two, whole,
                 "{name}: a batch boundary inside a tool call must produce the same events as one batch"
@@ -421,7 +455,106 @@ fn golden_10_resume_after_sigint() {
     );
 }
 
-// ── what holds across all ten ────────────────────────────────────────────────
+#[test]
+fn golden_11_subscription_rate_limit() {
+    assert_eq!(
+        events_of("11-subscription-rate-limit", 5),
+        vec![
+            Event::SessionStarted(SessionInfo {
+                id: "2946b2e2-95cf-4b20-8f06-6e90af26501a".to_string(),
+                // `apiKeySource: "none"`.
+                auth: "subscription".to_string(),
+                model: Some(SUBSCRIPTION_MODEL.to_string()),
+            }),
+            delta("ok"),
+            text("ok"),
+            // This login's line names only the `seven_day` window in `unifiedWindows`, which is
+            // also its `rateLimitType`, and reports overage as `rejected`.
+            Event::Quota(vec![
+                QuotaWindow {
+                    name: "seven-day".to_string(),
+                    used: Some(0.41),
+                    resets_at: Some(1_793_818_800_000),
+                    window_minutes: Some(10_080),
+                    state: Some(QuotaState::Ok),
+                },
+                QuotaWindow {
+                    name: "overage".to_string(),
+                    used: None,
+                    resets_at: None,
+                    window_minutes: None,
+                    state: Some(QuotaState::Exhausted),
+                },
+            ]),
+            spent(2, 4, 0, 567, 0),
+            end("ok"),
+        ]
+    );
+}
+
+// ── what holds across all of them ────────────────────────────────────────────
+
+#[test]
+fn the_rate_limit_line_is_recorded_only_on_the_subscription_login() {
+    for (name, events) in all_events() {
+        let printed = recorded_lines(name)
+            .iter()
+            .filter(|line| line.starts_with(r#"{"type":"rate_limit_event""#))
+            .count();
+        let quotas = events
+            .iter()
+            .filter(|event| matches!(event, Event::Quota(_)))
+            .count();
+        assert_eq!(
+            quotas, printed,
+            "{name}: one quota per rate_limit_event line"
+        );
+        assert_eq!(
+            printed > 0,
+            SUBSCRIPTION_RECORDINGS.contains(&name),
+            "{name}: claude prints the line on a subscription login and never with an API key"
+        );
+    }
+}
+
+#[test]
+fn with_suggestions_off_a_subscription_recording_notes_each_suggestion_instead() {
+    for name in SUBSCRIPTION_RECORDINGS {
+        let split = split_of(name);
+        let on = events_of(name, split);
+        let off = events_under(
+            name,
+            split,
+            &parse_context_for(None, &DriverConfig::default()),
+        );
+        let suggestion_lines: Vec<String> = recorded_lines(name)
+            .into_iter()
+            .filter(|line| line.starts_with(r#"{"type":"prompt_suggestion""#))
+            .collect();
+
+        assert_eq!(on.len(), off.len(), "{name}");
+        let mut notes = Vec::new();
+        for (on, off) in on.iter().zip(&off) {
+            match on {
+                Event::SuggestedPrompt(_) => {
+                    assert!(matches!(off, Event::Note(_)), "{name}: {off:?}");
+                    notes.push(off.clone());
+                }
+                _ => assert_eq!(on, off, "{name}"),
+            }
+        }
+        assert_eq!(notes.len(), suggestion_lines.len(), "{name}");
+    }
+}
+
+/// The mid-message split of a recording in [`RECORDINGS`].
+fn split_of(name: &str) -> usize {
+    RECORDINGS
+        .iter()
+        .find(|(recording, _)| *recording == name)
+        .expect("a named recording is in the table")
+        .1
+}
 
 fn all_events() -> Vec<(&'static str, Vec<Event>)> {
     RECORDINGS
@@ -687,7 +820,7 @@ fn spent(input: u64, output: u64, cache_read: u64, cache_creation: u64, thinking
     Event::Usage(usage(input, output, cache_read, cache_creation, thinking))
 }
 
-/// A reading in which the harness wrote all five counts, which is what all ten recordings do.
+/// A reading in which the harness wrote all five counts, which is what every recording does.
 fn usage(
     input: u64,
     output: u64,
@@ -765,7 +898,7 @@ fn every_recording_reports_one_reading_per_result_line() {
 fn every_recording_reports_exactly_the_counts_it_recorded() {
     // Read off the fixture bytes with jq and written down here, so a change to a recording or
     // to the reader has to be argued with rather than absorbed.
-    let expected: [(&str, Vec<TokenUsage>); 10] = [
+    let expected: [(&str, Vec<TokenUsage>); 11] = [
         ("01-text-new-session", vec![usage(1, 5, 0, 0, 0)]),
         ("02-resume-same-session", vec![usage(1, 5, 0, 0, 0)]),
         ("03-bridge-tool-call", vec![usage(2, 10, 0, 0, 0)]),
@@ -779,6 +912,7 @@ fn every_recording_reports_exactly_the_counts_it_recorded() {
         ),
         ("09-interrupt-sigint", vec![usage(0, 0, 0, 0, 0)]),
         ("10-resume-after-sigint", vec![usage(1, 5, 0, 0, 0)]),
+        ("11-subscription-rate-limit", vec![usage(2, 4, 0, 567, 0)]),
     ];
 
     for (name, counts) in expected {
@@ -825,11 +959,11 @@ fn a_failing_recording_keeps_its_verdict_and_reports_only_what_it_recorded() {
 
 #[test]
 fn no_line_but_a_result_line_reports_a_count() {
-    // Across all ten recordings, every reading is a result line's and every result line gives
+    // Across every recording, every reading is a result line's and every result line gives
     // one — measured line by line rather than in aggregate.
     for (name, _) in RECORDINGS {
         for line in recorded_lines(name) {
-            let events = parse_line(&line, &recorded_context(), &mut ParseState::new());
+            let events = parse_line(&line, &context_of(name), &mut ParseState::new());
             let reported = !usage_in(&events).is_empty();
             assert_eq!(
                 reported,

@@ -34,3 +34,62 @@ The task is one JSON line on stdin:
 
 Default retry behaviour (not recorded, observed): with no `CLAUDE_CODE_MAX_RETRIES`, a 401 or 429
 is retried up to 10 times with backoff, each visible as `system`/`api_retry`, before the final result.
+
+# Claude Code subscription recording, 2.1.314
+
+`11-subscription-rate-limit` is real `claude` 2.1.314 output, recorded 2026-10-31 on a real
+Claude subscription login: no mock and no API key. `init.apiKeySource` reads `none`. The model
+reply is real.
+
+The recorder ran outside this repository, in a fresh empty scratch working directory. Its
+environment held only `HOME` (the real one, where the login lives) and `PATH`, which is what a
+capsule with `capabilities.env.allow: [HOME, PATH]` passes. The argv is exactly what the driver
+builds for a no-bridge turn with `prompt_suggestions: true`:
+
+    claude --print --output-format stream-json --verbose --input-format stream-json
+           --include-partial-messages --setting-sources "" --prompt-suggestions true
+           --model haiku --session-id 2946b2e2-95cf-4b20-8f06-6e90af26501a --tools ""
+           --system-prompt "You are a Murmur capsule."
+
+The task was one stdin line:
+`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Reply with the single word ok."}]}}`.
+Stdin was closed as soon as the `result` line was read, as the runtime closes it, and stdout was
+read to EOF.
+
+Redactions, and nothing else changed:
+
+| Recorded | Committed |
+|---|---|
+| the scratch working dir, in `cwd` and `original_cwd` | `/work` |
+| the same dir encoded in the `memory_paths` project slug | `-work` |
+| the HOME | `/home/operator` |
+
+The recording carries no email, organization or account id. `stderr` was empty and the exit
+code was `0`. Every `rate_limit_event` value is as printed:
+
+    {"status":"allowed","resetsAt":1793818800,"rateLimitType":"seven_day","overageStatus":"rejected",
+     "overageDisabledReason":"org_level_disabled","isUsingOverage":false,
+     "unifiedWindows":{"seven_day":{"utilization":0.41,"resetsAt":1793818800,"status":"allowed"}}}
+
+This login's line names only `seven_day` in `unifiedWindows`, not `five_hour` as well, and has no
+`overageResetsAt`. `resetsAt` is epoch seconds: 1793818800 is 2026-11-04 UTC.
+
+Times are from a monotonic clock in the recorder:
+
+| Run | Turns | `rate_limit_event` | `prompt_suggestion` | last `result` → exit |
+|---|---|---|---|---|
+| 1, committed as `11-subscription-rate-limit` | 1 | yes, 26 ms before `result` | no | 823 ms |
+| 2 | 2 | yes, turn 1 only | no | 1,883 ms |
+| 3 | 3 | yes, turn 1 only | no | 2,003 ms |
+
+**No run printed a `prompt_suggestion`.** claude 2.1.314's bundle suppresses the suggestion for
+a turn before the conversation holds two assistant messages (`early_conversation`), so a
+session's first turn never gets one. In run 2, turn 2 read nothing from the cache
+(`cache_read_input_tokens: 0`): the login's claude.ai connector tools joined the tool list after
+turn 1, which changed the prompt prefix, and the bundle suppresses a cold-cache turn
+(`cache_cold`). Run 3 added a third turn, which read 4,414 cached tokens and still printed no
+suggestion. The bundle's suggestion prompt allows the model to answer with nothing, which is
+suppressed as `empty`. So no `result` → `prompt_suggestion` delay is measured. When stdin closes,
+`claude` waits up to 30 s for the suggestion call. murmur reads the harness's output for only 3 s
+after the terminal event, so a suggestion slower than that is lost. Runs 2 and 3 are not
+committed, because their later `init` lines list the login's own claude.ai connectors.
