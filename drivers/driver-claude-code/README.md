@@ -98,8 +98,8 @@ lost. In the three recorded runs, `claude` exited 823 ms, 1,883 ms and 2,003 ms 
 
 `claude` also skips the suggestion on its own:
 
-- for a turn before the conversation holds two assistant messages, so never after a session's
-  first turn;
+- for a turn before the conversation holds two assistant messages, so a session's first turn
+  never gets one;
 - when the prompt cache is cold;
 - when the model answers with no suggestion at all.
 
@@ -221,9 +221,9 @@ that directory's path.
 are carried from one `parse` call to the next: what `launch` decided, and the open tool calls of
 the message being streamed, which tie an `input_json_delta` to the call its block started.
 `launch` records the bridge's tool prefix, so `parse` can strip it off again, and whether
-suggestions are on. It records them only for a config it accepted. The run's token totals are carried the
-same way. `launch` starts the open calls and the totals afresh, because a new process is a new
-stream. Because what one line leaves for a later one is carried rather than dropped at a batch
+suggestions are on. It records them only for a config it accepted. The run's token totals are
+carried the same way. `launch` starts the open calls and the totals afresh, because a new
+process is a new stream. Because what one line leaves for a later one is carried rather than dropped at a batch
 boundary, the same lines split into different batches still produce the same events.
 
 | Line | Events |
@@ -418,8 +418,8 @@ check names against the runtime's rule; the runtime notes a window whose name it
 window's cap, and the runtime refuses a whole window whose fraction is above 1.
 
 Not read, because the interface has no member for them: `surpassedThreshold`,
-`overageDisabledReason`, `isUsingOverage`, `overageInUse`, `overageEnabled`,
-`rateLimitGraceActive`, `uuid` and `session_id`.
+`overageDisabledReason`, `isUsingOverage`, `overageInUse`, `overageEnabled`, `limitScope`,
+`rateLimitGraceActive`, `uuid`, `session_id` and any other field.
 
 **Each line is sent whole, and nothing is carried from one line to the next.** The runtime
 replaces a window of the same name whole and leaves the others standing. So a line naming only

@@ -106,15 +106,14 @@ fn events_of(name: &str, split: usize) -> Vec<Event> {
 /// [`events_of`], read against `context` rather than the one `name` was launched with.
 fn events_under(name: &str, split: usize, context: &ParseContext) -> Vec<Event> {
     let lines = recorded_lines(name);
-    let context = context.clone();
     assert_split_is_mid_message(name, &lines, split);
 
-    let whole = parse_lines(&lines, &context, &mut ParseState::new());
+    let whole = parse_lines(&lines, context, &mut ParseState::new());
 
     let mut one_by_one = ParseState::new();
     let one_at_a_time: Vec<Event> = lines
         .iter()
-        .flat_map(|line| parse_line(line, &context, &mut one_by_one))
+        .flat_map(|line| parse_line(line, context, &mut one_by_one))
         .collect();
     assert_eq!(
         one_at_a_time, whole,
@@ -123,8 +122,8 @@ fn events_under(name: &str, split: usize, context: &ParseContext) -> Vec<Event> 
 
     let (head, tail) = lines.split_at(split);
     let mut across = ParseState::new();
-    let mut split_in_two = parse_lines(head, &context, &mut across);
-    split_in_two.extend(parse_lines(tail, &context, &mut across));
+    let mut split_in_two = parse_lines(head, context, &mut across);
+    split_in_two.extend(parse_lines(tail, context, &mut across));
     assert_eq!(
         split_in_two, whole,
         "{name}: a batch boundary inside a message must produce the same events as one batch"
@@ -135,8 +134,8 @@ fn events_under(name: &str, split: usize, context: &ParseContext) -> Vec<Event> 
             assert_split_is_mid_tool_call(name, &lines, split);
             let (head, tail) = lines.split_at(split);
             let mut across = ParseState::new();
-            let mut split_in_two = parse_lines(head, &context, &mut across);
-            split_in_two.extend(parse_lines(tail, &context, &mut across));
+            let mut split_in_two = parse_lines(head, context, &mut across);
+            split_in_two.extend(parse_lines(tail, context, &mut across));
             assert_eq!(
                 split_in_two, whole,
                 "{name}: a batch boundary inside a tool call must produce the same events as one batch"
