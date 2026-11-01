@@ -5,6 +5,7 @@ implementation: wasm
 description: |
   Reads a file. path is relative to the work folder; an absolute path is refused.
   Returns content and total_lines: at most 2000 lines and 100 KB, lines cut to 2000 characters. A cut read adds a truncated note naming the limit and the start_line that continues it. A range over 2000 lines is refused.
+  A PNG, JPEG, GIF or WebP file is shown as an image, with its type, size and dimensions.
 input_schema:
   type: object
   properties:

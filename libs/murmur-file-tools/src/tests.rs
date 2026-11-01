@@ -586,6 +586,7 @@ fn dispatch_maps_status_data_truncated_and_state_effect() {
     );
     assert!(!out.truncated);
     assert_eq!(out.state_effect, Some("read"));
+    assert_eq!(out.attachments, vec![]);
 
     // A cut read sets `truncated`.
     let out = dispatch(Tool::Read, Some(&json!({ "path": &big }).to_string()));
@@ -607,6 +608,7 @@ fn dispatch_maps_status_data_truncated_and_state_effect() {
         Some("200 matches in 1 files (capped)")
     );
     assert_eq!(out.state_effect, Some("read"));
+    assert_eq!(out.attachments, vec![]);
 
     // A write and an edit carry no data.
     let written = dir.join("w.txt");
@@ -623,6 +625,7 @@ fn dispatch_maps_status_data_truncated_and_state_effect() {
             data: None,
             truncated: false,
             state_effect: Some("mutate"),
+            attachments: vec![],
         }
     );
     let out = dispatch(
@@ -637,6 +640,7 @@ fn dispatch_maps_status_data_truncated_and_state_effect() {
             data: None,
             truncated: false,
             state_effect: Some("mutate"),
+            attachments: vec![],
         }
     );
     assert_eq!(fs::read_to_string(written).unwrap(), "two");
@@ -654,6 +658,7 @@ fn dispatch_maps_status_data_truncated_and_state_effect() {
             data: None,
             truncated: false,
             state_effect: None,
+            attachments: vec![],
         }
     );
 
@@ -684,6 +689,7 @@ fn dispatch_maps_status_data_truncated_and_state_effect() {
                 data: None,
                 truncated: false,
                 state_effect: None,
+                attachments: vec![],
             }
         );
     }
@@ -1909,6 +1915,230 @@ fn read_refuses_an_unknown_input() {
         out["content"].is_null() && out["metadata"].is_null(),
         "{out:?}"
     );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ── read of an image file ───────────────────────────────────────────────────────
+
+/// `bytes` written to `dir/name`; its path as the tool is called with it.
+fn write_bytes(dir: &std::path::Path, name: &str, bytes: &[u8]) -> String {
+    let path = dir.join(name);
+    fs::write(&path, bytes).expect("failed to write test file");
+    path.to_string_lossy().to_string()
+}
+
+/// The result of an image read of `path`: `media_type`, `bytes` long, `width`×`height`.
+fn image_result(path: &str, media_type: &str, bytes: usize, width: u32, height: u32) -> Value {
+    json!({
+        "ok": true,
+        "message": format!("read {path} as an image"),
+        "status": "passed",
+        "summary": format!("{media_type}, {bytes} bytes, {width}x{height} pixels"),
+        "data": null,
+        "data_path": null,
+        "metadata": { "state_effect": "read" },
+        "attachments": [{ "media_type": media_type, "path": path }],
+    })
+}
+
+#[test]
+fn read_png_returns_an_attachment_and_its_dimensions() {
+    let dir = scratch("read_png");
+    let png = crate::test_png::png(64, 48);
+    let path = write_bytes(&dir, "logo.png", &png);
+
+    let out = call(Tool::Read, &json!({ "path": &path }));
+    assert_eq!(out["ok"], true, "{out:?}");
+    assert_eq!(
+        out["summary"],
+        format!("image/png, {} bytes, 64x48 pixels", png.len())
+    );
+    assert_eq!(out["message"], format!("read {path} as an image"));
+    assert!(out["data"].is_null(), "{out:?}");
+    assert_eq!(
+        out["attachments"],
+        json!([{ "media_type": "image/png", "path": &path }])
+    );
+    assert_eq!(out["metadata"]["state_effect"], "read");
+    assert_eq!(out, image_result(&path, "image/png", png.len(), 64, 48));
+
+    assert_eq!(
+        dispatch(Tool::Read, Some(&json!({ "path": &path }).to_string())),
+        ToolOutcome {
+            status: OutcomeStatus::Passed,
+            summary: Some(format!("image/png, {} bytes, 64x48 pixels", png.len())),
+            data: None,
+            truncated: false,
+            state_effect: Some("read"),
+            attachments: vec![OutcomeAttachment {
+                media_type: "image/png".to_string(),
+                path: path.clone(),
+            }],
+        }
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn read_refuses_a_text_file_named_as_an_image() {
+    let dir = scratch("read_named_image");
+    let mut cases: Vec<String> = ["notes.png", "x.jpg", "x.jpeg", "x.gif", "x.webp", "X.PNG"]
+        .iter()
+        .map(|name| write_bytes(&dir, name, b"hello world\n"))
+        .collect();
+    cases.push(write_bytes(
+        &dir,
+        "cut.png",
+        b"\x89PNG\r\n\x1a\n\0\0\0\x0d",
+    ));
+
+    for path in cases {
+        let out = call(Tool::Read, &json!({ "path": &path }));
+        assert_eq!(
+            out,
+            json!({
+                "ok": false,
+                "error_kind": "not_an_image",
+                "message": format!("'{path}' is named as an image but is not a PNG, JPEG, GIF or WebP file"),
+                "status": "error",
+                "summary": format!("'{path}' is named as an image but is not a PNG, JPEG, GIF or WebP file"),
+                "data": null,
+                "data_path": null,
+                "metadata": null,
+            }),
+            "{path}"
+        );
+        assert!(out.get("attachments").is_none(), "{out:?}");
+        assert!(out["metadata"].get("state_effect").is_none(), "{out:?}");
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn read_of_a_text_file_is_unchanged_by_the_image_check() {
+    let dir = scratch("read_text_control");
+    let path = write_bytes(&dir, "a.txt", b"one\ntwo\n");
+
+    // The result tool-read 0.1.0 returns for this file, key for key.
+    let out = call(Tool::Read, &json!({ "path": &path }));
+    assert_eq!(
+        out,
+        json!({
+            "ok": true,
+            "message": format!("read {path}"),
+            "status": "passed",
+            "summary": "8 bytes",
+            "data": { "content": "one\ntwo\n", "total_lines": 2 },
+            "content": "one\ntwo\n",
+            "total_lines": 2,
+            "data_path": null,
+            "metadata": { "state_effect": "read" },
+        })
+    );
+    assert!(out.get("attachments").is_none(), "{out:?}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn read_attaches_an_image_by_its_bytes_not_its_name() {
+    let dir = scratch("read_image_by_bytes");
+    let png = crate::test_png::png(5, 7);
+    for name in ["shot", "shot.bin", "photo.jpg"] {
+        let path = write_bytes(&dir, name, &png);
+        let out = call(Tool::Read, &json!({ "path": &path }));
+        assert_eq!(out, image_result(&path, "image/png", png.len(), 5, 7));
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn read_leaves_pdfs_and_other_binaries_as_they_were() {
+    let dir = scratch("read_binaries");
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    pdf.extend(0x80..=0xFFu8);
+    for (name, bytes) in [("doc.pdf", pdf), ("blob.bin", vec![0xFF, 0x00, 0xFE])] {
+        let path = write_bytes(&dir, name, &bytes);
+        let out = call(Tool::Read, &json!({ "path": &path }));
+        assert_eq!(out["ok"], false, "{out:?}");
+        assert_eq!(out["error_kind"], err::IO_ERROR, "{out:?}");
+        assert_eq!(
+            out["message"],
+            format!("{path}: stream did not contain valid UTF-8")
+        );
+        assert!(out.get("attachments").is_none(), "{out:?}");
+    }
+
+    let path = write_bytes(&dir, "plain.pdf", b"%PDF-1.4\nnot really\n");
+    let out = call(Tool::Read, &json!({ "path": &path }));
+    assert_eq!(out["ok"], true, "{out:?}");
+    assert_eq!(out["content"], "%PDF-1.4\nnot really\n");
+    assert_eq!(out["message"], format!("read {path}"));
+    assert!(out.get("attachments").is_none(), "{out:?}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn read_refuses_image_paths_as_it_refuses_text_paths() {
+    let dir = scratch("read_image_paths");
+
+    let out = call(Tool::Read, &json!({ "path": "/logo.png" }));
+    assert_eq!(out["error_kind"], err::ABSOLUTE_PATH, "{out:?}");
+    assert_eq!(
+        out["message"],
+        "'path' must be relative to the capsule workdir; got '/logo.png' (did you mean 'logo.png'?)"
+    );
+    assert!(out.get("attachments").is_none(), "{out:?}");
+
+    let missing = dir.join("missing.png").to_string_lossy().to_string();
+    let out = call(Tool::Read, &json!({ "path": &missing }));
+    assert_eq!(out["error_kind"], err::NOT_FOUND, "{out:?}");
+    assert!(
+        out["message"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{missing}: ")),
+        "{out:?}"
+    );
+    assert!(out.get("attachments").is_none(), "{out:?}");
+
+    // A directory named as an image is refused as any directory is, never `not_an_image`.
+    let refusal = |name: &str| {
+        let path = dir.join(name);
+        fs::create_dir_all(&path).unwrap();
+        let path = path.to_string_lossy().to_string();
+        let out = call(Tool::Read, &json!({ "path": &path }));
+        assert!(out.get("attachments").is_none(), "{out:?}");
+        (
+            out["ok"].clone(),
+            out["error_kind"].clone(),
+            out["message"].as_str().unwrap().replace(&path, "<path>"),
+        )
+    };
+    let image_dir = refusal("dir.png");
+    assert_eq!(image_dir, refusal("dir.txt"));
+    assert_ne!(image_dir.1, err::NOT_AN_IMAGE);
+    assert_eq!(image_dir.0, false);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn read_ignores_a_line_range_on_an_image() {
+    let dir = scratch("read_image_range");
+    let png = crate::test_png::png(64, 48);
+    let path = write_bytes(&dir, "logo.png", &png);
+
+    let out = call(
+        Tool::Read,
+        &json!({ "path": &path, "start_line": 5, "end_line": 1 }),
+    );
+    assert_eq!(out, image_result(&path, "image/png", png.len(), 64, 48));
 
     let _ = fs::remove_dir_all(&dir);
 }

@@ -3,7 +3,7 @@
 //!
 //! Each tool crate is a thin `wasm32-wasip2` component: it binds its own WIT world, calls
 //! [`dispatch`] with its [`Tool`] variant, and maps the [`ToolOutcome`] field for field onto the
-//! WIT `ToolResult`. Everything else — the stdin envelope, the field checks, every limit,
+//! WIT `ToolResult`, its [`attachments`](ToolOutcome::attachments) included. Everything else — the stdin envelope, the field checks, every limit,
 //! message and filesystem call — lives here, with no WASM bindings and no `cfg`, so it is unit
 //! tested on the host with `cargo test`.
 //!
@@ -16,7 +16,10 @@ use serde_json::{json, Value};
 
 mod edit;
 mod find;
+mod image;
 mod read;
+#[cfg(test)]
+mod test_png;
 #[cfg(test)]
 mod tests;
 mod write;
@@ -49,6 +52,8 @@ mod err {
     pub const ABSOLUTE_PATH: &str = "absolute_path";
     // tool-find `dir` has a `..` that climbs above the capsule workdir.
     pub const OUTSIDE_WORKDIR: &str = "outside_workdir";
+    // tool-read `path` is named as an image but its header is not a PNG, JPEG, GIF or WebP one.
+    pub const NOT_AN_IMAGE: &str = "not_an_image";
 }
 
 // ── The tools ───────────────────────────────────────────────────────────────────
@@ -190,6 +195,20 @@ pub struct ToolOutcome {
     pub truncated: bool,
     /// The tool's [`state_effect`](Tool::state_effect) on success, `None` otherwise.
     pub state_effect: Option<&'static str>,
+    /// The files murmur is asked to show the model as images, in order: an image read's one
+    /// file, empty for every other call. murmur checks and stores each, or adds a line saying
+    /// why it was not attached.
+    pub attachments: Vec<OutcomeAttachment>,
+}
+
+/// One entry of [`ToolOutcome::attachments`], mapped onto the WIT `attachment` record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutcomeAttachment {
+    /// The type the file's leading bytes declare: `image/png`, `image/jpeg`, `image/gif` or
+    /// `image/webp`.
+    pub media_type: String,
+    /// The file, as the call named it: relative to the work folder.
+    pub path: String,
 }
 
 /// [`ToolOutcome::status`], one variant per WIT `status` case.
@@ -207,7 +226,9 @@ pub enum OutcomeStatus {
 /// so [`run`] reports it — and an absent `data` becomes an envelope with no `data` key. The
 /// result is mapped as the host's native dispatch mapped a tool's stdout
 /// (crates/capsule-runtime `dispatch_native_tool`): `data` is the result's `data` field, a
-/// string used verbatim, else a non-null value re-serialized, else `None`.
+/// string used verbatim, else a non-null value re-serialized, else `None`. `attachments` is the
+/// result's top-level `attachments` array: each `{"media_type", "path"}` entry holding both as
+/// strings, in order, and empty when the result has none.
 pub fn dispatch(tool: Tool, data: Option<&str>) -> ToolOutcome {
     let raw = match data {
         Some(d) => {
@@ -247,6 +268,21 @@ pub fn dispatch(tool: Tool, data: Option<&str>) -> ToolOutcome {
     let truncated = result
         .get("data")
         .is_some_and(|d| d.get("capped").is_some() || d.get("truncated").is_some());
+    let attachments = result
+        .get("attachments")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    Some(OutcomeAttachment {
+                        media_type: entry.get("media_type")?.as_str()?.to_string(),
+                        path: entry.get("path")?.as_str()?.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     ToolOutcome {
         status,
@@ -254,6 +290,7 @@ pub fn dispatch(tool: Tool, data: Option<&str>) -> ToolOutcome {
         data,
         truncated,
         state_effect,
+        attachments,
     }
 }
 
