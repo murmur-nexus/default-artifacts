@@ -33,7 +33,7 @@ mod bindings {
         path: "../../wit/guest",
     });
 }
-use bindings::exports::murmur::tool::run::{Status, ToolInput, ToolResult};
+use bindings::exports::murmur::tool::run::{Attachment, Status, ToolInput, ToolResult};
 use bindings::Tool as ToolWorld;
 
 /// Store state: just a WASI context + resource table. `WasiView` is all the linker needs.
@@ -187,8 +187,26 @@ fn run_tool_reporting(
 }
 
 /// One independent instantiation + `run` call, returning the `ToolResult` exactly as it
-/// crossed the component boundary — `data` as its raw string, plus `truncated`.
+/// crossed the component boundary — `data` as its raw string, plus `truncated`. Every call it
+/// makes attaches no image; [`call_tool`] is the one for a call that may.
 fn run_tool_raw(
+    engine: &Engine,
+    component: &Component,
+    linker: &Linker<HostState>,
+    workdir: &Path,
+    data_payload: &str,
+) -> ToolResult {
+    let result = call_tool(engine, component, linker, workdir, data_payload);
+    assert!(
+        result.attachments.is_empty(),
+        "this call attaches no image, so ToolResult.attachments is empty: {:?}",
+        result.attachments
+    );
+    result
+}
+
+/// [`run_tool_raw`] without its check that `ToolResult.attachments` is empty.
+fn call_tool(
     engine: &Engine,
     component: &Component,
     linker: &Linker<HostState>,
@@ -202,15 +220,9 @@ fn run_tool_raw(
         data: Some(data_payload.to_string()),
         log_path: None,
     };
-    let result = tool
-        .murmur_tool_run()
+    tool.murmur_tool_run()
         .call_run(&mut store, &input)
-        .expect("call run");
-    assert!(
-        result.attachments.is_empty(),
-        "this tool attaches no image, so ToolResult.attachments is empty"
-    );
-    result
+        .expect("call run")
 }
 
 /// The workdir's immediate entries, sorted — the "did the call leave anything behind" check.
@@ -863,6 +875,90 @@ fn a_leftover_cache_directory_from_an_earlier_version_is_inert() {
     }
 
     let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[path = "../src/test_png.rs"]
+mod test_png;
+
+#[test]
+fn component_read_of_a_png_returns_an_attachment() {
+    let eng = engine();
+    let component = load(&eng, Tool::Read);
+    let lnk = linker(&eng);
+    let workdir = unique_workdir("read_png");
+    let png = test_png::png(64, 48);
+    std::fs::write(workdir.join("logo.png"), &png).unwrap();
+
+    let result = call_tool(&eng, &component, &lnk, &workdir, r#"{"path":"logo.png"}"#);
+    assert!(
+        matches!(result.status, Status::Passed),
+        "status: {:?}",
+        result.status
+    );
+    let attachments: Vec<(&str, &str)> = result
+        .attachments
+        .iter()
+        .map(|Attachment { media_type, path }| (media_type.as_str(), path.as_str()))
+        .collect();
+    assert_eq!(attachments, [("image/png", "logo.png")]);
+    assert_eq!(
+        result.summary.as_deref(),
+        Some(format!("image/png, {} bytes, 64x48 pixels", png.len()).as_str())
+    );
+    assert_eq!(result.data, None);
+    assert!(!result.truncated);
+    assert_eq!(
+        result.metadata,
+        vec![("state_effect".to_string(), "read".to_string())]
+    );
+
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn component_refuses_an_image_path_outside_the_work_folder() {
+    let eng = engine();
+    let component = load(&eng, Tool::Read);
+    let lnk = linker(&eng);
+    let parent = unique_workdir("outside_image");
+    let workdir = parent.join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::write(parent.join("outside.png"), test_png::png(8, 8)).unwrap();
+    std::fs::write(parent.join("outside.txt"), "outside\n").unwrap();
+
+    let refusal = |name: &str| {
+        let path = format!("../{name}");
+        let result = call_tool(
+            &eng,
+            &component,
+            &lnk,
+            &workdir,
+            &serde_json::json!({ "path": &path }).to_string(),
+        );
+        assert!(
+            result.attachments.is_empty(),
+            "{name}: {:?}",
+            result.attachments
+        );
+        assert_eq!(result.data, None, "{name}");
+        assert!(
+            matches!(result.status, Status::Error),
+            "{name}: {:?}",
+            result.status
+        );
+        result.summary.map(|s| s.replace(&path, "<path>"))
+    };
+    let image = refusal("outside.png");
+    assert_eq!(image, refusal("outside.txt"));
+    assert!(
+        !image
+            .as_deref()
+            .unwrap_or_default()
+            .contains("named as an image"),
+        "{image:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&parent);
 }
 
 #[test]

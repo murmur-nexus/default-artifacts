@@ -1,6 +1,7 @@
 # tool-read
 
-Reads a file in the work folder, within fixed line and size limits.
+Reads a file in the work folder, within fixed line and size limits, or shows a
+PNG, JPEG, GIF or WebP file to the model as an image.
 
 WASM tool component (`runtime: tool`, `implementation: wasm`, world `tool`,
 exports `murmur:tool/run`). The model calls it `tool-read`. Its file logic lives
@@ -15,6 +16,7 @@ The model is sent this description and input schema:
 description: |
   Reads a file. path is relative to the work folder; an absolute path is refused.
   Returns content and total_lines: at most 2000 lines and 100 KB, lines cut to 2000 characters. A cut read adds a truncated note naming the limit and the start_line that continues it. A range over 2000 lines is refused.
+  A PNG, JPEG, GIF or WebP file is shown as an image, with its type, size and dimensions.
 input_schema:
   type: object
   properties:
@@ -31,6 +33,15 @@ input_schema:
 
 `start_line` and `end_line` are 1-based and inclusive. A successful call
 declares `state_effect: read`.
+
+The four file tools' definitions are held to 500 cl100k tokens together
+(`libs/murmur-file-tools/tests/definition_token_budget.rs`). The sentence on
+images costs 88 characters and 24 tokens:
+
+| | tool-read | Sum of the four |
+|---|---|---|
+| Before the sentence | 485 chars, 117 tokens | 1867 chars, 441 tokens |
+| With the sentence | 573 chars, 141 tokens | 1955 chars, 465 tokens |
 
 ## Reading
 
@@ -73,6 +84,53 @@ A read that cuts long lines says so in a second sentence, after the first when
 both apply: `Lines longer than 2000 characters are cut to their first 2000
 characters: 1 in this read, the first at line 10.`
 
+## Images
+
+A file whose leading bytes are a PNG, JPEG, GIF or WebP header is attached as an
+image instead of being read as text. The bytes decide, not the name: PNG bytes
+saved as `shot` or `photo.jpg` are attached as `image/png`. tool-read reads the
+type and the width and height from the header alone, at most 32 bytes plus, for
+a JPEG, the segment headers before its frame header. It never reads or decodes
+the image data.
+
+The call succeeds with no `data`. Its summary, the text the model sees, is one
+line:
+
+```text
+image/png, 2048 bytes, 64x48 pixels
+```
+
+The result names the file in its `attachments`, with the type read from the
+header and `path` exactly as the call gave it. `start_line` and `end_line` are
+ignored on an image.
+
+| File | Result |
+|---|---|
+| A PNG, JPEG, GIF or WebP header, whatever its name | Attached under the type its header declares |
+| Named `.png`, `.jpg`, `.jpeg`, `.gif` or `.webp` in any case, but none of those headers | Refused with `not_an_image` |
+| Text, a PDF or any other file | Read as text. A file that is not UTF-8 is refused with `io_error` |
+| A missing file, a directory, an absolute path, a path outside the work folder | Refused exactly as for any other name |
+
+murmur then checks the attachment and puts the picture in front of the model.
+tool-read applies no limit of its own. murmur refuses an image over
+`context.images.max_bytes` (default `5Mi`), past `context.images.max_per_turn`
+in one turn (default 5), reached through a symlink, outside the work folder, or
+whose bytes do not match its type. The call's status does not change: murmur
+adds a line after the summary instead:
+
+```text
+attachment 'logo.png' was not attached: <why> (<code>)
+```
+
+driver-anthropic and driver-openai send an accepted image to the model as an
+image, and a harness driver shows it as an MCP image. A model that takes no
+image input sees the driver's `[image not shown: …]` line in its place.
+
+tool-read 0.2.0 exports `murmur:tool/run@0.2.0`, so it loads only on a `mur` at
+WIT level 3, which `mur version` prints. driver-anthropic and driver-openai
+declare which models take images with `models.<id>.vision`, which murmur reads
+from `a9ea4726` on.
+
 ## Refused calls
 
 Under murmur, a call missing a top-level `required` field (`path`) never
@@ -108,6 +166,8 @@ the call.
 | `start_line` after `end_line` | `invalid_range` | `inverted range: start_line 5 is greater than end_line 2` |
 | An explicit range over 2000 lines | `range_too_large` | `requested range of 2500 lines exceeds the maximum of 2000; narrow start_line/end_line` |
 | The file does not exist | `not_found` | `src/app.py: <OS error>` |
+| Named as an image, but not a PNG, JPEG, GIF or WebP file | `not_an_image` | `'notes.png' is named as an image but is not a PNG, JPEG, GIF or WebP file` |
+| The file is not UTF-8 and not an image | `io_error` | `blob.bin: stream did not contain valid UTF-8` |
 
 ## Absolute paths are refused
 

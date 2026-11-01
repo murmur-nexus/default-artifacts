@@ -13,7 +13,7 @@ mod wasm_tool {
         generate_all,
     });
 
-    use exports::murmur::tool::run::{Guest, Status, ToolInput, ToolResult};
+    use exports::murmur::tool::run::{Attachment, Guest, Status, ToolInput, ToolResult};
     use murmur_file_tools::{dispatch, OutcomeStatus, Tool, ToolOutcome};
 
     struct Component;
@@ -26,6 +26,7 @@ mod wasm_tool {
                 data,
                 truncated,
                 state_effect,
+                attachments,
             } = dispatch(Tool::Edit, input.data.as_deref());
             ToolResult {
                 status: match status {
@@ -40,7 +41,13 @@ mod wasm_tool {
                 metadata: state_effect
                     .map(|effect| vec![("state_effect".to_string(), effect.to_string())])
                     .unwrap_or_default(),
-                attachments: Vec::new(),
+                attachments: attachments
+                    .into_iter()
+                    .map(|a| Attachment {
+                        media_type: a.media_type,
+                        path: a.path,
+                    })
+                    .collect(),
             }
         }
     }

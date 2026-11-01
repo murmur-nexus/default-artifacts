@@ -1,9 +1,13 @@
-//! `tool-read`: a file's content, within the read limits.
+//! `tool-read`: a file's content, within the read limits, or an image file as an attachment.
+
+use std::fs::File;
 
 use serde_json::{json, Value};
 
+use crate::image::{has_image_name, image_header};
 use crate::{
-    err, err_result, format_result_size, io_error_kind, ok_with, reject_absolute, required_path,
+    err, err_result, format_result_size, io_error_kind, ok_summary_only, ok_with, reject_absolute,
+    required_path,
 };
 
 // read limits. Every read, with or without a range, returns at most this many lines, this
@@ -19,6 +23,8 @@ pub(crate) const MAX_LINE_CHARS: usize = 2000;
 
 /// Read the file `path` names: the whole file when it fits every limit, else the lines from
 /// `start_line` up to `end_line` or the first limit reached, with a `truncated` note naming it.
+/// A PNG, JPEG, GIF or WebP file, known by its header whatever its name, is instead attached
+/// by [`read_image`].
 pub(crate) fn read(op: &Value) -> Value {
     let path = match required_path(op, "path") {
         Ok(p) => p,
@@ -26,6 +32,9 @@ pub(crate) fn read(op: &Value) -> Value {
     };
     if let Some(refusal) = reject_absolute("path", &path) {
         return refusal;
+    }
+    if let Some(result) = read_image(&path) {
+        return result;
     }
 
     // Optional 1-based, inclusive line bounds. Reading through `as_i64` (not `as_u64`) is
@@ -153,6 +162,40 @@ pub(crate) fn read(op: &Value) -> Value {
     summary.push(')');
 
     ok_with(format!("read {path} lines {start}-{end}"), data, summary)
+}
+
+/// The result for an image file at `path`: attached when its header is a PNG, JPEG, GIF or
+/// WebP one, refused `not_an_image` when only its name says it is one, and `None` for every
+/// other file, which the text path reads.
+///
+/// Every failure to open the file, to stat it as a regular file, or to read its header is also
+/// `None`, so a missing file, a directory or a path outside the preopen is refused by the text
+/// path exactly as for any other name. The attachment carries the sniffed type and `path` as
+/// given: murmur checks the file again, and alone enforces its size and per-turn caps.
+fn read_image(path: &str) -> Option<Value> {
+    let mut file = File::open(path).ok()?;
+    let metadata = file.metadata().ok().filter(|m| m.is_file())?;
+    match image_header(&mut file).ok()? {
+        Some(header) => {
+            let mut result = ok_summary_only(
+                format!("read {path} as an image"),
+                format!(
+                    "{}, {} bytes, {}x{} pixels",
+                    header.media_type,
+                    metadata.len(),
+                    header.width,
+                    header.height
+                ),
+            );
+            result["attachments"] = json!([{ "media_type": header.media_type, "path": path }]);
+            Some(result)
+        }
+        None if has_image_name(path) => Some(err_result(
+            err::NOT_AN_IMAGE,
+            format!("'{path}' is named as an image but is not a PNG, JPEG, GIF or WebP file"),
+        )),
+        None => None,
+    }
 }
 
 /// The read limit that stopped a read before the lines it asked for ran out.

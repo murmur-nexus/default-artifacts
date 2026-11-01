@@ -7,6 +7,15 @@
 //! description and compact schema JSON the same way and holds the sum over the four to a budget.
 //! A driver's wrapper keys around each entry are outside the budget.
 //!
+//! tool-read 0.2.0's sentence on images (`A PNG, JPEG, GIF or WebP file is shown as an image,
+//! with its type, size and dimensions.`) costs 88 characters and 24 tokens:
+//!
+//! ```text
+//!         tool-read                     sum of the four
+//! before   485 chars 117 tokens         1867 chars 441 tokens
+//! after    573 chars 141 tokens         1955 chars 465 tokens
+//! ```
+//!
 //! `count_definition_file` is `#[ignore]`d: it measures the file `FILE_TOOLS_COUNT` names — a
 //! `murmur.yaml`, one tool entry `*.json`, or a JSON array of tool entries such as a logged
 //! request's `tools`:
