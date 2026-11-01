@@ -143,8 +143,11 @@ The driver's README lists each provider error it marks under `## Transient failu
 5. The `build` workflow runs. `verify` checks that the tag is `v` + the workspace version and the
    newest `v*` tag, and that no artifact drifted. `native` runs `./scripts/build-native.sh` on each
    platform runner. `release` builds `mur` at `MURMUR_REV` and the wasm artifacts, validates them, packs
-   every artifact with `./scripts/package-release.sh`, and writes `artifacts-index.json` with
-   `./scripts/index-release.sh`, merged with the latest release's index. Then
+   every version the latest release's index does not already list with
+   `./scripts/package-release.sh --previous`, and writes `artifacts-index.json` with
+   `./scripts/index-release.sh`, merged with the latest release's index. A version an earlier
+   release published stays on that release with its entry carried forward: repacked by a newer
+   `mur`, its zip would record a different WIT level in `murmur-build.json` and change bytes. Then
    `./scripts/check-release-installs.sh` installs every new version through `mur` against a
    loopback copy of the release, and only then is anything uploaded.
 6. Afterwards, `mur install -g murmur/<name>@<version>` resolves from the new release.

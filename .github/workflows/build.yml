@@ -230,10 +230,6 @@ jobs:
           for dir in native/native-*; do mv "$dir" "native/${dir#native/native-}"; done
           ls -lR native
 
-      - name: Pack every artifact
-        working-directory: default-artifacts
-        run: ./scripts/package-release.sh "$GITHUB_WORKSPACE/release" --native-dir "$GITHUB_WORKSPACE/native"
-
       # The latest release's index carries every version published so far; the new
       # index merges it, and the bytes gate holds every version in both to the same
       # assets. Three outcomes:
@@ -264,6 +260,16 @@ jobs:
           gh release download "$latest_tag" --repo "$GITHUB_REPOSITORY" --pattern artifacts-index.json --dir previous
           echo "Previous index: artifacts-index.json from $latest_tag"
           echo "path=$GITHUB_WORKSPACE/previous/artifacts-index.json" >> "$GITHUB_OUTPUT"
+
+      # Packs only the versions this release adds: a <name>@<version> the previous index
+      # lists stays on the release that published it, and the index carries its entry
+      # forward. Repacking it with a newer mur would change its bytes (the packed
+      # built_at_level moves whenever murmur adds a WIT level) and fail the bytes gate.
+      - name: Pack the versions this release adds
+        working-directory: default-artifacts
+        env:
+          PREVIOUS: ${{ steps.previous.outputs.path }}
+        run: ./scripts/package-release.sh "$GITHUB_WORKSPACE/release" --native-dir "$GITHUB_WORKSPACE/native" ${PREVIOUS:+--previous "$PREVIOUS"}
 
       - name: Index the release and apply the bytes gate
         working-directory: default-artifacts
