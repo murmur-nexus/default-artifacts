@@ -685,9 +685,11 @@ fn confirm_listed_click_is_held_in_a_sealed_capsule() {
         "launch-0-xmessage.log",
         &mut logs,
     );
-    assert_eq!(
-        fs::read_to_string(&logs[0]).unwrap(),
-        "",
-        "xmessage was never clicked"
+    // A click makes xmessage print its button's name. The log also holds xmessage's stderr, where
+    // a host may warn about fonts or locale, so it is not expected to be empty.
+    let log = fs::read_to_string(&logs[0]).unwrap();
+    assert!(
+        !log.lines().any(|line| line == "Press"),
+        "xmessage was never clicked: {log:?}"
     );
 }

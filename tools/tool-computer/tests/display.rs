@@ -679,8 +679,20 @@ fn s9_a_confirm_listed_action_is_held_and_never_runs() {
         !Png::read(&screenshot_path(&rig, &after)).box_is_background(BOX),
         "the window is still up"
     );
+    // A click makes xmessage print its button's name and exit. The log also holds xmessage's
+    // stderr, where a host may warn about fonts or locale, so it is not expected to be empty.
     let log = std::fs::read_to_string(rig.state().join("launch-0-xmessage.log")).unwrap();
-    assert_eq!(log, "", "xmessage was never clicked");
+    assert!(
+        !log.lines().any(|line| line == "Press"),
+        "xmessage was never clicked: {log:?}"
+    );
+    let exits = std::fs::read_to_string(rig.state().join("exits.jsonl")).unwrap_or_default();
+    assert_eq!(exits, "", "xmessage is still running");
+    assert!(
+        !data(&after).contains("exited"),
+        "no exit is reported: {}",
+        data(&after)
+    );
 }
 
 // ── S10 ──────────────────────────────────────────────────────────────────────
