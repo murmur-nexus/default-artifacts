@@ -1,0 +1,26 @@
+[package]
+name = "tool-browser"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tool-browser"
+path = "src/main.rs"
+
+# Every dependency below is already in Cargo.lock at the version named, so adding this crate adds
+# its own package entry and nothing else: a new or moved version would change every wasm
+# artifact's bytes. `tungstenite` and `tokio` are not locked, hence the hand-written WebSocket
+# client in src/ws.rs.
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha1 = "0.10"
+base64 = "0.22"
+libc = "0.2"
+# The feature set `ureq` already locks rustls with: `ring`, never aws-lc-rs.
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+webpki-roots = "0.26"
+
+[dev-dependencies]
+tempfile = "3"
