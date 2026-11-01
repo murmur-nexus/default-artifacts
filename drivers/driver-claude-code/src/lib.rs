@@ -27,7 +27,7 @@ const VERSION_ARGS: &[&str] = &["--version"];
 /// The `claude` releases this driver release was tested against. An untested version is a
 /// warning at run time, never a refusal, so this list documents what was measured rather than
 /// gating anything.
-const TESTED_VERSIONS: &[&str] = &["2.1.277", "2.1.278"];
+const TESTED_VERSIONS: &[&str] = &["2.1.277", "2.1.278", "2.1.314"];
 
 /// The variables `claude` cannot run without, each of which the capsule must declare in
 /// `capabilities.env.allow` or be refused at load.
@@ -202,8 +202,30 @@ pub struct TurnFailure {
     pub message: String,
 }
 
+/// Whether a subscription window still has room, as the harness reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaState {
+    Ok,
+    Warning,
+    Exhausted,
+}
+
+/// One subscription window, in the interface's names and units: see [`quota_windows`] for how
+/// Claude's spelling becomes these. Every member but `name` is optional, and absent means the
+/// line did not report it, never zero.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuotaWindow {
+    pub name: String,
+    /// The fraction of the window used, from 0 to 1.
+    pub used: Option<f64>,
+    /// When the window resets, in milliseconds since the Unix epoch.
+    pub resets_at: Option<u64>,
+    pub window_minutes: Option<u64>,
+    pub state: Option<QuotaState>,
+}
+
 /// One thing the harness did, read out of its output.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     SessionStarted(SessionInfo),
     TextDelta(String),
@@ -226,6 +248,10 @@ pub enum Event {
     /// How many bytes of a started call's input the model has written so far. It carries the
     /// size and nothing else: no byte of the input itself leaves the parser this way.
     ToolCallProgress(ToolCallProgress),
+    /// The subscription windows one `rate_limit_event` line reported, never empty.
+    Quota(Vec<QuotaWindow>),
+    /// The harness's prediction of the next prompt, read off a `prompt_suggestion` line.
+    SuggestedPrompt(String),
 }
 
 /// Token counts, in the interface's generic names rather than Claude's: only [`token_usage`]
@@ -420,12 +446,96 @@ pub fn describe() -> Description {
     }
 }
 
+// ── `inference.driver.config` vocabulary ──────────────────────────────────────
+//
+// Every key here is read. A key that is not is a refused launch, before the harness is spawned —
+// a declared setting that is parsed and ignored is a defect, not a convenience.
+
+/// Every key `inference.driver.config` accepts on this driver, sorted so the error message
+/// listing them is stable.
+const ACCEPTED_CONFIG_KEYS: &[&str] = &[PROMPT_SUGGESTIONS_KEY];
+
+/// The key that turns on `claude`'s suggested next prompt.
+const PROMPT_SUGGESTIONS_KEY: &str = "prompt_suggestions";
+
+/// The dials read from `inference.driver.config`. An unconfigured capsule gets
+/// [`DriverConfig::default`]: every dial off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DriverConfig {
+    /// `prompt_suggestions` — whether `claude` is started with `--prompt-suggestions true`, and
+    /// its `prompt_suggestion` lines are read as `suggested-prompt`. Each suggestion is one more
+    /// model call on the subscription after the turn, so it is off unless asked for.
+    pub prompt_suggestions: bool,
+}
+
+/// Reads `inference.driver.config`, which murmur hands a process driver as compact JSON in
+/// `launch-request.config`, into the dial set.
+///
+/// An absent config, `{}` and a whitespace-only value all yield [`DriverConfig::default`].
+/// Anything else that is not an object of accepted keys with accepted values is refused with a
+/// message naming the problem.
+pub fn parse_driver_config(config: Option<&str>) -> Result<DriverConfig, String> {
+    let Some(raw) = config else {
+        return Ok(DriverConfig::default());
+    };
+    if raw.trim().is_empty() {
+        return Ok(DriverConfig::default());
+    }
+    let parsed: Value = serde_json::from_str(raw)
+        .map_err(|err| format!("driver: inference.driver.config is not valid JSON: {err}"))?;
+    let Some(config) = parsed.as_object() else {
+        return Err("driver: inference.driver.config must be a JSON object".to_string());
+    };
+
+    let unrecognised = config
+        .keys()
+        .filter(|key| !ACCEPTED_CONFIG_KEYS.contains(&key.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unrecognised.is_empty() {
+        // `config` is a serde_json Map, i.e. sorted, so the offending keys come out in a stable
+        // order and one manifest fix clears every one of them.
+        return Err(format!(
+            "driver: unrecognised inference.driver.config key(s): {}. Accepted keys: {}",
+            unrecognised.join(", "),
+            ACCEPTED_CONFIG_KEYS.join(", ")
+        ));
+    }
+
+    Ok(DriverConfig {
+        prompt_suggestions: parse_prompt_suggestions(config.get(PROMPT_SUGGESTIONS_KEY))?,
+    })
+}
+
+/// Only a JSON boolean is accepted: `"true"`, `1` and `null` are refused rather than coerced.
+fn parse_prompt_suggestions(value: Option<&Value>) -> Result<bool, String> {
+    match value {
+        None => Ok(DriverConfig::default().prompt_suggestions),
+        Some(Value::Bool(on)) => Ok(*on),
+        Some(other) => Err(format!(
+            "driver: inference.driver.config '{PROMPT_SUGGESTIONS_KEY}' must be a boolean, got {other}"
+        )),
+    }
+}
+
 // ── launch ───────────────────────────────────────────────────────────────────
 
-/// Plans one turn. `claude` needs nothing this driver cannot supply from a request, so every
-/// request is plannable and no branch here returns `Err`.
-pub fn launch(request: LaunchRequest) -> Result<LaunchPlan, String> {
-    let args = build_args(&request);
+/// What one accepted `launch` produced: the plan that spawns the harness, and the context its
+/// output is read against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Launched {
+    pub plan: LaunchPlan,
+    pub context: ParseContext,
+}
+
+/// Plans one turn.
+///
+/// `inference.driver.config` is read first, once, before anything is planned: a config
+/// [`parse_driver_config`] refuses is this function's only `Err`, and its message is what the
+/// runtime reports. Every request with an accepted config is plannable.
+pub fn launch(request: LaunchRequest) -> Result<Launched, String> {
+    let config = parse_driver_config(request.config.as_deref())?;
+    let args = build_args(&request, &config);
     let files = match request.bridge.as_ref() {
         Some(bridge) => vec![DriverFile {
             name: MCP_CONFIG_FILE_NAME.to_string(),
@@ -434,7 +544,7 @@ pub fn launch(request: LaunchRequest) -> Result<LaunchPlan, String> {
         None => Vec::new(),
     };
 
-    Ok(LaunchPlan {
+    let plan = LaunchPlan {
         args,
         // The harness gets exactly what `capabilities.env.allow` passes through: declaring a
         // variable here would put a value in the harness's environment that the operator never
@@ -446,6 +556,10 @@ pub fn launch(request: LaunchRequest) -> Result<LaunchPlan, String> {
         // the runtime ends the turn — so an interrupt written mid-turn still has somewhere to go.
         keep_stdin_open: true,
         interrupt_stdin: Some(interrupt_message(&request.session.id)),
+    };
+    Ok(Launched {
+        plan,
+        context: parse_context_for(request.bridge.as_ref(), &config),
     })
 }
 
@@ -456,7 +570,10 @@ pub fn launch(request: LaunchRequest) -> Result<LaunchPlan, String> {
 /// interrupt control request possible. `--setting-sources ""` is what stops the operator's own
 /// `CLAUDE.md`, settings and hooks loading into a capsule's turn — the capsule's manifest is the
 /// only configuration a run answers to.
-fn build_args(request: &LaunchRequest) -> Vec<String> {
+///
+/// `--prompt-suggestions true` follows `--setting-sources ""` only when the config turned
+/// suggestions on, so an unconfigured turn's argv is exactly what it was before the key existed.
+fn build_args(request: &LaunchRequest, config: &DriverConfig) -> Vec<String> {
     let mut args: Vec<String> = [
         "--print",
         "--output-format",
@@ -471,6 +588,11 @@ fn build_args(request: &LaunchRequest) -> Vec<String> {
     .iter()
     .map(|s| s.to_string())
     .collect();
+
+    if config.prompt_suggestions {
+        args.push("--prompt-suggestions".to_string());
+        args.push("true".to_string());
+    }
 
     if let Some(model) = model_arg(request.model.as_deref()) {
         args.push("--model".to_string());
@@ -642,27 +764,38 @@ pub struct ParseContext {
     /// The prefix `launch` told the harness to address the capsule's tools by, stripped off a
     /// `tool_use` name again here. `None` passes every tool name through untouched.
     pub tool_prefix: Option<String>,
+    /// Whether `launch` asked the harness for suggestions, and so whether a `prompt_suggestion`
+    /// line is read as `suggested-prompt` rather than noted.
+    pub prompt_suggestions: bool,
 }
 
 impl ParseContext {
-    /// Reads tool names exactly as the harness printed them.
+    /// Reads tool names exactly as the harness printed them, with suggestions off.
     pub const fn none() -> Self {
-        Self { tool_prefix: None }
+        Self {
+            tool_prefix: None,
+            prompt_suggestions: false,
+        }
     }
 
-    /// Reads tool names with `prefix` stripped off.
+    /// Reads tool names with `prefix` stripped off, with suggestions off.
     pub fn with_prefix(prefix: &str) -> Self {
         Self {
             tool_prefix: Some(prefix.to_string()),
+            prompt_suggestions: false,
         }
     }
 }
 
-/// The context a turn launched with `bridge` reads its output against.
-pub fn parse_context_for(bridge: Option<&Bridge>) -> ParseContext {
-    match bridge {
+/// The context a turn launched with `bridge` and the accepted `config` reads its output against.
+pub fn parse_context_for(bridge: Option<&Bridge>, config: &DriverConfig) -> ParseContext {
+    let context = match bridge {
         Some(bridge) => ParseContext::with_prefix(&tool_name_prefix(&bridge.server_name)),
         None => ParseContext::none(),
+    };
+    ParseContext {
+        prompt_suggestions: config.prompt_suggestions,
+        ..context
     }
 }
 
@@ -718,6 +851,10 @@ pub fn parse_line(line: &str, context: &ParseContext, state: &mut ParseState) ->
         // A control response answers the driver's own interrupt request; the `result` line that
         // follows is what says the turn ended.
         Some("control_response") => Vec::new(),
+        Some("rate_limit_event") => vec![quota_event(&value).unwrap_or_else(|| note_for(line))],
+        Some("prompt_suggestion") => {
+            vec![suggestion_event(&value, context).unwrap_or_else(|| note_for(line))]
+        }
         _ => vec![note_for(line)],
     }
 }
@@ -783,6 +920,192 @@ fn reported(usage: TokenUsage) -> Option<TokenUsage> {
     .iter()
     .any(Option::is_some)
     .then_some(usage)
+}
+
+// ── subscription windows ─────────────────────────────────────────────────────
+//
+// A subscription run prints a `rate_limit_event` line at its first API response and again
+// whenever a window's rounded percentage, reset time, status or threshold moves. It is always
+// absent for an API-key run. Each line is sent as one `quota` as it stands: the runtime replaces
+// a window of the same name whole and leaves the others standing, so no state is carried from
+// one line to the next.
+
+/// The length of `claude`'s `five_hour` window, in minutes.
+pub const FIVE_HOUR_WINDOW_MINUTES: u64 = 300;
+
+/// The length of `claude`'s `seven_day` window, in minutes.
+pub const SEVEN_DAY_WINDOW_MINUTES: u64 = 10_080;
+
+/// The window the overage fields of a `rate_limit_info` describe, under the name the driver
+/// reports it by and the `rateLimitType` `claude` names it with.
+const OVERAGE: &str = "overage";
+
+/// The `quota` event of a `rate_limit_event` line, or `None` when its `rate_limit_info` is
+/// missing, is not an object, or names no window — a `quota` is never sent empty.
+fn quota_event(value: &Value) -> Option<Event> {
+    let info = value
+        .get("rate_limit_info")
+        .filter(|info| info.is_object())?;
+    let windows = quota_windows(info);
+    (!windows.is_empty()).then_some(Event::Quota(windows))
+}
+
+/// The subscription windows a `rate_limit_info` object reports, in the interface's names and
+/// units. The one place in this repo where Claude's spelling of a window appears.
+///
+/// 1. Each `unifiedWindows` entry whose value is an object is one window, in key order. Its name
+///    is the key lowercased with `_` written as `-`; `used` is its `utilization`, `resets-at` its
+///    `resetsAt` and `state` its `status`.
+/// 2. The top-level `status`, `resetsAt` and `utilization` describe the window the top-level
+///    `rateLimitType` names. They fill only the members that window left absent, or make a window
+///    of their own after the step-1 windows when there is none by that name. Without a
+///    `rateLimitType` they name no window and are not read.
+/// 3. When `overageStatus` or `overageResetsAt` is present and not `null`, or `rateLimitType` is
+///    `overage`, one window named `overage` comes last, its `state` from `overageStatus` and its
+///    `resets-at` from `overageResetsAt`. When `rateLimitType` is `overage`, step 2's top-level
+///    fields fill this window's members that the overage fields left absent.
+///
+/// Every member is read on its own and absent when the line did not carry it readably: a
+/// `utilization` that is negative or not a number, a reset time that is not a non-negative
+/// integer or overflows as milliseconds, and a status other than `allowed`, `allowed_warning`
+/// and `rejected` are all absent rather than guessed. A `utilization` above 1 is reported as 1:
+/// `claude` writes one when use runs past the window's cap, and the interface's fraction tops
+/// out there. `window-minutes` is stated only for `five_hour` and `seven_day`, the two types
+/// whose length is known; `claude` never sends one. `surpassedThreshold`, the other overage
+/// fields and everything else are not read, because the interface has no member for them.
+pub fn quota_windows(info: &Value) -> Vec<QuotaWindow> {
+    let mut windows: Vec<QuotaWindow> = info
+        .get("unifiedWindows")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter(|(_, window)| window.is_object())
+        .map(|(kind, window)| QuotaWindow {
+            name: window_name(kind),
+            used: used_at(window, "utilization"),
+            resets_at: millis_at(window, "resetsAt"),
+            window_minutes: window_minutes(kind),
+            state: quota_state_at(window, "status"),
+        })
+        .collect();
+
+    let limiting_window = info
+        .get("rateLimitType")
+        .and_then(Value::as_str)
+        .map(|kind| QuotaWindow {
+            name: window_name(kind),
+            used: used_at(info, "utilization"),
+            resets_at: millis_at(info, "resetsAt"),
+            window_minutes: window_minutes(kind),
+            state: quota_state_at(info, "status"),
+        });
+
+    let (limiting_window, overage_limits) = match limiting_window {
+        Some(window) if window.name == OVERAGE => (None, Some(window)),
+        other => (other, None),
+    };
+    let overage = overage_limits.is_some()
+        || reported_at(info, "overageStatus")
+        || reported_at(info, "overageResetsAt");
+
+    if let Some(top) = limiting_window {
+        match windows.iter_mut().find(|window| window.name == top.name) {
+            Some(window) => fill_absent(window, top),
+            None => windows.push(top),
+        }
+    }
+
+    if overage {
+        let mut window = match windows.iter().position(|window| window.name == OVERAGE) {
+            Some(at) => windows.remove(at),
+            None => QuotaWindow {
+                name: OVERAGE.to_string(),
+                used: None,
+                resets_at: None,
+                window_minutes: None,
+                state: None,
+            },
+        };
+        window.resets_at = window.resets_at.or(millis_at(info, "overageResetsAt"));
+        window.state = window.state.or(quota_state_at(info, "overageStatus"));
+        if let Some(top) = overage_limits {
+            fill_absent(&mut window, top);
+        }
+        windows.push(window);
+    }
+
+    windows
+}
+
+/// Whether the line wrote anything but `null` at `key`.
+fn reported_at(value: &Value, key: &str) -> bool {
+    value.get(key).is_some_and(|reported| !reported.is_null())
+}
+
+/// Fills each member `window` left absent from `from`; a member `window` carries stays.
+fn fill_absent(window: &mut QuotaWindow, from: QuotaWindow) {
+    window.used = window.used.or(from.used);
+    window.resets_at = window.resets_at.or(from.resets_at);
+    window.window_minutes = window.window_minutes.or(from.window_minutes);
+    window.state = window.state.or(from.state);
+}
+
+/// The name a window type `claude` spells `five_hour` is reported by: `five-hour`. The driver
+/// does not hold a name to the runtime's rule; a name the runtime refuses, it notes itself.
+fn window_name(kind: &str) -> String {
+    kind.to_lowercase().replace('_', "-")
+}
+
+/// The length of a window type, for the two types whose length is known.
+fn window_minutes(kind: &str) -> Option<u64> {
+    match kind {
+        "five_hour" => Some(FIVE_HOUR_WINDOW_MINUTES),
+        "seven_day" => Some(SEVEN_DAY_WINDOW_MINUTES),
+        _ => None,
+    }
+}
+
+/// The fraction at `key`, capped at 1; absent when it is negative or not a number.
+fn used_at(value: &Value, key: &str) -> Option<f64> {
+    value
+        .get(key)
+        .and_then(Value::as_f64)
+        .filter(|used| *used >= 0.0)
+        .map(|used| used.min(1.0))
+}
+
+/// The epoch seconds at `key` as epoch milliseconds; absent when they are not a non-negative
+/// integer or do not fit in a `u64` as milliseconds.
+fn millis_at(value: &Value, key: &str) -> Option<u64> {
+    count_at(value, key).and_then(|seconds| seconds.checked_mul(1000))
+}
+
+/// The window state a status at `key` reports; absent for any status but the three `claude`
+/// documents.
+fn quota_state_at(value: &Value, key: &str) -> Option<QuotaState> {
+    match value.get(key).and_then(Value::as_str)? {
+        "allowed" => Some(QuotaState::Ok),
+        "allowed_warning" => Some(QuotaState::Warning),
+        "rejected" => Some(QuotaState::Exhausted),
+        _ => None,
+    }
+}
+
+// ── the suggested next prompt ────────────────────────────────────────────────
+
+/// The `suggested-prompt` of a `prompt_suggestion` line, verbatim even when empty, or `None`
+/// when `launch` did not ask for suggestions or the line carries no string `suggestion`.
+///
+/// `claude` prints the line after the turn's `result`, from a second model call, and only when
+/// started with `--prompt-suggestions true`.
+fn suggestion_event(value: &Value, context: &ParseContext) -> Option<Event> {
+    if !context.prompt_suggestions {
+        return None;
+    }
+    value
+        .get("suggestion")
+        .and_then(Value::as_str)
+        .map(|suggestion| Event::SuggestedPrompt(suggestion.to_string()))
 }
 
 /// A `note` repeating a line the driver could not read, truncated at `NOTE_LINE_LIMIT`.
@@ -1172,8 +1495,9 @@ mod wasm_driver {
 
     use exports::murmur::driver::process::{
         Bridge, Description, DriverFile, Event, ExitStatus, FailureKind, Guest, InterruptMethod,
-        LaunchPlan, LaunchRequest, RetryInfo, Session, SessionInfo, SessionMode, ToolCallInfo,
-        ToolCallProgress, ToolCallStart, ToolResultInfo, TurnFailure, Usage,
+        LaunchPlan, LaunchRequest, QuotaState, QuotaWindow, RetryInfo, Session, SessionInfo,
+        SessionMode, ToolCallInfo, ToolCallProgress, ToolCallStart, ToolResultInfo, TurnFailure,
+        Usage,
     };
 
     pub struct ClaudeCodeDriver;
@@ -1184,13 +1508,13 @@ mod wasm_driver {
         }
 
         fn launch(request: LaunchRequest) -> Result<LaunchPlan, String> {
-            let request = to_request(request);
-            let context = super::parse_context_for(request.bridge.as_ref());
-            PARSE_CONTEXT.with(|stored| *stored.borrow_mut() = context);
-            // A new process has spent nothing and opened no tool call: its first turn is the
-            // run's first turn again, and its stream starts over.
-            STATE.with(|state| *state.borrow_mut() = super::ParseState::new());
-            super::launch(request).map(from_plan)
+            super::launch(to_request(request)).map(|launched| {
+                PARSE_CONTEXT.with(|stored| *stored.borrow_mut() = launched.context);
+                // A new process has spent nothing and opened no tool call: its first turn is
+                // the run's first turn again, and its stream starts over.
+                STATE.with(|state| *state.borrow_mut() = super::ParseState::new());
+                from_plan(launched.plan)
+            })
         }
 
         fn parse(lines: Vec<String>) -> Vec<Event> {
@@ -1339,6 +1663,24 @@ mod wasm_driver {
                 id: progress.id,
                 input_bytes: progress.input_bytes,
             }),
+            super::Event::Quota(windows) => {
+                Event::Quota(windows.into_iter().map(from_quota_window).collect())
+            }
+            super::Event::SuggestedPrompt(text) => Event::SuggestedPrompt(text),
+        }
+    }
+
+    fn from_quota_window(window: super::QuotaWindow) -> QuotaWindow {
+        QuotaWindow {
+            name: window.name,
+            used: window.used,
+            resets_at: window.resets_at,
+            window_minutes: window.window_minutes,
+            state: window.state.map(|state| match state {
+                super::QuotaState::Ok => QuotaState::Ok,
+                super::QuotaState::Warning => QuotaState::Warning,
+                super::QuotaState::Exhausted => QuotaState::Exhausted,
+            }),
         }
     }
 
@@ -1379,7 +1721,10 @@ mod tests {
     }
 
     fn args_of(request: LaunchRequest) -> Vec<String> {
-        launch(request).expect("launch plans every request").args
+        launch(request)
+            .expect("launch plans every request")
+            .plan
+            .args
     }
 
     /// The index of `flag` in `args`, or `None` when it is absent.
@@ -1402,7 +1747,11 @@ mod tests {
         assert_eq!(description.version_args, vec!["--version".to_string()]);
         assert_eq!(
             description.tested_versions,
-            vec!["2.1.277".to_string(), "2.1.278".to_string()]
+            vec![
+                "2.1.277".to_string(),
+                "2.1.278".to_string(),
+                "2.1.314".to_string()
+            ]
         );
         assert_eq!(description.interrupt, InterruptMethod::StdinMessage);
         assert_eq!(
@@ -1498,7 +1847,7 @@ mod tests {
     fn a_bridge_names_its_tools_the_harness_way_and_is_configured_from_a_file() {
         let mut bridged = request();
         bridged.bridge = Some(bridge());
-        let plan = launch(bridged).expect("launch plans every request");
+        let plan = launch(bridged).expect("launch plans every request").plan;
 
         assert_eq!(
             value_after(&plan.args, "--tools").as_deref(),
@@ -1540,7 +1889,7 @@ mod tests {
             bearer_token: "tok\"\n123".to_string(),
             ..bridge()
         });
-        let plan = launch(bridged).expect("launch plans every request");
+        let plan = launch(bridged).expect("launch plans every request").plan;
 
         let config: Value = serde_json::from_str(&plan.files[0].contents)
             .expect("the MCP config must still be JSON");
@@ -1555,7 +1904,7 @@ mod tests {
 
     #[test]
     fn without_a_bridge_the_tool_list_is_empty_and_no_mcp_flag_appears() {
-        let plan = launch(request()).expect("launch plans every request");
+        let plan = launch(request()).expect("launch plans every request").plan;
 
         assert_eq!(value_after(&plan.args, "--tools").as_deref(), Some(""));
         for absent in [
@@ -1652,7 +2001,7 @@ mod tests {
         let task = "say \"hello\"\nthen stop\\";
         let mut awkward = request();
         awkward.task = task.to_string();
-        let plan = launch(awkward).expect("launch plans every request");
+        let plan = launch(awkward).expect("launch plans every request").plan;
 
         let stdin = plan.stdin.expect("the task is written to stdin");
         assert_eq!(stdin.last(), Some(&b'\n'));
@@ -1671,7 +2020,7 @@ mod tests {
 
     #[test]
     fn stdin_stays_open_and_carries_an_interrupt_derived_from_the_session_id() {
-        let plan = launch(request()).expect("launch plans every request");
+        let plan = launch(request()).expect("launch plans every request").plan;
         assert!(plan.keep_stdin_open);
 
         let interrupt = plan.interrupt_stdin.expect("stdin-message needs a message");
@@ -1687,7 +2036,7 @@ mod tests {
 
     #[test]
     fn the_driver_sets_no_environment_variable() {
-        let plan = launch(request()).expect("launch plans every request");
+        let plan = launch(request()).expect("launch plans every request").plan;
         assert!(plan.env_set.is_empty());
     }
 
@@ -1695,10 +2044,13 @@ mod tests {
 
     /// The context a bridged run reads its output against, built the way `launch` builds it.
     fn bridged_context() -> ParseContext {
-        parse_context_for(Some(&Bridge {
-            server_name: "claude_bridge".to_string(),
-            ..bridge()
-        }))
+        parse_context_for(
+            Some(&Bridge {
+                server_name: "claude_bridge".to_string(),
+                ..bridge()
+            }),
+            &DriverConfig::default(),
+        )
     }
 
     fn events(line: &str) -> Vec<Event> {
@@ -3028,5 +3380,708 @@ mod tests {
             calls.grow(0, "{}").map(|progress| progress.input_bytes),
             Some(u64::MAX)
         );
+    }
+
+    // ── inference.driver.config ───────────────────────────────────────────────
+
+    #[test]
+    fn no_config_an_empty_object_or_whitespace_leaves_suggestions_off() {
+        for config in [None, Some(""), Some("  \n\t"), Some("{}")] {
+            assert_eq!(
+                parse_driver_config(config),
+                Ok(DriverConfig {
+                    prompt_suggestions: false
+                }),
+                "{config:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_suggestions_reads_a_json_boolean() {
+        assert_eq!(
+            parse_driver_config(Some(r#"{"prompt_suggestions":true}"#)),
+            Ok(DriverConfig {
+                prompt_suggestions: true
+            })
+        );
+        assert_eq!(
+            parse_driver_config(Some(r#"{"prompt_suggestions":false}"#)),
+            Ok(DriverConfig {
+                prompt_suggestions: false
+            })
+        );
+    }
+
+    #[test]
+    fn a_prompt_suggestions_that_is_not_a_boolean_is_refused_naming_the_key() {
+        for (value, shown) in [
+            (r#""yes""#, r#""yes""#),
+            (r#""true""#, r#""true""#),
+            ("1", "1"),
+            ("0", "0"),
+            ("null", "null"),
+            ("{}", "{}"),
+        ] {
+            assert_eq!(
+                parse_driver_config(Some(&format!(r#"{{"prompt_suggestions":{value}}}"#))),
+                Err(format!(
+                    "driver: inference.driver.config 'prompt_suggestions' must be a boolean, \
+                     got {shown}"
+                )),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_key_is_refused_sorted_with_the_accepted_keys() {
+        assert_eq!(
+            parse_driver_config(Some(r#"{"zeta":1,"prompt_suggestions":true,"alpha":true}"#)),
+            Err(
+                "driver: unrecognised inference.driver.config key(s): alpha, zeta. \
+                 Accepted keys: prompt_suggestions"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn a_config_that_is_not_a_json_object_is_refused() {
+        let not_json =
+            parse_driver_config(Some("prompt_suggestions: true")).expect_err("YAML is not JSON");
+        assert!(
+            not_json.starts_with("driver: inference.driver.config is not valid JSON: "),
+            "{not_json}"
+        );
+        for not_an_object in ["true", "[]", r#""prompt_suggestions""#, "null", "3"] {
+            assert_eq!(
+                parse_driver_config(Some(not_an_object)),
+                Err("driver: inference.driver.config must be a JSON object".to_string()),
+                "{not_an_object}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_config_refuses_the_turn_with_its_message() {
+        let mut refused = request();
+        refused.config = Some(r#"{"prompt_suggestions":"yes"}"#.to_string());
+        assert_eq!(
+            launch(refused),
+            Err(
+                "driver: inference.driver.config 'prompt_suggestions' must be a boolean, \
+                 got \"yes\""
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn suggestions_on_put_the_flag_right_after_setting_sources() {
+        // The argv the subscription recording was made with.
+        let mut recorded = request();
+        recorded.config = Some(r#"{"prompt_suggestions":true}"#.to_string());
+        recorded.model = Some("haiku".to_string());
+        assert_eq!(
+            args_of(recorded),
+            vec![
+                "--print",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--input-format",
+                "stream-json",
+                "--include-partial-messages",
+                "--setting-sources",
+                "",
+                "--prompt-suggestions",
+                "true",
+                "--model",
+                "haiku",
+                "--session-id",
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "--tools",
+                "",
+                "--system-prompt",
+                "You are a Murmur capsule.",
+            ]
+        );
+    }
+
+    #[test]
+    fn suggestions_off_leave_the_argv_as_an_unconfigured_turns() {
+        let unconfigured = args_of(request());
+        assert_eq!(index_of(&unconfigured, "--prompt-suggestions"), None);
+        for config in ["{}", " ", r#"{"prompt_suggestions":false}"#] {
+            let mut configured = request();
+            configured.config = Some(config.to_string());
+            assert_eq!(args_of(configured), unconfigured, "{config}");
+        }
+    }
+
+    #[test]
+    fn launch_returns_the_context_its_output_is_read_against() {
+        let mut bridged = request();
+        bridged.bridge = Some(bridge());
+        bridged.config = Some(r#"{"prompt_suggestions":true}"#.to_string());
+        let launched = launch(bridged).expect("an accepted config plans");
+        assert_eq!(
+            launched.context,
+            ParseContext {
+                tool_prefix: Some("mcp__claude_bridge__".to_string()),
+                prompt_suggestions: true,
+            }
+        );
+        assert_eq!(
+            launch(request()).expect("no config plans").context,
+            ParseContext::none()
+        );
+    }
+
+    // ── rate_limit_event → quota ──────────────────────────────────────────────
+
+    /// A `rate_limit_event` line in the first observed shape, verbatim from a subscription run of
+    /// `claude` recorded in a local murmur trace.
+    const SHAPE_1: &str = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1790900400,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.01,"resetsAt":1790900400},"seven_day":{"utilization":0.11,"resetsAt":1791399600}}},"uuid":"ca770960-c831-48d7-8c5d-6593cf25658e","session_id":"01a0f918-125d-7233-b8f6-f7f3c72a610c"}"#;
+
+    /// A `rate_limit_event` line in the second observed shape. It was only ever recorded cut at
+    /// 512 characters, losing its `uuid` and `session_id`: everything up to
+    /// `"overageEnabled":false}` is recorded, and the `uuid` and `session_id` after it are made
+    /// up to complete the line.
+    const SHAPE_2: &str = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1793214000,"rateLimitType":"seven_day","utilization":0.81,"overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false,"surpassedThreshold":0.75,"unifiedWindows":{"five_hour":{"utilization":0.17,"resetsAt":1793137800,"status":"allowed"},"seven_day":{"utilization":0.81,"resetsAt":1793214000,"status":"allowed_warning","surpassedThreshold":0.75}},"overageEnabled":false},"uuid":"4463ff17-c35f-47aa-8000-000000000000","session_id":"00000000-0000-4000-8000-000000000000"}"#;
+
+    fn window(
+        name: &str,
+        used: Option<f64>,
+        resets_at: Option<u64>,
+        window_minutes: Option<u64>,
+        state: Option<QuotaState>,
+    ) -> QuotaWindow {
+        QuotaWindow {
+            name: name.to_string(),
+            used,
+            resets_at,
+            window_minutes,
+            state,
+        }
+    }
+
+    /// A `rate_limit_event` line carrying `info` as its `rate_limit_info`.
+    fn rate_limit_line(info: Value) -> String {
+        json!({
+            "type": "rate_limit_event",
+            "rate_limit_info": info,
+            "uuid": "u",
+            "session_id": "s",
+        })
+        .to_string()
+    }
+
+    /// The windows of the one `quota` event `line` must produce.
+    fn quota_of(line: &str) -> Vec<QuotaWindow> {
+        match events(line).as_slice() {
+            [Event::Quota(windows)] => windows.clone(),
+            other => panic!("expected exactly one quota, got {other:?}"),
+        }
+    }
+
+    fn one_window(info: Value) -> QuotaWindow {
+        match quota_of(&rate_limit_line(info)).as_slice() {
+            [window] => window.clone(),
+            other => panic!("expected exactly one window, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_recorded_rate_limit_line_is_one_quota_in_the_interfaces_names_and_units() {
+        assert_eq!(
+            events(SHAPE_1),
+            vec![Event::Quota(vec![
+                // `state` from the top-level `status`, which describes the `five_hour` window.
+                window(
+                    "five-hour",
+                    Some(0.01),
+                    Some(1_790_900_400_000),
+                    Some(300),
+                    Some(QuotaState::Ok)
+                ),
+                window(
+                    "seven-day",
+                    Some(0.11),
+                    Some(1_791_399_600_000),
+                    Some(10_080),
+                    None
+                ),
+                window("overage", None, None, None, Some(QuotaState::Exhausted)),
+            ])]
+        );
+    }
+
+    #[test]
+    fn the_second_shape_reads_each_windows_own_status() {
+        assert_eq!(
+            events(SHAPE_2),
+            vec![Event::Quota(vec![
+                window(
+                    "five-hour",
+                    Some(0.17),
+                    Some(1_793_137_800_000),
+                    Some(300),
+                    Some(QuotaState::Ok)
+                ),
+                window(
+                    "seven-day",
+                    Some(0.81),
+                    Some(1_793_214_000_000),
+                    Some(10_080),
+                    Some(QuotaState::Warning)
+                ),
+                window("overage", None, None, None, Some(QuotaState::Exhausted)),
+            ])]
+        );
+    }
+
+    #[test]
+    fn each_member_the_line_did_not_carry_stays_absent() {
+        assert_eq!(
+            one_window(json!({ "unifiedWindows": { "five_hour": {} } })),
+            window("five-hour", None, None, Some(300), None)
+        );
+        assert_eq!(
+            one_window(json!({ "unifiedWindows": { "seven_day": { "utilization": 0.5 } } })),
+            window("seven-day", Some(0.5), None, Some(10_080), None)
+        );
+        assert_eq!(
+            one_window(json!({ "unifiedWindows": { "seven_day": { "resetsAt": 7 } } })),
+            window("seven-day", None, Some(7_000), Some(10_080), None)
+        );
+        assert_eq!(
+            one_window(json!({ "unifiedWindows": { "seven_day": { "status": "rejected" } } })),
+            window(
+                "seven-day",
+                None,
+                None,
+                Some(10_080),
+                Some(QuotaState::Exhausted)
+            )
+        );
+        // A zero the harness wrote is a measurement, and is reported as one.
+        assert_eq!(
+            one_window(
+                json!({ "unifiedWindows": { "five_hour": { "utilization": 0, "resetsAt": 0 } } })
+            ),
+            window("five-hour", Some(0.0), Some(0), Some(300), None)
+        );
+    }
+
+    #[test]
+    fn a_window_type_the_driver_does_not_know_keeps_its_name_and_states_no_length() {
+        assert_eq!(
+            one_window(json!({
+                "unifiedWindows": {
+                    "seven_day_overage_included": { "utilization": 0.2, "resetsAt": 10 }
+                }
+            })),
+            window(
+                "seven-day-overage-included",
+                Some(0.2),
+                Some(10_000),
+                None,
+                None
+            )
+        );
+        assert_eq!(
+            one_window(json!({
+                "status": "allowed_warning",
+                "resetsAt": 20,
+                "utilization": 0.9,
+                "rateLimitType": "seven_day_opus"
+            })),
+            window(
+                "seven-day-opus",
+                Some(0.9),
+                Some(20_000),
+                None,
+                Some(QuotaState::Warning)
+            )
+        );
+        assert_eq!(
+            one_window(json!({ "unifiedWindows": { "Some_New_Window": {} } })).name,
+            "some-new-window"
+        );
+    }
+
+    #[test]
+    fn a_window_the_top_level_names_but_unified_windows_does_not_comes_after_them() {
+        let windows = quota_of(&rate_limit_line(json!({
+            "status": "rejected",
+            "rateLimitType": "seven_day_sonnet",
+            "overageStatus": "allowed",
+            "unifiedWindows": { "seven_day": {}, "five_hour": {} }
+        })));
+        let names: Vec<&str> = windows.iter().map(|window| window.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["five-hour", "seven-day", "seven-day-sonnet", "overage"]
+        );
+        assert_eq!(windows[2].state, Some(QuotaState::Exhausted));
+        assert_eq!(windows[3].state, Some(QuotaState::Ok));
+    }
+
+    #[test]
+    fn every_status_maps_to_its_state_and_any_other_is_absent() {
+        for (status, state) in [
+            (json!("allowed"), Some(QuotaState::Ok)),
+            (json!("allowed_warning"), Some(QuotaState::Warning)),
+            (json!("rejected"), Some(QuotaState::Exhausted)),
+            (json!("paused"), None),
+            (json!("ALLOWED"), None),
+            (json!(""), None),
+            (json!(1), None),
+            (json!(null), None),
+        ] {
+            assert_eq!(
+                one_window(json!({ "unifiedWindows": { "five_hour": { "status": status } } }))
+                    .state,
+                state,
+                "{status}"
+            );
+        }
+        for (status, state) in [
+            ("allowed", Some(QuotaState::Ok)),
+            ("allowed_warning", Some(QuotaState::Warning)),
+            ("rejected", Some(QuotaState::Exhausted)),
+            ("unknown", None),
+        ] {
+            assert_eq!(
+                one_window(json!({ "overageStatus": status })),
+                window("overage", None, None, None, state),
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_utilization_past_the_cap_is_reported_as_the_whole_window() {
+        for (utilization, used) in [
+            (json!(1.07), Some(1.0)),
+            (json!(1), Some(1.0)),
+            (json!(250), Some(1.0)),
+            (json!(0.999), Some(0.999)),
+        ] {
+            assert_eq!(
+                one_window(
+                    json!({ "unifiedWindows": { "five_hour": { "utilization": utilization } } })
+                )
+                .used,
+                used,
+                "{utilization}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_utilization_that_is_negative_or_not_a_number_is_absent() {
+        for utilization in [
+            json!(-0.01),
+            json!(-1),
+            json!("0.5"),
+            json!(null),
+            json!(true),
+            json!([0.5]),
+        ] {
+            assert_eq!(
+                one_window(
+                    json!({ "unifiedWindows": { "five_hour": { "utilization": utilization } } })
+                )
+                .used,
+                None,
+                "{utilization}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reset_time_that_is_not_a_non_negative_integer_or_overflows_is_absent() {
+        for resets_at in [
+            json!(1790900400.5),
+            json!(1790900400.0),
+            json!(-1),
+            json!("1790900400"),
+            json!(null),
+            json!(u64::MAX),
+            json!(u64::MAX / 1000 + 1),
+        ] {
+            assert_eq!(
+                one_window(json!({ "unifiedWindows": { "five_hour": { "resetsAt": resets_at } } }))
+                    .resets_at,
+                None,
+                "{resets_at}"
+            );
+            assert_eq!(
+                one_window(json!({ "overageStatus": "rejected", "overageResetsAt": resets_at }))
+                    .resets_at,
+                None,
+                "{resets_at}"
+            );
+        }
+        assert_eq!(
+            one_window(
+                json!({ "unifiedWindows": { "five_hour": { "resetsAt": u64::MAX / 1000 } } })
+            )
+            .resets_at,
+            Some(u64::MAX / 1000 * 1000)
+        );
+    }
+
+    #[test]
+    fn the_top_level_fields_fill_only_what_the_named_window_left_absent() {
+        let windows = quota_of(&rate_limit_line(json!({
+            "status": "rejected",
+            "resetsAt": 99,
+            "utilization": 0.99,
+            "rateLimitType": "five_hour",
+            "unifiedWindows": {
+                "five_hour": { "utilization": 0.3, "status": "allowed_warning" },
+                "seven_day": {}
+            }
+        })));
+        assert_eq!(
+            windows,
+            vec![
+                window(
+                    "five-hour",
+                    Some(0.3),
+                    Some(99_000),
+                    Some(300),
+                    Some(QuotaState::Warning)
+                ),
+                window("seven-day", None, None, Some(10_080), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn without_a_rate_limit_type_the_top_level_fields_name_no_window() {
+        assert_eq!(
+            quota_of(&rate_limit_line(json!({
+                "status": "rejected",
+                "resetsAt": 99,
+                "utilization": 0.99,
+                "unifiedWindows": { "seven_day": {} }
+            }))),
+            vec![window("seven-day", None, None, Some(10_080), None)]
+        );
+    }
+
+    #[test]
+    fn a_rate_limit_type_of_overage_fills_the_overage_window() {
+        assert_eq!(
+            quota_of(&rate_limit_line(json!({
+                "status": "allowed_warning",
+                "resetsAt": 50,
+                "utilization": 0.6,
+                "rateLimitType": "overage",
+                "overageStatus": "rejected",
+                "overageResetsAt": 40,
+                "unifiedWindows": { "five_hour": {} }
+            }))),
+            vec![
+                window("five-hour", None, None, Some(300), None),
+                // The overage fields first; the top-level ones fill what they left absent.
+                window(
+                    "overage",
+                    Some(0.6),
+                    Some(40_000),
+                    None,
+                    Some(QuotaState::Exhausted)
+                ),
+            ]
+        );
+        assert_eq!(
+            one_window(json!({ "status": "allowed", "rateLimitType": "overage" })),
+            window("overage", None, None, None, Some(QuotaState::Ok))
+        );
+    }
+
+    #[test]
+    fn a_null_overage_field_names_no_overage_window() {
+        assert_eq!(
+            quota_of(&rate_limit_line(json!({
+                "overageStatus": null,
+                "overageResetsAt": null,
+                "unifiedWindows": { "seven_day": {} }
+            }))),
+            vec![window("seven-day", None, None, Some(10_080), None)]
+        );
+    }
+
+    #[test]
+    fn an_overage_reset_time_alone_makes_the_overage_window() {
+        assert_eq!(
+            one_window(json!({ "overageResetsAt": 1790900400 })),
+            window("overage", None, Some(1_790_900_400_000), None, None)
+        );
+    }
+
+    #[test]
+    fn the_overage_fields_the_interface_has_no_member_for_are_not_read() {
+        // Neither `overageDisabledReason`, `isUsingOverage`, `overageInUse`, `overageEnabled`,
+        // `surpassedThreshold` nor `rateLimitGraceActive` names or fills a window.
+        let line = rate_limit_line(json!({
+            "overageDisabledReason": "org_level_disabled",
+            "isUsingOverage": true,
+            "overageInUse": true,
+            "overageEnabled": true,
+            "surpassedThreshold": 0.75,
+            "rateLimitGraceActive": true
+        }));
+        assert_eq!(events(&line), vec![note_for(&line)]);
+    }
+
+    #[test]
+    fn a_rate_limit_line_that_names_no_window_is_one_note() {
+        for line in [
+            r#"{"type":"rate_limit_event"}"#.to_string(),
+            r#"{"type":"rate_limit_event","rate_limit_info":null}"#.to_string(),
+            r#"{"type":"rate_limit_event","rate_limit_info":"allowed"}"#.to_string(),
+            r#"{"type":"rate_limit_event","rate_limit_info":[{"status":"allowed"}]}"#.to_string(),
+            rate_limit_line(json!({})),
+            rate_limit_line(json!({ "status": "allowed", "resetsAt": 1, "utilization": 0.1 })),
+            rate_limit_line(json!({ "unifiedWindows": {} })),
+            rate_limit_line(json!({ "unifiedWindows": { "five_hour": 0.5, "seven_day": null } })),
+            rate_limit_line(json!({ "unifiedWindows": [{ "utilization": 0.5 }] })),
+        ] {
+            assert_eq!(events(&line), vec![note_for(&line)], "{line}");
+        }
+    }
+
+    #[test]
+    fn a_window_entry_that_is_not_an_object_is_skipped_and_the_rest_reported() {
+        assert_eq!(
+            quota_of(&rate_limit_line(
+                json!({ "unifiedWindows": { "five_hour": "full", "seven_day": {} } })
+            )),
+            vec![window("seven-day", None, None, Some(10_080), None)]
+        );
+    }
+
+    #[test]
+    fn a_rate_limit_line_is_read_the_same_without_a_bridge_or_with_suggestions_on() {
+        let suggesting = parse_context_for(
+            None,
+            &DriverConfig {
+                prompt_suggestions: true,
+            },
+        );
+        assert_eq!(
+            parse_line(SHAPE_1, &suggesting, &mut ParseState::new()),
+            events(SHAPE_1)
+        );
+    }
+
+    #[test]
+    fn a_rate_limit_line_leaves_nothing_behind_for_the_next() {
+        let mut state = ParseState::new();
+        let first = parse_line(SHAPE_1, &bridged_context(), &mut state);
+        assert_eq!(state, ParseState::new());
+        assert_eq!(parse_line(SHAPE_1, &bridged_context(), &mut state), first);
+    }
+
+    #[test]
+    fn a_rate_limit_line_of_any_shape_never_panics() {
+        let infos = [
+            json!({ "unifiedWindows": { "": {} } }),
+            json!({ "unifiedWindows": { "five_hour": { "utilization": 1e308 } } }),
+            json!({ "unifiedWindows": { "five_hour": { "utilization": -1e308 } } }),
+            json!({ "rateLimitType": "", "status": "allowed" }),
+            json!({ "rateLimitType": 5, "status": "allowed" }),
+            json!({ "rateLimitType": null, "overageStatus": null }),
+            json!({ "overageResetsAt": "soon" }),
+            json!({ "unifiedWindows": { "overage": { "utilization": 0.4 } }, "overageStatus": "rejected" }),
+            json!({ "unifiedWindows": { "Fünf_Stunden": {} } }),
+        ];
+        for info in infos {
+            let line = rate_limit_line(info);
+            assert_eq!(events(&line).len(), 1, "{line}");
+        }
+        assert_eq!(
+            quota_of(&rate_limit_line(json!({
+                "unifiedWindows": { "overage": { "utilization": 0.4 }, "seven_day": {} },
+                "overageStatus": "rejected"
+            }))),
+            vec![
+                window("seven-day", None, None, Some(10_080), None),
+                window(
+                    "overage",
+                    Some(0.4),
+                    None,
+                    None,
+                    Some(QuotaState::Exhausted)
+                ),
+            ],
+            "an overage window is still one window, and still last"
+        );
+    }
+
+    // ── prompt_suggestion → suggested-prompt ──────────────────────────────────
+
+    /// A `prompt_suggestion` line in the shape claude 2.1.314's bundle declares. No recorded run
+    /// printed one: see `tests/fixtures/README.md`.
+    const SUGGESTION: &str = r#"{"type":"prompt_suggestion","suggestion":"Run the tests again","uuid":"0b5c1e0a-0000-4000-8000-000000000000","session_id":"2946b2e2-95cf-4b20-8f06-6e90af26501a"}"#;
+
+    fn suggesting() -> ParseContext {
+        parse_context_for(
+            None,
+            &DriverConfig {
+                prompt_suggestions: true,
+            },
+        )
+    }
+
+    #[test]
+    fn a_suggestion_is_a_suggested_prompt_when_suggestions_are_on() {
+        assert_eq!(
+            parse_line(SUGGESTION, &suggesting(), &mut ParseState::new()),
+            vec![Event::SuggestedPrompt("Run the tests again".to_string())]
+        );
+        let verbatim = r#"{"type":"prompt_suggestion","suggestion":"  two\nlines  "}"#;
+        assert_eq!(
+            parse_line(verbatim, &suggesting(), &mut ParseState::new()),
+            vec![Event::SuggestedPrompt("  two\nlines  ".to_string())]
+        );
+        // The runtime drops an empty suggestion itself.
+        let empty = r#"{"type":"prompt_suggestion","suggestion":""}"#;
+        assert_eq!(
+            parse_line(empty, &suggesting(), &mut ParseState::new()),
+            vec![Event::SuggestedPrompt(String::new())]
+        );
+    }
+
+    #[test]
+    fn a_suggestion_is_one_note_when_suggestions_are_off() {
+        for context in [ParseContext::none(), bridged_context()] {
+            assert_eq!(
+                parse_line(SUGGESTION, &context, &mut ParseState::new()),
+                vec![note_for(SUGGESTION)]
+            );
+        }
+    }
+
+    #[test]
+    fn a_suggestion_line_without_a_string_suggestion_is_one_note() {
+        for line in [
+            r#"{"type":"prompt_suggestion"}"#,
+            r#"{"type":"prompt_suggestion","suggestion":null}"#,
+            r#"{"type":"prompt_suggestion","suggestion":3}"#,
+            r#"{"type":"prompt_suggestion","suggestion":["a"]}"#,
+        ] {
+            assert_eq!(
+                parse_line(line, &suggesting(), &mut ParseState::new()),
+                vec![note_for(line)],
+                "{line}"
+            );
+        }
     }
 }

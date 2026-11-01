@@ -1,5 +1,5 @@
 name: driver-claude-code
-version: 0.8.0
+version: 0.9.0
 runtime: driver
 description: |
   Process driver for Claude Code. It tells a `transport: process` capsule how to drive the
@@ -36,5 +36,19 @@ description: |
   not the turn. A count the harness did not report stays absent rather than being reported as
   zero. The counts go out as totals for the harness run, which is what the interface asks for,
   so a second turn is reported as the sum of itself and every turn before it.
+
+  On a subscription login, `claude` prints a rate limit line, and each one becomes exactly one
+  `quota` event. It carries the five-hour window (`five-hour`, 300 minutes), the seven-day window
+  (`seven-day`, 10080 minutes), any other window type `claude` names under its own name with `_`
+  written as `-`, and overage as an `overage` window. Each window carries the fraction used
+  (capped at 1), its reset time in milliseconds and its state (`ok`, `warning` or `exhausted`),
+  each only when the line carries it.
+
+  Setting `prompt_suggestions: true` under `inference.driver.config` starts `claude` with
+  `--prompt-suggestions true`. Each suggested next prompt it prints after a turn's result then
+  becomes a `suggested-prompt` event. Each suggestion costs one more model call on the
+  subscription, and murmur reads it only within its exit grace after the turn. Suggestions are
+  off by default. Any other key, or a `prompt_suggestions` that is not a JSON boolean, refuses
+  the turn with a message naming it.
 requires_files:
   - driver_claude_code.wasm

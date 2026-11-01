@@ -4,7 +4,9 @@
 //! Claude's `usage` block is Anthropic-shaped and already reports `input_tokens` that way, so
 //! the driver relays it member for member.
 
-use driver_claude_code::{parse_context_for, parse_line, Event, ParseState, TokenUsage};
+use driver_claude_code::{
+    parse_context_for, parse_line, DriverConfig, Event, ParseState, TokenUsage,
+};
 use serde_json::json;
 
 /// A successful `result` line carrying the given `usage` block.
@@ -21,7 +23,11 @@ fn result_line(usage: serde_json::Value) -> String {
 
 /// The single `Usage` event a `result` line produced.
 fn usage_event(line: &str, state: &mut ParseState) -> TokenUsage {
-    let events = parse_line(line, &parse_context_for(None), state);
+    let events = parse_line(
+        line,
+        &parse_context_for(None, &DriverConfig::default()),
+        state,
+    );
     match events.as_slice() {
         [Event::Usage(usage), Event::TurnEnd(_)] => usage.clone(),
         other => panic!("expected a usage event then the turn end, got {other:?}"),
