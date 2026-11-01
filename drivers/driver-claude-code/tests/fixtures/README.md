@@ -93,3 +93,57 @@ suppressed as `empty`. So no `result` → `prompt_suggestion` delay is measured.
 `claude` waits up to 30 s for the suggestion call. murmur reads the harness's output for only 3 s
 after the terminal event, so a suggestion slower than that is lost. Runs 2 and 3 are not
 committed, because their later `init` lines list the login's own claude.ai connectors.
+
+# Claude Code image recording, 2.1.316
+
+`12-bridge-image-result` is real `claude` 2.1.316 output, recorded 2026-11-01 against the same
+mock Anthropic endpoint (`mock.py`) and a mock MCP bridge that answers the way murmur's bridge
+does when a tool returns an image (`../live/image_bridge.py`). Claude Code's own stream format is
+real; the model replies are canned. Auth was a dummy API key pointed at the mock, so
+`init.apiKeySource` reads `ANTHROPIC_API_KEY`.
+
+The recorder, `../live/record_image_mock.py`, ran in a fresh scratch working directory with a
+fresh scratch `HOME`; `claude` needed nothing in that `HOME` to start. Its environment held only
+`HOME`, `PATH`, `ANTHROPIC_BASE_URL=http://127.0.0.1:<mock port>` and a dummy
+`ANTHROPIC_API_KEY`. The argv is what the driver builds for a bridged turn:
+
+    claude --print --output-format stream-json --verbose --input-format stream-json
+           --include-partial-messages --setting-sources ""
+           --session-id e1d82534-9201-4553-80a2-81b3989eb0ea
+           --tools mcp__claude_bridge__picture_tool --mcp-config <scratch>/mcp-config.json
+           --strict-mcp-config --permission-mode bypassPermissions
+           --system-prompt "You are a Murmur capsule."
+
+The MCP config named the server `claude_bridge`, type `http`, at the bridge's loopback URL with
+a bearer token. The mock's scenario was `call:{"name":"picture_tool","args":{}}`: it calls the
+tool once, then answers with text once the request holds a `tool_result`. The task was one
+stdin line,
+`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Call picture_tool once, then say what the picture shows."}]}}`.
+Stdin was closed when the `result` line was read, and stdout was read to EOF. claude 2.1.316
+prints the `result` line's keys in a different order from 2.1.278, with `type` near the end
+rather than first, so the recorder finds that line by its parsed `type`.
+
+The bridge answered `tools/call` with murmur's shape, for a 692-byte 320×160 PNG drawn by
+`../live/picture.py --number 482 --background blue`:
+
+    {"content":[{"type":"text","text":"PICTURE-TOOL-RAN\n[image attached: picture.png, image/png, 692 bytes]"},
+                {"type":"image","data":"iVBORw0KGgoAAAAN…AAAASUVORK5CYII=","mimeType":"image/png"}],
+     "isError":false}
+
+The `user` line `claude` printed carries the image in the Anthropic shape
+(`source.type: "base64"`, `source.media_type`, `source.data`), base64 included, with the bridge's
+exact bytes. It sits between the bridge's text and a text block `claude` adds itself,
+`[Image: source: <path of the copy it saved under HOME>]`, both in `message.content` and in
+`tool_use_result`. The request `claude` sent the mock after the tool call held the same three
+blocks.
+
+Redactions, and nothing else changed:
+
+| Recorded | Committed |
+|---|---|
+| the scratch working dir, in `cwd` and `original_cwd` | `/work` |
+| the same dir encoded in a project slug, in `memory_paths` and the `[Image: source: …]` path | `-work` |
+| the scratch HOME | `/home/operator` |
+
+`stderr` was empty and the exit code was `0`. The `init` line lists only the built-in plugins
+and skills of a fresh `HOME`, with no account, email or personal connector.
