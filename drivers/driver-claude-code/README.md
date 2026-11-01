@@ -511,14 +511,18 @@ record, in its `attachments` entry `{"path","media_type","bytes","sha256"}` for 
   `tool_use_result`.
 - **A live subscription run of `tests/live/image-check.sh`**, on a `mur` built at `4f65bb98`.
   On `--model haiku`, the model read the number and the colour off a picture it could see only
-  in the tool result, and the script printed `PASS`. That was the implementing agent's own
-  run. The maintainer's run is pending, with the command in
+  in the tool result, and the script printed `PASS`. The command and its prerequisites are in
   [`tests/live/README.md`](tests/live/README.md#the-live-check).
 
-**Image items reach the harness only on a murmur with `4f65bb98` or later.** That commit makes the
-tool bridge answer a bridged call with an MCP `image` item per accepted attachment. On an
-earlier murmur, the tool result carries only text, and there is no image for this driver to
-report.
+**A host path reaches the model and the trace.** The `[Image: source: <path>]` block `claude`
+adds names a file under `claude`'s own `$HOME`, outside the capsule's work folder. The driver
+passes it through like any text block, so it appears in the `tool-result` output and in the
+trace's `tool_call.output`.
+
+**Image items reach the harness only on murmur v0.9.0 or later.** murmur commit `4f65bb98`, on
+`main` and in no murmur release yet, makes the tool bridge answer a bridged call with an MCP
+`image` item per accepted attachment. On a murmur without it, the tool result carries only text,
+and there is no image for this driver to report.
 
 **murmur can pair attachments with the wrong call.** murmur pairs a tool's `AttachmentReport`
 with the driver's `tool-result` by tool name and arguments. It first looks for a report whose
@@ -562,7 +566,7 @@ every recording:
 - no recording whose `result` line says `is_error: true` ends the turn successfully;
 - each `rate_limit_event` line gives one `quota`, and only the subscription recording has one.
 
-`12-bridge-image-result` gives one `tool-result` with three lines: the bridge's text, the
+`12-bridge-image-result` gives one `tool-result` of four lines: the bridge's two-line text, the
 reference line `[image: image/png, 692 bytes]`, and the `[Image: source: …]` text block `claude`
 adds. No 16-character run of the recorded base64 appears in it.
 
