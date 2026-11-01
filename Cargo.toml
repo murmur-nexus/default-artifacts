@@ -35,6 +35,7 @@ members = [
   "tools/tool-github",
   "tools/tool-test-report",
   "tools/tool-registry-search",
+  "tools/tool-computer",
   "tools/tool-report",
   "tools/tool-request-input",
   "tools/tool-tavily",

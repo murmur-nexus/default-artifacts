@@ -21,7 +21,7 @@
 #     write,edit,find,corpus,report,            that export murmur:tool/run)
 #     tavily}
 #   tool-{git,git-validate,            -> SKIP   (native bin crates the workspace build
-#     registry-search}                          may still leave a .wasm for; shipped as
+#     registry-search,browser,computer}         may still leave a .wasm for; shipped as
 #                                               native binaries, they export
 #                                               wasi:cli/run and are NOT murmur guest
 #                                               components)
@@ -127,7 +127,7 @@ validate_one() {
 
   # ---- category resolution ---------------------------------------------------
   case "$name" in
-    tool-git|tool-git-validate|tool-registry-search|tool-browser)
+    tool-git|tool-git-validate|tool-registry-search|tool-browser|tool-computer)
       echo "skip: $base is a native command component (exports wasi:cli/run), not a murmur guest component — not validated"
       return 0
       ;;

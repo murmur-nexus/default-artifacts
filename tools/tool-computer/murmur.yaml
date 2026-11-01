@@ -1,0 +1,90 @@
+name: tool-computer
+version: 0.1.0
+runtime: tool
+implementation: native
+description: |
+  Operates this capsule's own virtual display (1440x900): screenshot, click,
+  drag, move, scroll, type, press keys, wait, zoom. One action per call.
+  Coordinates are display pixels, x 0-1439 and y 0-899; read them off the
+  latest screenshot. Every action returns the cursor position and a fresh
+  screenshot. Modifiers held during a click, drag or scroll go in
+  `modifiers`, never in `text`.
+
+requires_files:
+  - bin/tool-computer
+
+# The display this tool starts. A driver may offer the tool as its provider's own
+# computer tool and scale coordinates to this size. A capsule declaring it must run
+# capabilities.containment: sealed (a mur from murmur a9ea4726 or later refuses
+# anything weaker with E-CAP-003).
+provider_tool:
+  kind: computer
+  display_width: 1440
+  display_height: 900
+
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - screenshot
+        - left_click
+        - right_click
+        - middle_click
+        - double_click
+        - triple_click
+        - left_click_drag
+        - left_mouse_down
+        - left_mouse_up
+        - mouse_move
+        - scroll
+        - type
+        - key
+        - hold_key
+        - wait
+        - zoom
+    x:
+      type: integer
+      description: "Pixel column, 0-1439. With y: where a click, left_mouse_down/up or scroll happens (omit both for the cursor); required for mouse_move, left_click_drag (start) and zoom (top-left)."
+    y:
+      type: integer
+      description: "Pixel row, 0-899. Paired with x."
+    to_x:
+      type: integer
+      description: "With to_y, required for left_click_drag (end) and zoom (bottom-right, exclusive)."
+    to_y:
+      type: integer
+      description: "Paired with to_x."
+    text:
+      type: string
+      description: "type only: the text to type, 1-5000 characters."
+    key:
+      type: string
+      description: "key and hold_key: combos separated by spaces, names joined by +, e.g. \"ctrl+a Return\". Names: ctrl, shift, alt, super, Return, Tab, Escape, BackSpace, Delete, Home, End, Page_Up, Page_Down, Up, Down, Left, Right, F1-F24, or one character."
+    modifiers:
+      type: string
+      description: "Clicks, left_click_drag and scroll: modifiers held during the action, joined by +, e.g. \"ctrl+shift\"."
+    scroll_direction:
+      type: string
+      enum: [up, down, left, right]
+      description: "scroll only, required."
+    scroll_amount:
+      type: integer
+      description: "scroll only: wheel steps, 1-50, default 3."
+    duration:
+      type: number
+      description: "Seconds. wait: more than 0, at most 60, default 1. hold_key: required, more than 0, at most 30."
+  required:
+    - action
+
+capabilities:
+  # Documents what the capsule must grant; the runtime does not read this block.
+  # The capsule's own capabilities.shell.allow must list Xvfb and xkbcomp, plus every
+  # program named in this tool's config.launch, and the capsule must run
+  # capabilities.containment: sealed. Under sealed it must also list sh: Xvfb runs
+  # xkbcomp through /bin/sh to compile its keymap.
+  shell:
+    allow:
+      - Xvfb
+      - xkbcomp
