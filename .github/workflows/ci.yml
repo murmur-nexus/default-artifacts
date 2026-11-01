@@ -47,6 +47,17 @@ jobs:
       - name: Cargo fmt
         run: cargo fmt --all -- --check
 
+      # tool-computer's display tests start a real Xvfb (xvfb, x11-xkb-utils) and click a
+      # real xmessage window (x11-utils), and fail rather than skip without them. The
+      # runner image ships xvfb but lists no x11-utils. Bounded separately from the job:
+      # a runner whose Azure mirror is unreachable leaves `apt-get update` failing over
+      # for tens of minutes.
+      - name: Install the X programs tool-computer's tests use
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11-xkb-utils x11-utils
+
       # --locked: a Cargo.lock that no longer matches the workspace (a member renamed,
       # added, or its version changed without `cargo update --workspace --offline`)
       # fails here instead of being rewritten in place and passing.

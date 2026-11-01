@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, Read};
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -429,17 +429,10 @@ fn start_xvfb(
     keeper_log: &CappedLog,
     procs: &mut RealProcesses,
 ) -> Result<(i32, u16), StartFailure> {
-    let mut fds = [0i32; 2];
-    // SAFETY: pipe2 writes two descriptors into `fds`.
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } == -1 {
-        return Err(io_failure("cannot make the -displayfd pipe")(
-            io::Error::last_os_error(),
-        ));
-    }
-    // SAFETY: both descriptors were just created and are owned here alone.
-    let (read_end, write_end) =
-        unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
-    let write_fd = fds[1];
+    // Both ends are close-on-exec; the child clears it on the write end alone, below.
+    let (mut reader, write_end) =
+        io::pipe().map_err(io_failure("cannot make the -displayfd pipe"))?;
+    let write_fd = write_end.as_raw_fd();
 
     let mut command = Command::new(xvfb);
     command
@@ -479,12 +472,11 @@ fn start_xvfb(
     let pid = child.id() as i32;
     drop(child);
 
-    let mut reader = std::fs::File::from(read_end);
     let deadline = Instant::now() + DISPLAY_NUMBER_WAIT;
     let mut got = Vec::new();
     loop {
         let mut pfd = libc::pollfd {
-            fd: std::os::fd::AsRawFd::as_raw_fd(&reader),
+            fd: reader.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
         };

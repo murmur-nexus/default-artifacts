@@ -6,7 +6,7 @@
 //! keeper that starts Xvfb, the window manager and the configured programs, and outlives the
 //! call. Later calls connect to that display over loopback TCP with the keeper's cookie.
 //!
-//! Only Linux runs a display. Every other OS compiles [`platform::not_linux_line`] alone.
+//! Only Linux runs a display. Every other OS compiles `platform::not_linux_line` alone.
 
 mod platform;
 

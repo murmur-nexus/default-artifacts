@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 
 /// The one line a call gets on any OS but Linux.
-#[cfg_attr(target_os = "linux", allow(dead_code))]
+#[cfg(any(test, not(target_os = "linux")))]
 pub fn not_linux_line() -> &'static str {
     "tool-computer runs only on Linux, in a sealed capsule; on macOS or Windows, run the capsule on a Linux VM"
 }

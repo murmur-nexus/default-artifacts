@@ -97,8 +97,23 @@ fn and_list_or(items: &[&str]) -> String {
     and_list(items).replacen(" and ", " or ", 1)
 }
 
-fn stop_stale_keeper(pid: i32) {
-    if !pid_alive(pid) {
+/// Whether `pid` runs `tool-computer --keep <state_dir>`. `display.json` sits in the work folder,
+/// where the model can write, so its `keeper_pid` is checked against `/proc` before any signal.
+fn is_keeper_of(pid: i32, state_dir: &Path) -> bool {
+    fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|cmdline| cmdline_keeps(&cmdline, state_dir))
+}
+
+/// Whether a NUL-separated `/proc/<pid>/cmdline` is `<program> --keep <state_dir> …`.
+fn cmdline_keeps(cmdline: &[u8], state_dir: &Path) -> bool {
+    let mut args = cmdline.split(|b| *b == 0).skip(1);
+    args.next() == Some(b"--keep".as_slice())
+        && args.next() == Some(state_dir.as_os_str().as_encoded_bytes())
+}
+
+/// Stops the keeper `display.json` names. A pid that is not this state folder's keeper is left
+/// alone: a real keeper stops itself within a second of its Xvfb exiting.
+fn stop_stale_keeper(pid: i32, state_dir: &Path) {
+    if !pid_alive(pid) || !is_keeper_of(pid, state_dir) {
         return;
     }
     // SAFETY: kill(2) on a pid this tool's keeper recorded.
@@ -201,7 +216,7 @@ pub fn ensure(state: &StateDir, workdir: &Path) -> Result<Ready, String> {
                     });
                 }
             }
-            stop_stale_keeper(info.keeper_pid);
+            stop_stale_keeper(info.keeper_pid, &state.abs);
             let _ = fs::remove_file(state.path(DISPLAY_JSON));
             restarted = true;
         } else if state.read_stopped().is_some_and(|s| s.was_running) {
@@ -393,5 +408,23 @@ mod tests {
     fn this_process_is_alive_and_pid_zero_is_not() {
         assert!(pid_alive(std::process::id() as i32));
         assert!(!pid_alive(0));
+    }
+
+    #[test]
+    fn only_this_state_folders_keeper_is_signalled() {
+        let dir = Path::new("/w/.tool-computer/ses_x");
+        assert!(cmdline_keeps(
+            b"/b/tool-computer\0--keep\0/w/.tool-computer/ses_x\0",
+            dir
+        ));
+        assert!(!cmdline_keeps(
+            b"/b/tool-computer\0--keep\0/w/.tool-computer/ses_y\0",
+            dir
+        ));
+        assert!(!cmdline_keeps(b"/usr/bin/firefox\0", dir));
+        assert!(!cmdline_keeps(b"", dir));
+        // This test process is alive but no keeper, so a forged keeper_pid naming it is spared.
+        let me = std::process::id() as i32;
+        assert!(pid_alive(me) && !is_keeper_of(me, dir));
     }
 }

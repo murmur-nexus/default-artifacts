@@ -15,7 +15,7 @@ the tool as its provider's own computer tool and rescale coordinates to this siz
 
 | Requirement | Why |
 |---|---|
-| A `mur` built from murmur `a9ea4726` (#381) or later | That `mur` reads `provider_tool:`, refuses the capsule below `sealed` with `E-CAP-003`, and checks the block at `mur build`. An older `mur` ignores the key and would run this tool below `sealed` |
+| A `mur` built from murmur `a9ea4726` (#381) or later; `mur` v0.8.0 and every earlier release lack it | That `mur` reads `provider_tool:`, refuses the capsule below `sealed` with `E-CAP-003`, and checks the block at `mur build`. An older `mur` ignores the key and would run this tool below `sealed` |
 | Linux | The display is Xvfb. On macOS or Windows every call returns `tool-computer runs only on Linux, in a sealed capsule; on macOS or Windows, run the capsule on a Linux VM` |
 | `capabilities.containment: sealed` | Under `sealed` the tool runs in the session's own network namespace, so the X server on `127.0.0.1` is reachable by the tool, its programs and the capsule's shell commands and by nothing outside. `/tmp` is private and the host's X server is unreachable. A host that refuses unprivileged user namespaces (many container hosts) cannot give `sealed`, and the capsule is refused with `E-CAP-003` or `E-CAP-005` |
 | `Xvfb`, `xkbcomp` and `sh` in `capabilities.shell.allow` | Xvfb runs `xkbcomp` through `/bin/sh -c` to compile its keymap. Without `sh`, Xvfb exits with `Failed to activate virtual core keyboard`, and the tool's start-failure line says to add `sh` |
@@ -185,8 +185,9 @@ lifecycle:
 
 ### Measured under `sealed`
 
-Ubuntu 24.04.5, kernel 7.0.0-28, Xvfb 21.1.12, `mur` at murmur `ccd18c08` (which carries #378,
-#379 and #381):
+Ubuntu 24.04.5, kernel 7.0.0-28, Xvfb 21.1.12, `mur` at murmur `ccd18c08`, a pre-merge build of
+#381 that carries #378 and #379 and refuses a non-`sealed` capsule with the same `E-CAP-003` as
+`a9ea4726`:
 
 | Program | VmPeak | Peak RSS (VmHWM) | Session tree |
 |---|---|---|---|
