@@ -1,0 +1,20 @@
+{
+  "driver_config": null,
+  "artifact_config": {"prompt_cache": false},
+  "request": {
+    "model": "claude-opus-4-6",
+    "max_tokens": 2048,
+    "system": "You are a careful assistant.",
+    "messages": [
+      {"role": "user", "content": [{"type": "text", "text": "List the files in src."}]},
+      {"role": "assistant", "content": [
+        {"type": "tool_call", "id": "toolu_01", "name": "find", "input": {"path": "src"}}
+      ]},
+      {"role": "tool", "tool_call_id": "toolu_01", "content": [{"type": "text", "text": "lib.rs"}]}
+    ],
+    "tools": [
+      {"name": "find", "description": "Find files.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}
+    ],
+    "params": {"temperature": 0.2, "top_p": 0.9}
+  }
+}

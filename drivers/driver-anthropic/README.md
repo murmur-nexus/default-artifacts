@@ -92,6 +92,7 @@ Whether the runtime reads `models:` depends on the murmur release:
 |---|---|---|
 | v0.7.0 and earlier | ignores it; an unknown manifest key is a `W-SEC-019` warning, never a refusal | `inference.max_tokens` and `context.max_tokens`; left unset, the runtime's own defaults apply, not the model's limits |
 | the first release after v0.7.0 | defaults the output cap and context window from it when the capsule leaves them unset, reads `max_input_tokens` as the input ceiling, measures compaction and the seed budget against the input budget, and caps a hook's `run-inference` (e.g. `hook-compact`) at its `max_output_tokens` | nothing, unless it wants tighter limits than the table |
+| murmur `a9ea4726` and later; no release has it yet (v0.8.0, the newest tag, predates WIT level 3) | also reads `vision`, and serves WIT level 3, which driver-anthropic 0.18.0 and later need: an older `mur` refuses the `vision` key (`E-BLD-005` when packing, `E-RUN-052` at launch) and does not load the driver's `murmur:tool/run@0.2.0` export. `vision: false` makes `mur run` refuse (`E-RUN-057`) a `transport: http` capsule that declares a computer tool and runs that model | nothing |
 
 A capsule value always wins: the runtime never clamps or raises
 `inference.max_tokens` or `context.max_tokens` to the table.
@@ -116,6 +117,146 @@ itself:
 | neither | the launch is refused with `E-RUN-052`, naming the driver and the model, before any HTTP call |
 | only `inference.max_tokens` | it launches with `W-RUN-009`, and compaction does not run |
 | both | it launches |
+
+## Images
+
+murmur hands the driver each image a tool attaches, or an A2A message carries, as a base64 `image`
+block. Before it translates the request, the driver sizes every image in a `user` or `tool`
+message to the model's limits, so Anthropic never downscales it again and the driver knows the
+exact size the model sees. A request that holds no image is sent byte for byte as before, and
+nothing is decoded.
+
+### Placement
+
+| murmur message | Where the image goes |
+|---|---|
+| `tool` | Inside the one `tool_result` that answers the call. It holds the message's text and image blocks in the order murmur sent them, including any `[image not shown: …]` or `[image unavailable: …]` line. Anthropic refuses a second `tool_result` for the same `tool_use_id` with HTTP 400, so the driver never sends one |
+| `user` | An `image` block in the user message, where murmur put it |
+
+The prompt-cache marker stays on the `tool_result`, never on a block inside it.
+
+### Sizing
+
+Each tier is a long-edge cap and a visual-token cap. A `width`×`height` image fits when each side,
+padded up to a multiple of 28 px, is within the long edge, and `⌈w/28⌉ × ⌈h/28⌉` visual tokens
+are within the token cap. An image that does not fit is resized to the largest aspect-preserving
+size that does, found with the binary search of Anthropic's reference implementation
+(<https://platform.claude.com/docs/en/build-with-claude/vision-coordinates>, "How Claude resizes and pads images"). A 3000×2000 screenshot is sent at 2352×1568 on the
+high-resolution tier and at 1344×896 on the standard tier.
+
+| Model | Reads images | Max long edge (px) | Max visual tokens | Source |
+|---|---|---|---|---|
+| `claude-fable-5-1` | yes | 2576 | 4784 | <https://platform.claude.com/docs/en/build-with-claude/vision>, read 2026-11-01: "High-resolution · Claude 4.7 and later models · 2,576 px · 4,784"; `supportedModels` lists `claude-fable-5-1` |
+| `claude-opus-5-5` | yes | 2576 | 4784 | <https://platform.claude.com/docs/en/build-with-claude/vision>, read 2026-11-01: "High-resolution · Claude 4.7 and later models · 2,576 px · 4,784"; `supportedModels` lists `claude-opus-5-5` |
+| `claude-sonnet-5-5` | yes | 2576 | 4784 | <https://platform.claude.com/docs/en/build-with-claude/vision>, read 2026-11-01: "High-resolution · Claude 4.7 and later models · 2,576 px · 4,784"; `supportedModels` lists `claude-sonnet-5-5` |
+| `claude-haiku-5-5` | yes | 2576 | 4784 | <https://platform.claude.com/docs/en/build-with-claude/vision>, read 2026-11-01: "High-resolution · Claude 4.7 and later models · 2,576 px · 4,784"; `supportedModels` lists `claude-haiku-5-5` |
+| `claude-fable-5` | yes | 2576 | 4784 | <https://platform.claude.com/docs/en/build-with-claude/vision>, read 2026-11-01: "High-resolution · Claude 4.7 and later models · 2,576 px · 4,784"; `supportedModels` lists `claude-fable-5` |
+| `claude-opus-5` | yes | 2576 | 4784 | <https://platform.claude.com/docs/en/build-with-claude/vision>, read 2026-11-01: "High-resolution · Claude 4.7 and later models · 2,576 px · 4,784"; `supportedModels` lists `claude-opus-5` |
+| `claude-sonnet-5` | yes | 2576 | 4784 | <https://platform.claude.com/docs/en/build-with-claude/vision>, read 2026-11-01: "High-resolution · Claude 4.7 and later models · 2,576 px · 4,784"; `supportedModels` lists `claude-sonnet-5` |
+| `claude-opus-4-8` | yes | 2576 | 4784 | <https://platform.claude.com/docs/en/build-with-claude/vision>, read 2026-11-01: "High-resolution · Claude 4.7 and later models · 2,576 px · 4,784"; `supportedModels` lists `claude-opus-4-8` |
+| `claude-opus-4-7` | yes | 2576 | 4784 | <https://platform.claude.com/docs/en/build-with-claude/vision>, read 2026-11-01: "High-resolution · Claude 4.7 and later models · 2,576 px · 4,784"; `supportedModels` lists `claude-opus-4-7` |
+| `claude-opus-4-6` | yes | 1568 | 1568 | <https://platform.claude.com/docs/en/build-with-claude/vision>, read 2026-11-01: "Standard · All other models · 1,568 px · 1,568"; `supportedModels` lists `claude-opus-4-6` |
+| `claude-sonnet-4-6` | yes | 1568 | 1568 | <https://platform.claude.com/docs/en/build-with-claude/vision>, read 2026-11-01: "Standard · All other models · 1,568 px · 1,568"; `supportedModels` lists `claude-sonnet-4-6` |
+| `claude-opus-4-5-20251101` | yes | 1568 | 1568 | <https://platform.claude.com/docs/en/build-with-claude/vision>, read 2026-11-01: "Standard · All other models · 1,568 px · 1,568"; `supportedModels` lists `claude-opus-4-5-20251101` |
+| `claude-opus-4-5` | yes | 1568 | 1568 | <https://platform.claude.com/docs/en/build-with-claude/vision>, read 2026-11-01: "Standard · All other models · 1,568 px · 1,568"; the alias of `claude-opus-4-5-20251101`, which `supportedModels` lists |
+| `claude-sonnet-4-5-20250929` | yes | 1568 | 1568 | <https://platform.claude.com/docs/en/build-with-claude/vision>, read 2026-11-01: "Standard · All other models · 1,568 px · 1,568"; `supportedModels` lists `claude-sonnet-4-5-20250929` |
+| `claude-sonnet-4-5` | yes | 1568 | 1568 | <https://platform.claude.com/docs/en/build-with-claude/vision>, read 2026-11-01: "Standard · All other models · 1,568 px · 1,568"; the alias of `claude-sonnet-4-5-20250929`, which `supportedModels` lists |
+| `claude-haiku-4-5-20251001` | yes | 1568 | 1568 | <https://platform.claude.com/docs/en/build-with-claude/vision>, read 2026-11-01: "Standard · All other models · 1,568 px · 1,568"; `supportedModels` lists `claude-haiku-4-5-20251001` |
+| `claude-haiku-4-5` | yes | 1568 | 1568 | <https://platform.claude.com/docs/en/build-with-claude/vision>, read 2026-11-01: "Standard · All other models · 1,568 px · 1,568"; the alias of `claude-haiku-4-5-20251001`, which `supportedModels` lists |
+
+An id outside the table, such as `claude-mythos-5-1`, is sized at the standard tier: every current
+Claude model reads images, and no model rescales an image that fits the smaller tier.
+
+The vision page's cost table gives 1269×952 for a 2000×1500 image on the standard tier. Its
+reference implementation, which the driver follows, gives 1270×952.
+
+| Rule | Value |
+|---|---|
+| Decode ceiling | 8000 px a side and 40000000 pixels, checked on the header before any pixel is decoded. The decoder's own allocation is capped at 192 MiB |
+| Per-image limit | 10000000 bytes of base64: the vision page's "10 MB (base64-encoded) on the Claude API", read as decimal megabytes, the smaller reading |
+| Resampling filter | Catmull-Rom |
+| PNG | resized as a PNG, deflate level 1 with adaptive filtering |
+| JPEG | resized as a JPEG at quality 90 |
+| GIF, WebP | sent as they are when they fit, since Anthropic reads an animated GIF's first frame; otherwise resized as a PNG of the first frame |
+| An image that fits | its original bytes, untouched |
+| A source that is not base64 | sent as it is, unmeasured |
+
+### The report
+
+When the request held an image, the response the driver returns to murmur carries a top-level
+`images` list: one entry per image block, in request order. murmur reads only `stop_reason`,
+`content`, `usage` and `error` from that response. With `trace.capture: content` the whole response,
+report included, is stored as the `inference` event's response blob. An error response carries no
+report.
+
+| Field | Type | Present | Meaning |
+|---|---|---|---|
+| `message` | integer | always | index of the message in the request's `messages` |
+| `block` | integer | always | index of the block in that message's `content` |
+| `media_type` | string | always | the media type murmur sent |
+| `bytes` | integer | always | length of the decoded image; of the source data as given when it is not valid base64 or not a base64 source |
+| `sha256` | string | always | hex sha256 of the bytes `bytes` counts |
+| `outcome` | string | always | `sent` (original bytes), `resized` (resized or re-encoded) or `replaced` (a text line instead) |
+| `width`, `height` | integer | when the header was read | the original size |
+| `sent_media_type` | string | `sent`, `resized` | the media type sent |
+| `sent_width`, `sent_height` | integer | `sent`, `resized`, when the original size is known | the size sent, which is the size the model sees |
+| `scale` | number | `sent`, `resized`, when the original size is known | `sent_width / width` |
+| `placement` | string | `sent`, `resized` | `tool_result` or `user` |
+| `reason` | string | `replaced` | why the image was not sent |
+
+### Images the driver does not send
+
+An image the driver cannot send becomes a text block in its place, and the request is still sent:
+
+```
+[image not shown: <media_type>, <n> bytes, sha256 <hex>; <reason>]
+```
+
+| Reason | When |
+|---|---|
+| `model '<model>' does not take image input in driver-anthropic's model table` | the model's tier reads no image; no model in the table is one today |
+| `the image data is not valid base64: <detail>` | the block's data does not decode |
+| `the image's dimensions could not be read: <detail>` | the header does not parse as the media type murmur named |
+| `the image is <w>x<h> px, over the driver's decode ceiling of 8000 px a side and 40000000 pixels` | the header names a size over the decode ceiling |
+| `the image could not be decoded: <detail>` | the pixels do not decode |
+| `the image could not be re-encoded after resizing: <detail>` | the encoder refuses the resized image |
+| `the image is <n> bytes as base64, over Anthropic's per-image limit of 10000000 bytes` | the image to send is over the per-image limit |
+
+murmur's own `[image not shown: …; the <keep> newer images in this conversation are shown instead]`
+and `[image unavailable: …]` lines arrive as text and are sent as they are.
+
+### Cost
+
+The pre-pass runs inside the driver component on every request that holds an image, and on no
+other. murmur re-sends the newest `context.images.keep` images on every turn, so an image that is
+resized is resized again on each turn, to the same bytes: sizing is deterministic, so the prompt
+prefix that holds it stays cacheable. An image that already fits costs only a base64 decode, a
+sha256 and a header read.
+
+Measured on 2026-11-01 by
+`cargo test -p murmur-driver-image --test wasm_timing -- --ignored --nocapture`: the whole
+pre-pass for one 3840×2160 screenshot-like PNG (8742731 bytes), 7 runs per case, as a
+wasm32-wasip2 command under wasmtime 46 and natively, on an Intel Core i7-8565U (8 threads) at a
+load average of 7 to 8.
+
+| Case | Sent at | Sent bytes | wasm32-wasip2, median (range) | native, median (range) |
+|---|---|---|---|---|
+| Anthropic high-resolution tier | 2576×1449 | 4813605 | 1557.5 ms (1535.0–1609.4) | 724.8 ms (702.0–865.9) |
+| Anthropic standard tier | 1456×819 | 1579629 | 936.7 ms (874.8–964.9) | 440.8 ms (421.7–456.7) |
+| OpenAI 2048 px / 2,500 patches | 2048×1152 | 1558098 | 1340.0 ms (1139.7–1446.9) | 539.7 ms (506.2–579.9) |
+| Fits as it is: header read only | 3840×2160 | 8742731 | 108.8 ms (94.5–122.9) | 88.9 ms (83.4–97.1) |
+
+### Checked against the live API
+
+On 2026-11-01 a `claude-haiku-4-5` Messages request whose `tool_result` held a text block and a PNG
+of the word LANTERN, shaped as this driver sends it with the cache marker on the `tool_result`,
+returned HTTP 200, and the model answered with the word.
+
+Also on 2026-11-01, a request answering one `tool_use` with two `tool_result` blocks, one holding
+the tool's text and one an `[image not shown: …]` line, returned HTTP 400: "each tool_use must
+have a single result. Found multiple `tool_result` blocks with id". A `claude-sonnet-5-5` run with
+`context.images.keep: 1` and two tool images, where every later request carries an aged image line
+beside the tool's text in one `tool_result`, ran seven turns without an error.
 
 ## Prompt caching
 

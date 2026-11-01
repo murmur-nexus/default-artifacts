@@ -85,6 +85,7 @@ mod wasm_tool {
                 data_path: None,
                 truncated: false,
                 metadata: response.metadata,
+                attachments: Vec::new(),
             }
         }
     }

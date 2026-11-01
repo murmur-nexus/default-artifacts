@@ -16,6 +16,7 @@ members = [
   "hooks/hook-regression-verifier",
   "hooks/hook-shell-desc",
   "libs/murmur-driver-env",
+  "libs/murmur-driver-image",
   "libs/murmur-driver-stream",
   "libs/murmur-file-tools",
   "libs/murmur-hook-transcript",

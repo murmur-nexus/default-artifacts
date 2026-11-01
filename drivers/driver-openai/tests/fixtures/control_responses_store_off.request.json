@@ -1,0 +1,25 @@
+{
+  "driver_config": {"reasoning_effort": "high", "thinking": "enabled"},
+  "request": {
+    "model": "gpt-5.6-luna",
+    "max_tokens": 4096,
+    "system": "You are a careful assistant.",
+    "prompt_cache_key": "task-7f3a",
+    "continuation_id": "resp_ignored_without_store",
+    "messages": [
+      {"role": "user", "content": [{"type": "text", "text": "List the files in src."}]},
+      {"role": "assistant", "content": [
+        {"type": "thinking", "text": "Use find."},
+        {"type": "text", "text": "I'll look."},
+        {"type": "tool_call", "id": "call_01", "name": "find", "input": {"path": "src"}}
+      ]},
+      {"role": "tool", "tool_call_id": "call_01", "content": [
+        {"type": "text", "text": "lib.rs"},
+        {"type": "text", "text": "[image unavailable: image/jpeg, 900 bytes, sha256 fcde2b2edba56bf408601fb721fe9b5c338d10ee429ea04fae5511b68fbf8fb9]"}
+      ]}
+    ],
+    "tools": [
+      {"name": "find", "description": "Find files.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}
+    ]
+  }
+}

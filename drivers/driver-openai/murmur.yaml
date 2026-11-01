@@ -1,7 +1,7 @@
 name: driver-openai
-version: 0.17.0
+version: 0.18.0
 runtime: driver
-description: OpenAI inference driver for Murmur agent capsules — routes each listed OpenAI model to the Responses or Chat Completions endpoint its model page lists, and refuses any other model. Reads store, thinking, reasoning_effort and verbosity from inference.driver.config and rejects any other key; store grants server-side retention and with it stateful continuation via previous_response_id.
+description: OpenAI inference driver for Murmur agent capsules — routes each listed OpenAI model to the Responses or Chat Completions endpoint its model page lists, and refuses any other model. Reads store, thinking, reasoning_effort and verbosity from inference.driver.config and rejects any other key; store grants server-side retention and with it stateful continuation via previous_response_id. Sizes every image to the model's dimension and patch limits before sending it, places a tool's image in its function_call_output (Responses) or in a user message after the tool messages (Chat Completions), and reports what it sent in the response's images list.
 requires_files:
   - driver_openai.wasm
 
@@ -11,68 +11,87 @@ upstream_auth:
   value: "Bearer {key}"
 
 # The limits of each model this driver serves, from the provider's documentation, including any input ceiling it gives below the window; README.md cites each number.
+# `vision` is whether the model reads images, from its page's "Input modalities"; README.md's "Images" table cites each one.
 models:
   gpt-6-astra:
     max_output_tokens: 128000
     context_window: 1050000
     max_input_tokens: 922000
+    vision: true
   gpt-6.1-sol:
     max_output_tokens: 128000
     context_window: 1050000
     max_input_tokens: 922000
+    vision: true
   gpt-6-luna:
     max_output_tokens: 128000
     context_window: 1050000
     max_input_tokens: 922000
+    vision: true
   gpt-5.6-cyber:
     max_output_tokens: 128000
     context_window: 400000
     max_input_tokens: 272000
+    vision: true
   gpt-oss-120b:
     max_output_tokens: 131072
     context_window: 131072
+    vision: false
   gpt-oss-20b:
     max_output_tokens: 131072
     context_window: 131072
+    vision: false
   gpt-6-sol:
     max_output_tokens: 128000
     context_window: 1050000
     max_input_tokens: 922000
+    vision: true
   gpt-5.6-sol:
     max_output_tokens: 128000
     context_window: 1050000
     max_input_tokens: 922000
+    vision: true
   gpt-5.6-terra:
     max_output_tokens: 128000
     context_window: 1050000
     max_input_tokens: 922000
+    vision: true
   gpt-5.6-luna:
     max_output_tokens: 128000
     context_window: 1050000
     max_input_tokens: 922000
+    vision: true
   gpt-5.5:
     max_output_tokens: 128000
     context_window: 1050000
+    vision: true
   gpt-5.5-pro:
     max_output_tokens: 128000
     context_window: 1050000
+    vision: true
   gpt-5.4:
     max_output_tokens: 128000
     context_window: 1050000
+    vision: true
   gpt-5.4-pro:
     max_output_tokens: 128000
     context_window: 1050000
+    vision: true
   gpt-5.4-mini:
     max_output_tokens: 128000
     context_window: 400000
     max_input_tokens: 272000
+    vision: true
   gpt-5.2:
     max_output_tokens: 128000
     context_window: 400000
+    vision: true
   gpt-5.2-pro:
     max_output_tokens: 128000
     context_window: 400000
+    vision: true
   chat-latest:
     max_output_tokens: 128000
     context_window: 400000
     max_input_tokens: 272000
+    vision: true

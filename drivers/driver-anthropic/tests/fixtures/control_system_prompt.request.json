@@ -1,0 +1,13 @@
+{
+  "driver_config": null,
+  "artifact_config": {"prompt_cache": "enabled"},
+  "request": {
+    "model": "claude-fable-5-1",
+    "max_tokens": 512,
+    "system": "  You answer in one sentence.\nNever use lists.  ",
+    "prompt_cache_key": "task-1",
+    "messages": [
+      {"role": "user", "content": [{"type": "text", "text": "Why is the sky blue?"}]}
+    ]
+  }
+}

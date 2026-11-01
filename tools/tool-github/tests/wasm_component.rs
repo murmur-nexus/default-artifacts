@@ -139,9 +139,15 @@ fn run_component_in_dir(
         data: Some(data.to_string()),
         log_path: None,
     };
-    tool.murmur_tool_run()
+    let result = tool
+        .murmur_tool_run()
         .call_run(&mut store, &input)
-        .expect("call run")
+        .expect("call run");
+    assert!(
+        result.attachments.is_empty(),
+        "this tool attaches no image, so ToolResult.attachments is empty"
+    );
+    result
 }
 
 /// [`run_component_in_dir`] on a spawned thread, failing once `deadline` passes: a guest that

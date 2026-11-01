@@ -140,9 +140,144 @@ Whether the runtime reads `models:` depends on the murmur release:
 |---|---|---|
 | v0.7.0 and earlier | ignores it; an unknown manifest key is a `W-SEC-019` warning, never a refusal | `inference.max_tokens` and `context.max_tokens`; left unset, the runtime's own defaults apply, not the model's limits |
 | the first release after v0.7.0 | defaults the output cap and context window from it when the capsule leaves them unset, reads `max_input_tokens` as the input ceiling, measures compaction and the seed budget against the input budget, and caps a hook's `run-inference` (e.g. `hook-compact`) at its `max_output_tokens` | nothing, unless it wants tighter limits than the table |
+| murmur `a9ea4726` and later; no release has it yet (v0.8.0, the newest tag, predates WIT level 3) | also reads `vision`, and serves WIT level 3, which driver-openai 0.18.0 and later need: an older `mur` refuses the `vision` key (`E-BLD-005` when packing, `E-RUN-052` at launch) and does not load the driver's `murmur:tool/run@0.2.0` export. `vision: false` makes `mur run` refuse (`E-RUN-057`) a `transport: http` capsule that declares a computer tool and runs that model | nothing |
 
 A capsule value always wins: the runtime never clamps or raises
 `inference.max_tokens` or `context.max_tokens` to the table.
+
+## Images
+
+murmur hands the driver each image a tool attaches, or an A2A message carries, as a base64 `image`
+block. Before it translates the request, the driver sizes every image in a `user` or `tool`
+message to the model's limits, so OpenAI never rescales it again and the driver knows the exact
+size the model sees. A request that holds no image is sent byte for byte as before, and nothing is
+decoded.
+
+### Placement
+
+| murmur message | Responses | Chat Completions (`chat-latest`) |
+|---|---|---|
+| `tool` | The call's `function_call_output.output` becomes an array: an `input_text` holding the message's text, left out when it has none, then one `input_image` per image. A tool message without an image keeps its string `output` | The tool message keeps only its text, since a Chat Completions tool message takes text only. After the last tool message of each consecutive run, one `user` message carries, for each image of the run in order, a text part `Image attached to the result of tool call <tool_call_id>:` and then the `image_url` part. It is never placed between two tool messages |
+| `user` | An `input_image` part where murmur put it | An `image_url` part where murmur put it |
+
+Every image travels as a `data:<media_type>;base64,<data>` URL with no `detail` field: the driver
+sizes it to what `detail: auto`, the default, keeps.
+
+### Sizing
+
+Each model's rule is a maximum dimension and a budget of 32×32 patches. A `width`×`height` image
+fits when both sides are within the maximum dimension and `⌈w/32⌉ × ⌈h/32⌉` patches are within
+the budget. An image that does not fit is resized to the largest aspect-preserving size that does,
+found with a binary search along its long edge. A 3000×2000 screenshot is sent as it is on the
+65,535 px and 6000 px rules, at 1920×1280 on the 2048 px / 2,500-patch rule and at 2048×1365 on
+`gpt-5.2`.
+
+| Model | Reads images | Max dimension (px) | Patch budget | Source |
+|---|---|---|---|---|
+| `gpt-6-astra` | yes | 65535 | 30000 | <https://developers.openai.com/api/docs/models/gpt-6-astra>, read 2026-11-01: "Input modalities: text, image". <https://developers.openai.com/api/docs/guides/images-vision>, read 2026-11-01: sizing table row `gpt-6-astra`: "`auto` uses the same sizing behavior as `original`", which keeps dimensions up to 65,535 px; "Images that exceed the 30,000-patch limit after processing are rejected" |
+| `gpt-6.1-sol` | yes | 2048 | 2500 | <https://developers.openai.com/api/docs/models/gpt-6.1-sol>, read 2026-11-01: "Input modalities: text, image". <https://developers.openai.com/api/docs/guides/images-vision>, read 2026-11-01: not in the sizing table; the conservative rule, which no listed family rescales an image inside |
+| `gpt-6-luna` | yes | 2048 | 2500 | <https://developers.openai.com/api/docs/models/gpt-6-luna>, read 2026-11-01: "Input modalities: text, image". <https://developers.openai.com/api/docs/guides/images-vision>, read 2026-11-01: not in the sizing table; the conservative rule, which no listed family rescales an image inside |
+| `gpt-5.6-cyber` | yes | 2048 | 2500 | <https://developers.openai.com/api/docs/models/gpt-5.6-cyber>, read 2026-11-01: "Input modalities: text, image". <https://developers.openai.com/api/docs/guides/images-vision>, read 2026-11-01: not in the sizing table; the conservative rule, which no listed family rescales an image inside |
+| `gpt-oss-120b` | no | – | – | <https://developers.openai.com/api/docs/models/gpt-oss-120b>, read 2026-11-01: "Input modalities: text" |
+| `gpt-oss-20b` | no | – | – | <https://developers.openai.com/api/docs/models/gpt-oss-20b>, read 2026-11-01: "Input modalities: text" |
+| `gpt-6-sol` | yes | 2048 | 2500 | <https://developers.openai.com/api/docs/models/gpt-6-sol>, read 2026-11-01: "Input modalities: text, image". <https://developers.openai.com/api/docs/guides/images-vision>, read 2026-11-01: not in the sizing table; the conservative rule, which no listed family rescales an image inside |
+| `gpt-5.6-sol` | yes | 65535 | 30000 | <https://developers.openai.com/api/docs/models/gpt-5.6-sol>, read 2026-11-01: "Input modalities: text, image". <https://developers.openai.com/api/docs/guides/images-vision>, read 2026-11-01: sizing table row `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`: "`auto` uses the same sizing behavior as `original`", which keeps dimensions up to 65,535 px; "Images that exceed the 30,000-patch limit after processing are rejected" |
+| `gpt-5.6-terra` | yes | 65535 | 30000 | <https://developers.openai.com/api/docs/models/gpt-5.6-terra>, read 2026-11-01: "Input modalities: text, image". <https://developers.openai.com/api/docs/guides/images-vision>, read 2026-11-01: sizing table row `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`: "`auto` uses the same sizing behavior as `original`", which keeps dimensions up to 65,535 px; "Images that exceed the 30,000-patch limit after processing are rejected" |
+| `gpt-5.6-luna` | yes | 65535 | 30000 | <https://developers.openai.com/api/docs/models/gpt-5.6-luna>, read 2026-11-01: "Input modalities: text, image". <https://developers.openai.com/api/docs/guides/images-vision>, read 2026-11-01: sizing table row `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`: "`auto` uses the same sizing behavior as `original`", which keeps dimensions up to 65,535 px; "Images that exceed the 30,000-patch limit after processing are rejected" |
+| `gpt-5.5` | yes | 6000 | 10000 | <https://developers.openai.com/api/docs/models/gpt-5.5>, read 2026-11-01: "Input modalities: text, image". <https://developers.openai.com/api/docs/guides/images-vision>, read 2026-11-01: sizing table row `gpt-5.5`: "`original` allows up to 10,000 patches and a 6000-pixel maximum dimension … `auto` uses the same sizing behavior as `original`" |
+| `gpt-5.5-pro` | yes | 2048 | 2500 | <https://developers.openai.com/api/docs/models/gpt-5.5-pro>, read 2026-11-01: "Input modalities: text, image". <https://developers.openai.com/api/docs/guides/images-vision>, read 2026-11-01: not in the sizing table; the conservative rule, which no listed family rescales an image inside |
+| `gpt-5.4` | yes | 2048 | 2500 | <https://developers.openai.com/api/docs/models/gpt-5.4>, read 2026-11-01: "Input modalities: text, image". <https://developers.openai.com/api/docs/guides/images-vision>, read 2026-11-01: sizing table row `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-nano`: "`high` allows up to 2,500 patches and a 2048-pixel maximum dimension … `auto` uses the same sizing behavior as `high`" |
+| `gpt-5.4-pro` | yes | 2048 | 2500 | <https://developers.openai.com/api/docs/models/gpt-5.4-pro>, read 2026-11-01: "Input modalities: text, image". <https://developers.openai.com/api/docs/guides/images-vision>, read 2026-11-01: not in the sizing table; the conservative rule, which no listed family rescales an image inside |
+| `gpt-5.4-mini` | yes | 2048 | 2500 | <https://developers.openai.com/api/docs/models/gpt-5.4-mini>, read 2026-11-01: "Input modalities: text, image". <https://developers.openai.com/api/docs/guides/images-vision>, read 2026-11-01: sizing table row `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-nano`: "`high` allows up to 2,500 patches and a 2048-pixel maximum dimension … `auto` uses the same sizing behavior as `high`" |
+| `gpt-5.2` | yes | 2048 | 6144 | <https://developers.openai.com/api/docs/models/gpt-5.2>, read 2026-11-01: "Input modalities: text, image". <https://developers.openai.com/api/docs/guides/images-vision>, read 2026-11-01: sizing table row `gpt-5.2`, `gpt-4.1-mini`: "a 2048-pixel maximum dimension and a 6,144-patch budget" |
+| `gpt-5.2-pro` | yes | 2048 | 2500 | <https://developers.openai.com/api/docs/models/gpt-5.2-pro>, read 2026-11-01: "Input modalities: text, image". <https://developers.openai.com/api/docs/guides/images-vision>, read 2026-11-01: not in the sizing table; the conservative rule, which no listed family rescales an image inside |
+| `chat-latest` | yes | 2048 | 2500 | <https://developers.openai.com/api/docs/models/chat-latest>, read 2026-11-01: "Input modalities: text, image". <https://developers.openai.com/api/docs/guides/images-vision>, read 2026-11-01: not in the sizing table; the conservative rule, which no listed family rescales an image inside |
+
+| Rule | Value |
+|---|---|
+| Decode ceiling | 8000 px a side and 40000000 pixels, checked on the header before any pixel is decoded. The decoder's own allocation is capped at 192 MiB |
+| Per-image limit | none: the vision guide states "Up to 512 MB total payload per request" and no per-image byte limit |
+| Resampling filter | Catmull-Rom |
+| PNG | resized as a PNG, deflate level 1 with adaptive filtering |
+| JPEG | resized as a JPEG at quality 90 |
+| GIF | always sent as a PNG of its first frame: the guide accepts only a "non-animated GIF" |
+| WebP | sent as it is when it fits; otherwise resized as a PNG of the first frame |
+| An image that fits | its original bytes, untouched |
+| A source that is not base64 | sent as it is, unmeasured |
+
+### The report
+
+When the request held an image, the response the driver returns to murmur carries a top-level
+`images` list: one entry per image block, in request order. murmur reads only `stop_reason`,
+`content`, `usage` and `error` from that response. With `trace.capture: content` the whole response,
+report included, is stored as the `inference` event's response blob. An error response carries no
+report.
+
+| Field | Type | Present | Meaning |
+|---|---|---|---|
+| `message` | integer | always | index of the message in the request's `messages` |
+| `block` | integer | always | index of the block in that message's `content` |
+| `media_type` | string | always | the media type murmur sent |
+| `bytes` | integer | always | length of the decoded image; of the source data as given when it is not valid base64 or not a base64 source |
+| `sha256` | string | always | hex sha256 of the bytes `bytes` counts |
+| `outcome` | string | always | `sent` (original bytes), `resized` (resized or re-encoded) or `replaced` (a text line instead) |
+| `width`, `height` | integer | when the header was read | the original size |
+| `sent_media_type` | string | `sent`, `resized` | the media type sent |
+| `sent_width`, `sent_height` | integer | `sent`, `resized`, when the original size is known | the size sent, which is the size the model sees |
+| `scale` | number | `sent`, `resized`, when the original size is known | `sent_width / width` |
+| `placement` | string | `sent`, `resized` | `function_call_output`, `user_after_tool` or `user` |
+| `reason` | string | `replaced` | why the image was not sent |
+
+### Images the driver does not send
+
+An image the driver cannot send becomes a text block in its place, and the request is still sent:
+
+```
+[image not shown: <media_type>, <n> bytes, sha256 <hex>; <reason>]
+```
+
+| Reason | When |
+|---|---|
+| `model '<model>' does not take image input in driver-openai's model table` | the model reads no image: `gpt-oss-120b`, `gpt-oss-20b` |
+| `the image data is not valid base64: <detail>` | the block's data does not decode |
+| `the image's dimensions could not be read: <detail>` | the header does not parse as the media type murmur named |
+| `the image is <w>x<h> px, over the driver's decode ceiling of 8000 px a side and 40000000 pixels` | the header names a size over the decode ceiling |
+| `the image could not be decoded: <detail>` | the pixels do not decode |
+| `the image could not be re-encoded after resizing: <detail>` | the encoder refuses the resized image |
+
+murmur's own `[image not shown: …; the <keep> newer images in this conversation are shown instead]`
+and `[image unavailable: …]` lines arrive as text and are sent as they are.
+
+### Cost
+
+The pre-pass runs inside the driver component on every request that holds an image, and on no
+other. murmur re-sends the newest `context.images.keep` images on every turn, so an image that is
+resized is resized again on each turn, to the same bytes: sizing is deterministic, so the prompt
+prefix that holds it stays cacheable. An image that already fits costs only a base64 decode, a
+sha256 and a header read.
+
+Measured on 2026-11-01 by
+`cargo test -p murmur-driver-image --test wasm_timing -- --ignored --nocapture`: the whole
+pre-pass for one 3840×2160 screenshot-like PNG (8742731 bytes), 7 runs per case, as a
+wasm32-wasip2 command under wasmtime 46 and natively, on an Intel Core i7-8565U (8 threads) at a
+load average of 7 to 8.
+
+| Case | Sent at | Sent bytes | wasm32-wasip2, median (range) | native, median (range) |
+|---|---|---|---|---|
+| Anthropic high-resolution tier | 2576×1449 | 4813605 | 1557.5 ms (1535.0–1609.4) | 724.8 ms (702.0–865.9) |
+| Anthropic standard tier | 1456×819 | 1579629 | 936.7 ms (874.8–964.9) | 440.8 ms (421.7–456.7) |
+| OpenAI 2048 px / 2,500 patches | 2048×1152 | 1558098 | 1340.0 ms (1139.7–1446.9) | 539.7 ms (506.2–579.9) |
+| Fits as it is: header read only | 3840×2160 | 8742731 | 108.8 ms (94.5–122.9) | 88.9 ms (83.4–97.1) |
+
+### Checked against the live API
+
+On 2026-11-01, with a PNG of the word LANTERN:
+
+| Request | HTTP status | The model's answer |
+|---|---|---|
+| Responses, `gpt-5.6-luna`: `function_call_output.output` as `[input_text, input_image]` | 200 | "LANTERN" |
+| Chat Completions, `chat-latest`: the image as an `image_url` part inside the tool message | 200 | "The word is **attached**.": the request is accepted and the image is not seen |
+| Chat Completions, `chat-latest`: this driver's placement, a user message after the tool message | 200 | "LANTERN" |
 
 ## Models this driver refuses
 

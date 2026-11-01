@@ -1,0 +1,37 @@
+[package]
+name = "murmur-driver-image"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+
+# Internal-only shared library: decodes, measures, resizes and re-encodes the images an inference
+# driver finds in a request, so driver-anthropic and driver-openai size each image to their
+# model's documented limits before sending it. It holds no provider rule: each driver supplies its
+# own size predicate and model table. NOT an artifact: it has no murmur.yaml, so nothing publishes
+# it.
+
+[lib]
+name = "murmur_driver_image"
+path = "src/lib.rs"
+
+[features]
+# Test images for the drivers' tests and the timing example; see `fixtures` in src/lib.rs.
+fixtures = []
+
+[dependencies]
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+serde_json.workspace = true
+sha2.workspace = true
+
+# tests/wasm_timing.rs runs examples/timing.rs, built for wasm32-wasip2, under the wasmtime release
+# murmur embeds. A target-scoped table keeps both off the wasm32 build, so
+# `cargo clippy --target wasm32-wasip2 --all-targets` still builds.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+wasmtime = "46"
+wasmtime-wasi = "46"
+
+# The pre-pass timing program tests/wasm_timing.rs builds for wasm32-wasip2 and for the host.
+[[example]]
+name = "timing"
+required-features = ["fixtures"]

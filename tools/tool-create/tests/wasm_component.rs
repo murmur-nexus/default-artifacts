@@ -102,6 +102,10 @@ fn run_create(workdir: &Path, data_payload: &str) -> (Status, Option<String>, Va
         .murmur_tool_run()
         .call_run(&mut store, &input)
         .expect("run");
+    assert!(
+        result.attachments.is_empty(),
+        "this tool attaches no image, so ToolResult.attachments is empty"
+    );
     let summary = result.summary.clone();
     let data: Value = result
         .data

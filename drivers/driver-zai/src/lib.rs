@@ -1125,6 +1125,7 @@ mod wasm_driver {
                 data_path: None,
                 truncated: false,
                 metadata,
+                attachments: Vec::new(),
             }
         }
     }

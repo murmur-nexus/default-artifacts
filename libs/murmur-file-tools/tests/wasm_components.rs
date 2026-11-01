@@ -202,9 +202,15 @@ fn run_tool_raw(
         data: Some(data_payload.to_string()),
         log_path: None,
     };
-    tool.murmur_tool_run()
+    let result = tool
+        .murmur_tool_run()
         .call_run(&mut store, &input)
-        .expect("call run")
+        .expect("call run");
+    assert!(
+        result.attachments.is_empty(),
+        "this tool attaches no image, so ToolResult.attachments is empty"
+    );
+    result
 }
 
 /// The workdir's immediate entries, sorted — the "did the call leave anything behind" check.

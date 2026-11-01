@@ -2,6 +2,7 @@
 // or from cfg(test). Suppress dead_code noise in plain host library builds.
 #![cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
 
+use murmur_driver_image::{largest_fit, prepare_source, Action, ImageReport, Rule, SizeRule};
 use murmur_driver_stream::Failure;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -37,48 +38,107 @@ impl ApiSurface {
     }
 }
 
+/// How a model takes an image under `detail: auto`, the default this driver leaves in place: it
+/// keeps an image at most `max_dimension` px on either side that needs at most `patch_budget`
+/// 32×32 patches, and rescales or rejects anything larger. From the "Model sizing behavior" and
+/// "Image input requirements" sections of
+/// <https://developers.openai.com/api/docs/guides/images-vision>, read 2026-11-01.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ImageRule {
+    max_dimension: u32,
+    patch_budget: u32,
+}
+
+/// `gpt-6-astra` and `gpt-5.6-sol`/`-terra`/`-luna`: `auto` is `original`, which keeps
+/// dimensions up to 65,535 px, and an image over 30,000 patches is rejected, not resized.
+const ORIGINAL_65535_PX: ImageRule = ImageRule {
+    max_dimension: 65535,
+    patch_budget: 30000,
+};
+/// `gpt-5.5`: `auto` is `original`, up to 10,000 patches and 6000 px.
+const ORIGINAL_6000_PX: ImageRule = ImageRule {
+    max_dimension: 6000,
+    patch_budget: 10000,
+};
+/// `gpt-5.4` and `gpt-5.4-mini`: `auto` is `high`, up to 2,500 patches and 2048 px. Also the rule
+/// for every vision model the sizing table does not list: no listed family rescales an image
+/// inside it.
+const HIGH_2048_PX: ImageRule = ImageRule {
+    max_dimension: 2048,
+    patch_budget: 2500,
+};
+/// `gpt-5.2`: every detail level is 2048 px and a 6,144-patch budget.
+const GPT_5_2_2048_PX: ImageRule = ImageRule {
+    max_dimension: 2048,
+    patch_budget: 6144,
+};
+
+/// One model this driver accepts: the surface it is sent to, and how it takes images (`None`:
+/// its model page lists no image input).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ModelRoute {
+    id: &'static str,
+    surface: ApiSurface,
+    images: Option<ImageRule>,
+}
+
+const fn responses(id: &'static str, images: Option<ImageRule>) -> ModelRoute {
+    ModelRoute {
+        id,
+        surface: ApiSurface::Responses,
+        images,
+    }
+}
+
 /// Every model this driver accepts, in the order OpenAI's model catalogue lists them, with the
-/// surface it is sent to. Each surface is an endpoint the model's page lists as Supported: a
-/// model that lists only Responses goes there, and of the models that list both, `chat-latest`
-/// goes to Chat Completions and the rest to Responses. This table is the one place the crate
-/// branches on a model id. `murmur.yaml`'s `models:` block, README.md's "Model limits" table and README.md's
-/// "Endpoints" table hold the same ids, and a test keeps all four in step.
-const MODEL_ROUTES: &[(&str, ApiSurface)] = &[
-    ("gpt-6-astra", ApiSurface::Responses),
-    ("gpt-6.1-sol", ApiSurface::Responses),
-    ("gpt-6-luna", ApiSurface::Responses),
-    ("gpt-5.6-cyber", ApiSurface::Responses),
-    ("gpt-oss-120b", ApiSurface::Responses),
-    ("gpt-oss-20b", ApiSurface::Responses),
-    ("gpt-6-sol", ApiSurface::Responses),
-    ("gpt-5.6-sol", ApiSurface::Responses),
-    ("gpt-5.6-terra", ApiSurface::Responses),
-    ("gpt-5.6-luna", ApiSurface::Responses),
-    ("gpt-5.5", ApiSurface::Responses),
-    ("gpt-5.5-pro", ApiSurface::Responses),
-    ("gpt-5.4", ApiSurface::Responses),
-    ("gpt-5.4-pro", ApiSurface::Responses),
-    ("gpt-5.4-mini", ApiSurface::Responses),
-    ("gpt-5.2", ApiSurface::Responses),
-    ("gpt-5.2-pro", ApiSurface::Responses),
-    ("chat-latest", ApiSurface::ChatCompletions),
+/// surface it is sent to and its image rule. Each surface is an endpoint the model's page lists as
+/// Supported: a model that lists only Responses goes there, and of the models that list both,
+/// `chat-latest` goes to Chat Completions and the rest to Responses. Whether a model reads images
+/// is its page's "Input modalities" line. This table is the one place the crate branches on a
+/// model id. `murmur.yaml`'s `models:` block, README.md's "Model limits", "Endpoints" and "Images"
+/// tables hold the same ids, and tests keep all of them in step.
+const MODEL_ROUTES: &[ModelRoute] = &[
+    responses("gpt-6-astra", Some(ORIGINAL_65535_PX)),
+    responses("gpt-6.1-sol", Some(HIGH_2048_PX)),
+    responses("gpt-6-luna", Some(HIGH_2048_PX)),
+    responses("gpt-5.6-cyber", Some(HIGH_2048_PX)),
+    responses("gpt-oss-120b", None),
+    responses("gpt-oss-20b", None),
+    responses("gpt-6-sol", Some(HIGH_2048_PX)),
+    responses("gpt-5.6-sol", Some(ORIGINAL_65535_PX)),
+    responses("gpt-5.6-terra", Some(ORIGINAL_65535_PX)),
+    responses("gpt-5.6-luna", Some(ORIGINAL_65535_PX)),
+    responses("gpt-5.5", Some(ORIGINAL_6000_PX)),
+    responses("gpt-5.5-pro", Some(HIGH_2048_PX)),
+    responses("gpt-5.4", Some(HIGH_2048_PX)),
+    responses("gpt-5.4-pro", Some(HIGH_2048_PX)),
+    responses("gpt-5.4-mini", Some(HIGH_2048_PX)),
+    responses("gpt-5.2", Some(GPT_5_2_2048_PX)),
+    responses("gpt-5.2-pro", Some(HIGH_2048_PX)),
+    ModelRoute {
+        id: "chat-latest",
+        surface: ApiSurface::ChatCompletions,
+        images: Some(HIGH_2048_PX),
+    },
 ];
+
+fn model_route(model: &str) -> Option<&'static ModelRoute> {
+    MODEL_ROUTES.iter().find(|route| route.id == model)
+}
 
 /// The surface `model` is sent to, looked up by its exact id. Anything else — a dated
 /// snapshot, a model OpenAI marks Deprecated, another provider's id — is refused before a
 /// request body is built, so it costs no HTTP call.
 fn route(model: &str) -> Result<ApiSurface, String> {
-    MODEL_ROUTES
-        .iter()
-        .find(|(id, _)| *id == model)
-        .map(|(_, surface)| *surface)
+    model_route(model)
+        .map(|route| route.surface)
         .ok_or_else(|| {
             format!(
                 "driver: model '{model}' is not supported by driver-openai. \
                  Supported models: {}.",
                 MODEL_ROUTES
                     .iter()
-                    .map(|(id, _)| *id)
+                    .map(|route| route.id)
                     .collect::<Vec<_>>()
                     .join(", ")
             )
@@ -160,12 +220,132 @@ enum MurmurContentBlock {
 
 #[derive(Debug, Deserialize)]
 struct MurmurImageSource {
+    /// `base64` when absent, the only kind murmur sends. Another kind is sent unmeasured.
+    #[serde(default)]
+    r#type: Option<String>,
     media_type: String,
     data: String,
 }
 
 fn default_object() -> Value {
     json!({})
+}
+
+// ── Images ────────────────────────────────────────────────────────────────────
+
+/// Whether `rule` keeps a `width`×`height` image as it is: both sides within `max_dimension`, and
+/// `⌈w/32⌉·⌈h/32⌉` patches within `patch_budget`.
+fn openai_fits(rule: ImageRule, width: u32, height: u32) -> bool {
+    width <= rule.max_dimension
+        && height <= rule.max_dimension
+        && width.div_ceil(32) * height.div_ceil(32) <= rule.patch_budget
+}
+
+/// The size `model` sees a `width`×`height` image at — the size this driver sends it at — or
+/// `None` when the model reads no image or is not in `MODEL_ROUTES`. The pre-pass sizes through
+/// the same rule; this is the entry point for mapping a model's coordinates back onto the original
+/// image.
+#[cfg_attr(not(test), allow(dead_code))]
+fn openai_image_size(model: &str, width: u32, height: u32) -> Option<(u32, u32)> {
+    let rule = model_route(model)?.images?;
+    Some(largest_fit(width, height, |w, h| openai_fits(rule, w, h)))
+}
+
+/// Media types sent as a PNG of their first frame whatever their size: the vision guide accepts
+/// only a non-animated GIF.
+const ALWAYS_REENCODED: &[&str] = &["image/gif"];
+
+/// Size every image of every `user` and `tool` message for `model`'s rule, in place, and report
+/// what became of each; `surface` decides where a tool image is placed. A request holding no image
+/// is left untouched and nothing is decoded.
+fn prepare_images(
+    request: &mut MurmurRequest,
+    images: Option<ImageRule>,
+    surface: ApiSurface,
+) -> Vec<ImageReport> {
+    let holds_image = request.messages.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, MurmurContentBlock::Image { .. }))
+    });
+    if !holds_image {
+        return Vec::new();
+    }
+
+    let fits = |w: u32, h: u32| images.is_some_and(|rule| openai_fits(rule, w, h));
+    let rule = match images {
+        None => Rule::NoVision {
+            reason: format!(
+                "model '{}' does not take image input in driver-openai's model table",
+                request.model
+            ),
+        },
+        Some(_) => Rule::Sized(SizeRule {
+            fits: &fits,
+            always_reencode: ALWAYS_REENCODED,
+            max_base64_len: None,
+        }),
+    };
+    let tool_placement = match surface {
+        ApiSurface::Responses => "function_call_output",
+        ApiSurface::ChatCompletions => "user_after_tool",
+    };
+
+    let mut reports = Vec::new();
+    for (index, message) in request.messages.iter_mut().enumerate() {
+        let placement = match message.role.as_str() {
+            "user" => "user",
+            "tool" => tool_placement,
+            _ => continue,
+        };
+        for (block_index, block) in message.content.iter_mut().enumerate() {
+            let MurmurContentBlock::Image { source } = block else {
+                continue;
+            };
+            let prepared = prepare_source(
+                index,
+                block_index,
+                source.r#type.as_deref(),
+                &source.media_type,
+                &source.data,
+                placement,
+                &rule,
+            );
+            match prepared.action {
+                Action::Keep => {}
+                Action::Replace { media_type, data } => {
+                    source.media_type = media_type;
+                    source.data = data;
+                }
+                Action::Line(text) => *block = MurmurContentBlock::Text { text },
+            }
+            reports.push(prepared.report);
+        }
+    }
+    reports
+}
+
+/// The `data:` URL both surfaces carry an image as.
+fn image_data_url(source: &MurmurImageSource) -> String {
+    format!("data:{};base64,{}", source.media_type, source.data)
+}
+
+/// Route a parsed request, size its images and build its provider body: the surface it goes to,
+/// the body, and the report of every image it held. `run_inner` and the tests build a body
+/// through this one path.
+fn build_request_body(
+    mut request: MurmurRequest,
+    config: &DriverConfig,
+    store: bool,
+) -> Result<(ApiSurface, Value, Vec<ImageReport>), String> {
+    // A model outside MODEL_ROUTES is refused here, before a body is built: it costs no HTTP
+    // call.
+    let surface = route(&request.model)?;
+    let images = model_route(&request.model).and_then(|route| route.images);
+    let reports = prepare_images(&mut request, images, surface);
+    let body = build_provider_request(&request, config, store, surface)?;
+    Ok((surface, body, reports))
 }
 
 // ── Server-side response retention (`store`) governance ───────────────────────
@@ -422,13 +602,26 @@ fn translate_murmur_request_to_openai(request: &MurmurRequest) -> Result<Value, 
         }));
     }
 
+    // A tool message takes only text, so the images of a run of consecutive tool messages follow
+    // the run's last one, in one user message: never between two tool messages, which must
+    // directly follow the assistant turn that called them.
+    let mut tool_images = Vec::new();
     for message in &request.messages {
+        if message.role != "tool" && !tool_images.is_empty() {
+            messages.push(json!({"role": "user", "content": std::mem::take(&mut tool_images)}));
+        }
         match message.role.as_str() {
             "user" => messages.push(translate_user_message(message)),
             "assistant" => messages.push(translate_assistant_message(message)?),
-            "tool" => messages.push(translate_tool_message(message)?),
+            "tool" => {
+                messages.push(translate_tool_message(message)?);
+                tool_images.extend(tool_image_parts(message));
+            }
             other => return Err(format!("driver: unsupported message role '{other}'")),
         }
+    }
+    if !tool_images.is_empty() {
+        messages.push(json!({"role": "user", "content": tool_images}));
     }
 
     let tools = request
@@ -506,7 +699,7 @@ fn translate_user_message(message: &MurmurMessage) -> Value {
                 MurmurContentBlock::Image { source } => Some(json!({
                     "type": "image_url",
                     "image_url": {
-                        "url": format!("data:{};base64,{}", source.media_type, source.data),
+                        "url": image_data_url(source),
                     }
                 })),
                 _ => None,
@@ -574,6 +767,30 @@ fn translate_assistant_message(message: &MurmurMessage) -> Result<Value, String>
             "tool_calls": tool_calls,
         }))
     }
+}
+
+/// The Chat Completions parts for a tool message's images: each a text part naming the call it
+/// answers, then the image.
+fn tool_image_parts(message: &MurmurMessage) -> Vec<Value> {
+    let call = message.tool_call_id.as_deref().unwrap_or_default();
+    message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            MurmurContentBlock::Image { source } => Some([
+                json!({
+                    "type": "text",
+                    "text": format!("Image attached to the result of tool call {call}:"),
+                }),
+                json!({
+                    "type": "image_url",
+                    "image_url": {"url": image_data_url(source)},
+                }),
+            ]),
+            _ => None,
+        })
+        .flatten()
+        .collect()
 }
 
 fn translate_tool_message(message: &MurmurMessage) -> Result<Value, String> {
@@ -737,7 +954,7 @@ fn translate_user_message_responses(message: &MurmurMessage) -> Value {
             })),
             MurmurContentBlock::Image { source } => Some(json!({
                 "type": "input_image",
-                "image_url": format!("data:{};base64,{}", source.media_type, source.data),
+                "image_url": image_data_url(source),
             })),
             _ => None,
         })
@@ -801,10 +1018,33 @@ fn translate_tool_message_responses(message: &MurmurMessage) -> Result<Value, St
         .collect::<Vec<_>>()
         .join("\n");
 
+    // An output holding an image is an array: the text, when there is any, then each image.
+    let images = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            MurmurContentBlock::Image { source } => Some(json!({
+                "type": "input_image",
+                "image_url": image_data_url(source),
+            })),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let output = if images.is_empty() {
+        Value::String(text)
+    } else {
+        let mut parts = Vec::with_capacity(images.len() + 1);
+        if !text.is_empty() {
+            parts.push(json!({"type": "input_text", "text": text}));
+        }
+        parts.extend(images);
+        Value::Array(parts)
+    };
+
     Ok(json!({
         "type": "function_call_output",
         "call_id": call_id,
-        "output": text,
+        "output": output,
     }))
 }
 
@@ -2037,11 +2277,12 @@ fn assemble_responses_streaming_response(
 mod wasm_driver {
     use super::{
         assemble_openai_streaming_response, assemble_responses_streaming_response,
-        build_provider_request, parse_driver_config, process_openai_sse_line,
-        process_responses_sse_line, render_outcome, route, status_failure, store_opt_in,
+        build_request_body, parse_driver_config, process_openai_sse_line,
+        process_responses_sse_line, render_outcome, status_failure, store_opt_in,
         translate_openai_response_to_murmur, translate_responses_to_murmur, ApiSurface,
         MurmurRequest, ThinkingState, ToolCallSignal, ToolCallState, UsageTokens,
     };
+    use murmur_driver_image::attach_image_report;
     use murmur_driver_stream::Failure;
     use murmur_wasi_http::{write_body, BodyWrite};
     use serde_json::Value;
@@ -2106,6 +2347,7 @@ mod wasm_driver {
                 data_path: None,
                 truncated: false,
                 metadata,
+                attachments: Vec::new(),
             }
         }
     }
@@ -2138,15 +2380,15 @@ mod wasm_driver {
 
         let murmur_request: MurmurRequest = serde_json::from_str(&raw)
             .map_err(|err| format!("driver: failed to parse tool-input.data: {err}"))?;
+        drop(raw);
 
-        // A model outside MODEL_ROUTES is refused here, before a body is built: it costs no
-        // HTTP call.
-        let surface = route(&murmur_request.model)?;
-
-        let provider_request = build_provider_request(&murmur_request, &config, store, surface)?;
+        // Images are sized here, before translation; `images` is what the response reports.
+        let (surface, provider_request, images) =
+            build_request_body(murmur_request, &config, store)?;
 
         let body = serde_json::to_vec(&provider_request)
             .map_err(|err| format!("driver: failed to encode request body: {err}"))?;
+        drop(provider_request);
 
         let url = format!("{}/{}", endpoint.trim_end_matches('/'), surface.path());
 
@@ -2180,7 +2422,7 @@ mod wasm_driver {
 
         // `provider_response_id` is the raw Responses `id` (streaming or not);
         // `result` is the translated murmur response.
-        let (result, provider_response_id): (Value, Option<String>) = if is_json {
+        let (mut result, provider_response_id): (Value, Option<String>) = if is_json {
             // Non-streaming fallback (test servers, providers ignoring stream:true).
             let mut all = first;
             loop {
@@ -2224,6 +2466,7 @@ mod wasm_driver {
             None
         };
 
+        attach_image_report(&mut result, &images);
         Ok((result, continuation_id))
     }
 
@@ -2920,8 +3163,8 @@ mod tests {
 
     #[test]
     fn route_places_every_model_routes_id_on_its_row_surface() {
-        for (id, surface) in MODEL_ROUTES {
-            assert_eq!(route(id), Ok(*surface), "route('{id}')");
+        for row in MODEL_ROUTES {
+            assert_eq!(route(row.id), Ok(row.surface), "route('{}')", row.id);
         }
         assert_eq!(route("gpt-oss-120b"), Ok(ApiSurface::Responses));
         assert_eq!(route("gpt-oss-20b"), Ok(ApiSurface::Responses));
@@ -2932,7 +3175,7 @@ mod tests {
     fn route_refuses_every_id_outside_the_table_naming_it() {
         let supported = MODEL_ROUTES
             .iter()
-            .map(|(id, _)| *id)
+            .map(|row| row.id)
             .collect::<Vec<_>>()
             .join(", ");
         for model in [
@@ -4665,6 +4908,9 @@ mod tests {
             context_window: u32,
             #[serde(default)]
             max_input_tokens: Option<u32>,
+            // Optional to murmur; required of every entry here, and checked below.
+            #[serde(default)]
+            vision: Option<bool>,
         }
 
         // Parsed with the crate murmur parses the bundled manifest with.
@@ -4673,6 +4919,12 @@ mod tests {
             .models;
         assert!(!models.is_empty(), "murmur.yaml's models: block is empty");
         for (id, limits) in &models {
+            let reads_images = super::model_route(id).is_some_and(|row| row.images.is_some());
+            assert_eq!(
+                limits.vision,
+                Some(reads_images),
+                "models.{id}: `vision` must be declared and agree with MODEL_ROUTES"
+            );
             assert!(
                 limits.max_output_tokens >= 1
                     && limits.context_window >= 1
@@ -4713,10 +4965,12 @@ mod tests {
                     panic!("README.md row '{id}': '{cell}' is not an integer or none")
                 })),
             };
+            // The Images table documents `vision`; this table only the numbers.
             let limits = Limits {
                 max_output_tokens: number(out),
                 context_window: number(ctx),
                 max_input_tokens: ceiling,
+                vision: models.get(id).and_then(|declared| declared.vision),
             };
             assert!(
                 documented.insert(id.to_string(), limits).is_none(),
@@ -4725,7 +4979,7 @@ mod tests {
         }
 
         // The accepted set is MODEL_ROUTES.
-        let accepted: Vec<&str> = super::MODEL_ROUTES.iter().map(|(id, _)| *id).collect();
+        let accepted: Vec<&str> = super::MODEL_ROUTES.iter().map(|row| row.id).collect();
         assert!(
             accepted.contains(&"gpt-5.6-luna"),
             "MODEL_ROUTES lacks 'gpt-5.6-luna'"
@@ -5632,3 +5886,9 @@ mod tests {
         assert!(finish < awaited, "the response is awaited after the body");
     }
 }
+
+#[cfg(test)]
+mod control_tests;
+
+#[cfg(test)]
+mod image_tests;
