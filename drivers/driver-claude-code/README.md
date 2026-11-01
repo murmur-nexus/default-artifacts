@@ -239,7 +239,7 @@ boundary, the same lines split into different batches still produce the same eve
 | `stream_event` whose `event.delta.type` is `input_json_delta` | `tool-call-progress` with the running UTF-8 byte total of the call's input so far; none when no `tool_use` block in this message opened its `index`, or its `partial_json` is empty |
 | `stream_event` anything else (`content_block_stop`, `message_delta`, `message_stop`, `signature_delta`, other block starts) | none |
 | `assistant` | at most one `thinking`, then at most one `text`, then one `tool-call` per `tool_use` block |
-| `user` `tool_result` block | `tool-result` |
+| `user` `tool_result` block | `tool-result`; an `image` block in it becomes `[image: <media type>, <n> bytes]` — see [Images in a tool result](#images-in-a-tool-result) |
 | `user` any other block, such as the `[Request interrupted by user]` marker | none |
 | `result` | one `usage`, then `turn-end` or `turn-failed` — see [The tokens a turn spent](#the-tokens-a-turn-spent) |
 | `rate_limit_event` | one `quota` — see [Subscription windows](#subscription-windows) |
@@ -452,7 +452,7 @@ a `prompt_suggestion` line is noted like any other line it does not read.
   `subscription` only when the harness reports `apiKeySource: "none"`; every other value reads
   as `api-key`, **absent included**. The runtime warns on anything that is not `subscription`,
   so the ambiguous case fails towards being warned about rather than towards a quiet
-  subscription claim. The ten mock recordings in `tests/fixtures/` authenticated with an API
+  subscription claim. The eleven mock recordings in `tests/fixtures/` authenticated with an API
   key and read `api-key`. `11-subscription-rate-limit` ran on a subscription login and reads
   `subscription`.
 - **`retry`** takes `attempt` from the line and reads its reason as `<error> (<error_status>)`,
@@ -461,8 +461,71 @@ a `prompt_suggestion` line is noted like any other line it does not read.
   `mcp__<anything>__` strip would also rename the tools of an MCP server this driver never
   registered; with no bridge recorded, a tool name passes through untouched.
 - **`tool-result`** pairs by `tool_use_id`. Its output is the block's `content` when that is a
-  string, and otherwise its text blocks joined with newlines, with any non-text block keeping
-  its JSON rather than being dropped.
+  string, and otherwise its blocks joined with newlines: a text block gives its text, an `image`
+  block gives one reference line (below), and any other block keeps its JSON rather than being
+  dropped. A `content` that is a single `image` object gives the line on its own.
+
+### Images in a tool result
+
+An image block never reaches the event feed as its bytes. In its place, the `tool-result` output
+carries one line:
+
+    [image: <media type>, <n> bytes]
+
+The driver reads both shapes an image block arrives in. `claude` writes the Anthropic one.
+
+| Field | Read from, first match wins |
+|---|---|
+| media type | `source.media_type` (when `source` is an object), `mimeType`, `media_type`; the first non-blank string |
+| data | `source.data` (when `source` is an object), `data`; the first string |
+
+`<n>` is the size the base64 decodes to, worked out from its length without decoding it.
+ASCII whitespace is ignored. Any character outside `A–Z a–z 0–9 + /` makes the size unknown,
+and so does `=` anywhere but the last one or two places, padded data that is not a whole number
+of 4-character groups, and unpadded data that ends on a single character. The fallbacks:
+
+| Block | Line |
+|---|---|
+| no media type | `[image: unknown media type, 19 bytes]` |
+| no data string (a `source.type: "url"` image, `"source":"s"`) or data that is not base64 | `[image: image/png, size unknown]` |
+| neither | `[image: unknown media type, size unknown]` |
+
+**The size is what `claude` reported, not necessarily what the tool attached.** `claude` passes a
+small image to its model byte for byte. It re-encodes a large one. In the mock recording below, a
+12,005,713-byte 2000×2000 PNG went to the model as a 1932×1932 JPEG of 429,284 bytes, and the
+line then reads `[image: image/jpeg, 429284 bytes]`.
+
+**The line is murmur's own trace placeholder without the hash.** murmur writes
+`[image: <media type>, <n> bytes, sha256 <hex>]` where a tool result's output repeats an image's
+base64. With this driver the output never does, so the hash is found in the trace's `tool_call`
+record, in its `attachments` entry `{"path","media_type","bytes","sha256"}` for the same call.
+
+**Claude Code shows its model an image a murmur tool returns.** `claude` 2.1.316 was checked two ways:
+
+- **Mock recording `12-bridge-image-result`.** The request `claude` sent its model after the
+  tool call holds the bridge's image as an `image` block, `source.type: "base64"`, with the
+  bridge's exact bytes (same sha256). The block sits between the bridge's text item and a text
+  block `claude` adds itself, `[Image: source: <path>]`. That path names the copy `claude` saves
+  under `$HOME/.claude/projects/<project>/<session>/tool-results/`. The `user` line on stdout
+  carries the same three blocks, base64 included, in `message.content` and again in
+  `tool_use_result`.
+- **A live subscription run of `tests/live/image-check.sh`**, on a `mur` built at `4f65bb98`.
+  On `--model haiku`, the model read the number and the colour off a picture it could see only
+  in the tool result, and the script printed `PASS`. That was the implementing agent's own
+  run. The maintainer's run is pending, with the command in
+  [`tests/live/README.md`](tests/live/README.md#the-live-check).
+
+**Image items reach the harness only on a murmur with `4f65bb98` or later.** That commit makes the
+tool bridge answer a bridged call with an MCP `image` item per accepted attachment. On an
+earlier murmur, the tool result carries only text, and there is no image for this driver to
+report.
+
+**murmur can pair attachments with the wrong call.** murmur pairs a tool's `AttachmentReport`
+with the driver's `tool-result` by tool name and arguments. It first looks for a report whose
+base64 appears verbatim in the output. This driver never puts base64 in the output, so murmur
+always falls back to the oldest report with the same name and arguments. Two concurrent calls
+with the same name and arguments, returning different images and reported out of order, can
+have their `attachments` swapped in the trace. Neither murmur nor this driver works around it.
 
 ### `classify-exit`
 
@@ -481,13 +544,14 @@ canceled turn from a finished one.
 
 ## The recordings this is tested against
 
-`tests/fixtures/` holds eleven recordings of real `claude` output, each with its stdout, its
+`tests/fixtures/` holds twelve recordings of real `claude` output, each with its stdout, its
 stderr and its exit code:
 
 | Recordings | claude | Auth | Launched with |
 |---|---|---|---|
 | `01` to `10` | 2.1.278, against a mock endpoint and a mock bridge; byte-identical copies of the roadmap's | API key | the bridge `claude_bridge`, no config |
 | `11-subscription-rate-limit` | 2.1.314, a real subscription turn on `--model haiku` | subscription | no bridge, `prompt_suggestions: true` |
+| `12-bridge-image-result` | 2.1.316, against a mock endpoint and a mock bridge that answers with murmur's text item, then an MCP `image` item | API key | the bridge `claude_bridge`, no config |
 
 `tests/golden.rs` asserts the **complete** event list for every one. It also asserts, across
 every recording:
@@ -497,6 +561,10 @@ every recording:
   them, including the two that exit `1`;
 - no recording whose `result` line says `is_error: true` ends the turn successfully;
 - each `rate_limit_event` line gives one `quota`, and only the subscription recording has one.
+
+`12-bridge-image-result` gives one `tool-result` with three lines: the bridge's text, the
+reference line `[image: image/png, 692 bytes]`, and the `[Image: source: …]` text block `claude`
+adds. No 16-character run of the recorded base64 appears in it.
 
 `11-subscription-rate-limit` gives `session-started` with `auth: "subscription"` and one `quota`.
 Its line names only `seven_day` in `unifiedWindows`. Read with suggestions off, it gives the same
@@ -513,8 +581,9 @@ Each recording is parsed four ways, each partition with its own fresh parse stat
 across its batches: all lines in one batch, one line per batch, a two-batch split whose boundary
 falls between a message's deltas and the `assistant` line carrying its full text, and a
 two-batch split between a tool call's `content_block_start` and its first `input_json_delta`.
-All four must produce the same events. Only `03-bridge-tool-call` streams tool input, so it is
-the only recording the fourth partition applies to; the others are checked to stream none.
+All four must produce the same events. Only `03-bridge-tool-call` and `12-bridge-image-result`
+stream tool input, so they are the only recordings the fourth partition applies to; the others
+are checked to stream none.
 
 ## Building it
 

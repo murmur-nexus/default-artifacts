@@ -8,6 +8,10 @@
 //!
 //! `11-subscription-rate-limit` is `claude` 2.1.314 on a real subscription login, with no bridge
 //! and `prompt_suggestions` on: it reports `auth: "subscription"` and one `quota`.
+//!
+//! `12-bridge-image-result` is `claude` 2.1.316 against the same kind of mocks, with a bridge
+//! that answers the way murmur's does when a tool returns an image: a text item, then an MCP
+//! `image` item. It authenticated with an API key.
 
 use driver_claude_code::{
     describe, parse_context_for, parse_line, parse_lines, tool_name_prefix, DriverConfig, Event,
@@ -23,13 +27,16 @@ const RECORDED_SERVER: &str = "claude_bridge";
 /// The model every mock recording's `init` line reports.
 const RECORDED_MODEL: &str = "claude-opus-5[1m]";
 
+/// The model the image recording's `init` line reports: `claude` 2.1.316's default.
+const IMAGE_RECORDING_MODEL: &str = "claude-opus-5-5";
+
 /// The model the subscription recording's `init` line reports, for `--model haiku`.
 const SUBSCRIPTION_MODEL: &str = "claude-haiku-5-5";
 
 /// Every recording, with the line index a mid-message batch boundary falls on: between a
 /// message's `content_block_delta` lines and the `assistant` line carrying its full text, or —
 /// for the three recordings that stream no deltas — immediately before the `result` line.
-const RECORDINGS: [(&str, usize); 11] = [
+const RECORDINGS: [(&str, usize); 12] = [
     ("01-text-new-session", 5),
     ("02-resume-same-session", 5),
     ("03-bridge-tool-call", 14),
@@ -41,6 +48,7 @@ const RECORDINGS: [(&str, usize); 11] = [
     ("09-interrupt-sigint", 9),
     ("10-resume-after-sigint", 5),
     ("11-subscription-rate-limit", 5),
+    ("12-bridge-image-result", 14),
 ];
 
 /// The recordings made on a subscription login, launched with no bridge and with
@@ -52,7 +60,8 @@ const SUBSCRIPTION_RECORDINGS: [&str; 1] = ["11-subscription-rate-limit"];
 /// that forgot which call a block index belongs to between batches would get wrong. Every other
 /// recording streams no `input_json_delta`, so it has no such boundary and skips this partition;
 /// `events_of` checks that it really does stream none.
-const TOOL_INPUT_SPLITS: [(&str, usize); 1] = [("03-bridge-tool-call", 4)];
+const TOOL_INPUT_SPLITS: [(&str, usize); 2] =
+    [("03-bridge-tool-call", 4), ("12-bridge-image-result", 4)];
 
 // ── reading a recording ──────────────────────────────────────────────────────
 
@@ -492,6 +501,98 @@ fn golden_11_subscription_rate_limit() {
     );
 }
 
+/// The bridge's 692-byte PNG, as the image item `claude` wrote back on its `user` line.
+const RECORDED_IMAGE_BYTES: u64 = 692;
+
+#[test]
+fn golden_12_bridge_image_result() {
+    let reply = "MOCKREPLY saw_secret=False tools_offered=2";
+    assert_eq!(
+        events_of("12-bridge-image-result", 14),
+        vec![
+            Event::SessionStarted(SessionInfo {
+                id: "e1d82534-9201-4553-80a2-81b3989eb0ea".to_string(),
+                auth: "api-key".to_string(),
+                model: Some(IMAGE_RECORDING_MODEL.to_string()),
+            }),
+            Event::ToolCallStarted(ToolCallStart {
+                id: "toolu_1".to_string(),
+                name: "picture_tool".to_string(),
+            }),
+            // The one `input_json_delta`, `{}`.
+            Event::ToolCallProgress(ToolCallProgress {
+                id: "toolu_1".to_string(),
+                input_bytes: 2,
+            }),
+            Event::ToolCall(ToolCallInfo {
+                id: "toolu_1".to_string(),
+                name: "picture_tool".to_string(),
+                input: "{}".to_string(),
+            }),
+            // The bridge's text item, the image item named by its line, then the text block
+            // `claude` adds itself, naming the copy it saved under its HOME.
+            Event::ToolResult(ToolResultInfo {
+                id: "toolu_1".to_string(),
+                output: [
+                    "PICTURE-TOOL-RAN",
+                    "[image attached: picture.png, image/png, 692 bytes]",
+                    "[image: image/png, 692 bytes]",
+                    "[Image: source: /home/operator/.claude/projects/-work/\
+                     e1d82534-9201-4553-80a2-81b3989eb0ea/tool-results/\
+                     mcp-claude_bridge-blob-1793557205356-hpddst.png]",
+                ]
+                .join("\n"),
+                is_error: false,
+            }),
+            delta(reply),
+            text(reply),
+            spent(2, 10, 0, 0, 0),
+            end(reply),
+        ]
+    );
+}
+
+#[test]
+fn the_recorded_image_reaches_the_feed_as_its_line_and_never_as_its_bytes() {
+    let lines = recorded_lines("12-bridge-image-result");
+    let user_line: Value = lines
+        .iter()
+        .map(|line| serde_json::from_str::<Value>(line).expect("every line is JSON"))
+        .find(|value| value["type"] == "user")
+        .expect("the recording carries the tool result's user line");
+
+    // What `claude` printed: the image in the Anthropic shape, base64 and all, in the message
+    // and again in `tool_use_result`.
+    let image = &user_line["message"]["content"][0]["content"][1];
+    assert_eq!(image["type"], "image");
+    assert_eq!(image["source"]["type"], "base64");
+    assert_eq!(image["source"]["media_type"], "image/png");
+    let data = image["source"]["data"]
+        .as_str()
+        .expect("the image carries its base64");
+    assert_eq!(data.len(), 924);
+    assert_eq!(user_line["tool_use_result"][1], *image);
+
+    // What the driver reports: the line, with the size the base64 decodes to, and no byte of it.
+    let outputs: Vec<String> = events_of("12-bridge-image-result", 14)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::ToolResult(result) => Some(result.output),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(outputs.len(), 1);
+    let output = &outputs[0];
+    assert!(output.contains(&format!(
+        "\n[image: image/png, {RECORDED_IMAGE_BYTES} bytes]\n"
+    )));
+    // No 16-character run of the base64 survives, wherever it is cut.
+    for window in data.as_bytes().windows(16) {
+        let run = std::str::from_utf8(window).expect("base64 is ASCII");
+        assert!(!output.contains(run), "{run} leaked into {output}");
+    }
+}
+
 // ── what holds across all of them ────────────────────────────────────────────
 
 #[test]
@@ -898,7 +999,7 @@ fn every_recording_reports_one_reading_per_result_line() {
 fn every_recording_reports_exactly_the_counts_it_recorded() {
     // Read off the fixture bytes with jq and written down here, so a change to a recording or
     // to the reader has to be argued with rather than absorbed.
-    let expected: [(&str, Vec<TokenUsage>); 11] = [
+    let expected: [(&str, Vec<TokenUsage>); 12] = [
         ("01-text-new-session", vec![usage(1, 5, 0, 0, 0)]),
         ("02-resume-same-session", vec![usage(1, 5, 0, 0, 0)]),
         ("03-bridge-tool-call", vec![usage(2, 10, 0, 0, 0)]),
@@ -913,6 +1014,7 @@ fn every_recording_reports_exactly_the_counts_it_recorded() {
         ("09-interrupt-sigint", vec![usage(0, 0, 0, 0, 0)]),
         ("10-resume-after-sigint", vec![usage(1, 5, 0, 0, 0)]),
         ("11-subscription-rate-limit", vec![usage(2, 4, 0, 567, 0)]),
+        ("12-bridge-image-result", vec![usage(2, 10, 0, 0, 0)]),
     ];
 
     for (name, counts) in expected {

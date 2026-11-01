@@ -50,5 +50,8 @@ description: |
   subscription, and murmur reads it only within its exit grace after the turn. Suggestions are
   off by default. Any other key, or a `prompt_suggestions` that is not a JSON boolean, refuses
   the turn with a message naming it.
+
+  An image in a tool result is reported in the feed as `[image: <media type>, <n> bytes]`, never
+  as its bytes; whether the model saw it is up to `claude`.
 requires_files:
   - driver_claude_code.wasm

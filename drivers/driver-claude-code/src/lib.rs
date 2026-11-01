@@ -1306,7 +1306,9 @@ fn user_events(value: &Value) -> Vec<Event> {
 }
 
 /// A `tool_result` block's content as one string. `claude` writes either the output itself or a
-/// list of blocks; a block that is not text keeps its JSON rather than being dropped.
+/// list of blocks. An image block becomes its [`image_reference`] line, so the feed names the
+/// image and never carries its base64; any other block that is not text keeps its JSON rather
+/// than being dropped.
 fn tool_result_output(content: Option<&Value>) -> String {
     match content {
         None | Some(Value::Null) => String::new(),
@@ -1315,12 +1317,90 @@ fn tool_result_output(content: Option<&Value>) -> String {
             .iter()
             .map(|block| match block.get("type").and_then(Value::as_str) {
                 Some("text") => text_at(block, "text"),
+                Some("image") => image_reference(block),
                 _ => block.to_string(),
             })
             .collect::<Vec<_>>()
             .join("\n"),
+        Some(image) if is_image_block(image) => image_reference(image),
         Some(other) => other.to_string(),
     }
+}
+
+/// The media type an image line names when the block carries none.
+pub const UNKNOWN_MEDIA_TYPE: &str = "unknown media type";
+
+/// The size clause an image line carries when the block's data is absent or not valid base64.
+pub const UNKNOWN_SIZE: &str = "size unknown";
+
+fn is_image_block(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("image")
+}
+
+/// The line the feed carries in place of an image block: `[image: <media type>, <n> bytes]`,
+/// where `<n>` is the size of the image the base64 decodes to. It is murmur's trace placeholder,
+/// `[image: <media type>, <n> bytes, sha256 <hex>]`, without the hash: the trace's
+/// `tool_call.attachments` entry for the same call already carries it.
+///
+/// Reads both shapes an image block arrives in: the Anthropic one (`source.media_type`,
+/// `source.data`), which is what `claude` writes, and the MCP one (`mimeType`, `data`). A block
+/// with no media type names [`UNKNOWN_MEDIA_TYPE`]; one whose data is absent, not a string or
+/// not valid base64 — a `source.type: "url"` image among them — says [`UNKNOWN_SIZE`].
+fn image_reference(block: &Value) -> String {
+    let source = block.get("source").filter(|source| source.is_object());
+    let media_type = [
+        source.and_then(|source| source.get("media_type")),
+        block.get("mimeType"),
+        block.get("media_type"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_str)
+    .find(|media_type| !media_type.trim().is_empty())
+    .unwrap_or(UNKNOWN_MEDIA_TYPE);
+    let size = [
+        source.and_then(|source| source.get("data")),
+        block.get("data"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(Value::as_str)
+    .and_then(base64_decoded_len)
+    .map_or_else(
+        || UNKNOWN_SIZE.to_string(),
+        |bytes| format!("{bytes} bytes"),
+    );
+    format!("[image: {media_type}, {size}]")
+}
+
+/// The number of bytes standard base64 `data` decodes to, worked out from its length alone:
+/// nothing is decoded and nothing allocated.
+///
+/// ASCII whitespace anywhere is ignored, so line-wrapped base64 counts the same as unwrapped.
+/// Every other character must be in `A–Z a–z 0–9 + /`, or `=` in the last one or two places.
+/// Padded data must be a whole number of 4-character groups; unpadded data may end on a partial
+/// group of 2 or 3 characters, never 1. `None` for anything else.
+fn base64_decoded_len(data: &str) -> Option<u64> {
+    let mut symbols: u64 = 0;
+    let mut padding: u64 = 0;
+    for byte in data.bytes() {
+        match byte {
+            b' ' | b'\t' | b'\n' | b'\r' => {}
+            b'=' => padding += 1,
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' if padding == 0 => symbols += 1,
+            _ => return None,
+        }
+    }
+    let partial = symbols % 4;
+    let valid = match padding {
+        0 => partial != 1,
+        1 => partial == 3,
+        2 => partial == 2,
+        _ => false,
+    };
+    // `symbols / 4 * 3` and `partial * 3 / 4` are floor(symbols * 3 / 4) without the product,
+    // so no length overflows.
+    valid.then(|| symbols / 4 * 3 + partial * 3 / 4)
 }
 
 /// Reads a `result` line, the one line that ends a turn.
@@ -2338,7 +2418,258 @@ mod tests {
             )),
             vec![Event::ToolResult(ToolResultInfo {
                 id: "t1".to_string(),
-                output: "one\n{\"source\":\"s\",\"type\":\"image\"}".to_string(),
+                output: "one\n[image: unknown media type, size unknown]".to_string(),
+                is_error: true,
+            })]
+        );
+    }
+
+    // ── an image in a tool result is named, never carried ─────────────────────
+
+    /// murmur's 19-byte PNG fixture: the PNG signature, then `IHDRpayload`.
+    const PNG_19: &[u8] = b"\x89PNG\r\n\x1a\nIHDRpayload";
+
+    /// [`PNG_19`] as standard padded base64, as Python's `base64.b64encode` writes it.
+    const PNG_19_BASE64: &str = "iVBORw0KGgpJSERScGF5bG9hZA==";
+
+    /// The one `tool-result` a `user` line carrying `content` as its only `tool_result` gives.
+    fn tool_result_of(content: &str) -> ToolResultInfo {
+        let line = format!(
+            r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"toolu_1","content":{content}}}]}}}}"#
+        );
+        match events(&line).as_slice() {
+            [Event::ToolResult(result)] => result.clone(),
+            other => panic!("one tool-result, not {other:?}"),
+        }
+    }
+
+    fn anthropic_image(media_type: &str, data: &str) -> String {
+        format!(
+            r#"{{"type":"image","source":{{"type":"base64","media_type":"{media_type}","data":"{data}"}}}}"#
+        )
+    }
+
+    fn mcp_image(mime_type: &str, data: &str) -> String {
+        format!(r#"{{"type":"image","data":"{data}","mimeType":"{mime_type}"}}"#)
+    }
+
+    #[test]
+    fn an_anthropic_image_block_is_one_reference_line_with_its_decoded_size() {
+        assert_eq!(PNG_19.len(), 19);
+        let result = tool_result_of(&format!(
+            "[{}]",
+            anthropic_image("image/png", PNG_19_BASE64)
+        ));
+        assert_eq!(result.output, "[image: image/png, 19 bytes]");
+        assert!(!result.output.contains(PNG_19_BASE64));
+        assert_eq!(result.id, "toolu_1");
+        assert!(!result.is_error);
+    }
+
+    #[test]
+    fn an_mcp_image_block_gives_the_same_line() {
+        let result = tool_result_of(&format!("[{}]", mcp_image("image/png", PNG_19_BASE64)));
+        assert_eq!(result.output, "[image: image/png, 19 bytes]");
+        assert!(!result.output.contains(PNG_19_BASE64));
+    }
+
+    #[test]
+    fn murmurs_bridge_answer_keeps_its_text_and_names_its_image() {
+        // The text item and the image item murmur's bridge answers a bridged call with.
+        let text = r#"{"type":"text","text":"PICTURE-TOOL-RAN\n[image attached: picture.png, image/png, 19 bytes]"}"#;
+        for image in [
+            mcp_image("image/png", PNG_19_BASE64),
+            anthropic_image("image/png", PNG_19_BASE64),
+        ] {
+            let result = tool_result_of(&format!("[{text},{image}]"));
+            assert_eq!(
+                result.output,
+                "PICTURE-TOOL-RAN\n[image attached: picture.png, image/png, 19 bytes]\n[image: image/png, 19 bytes]"
+            );
+            assert!(!result.output.contains(PNG_19_BASE64));
+        }
+    }
+
+    #[test]
+    fn the_decoded_size_is_worked_out_from_the_base64_length() {
+        for (data, bytes) in [
+            ("QQ==", 1),
+            ("QUI=", 2),
+            ("QUJD", 3),
+            ("QQ", 1),
+            ("QUI", 2),
+            ("", 0),
+            (PNG_19_BASE64, 19),
+        ] {
+            assert_eq!(base64_decoded_len(data), Some(bytes), "{data:?}");
+        }
+
+        // 300 bytes encode to 400 characters: wrapped at 76 columns, as MIME wraps it, with
+        // either line ending, the size is the unwrapped one's.
+        let unwrapped = "QUJD".repeat(100);
+        let wrap = |ending: &str| {
+            unwrapped
+                .as_bytes()
+                .chunks(76)
+                .map(|line| std::str::from_utf8(line).expect("ASCII"))
+                .collect::<Vec<_>>()
+                .join(ending)
+        };
+        assert_eq!(base64_decoded_len(&unwrapped), Some(300));
+        assert_eq!(base64_decoded_len(&wrap("\n")), Some(300));
+        assert_eq!(base64_decoded_len(&wrap("\r\n")), Some(300));
+        assert_eq!(base64_decoded_len(" QU\tJD \n"), Some(3));
+    }
+
+    #[test]
+    fn data_that_is_not_base64_has_no_size() {
+        for data in [
+            "QUJ!",     // a character outside the alphabet
+            "QQ==QUJD", // padding in the middle
+            "Q=UJ",     // padding before the end
+            "QUJDQ",    // 4k+1 characters
+            "Q",        // the same, short
+            "QUJDQ===", // three padding characters
+            "QUJ==",    // padding that does not end a whole group
+            "QUJD=",    // the same, after a whole group
+            "==",       // padding alone
+            "QUJD-_",   // the URL-safe alphabet
+        ] {
+            assert_eq!(base64_decoded_len(data), None, "{data:?}");
+        }
+    }
+
+    #[test]
+    fn an_image_block_the_driver_cannot_size_or_type_still_gives_one_line() {
+        for (image, line) in [
+            (
+                r#"{"type":"image","source":"s"}"#,
+                "[image: unknown media type, size unknown]",
+            ),
+            (
+                r#"{"type":"image","source":{"type":"base64","media_type":"image/png","data":42}}"#,
+                "[image: image/png, size unknown]",
+            ),
+            (
+                r#"{"type":"image","data":["QUJD"],"mimeType":"image/png"}"#,
+                "[image: image/png, size unknown]",
+            ),
+            (
+                &anthropic_image("image/png", "QUJ!"),
+                "[image: image/png, size unknown]",
+            ),
+            (
+                &mcp_image("image/png", "QQ==QUJD"),
+                "[image: image/png, size unknown]",
+            ),
+            (
+                &mcp_image("image/png", "QUJDQ"),
+                "[image: image/png, size unknown]",
+            ),
+            (
+                r#"{"type":"image","source":{"type":"base64","data":"QUJD"}}"#,
+                "[image: unknown media type, 3 bytes]",
+            ),
+            (
+                &anthropic_image("  ", "QUJD"),
+                "[image: unknown media type, 3 bytes]",
+            ),
+            (
+                &mcp_image("", "QUJD"),
+                "[image: unknown media type, 3 bytes]",
+            ),
+            (
+                r#"{"type":"image","source":{"type":"url","url":"https://example.com/p.png"}}"#,
+                "[image: unknown media type, size unknown]",
+            ),
+            (
+                r#"{"type":"image","source":{"type":"url","media_type":"image/webp","url":"https://example.com/p.webp"}}"#,
+                "[image: image/webp, size unknown]",
+            ),
+            (
+                r#"{"type":"image"}"#,
+                "[image: unknown media type, size unknown]",
+            ),
+            (
+                r#"{"type":"image","media_type":"image/gif","data":"QUI="}"#,
+                "[image: image/gif, 2 bytes]",
+            ),
+        ] {
+            let result = tool_result_of(&format!("[{image}]"));
+            assert_eq!(result.output, line, "{image}");
+            // The same block as the whole content gives the same line.
+            assert_eq!(tool_result_of(image).output, line, "{image}");
+        }
+    }
+
+    #[test]
+    fn the_source_shape_is_read_before_the_mcp_one() {
+        let both = r#"{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"QUJD"},"mimeType":"image/png","data":"QQ=="}"#;
+        assert_eq!(tool_result_of(both).output, "[image: image/jpeg, 3 bytes]");
+        // A blank `source.media_type` falls through to `mimeType`; a `source` with no data string
+        // falls through to `data`.
+        let fallthrough = r#"{"type":"image","source":{"type":"base64","media_type":" ","data":null},"mimeType":"image/png","data":"QQ=="}"#;
+        assert_eq!(
+            tool_result_of(fallthrough).output,
+            "[image: image/png, 1 bytes]"
+        );
+    }
+
+    #[test]
+    fn a_one_mebibyte_image_is_named_by_its_size() {
+        // 1 MiB is 349,526 groups of three bytes, the last one short by two: 1,398,104
+        // characters ending in `==`.
+        let bytes = 1_048_576_u64;
+        let groups = bytes.div_ceil(3) as usize;
+        let mut data = "AAAA".repeat(groups - 1);
+        data.push_str("AA==");
+        assert_eq!(data.len(), 1_398_104);
+
+        let result = tool_result_of(&format!("[{}]", mcp_image("image/png", &data)));
+        assert_eq!(result.output, "[image: image/png, 1048576 bytes]");
+        assert!(!result.output.contains("AAAA"));
+    }
+
+    #[test]
+    fn only_image_blocks_change() {
+        // A resource block keeps its JSON, as every block the driver does not read does.
+        let resource = r#"{"type":"resource","resource":{"uri":"file:///a","text":"x"}}"#;
+        assert_eq!(
+            tool_result_of(&format!(r#"[{{"type":"text","text":"one"}},{resource}]"#)).output,
+            format!(
+                "one\n{}",
+                serde_json::from_str::<Value>(resource).expect("JSON")
+            )
+        );
+        // A string passes verbatim, even one that looks like an image block.
+        let looks_like_an_image = r#""{\"type\":\"image\",\"data\":\"QUJD\"}""#;
+        assert_eq!(
+            tool_result_of(looks_like_an_image).output,
+            r#"{"type":"image","data":"QUJD"}"#
+        );
+        // A single image object as the whole content is named like one in a list.
+        assert_eq!(
+            tool_result_of(&anthropic_image("image/png", PNG_19_BASE64)).output,
+            "[image: image/png, 19 bytes]"
+        );
+        // Any other single object keeps its JSON; null gives nothing.
+        assert_eq!(
+            tool_result_of(r#"{"type":"text","text":"t"}"#).output,
+            r#"{"text":"t","type":"text"}"#
+        );
+        assert_eq!(tool_result_of("null").output, "");
+        assert_eq!(tool_result_of("[]").output, "");
+    }
+
+    #[test]
+    fn an_absent_content_gives_an_empty_output() {
+        assert_eq!(
+            events(
+                r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t9","is_error":true}]}}"#
+            ),
+            vec![Event::ToolResult(ToolResultInfo {
+                id: "t9".to_string(),
+                output: String::new(),
                 is_error: true,
             })]
         );
