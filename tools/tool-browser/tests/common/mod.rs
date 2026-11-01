@@ -1,6 +1,8 @@
 //! What the browser suites share: which browser they run, the fixture page and server, a
 //! scratch session environment, and the guard that leaves no browser behind.
 
+// Each test binary compiles this module on its own and uses only part of it: `mur_run_browser`
+// takes the browser lookup and the fixture page, `browser` the rest. Every item is used by one.
 #![allow(dead_code)]
 
 use std::{

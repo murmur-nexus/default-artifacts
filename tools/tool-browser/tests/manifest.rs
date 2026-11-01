@@ -1,5 +1,6 @@
-//! Scenario 13: `murmur.yaml` declares a native tool with its binary, the twelve actions, and
-//! only scalar top-level properties, read by line scan from `CARGO_MANIFEST_DIR`.
+//! The tool's published interface: `murmur.yaml` declares a native tool with its binary, the
+//! twelve actions, and only scalar top-level properties, read by line scan from
+//! `CARGO_MANIFEST_DIR`.
 
 use std::path::PathBuf;
 

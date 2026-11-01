@@ -241,6 +241,13 @@ fn close_stops_everything_and_the_next_call_starts_a_new_browser() {
         data(&s).starts_with("browser: chromium "),
         "the banner again: {s}"
     );
+    assert!(
+        data(&s)
+            .lines()
+            .nth(1)
+            .is_some_and(|l| l.starts_with("page: ") && l.ends_with(" — about:blank")),
+        "a fresh browser shows about:blank: {s}"
+    );
     let new_pid = env.info().unwrap()["browser"]["pid"].as_u64().unwrap();
     assert_ne!(new_pid, browser);
 }
