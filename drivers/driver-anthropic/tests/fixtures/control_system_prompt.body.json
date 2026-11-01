@@ -1,0 +1,1 @@
+{"max_tokens":512,"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"Why is the sky blue?","type":"text"}],"role":"user"}],"model":"claude-fable-5-1","stream":true,"system":[{"cache_control":{"type":"ephemeral"},"text":"You answer in one sentence.\nNever use lists.","type":"text"}]}

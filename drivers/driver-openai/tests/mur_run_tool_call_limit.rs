@@ -365,10 +365,10 @@ fn a_tool_call_index_past_the_limit_fails_the_turn_in_the_component() {
         "the guest must not trap:\n{text}"
     );
     assert!(text.contains("status:  failed"), "{text}");
+    // murmur renders the failed turn as `the task ended failed: <error>`; earlier releases
+    // printed the driver's whole error payload. Either way it carries the driver's text.
     assert!(
-        text.contains(
-            r#"{"error":"driver: tool call index 4294967296 is past the limit of 1024 per turn","stop_reason":"error"}"#
-        ),
+        text.contains("driver: tool call index 4294967296 is past the limit of 1024 per turn"),
         "the turn must end with the driver error:\n{text}"
     );
     assert_eq!(provider.request_count(), 1, "{text}");

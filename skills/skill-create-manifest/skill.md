@@ -85,20 +85,20 @@ entry into the project store.
 ```yaml
 artifacts:
   - name: murmur/tool-read
-    version: "0.1.0"
+    version: "0.2.0"
     runtime: tool
   - name: murmur/tool-write
-    version: "0.1.0"
+    version: "0.2.0"
     runtime: tool
   - name: murmur/tool-edit
-    version: "0.1.0"
+    version: "0.2.0"
     runtime: tool
   - name: murmur/tool-find
-    version: "0.1.0"
+    version: "0.2.0"
     runtime: tool
 
   - name: murmur/driver-anthropic
-    version: "0.17.0"
+    version: "0.18.0"
     runtime: driver
 
   - name: murmur/hook-debug
@@ -109,7 +109,7 @@ artifacts:
         records: true          # hook-debug.jsonl goes in the records directory (§4.3a)
 
   - name: murmur/skill-create-manifest
-    version: "0.10.0"
+    version: "0.11.0"
     runtime: skill
 ```
 
@@ -356,7 +356,7 @@ so the driver never sees it.
 ```yaml
 artifacts:
   - name: murmur/driver-anthropic
-    version: "0.17.0"
+    version: "0.18.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
@@ -402,7 +402,7 @@ cannot.
 ```yaml
 artifacts:
   - name: murmur/driver-openai
-    version: "0.17.0"
+    version: "0.18.0"
     runtime: driver
     gateway:
       endpoint: https://api.openai.com/v1
@@ -492,19 +492,19 @@ description: "Simple file editing capsule — reads and writes files, exits on c
 
 artifacts:
   - name: murmur/tool-read
-    version: "0.1.0"
+    version: "0.2.0"
     runtime: tool
   - name: murmur/tool-write
-    version: "0.1.0"
+    version: "0.2.0"
     runtime: tool
   - name: murmur/tool-edit
-    version: "0.1.0"
+    version: "0.2.0"
     runtime: tool
   - name: murmur/tool-find
-    version: "0.1.0"
+    version: "0.2.0"
     runtime: tool
   - name: murmur/driver-anthropic
-    version: "0.17.0"
+    version: "0.18.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
@@ -538,19 +538,19 @@ artifacts:
     version: "0.6.0"
     runtime: tool
   - name: murmur/tool-read
-    version: "0.1.0"
+    version: "0.2.0"
     runtime: tool
   - name: murmur/tool-write
-    version: "0.1.0"
+    version: "0.2.0"
     runtime: tool
   - name: murmur/tool-edit
-    version: "0.1.0"
+    version: "0.2.0"
     runtime: tool
   - name: murmur/tool-find
-    version: "0.1.0"
+    version: "0.2.0"
     runtime: tool
   - name: murmur/driver-anthropic
-    version: "0.17.0"
+    version: "0.18.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
@@ -592,13 +592,13 @@ description: "Orchestrator that spawns sub-capsules for parallel task execution"
 
 artifacts:
   - name: murmur/tool-read
-    version: "0.1.0"
+    version: "0.2.0"
     runtime: tool
   - name: murmur/tool-find
-    version: "0.1.0"
+    version: "0.2.0"
     runtime: tool
   - name: murmur/driver-anthropic
-    version: "0.17.0"
+    version: "0.18.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com

@@ -12,13 +12,16 @@ serde.workspace = true
 serde_json.workspace = true
 wit-bindgen.workspace = true
 murmur-driver-env = { path = "../../libs/murmur-driver-env" }
+murmur-driver-image = { path = "../../libs/murmur-driver-image" }
 murmur-driver-stream = { path = "../../libs/murmur-driver-stream" }
 murmur-wasi-http = { path = "../../libs/murmur-wasi-http" }
 
-# tempfile gives tests/mur_run_large_body.rs scratch directories, and serde_norway parses
-# murmur.yaml in a test, as murmur does. A `[dev-dependencies]` entry is excluded from the cdylib
-# the component is built from.
+# tempfile gives the `mur_run_*` tests scratch directories, serde_norway parses murmur.yaml in a
+# test, as murmur does, and murmur-driver-image's `fixtures` feature supplies the test images. A
+# `[dev-dependencies]` entry is excluded from the cdylib the component is built from.
 [dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+murmur-driver-image = { path = "../../libs/murmur-driver-image", features = ["fixtures"] }
 serde_norway = "0.9.42"
 tempfile = "3"
 

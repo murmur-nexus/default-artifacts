@@ -1,0 +1,30 @@
+{
+  "driver_config": null,
+  "artifact_config": null,
+  "request": {
+    "model": "claude-haiku-4-5",
+    "max_tokens": 1024,
+    "messages": [
+      {"role": "user", "content": [{"type": "text", "text": "Run both tools."}]},
+      {"role": "assistant", "content": [
+        {"type": "text", "text": "Running them."},
+        {"type": "tool_call", "id": "toolu_a", "name": "first", "input": {}},
+        {"type": "tool_call", "id": "toolu_b", "name": "second", "input": {"n": 2}}
+      ]},
+      {"role": "tool", "tool_call_id": "toolu_a", "content": [
+        {"type": "text", "text": "first result"},
+        {"type": "text", "text": "[image not shown: image/png, 5120 bytes, sha256 2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae; the 5 newer images in this conversation are shown instead]"}
+      ]},
+      {"role": "tool", "tool_call_id": "toolu_b", "content": [
+        {"type": "text", "text": "[image unavailable: image/jpeg, 900 bytes, sha256 fcde2b2edba56bf408601fb721fe9b5c338d10ee429ea04fae5511b68fbf8fb9]"}
+      ]},
+      {"role": "assistant", "content": [{"type": "text", "text": "Both ran."}]},
+      {"role": "user", "content": [{"type": "text", "text": "Thanks."}, {"type": "text", "text": "Now stop."}]}
+    ],
+    "tools": [
+      {"name": "first", "parameters": {"type": "object"}},
+      {"name": "second", "description": "  ", "parameters": {"type": "object", "properties": {"n": {"type": "integer"}}}}
+    ],
+    "params": {"tool_choice": "required"}
+  }
+}

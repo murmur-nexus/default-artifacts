@@ -1,0 +1,28 @@
+{
+  "driver_config": {"verbosity": "low"},
+  "request": {
+    "model": "chat-latest",
+    "max_tokens": 2048,
+    "system": "You are a careful assistant.",
+    "prompt_cache_key": "task-7f3a",
+    "messages": [
+      {"role": "user", "content": [{"type": "text", "text": "List the files in src."}]},
+      {"role": "assistant", "content": [
+        {"type": "text", "text": "I'll look."},
+        {"type": "tool_call", "id": "call_01", "name": "find", "input": {"path": "src"}},
+        {"type": "tool_call", "id": "call_02", "name": "read", "input": {"path": "src/lib.rs"}}
+      ]},
+      {"role": "tool", "tool_call_id": "call_01", "content": [
+        {"type": "text", "text": "lib.rs"},
+        {"type": "text", "text": "[image not shown: image/png, 5120 bytes, sha256 2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae; the 5 newer images in this conversation are shown instead]"}
+      ]},
+      {"role": "tool", "tool_call_id": "call_02", "content": [{"type": "text", "text": "fn main() {}"}]},
+      {"role": "assistant", "content": [{"type": "text", "text": "One file."}]}
+    ],
+    "tools": [
+      {"name": "find", "description": "Find files.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}},
+      {"name": "read", "description": "Read a file.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}
+    ],
+    "params": {"temperature": 0.3, "reasoning": {"effort": "low"}}
+  }
+}

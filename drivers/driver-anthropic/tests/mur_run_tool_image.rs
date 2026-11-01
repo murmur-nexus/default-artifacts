@@ -1,0 +1,448 @@
+//! A tool's image, proved to reach the provider inside its `tool_result`, sized to the model,
+//! under a real `mur run`.
+//!
+//! The capsule runs driver-anthropic on `claude-sonnet-5-5` with the native `show-image` tool,
+//! compiled with `rustc` from `libs/murmur-driver-image/test-support/show_image.rs`. A loopback
+//! fake Anthropic answers the first request with a call to the tool for a 3000×2000 PNG in the
+//! work folder, and the second with a final text. The test asserts the second request carries the
+//! image in the call's `tool_result`, decoded at the high-resolution tier's 2352×1568, and that
+//! the guest never trapped. Only a launch runs `mod wasm_driver`, where the decode, resize and
+//! re-encode happen inside the component under the runtime's memory cap.
+//!
+//! `#[ignore]`d because the default `cargo test --workspace` has no `mur` to launch:
+//! `MUR_BIN=… cargo test -p driver-anthropic --test mur_run_tool_image -- --ignored`. `mur` must
+//! serve WIT level 3 and read `vision` (murmur `a9ea4726` or later).
+//!
+//! Unix only: it spawns a host `mur` and reads Unix permission bits.
+#![cfg(unix)]
+
+use std::{
+    fs,
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    process::{Command, Output, Stdio},
+    sync::{Arc, Mutex, Once},
+    thread,
+    time::Duration,
+};
+
+use murmur_driver_image::{decode_base64, dimensions};
+use serde_json::{json, Value};
+use tempfile::TempDir;
+
+const MODEL: &str = "claude-sonnet-5-5";
+const IMAGE: &str = "shot.png";
+
+// ── the runtime under test ───────────────────────────────────────────────────
+
+fn mur_binary() -> PathBuf {
+    if let Some(explicit) = std::env::var_os("MUR_BIN") {
+        let path = PathBuf::from(explicit);
+        assert!(
+            is_executable(&path),
+            "MUR_BIN names {}, which is not executable",
+            path.display()
+        );
+        return path;
+    }
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&path_var)
+        .map(|dir| dir.join("mur"))
+        .find(|candidate| is_executable(candidate))
+        .unwrap_or_else(|| panic!("no `mur` binary: set MUR_BIN to one, or put it on PATH"))
+}
+
+fn is_executable(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
+
+fn mur(home: &TempDir) -> Command {
+    let mut command = Command::new(mur_binary());
+    command.env("HOME", home.path());
+    command
+}
+
+fn run_to_success(mut command: Command, what: &str) -> Output {
+    let output = command
+        .output()
+        .unwrap_or_else(|err| panic!("spawning `mur` for {what}: {err}"));
+    assert!(
+        output.status.success(),
+        "{what} failed ({})\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+// ── building and packing ─────────────────────────────────────────────────────
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn target_dir() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root().join("target"))
+}
+
+fn build_driver() {
+    static BUILD: Once = Once::new();
+    BUILD.call_once(|| {
+        let status = Command::new(env!("CARGO"))
+            .current_dir(workspace_root())
+            .args([
+                "build",
+                "-p",
+                "driver-anthropic",
+                "--target",
+                "wasm32-wasip2",
+                "--release",
+            ])
+            .status()
+            .expect("failed to spawn `cargo build` for driver-anthropic");
+        assert!(status.success(), "cargo build of driver-anthropic failed");
+    });
+}
+
+fn manifest_field(manifest: &str, key: &str) -> String {
+    let prefix = format!("{key}:");
+    manifest
+        .lines()
+        .find(|line| line.starts_with(&prefix))
+        .map(|line| line[prefix.len()..].trim().trim_matches('"').to_string())
+        .unwrap_or_else(|| panic!("no top-level `{key}:` in murmur.yaml"))
+}
+
+fn package(artifact_dir: &Path, out_dir: &Path, payload: &Path) -> PathBuf {
+    let output = Command::new("bash")
+        .arg(workspace_root().join("scripts/package-artifact.sh"))
+        .arg(artifact_dir)
+        .arg(out_dir)
+        .arg("--payload")
+        .arg(payload)
+        .env("MUR_BIN", mur_binary())
+        .stderr(Stdio::inherit())
+        .output()
+        .expect("failed to spawn scripts/package-artifact.sh");
+    assert!(
+        output.status.success(),
+        "packing {} failed",
+        artifact_dir.display()
+    );
+    PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+}
+
+/// Pack the driver; returns its version and zip.
+fn pack_driver(out_dir: &Path) -> (String, PathBuf) {
+    build_driver();
+    let crate_path = workspace_root().join("drivers/driver-anthropic");
+    let manifest = fs::read_to_string(crate_path.join("murmur.yaml")).unwrap();
+    let version = manifest_field(&manifest, "version");
+    let wasm = target_dir().join("wasm32-wasip2/release/driver_anthropic.wasm");
+    (version, package(&crate_path, out_dir, &wasm))
+}
+
+const SHOW_IMAGE_MANIFEST: &str = "name: show-image\nversion: 0.1.0\nruntime: tool\n\
+implementation: native\ndescription: Attaches one image from the work folder.\n\
+requires_files:\n  - bin/show-image\n\
+input_schema: '{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\
+\"description\":\"The image, relative to the work folder.\"}},\"required\":[\"path\"]}'\n";
+
+/// Compile `show_image.rs` with `rustc` and pack it as a native tool artifact.
+fn pack_show_image(scratch: &Path, out_dir: &Path) -> PathBuf {
+    let binary = scratch.join("show-image-bin");
+    let status = Command::new("rustc")
+        .args(["--edition", "2021", "-O", "-o"])
+        .arg(&binary)
+        .arg(workspace_root().join("libs/murmur-driver-image/test-support/show_image.rs"))
+        .status()
+        .expect("failed to spawn rustc");
+    assert!(status.success(), "rustc show_image.rs failed");
+    let dir = scratch.join("show-image");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("murmur.yaml"), SHOW_IMAGE_MANIFEST).unwrap();
+    package(&dir, out_dir, &binary)
+}
+
+/// A 3000×2000 PNG of flat bands and one dark block: small enough on disk for the runtime's
+/// default 5 MiB attachment cap.
+fn write_image(path: &Path) {
+    let image = image::RgbImage::from_fn(3000, 2000, |x, y| {
+        if (1000..2000).contains(&x) && (800..1200).contains(&y) {
+            image::Rgb([20, 20, 30])
+        } else {
+            image::Rgb([240, 240 - (y / 100) as u8, 230])
+        }
+    });
+    image.save(path).unwrap();
+}
+
+// ── the fake provider ────────────────────────────────────────────────────────
+
+fn response(body: &Value) -> String {
+    let payload = body.to_string();
+    format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+         connection: close\r\n\r\n{payload}",
+        payload.len()
+    )
+}
+
+/// The name the request offers the show-image tool under.
+fn show_image_tool(request: &Value) -> String {
+    request["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool["name"].as_str())
+        .find(|name| name.contains("show"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the request offers no show-image tool: {}",
+                request["tools"]
+            )
+        })
+        .to_string()
+}
+
+/// The first answer calls the show-image tool; every later one ends the turn.
+fn answer(index: usize, request: &Value) -> String {
+    if index == 0 {
+        let tool = show_image_tool(request);
+        response(&json!({
+            "id": "msg_1", "type": "message", "role": "assistant", "model": MODEL,
+            "content": [{"type": "tool_use", "id": "toolu_img1", "name": tool, "input": {"path": IMAGE}}],
+            "stop_reason": "tool_use", "usage": {"input_tokens": 10, "output_tokens": 5}
+        }))
+    } else {
+        response(&json!({
+            "id": "msg_2", "type": "message", "role": "assistant", "model": MODEL,
+            "content": [{"type": "text", "text": "I see the image."}],
+            "stop_reason": "end_turn", "usage": {"input_tokens": 20, "output_tokens": 5}
+        }))
+    }
+}
+
+struct Provider {
+    port: u16,
+    requests: Arc<Mutex<Vec<Value>>>,
+}
+
+impl Provider {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&requests);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let Some(body) = read_body(&mut stream) else {
+                    continue;
+                };
+                let request: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                let mut all = recorded.lock().unwrap();
+                let reply = answer(all.len(), &request);
+                all.push(request);
+                drop(all);
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        Self { port, requests }
+    }
+
+    fn endpoint(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    fn requests(&self) -> Vec<Value> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+fn read_body(stream: &mut TcpStream) -> Option<Vec<u8>> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .ok()?;
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 65536];
+    let header_end = loop {
+        let n = stream.read(&mut chunk).ok()?;
+        if n == 0 {
+            return None;
+        }
+        buffer.extend_from_slice(&chunk[..n]);
+        if let Some(i) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i;
+        }
+    };
+    let head = String::from_utf8_lossy(&buffer[..header_end]).to_ascii_lowercase();
+    let length: usize = head
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length:"))
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(0);
+    let mut body = buffer[header_end + 4..].to_vec();
+    while body.len() < length {
+        let n = stream.read(&mut chunk).ok()?;
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..n]);
+    }
+    Some(body)
+}
+
+// ── scenario ─────────────────────────────────────────────────────────────────
+
+/// Every file under `dir` whose text holds `needle`.
+fn files_containing(dir: &Path, needle: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(files_containing(&path, needle));
+        } else if fs::read(&path)
+            .is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains(needle))
+        {
+            found.push(path);
+        }
+    }
+    found
+}
+
+#[test]
+#[ignore = "launches the real mur binary; run with --ignored"]
+fn a_tool_image_reaches_the_tool_result_sized_to_the_model() {
+    let scratch = tempfile::tempdir().unwrap();
+    let artifacts = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let (version, driver_zip) = pack_driver(artifacts.path());
+    let tool_zip = pack_show_image(scratch.path(), artifacts.path());
+    let provider = Provider::start();
+
+    let manifest = project.path().join("murmur.yaml");
+    fs::write(
+        &manifest,
+        format!(
+            "name: tool-image-proof\nversion: 0.1.0\nartifacts:\n\
+             \x20 - name: local/driver-anthropic\n    version: {version}\n    runtime: driver\n    \
+             gateway:\n      endpoint: {}\n      api_key: test-key\n\
+             \x20 - name: local/show-image\n    version: 0.1.0\n    runtime: tool\n\
+             inference:\n  transport: http\n  model: {MODEL}\n  max_tokens: 4096\n  \
+             driver:\n    artifact: local/driver-anthropic\n\
+             trace:\n  capture: content\n",
+            provider.endpoint()
+        ),
+    )
+    .unwrap();
+    for zip in [&driver_zip, &tool_zip] {
+        let mut publish = mur(&home);
+        publish.arg("publish").arg(zip);
+        run_to_success(publish, "publishing");
+        let mut install = mur(&home);
+        install.current_dir(project.path()).arg("install").arg(zip);
+        run_to_success(install, "installing");
+    }
+
+    let workdir = project.path().join("work");
+    fs::create_dir_all(&workdir).unwrap();
+    write_image(&workdir.join(IMAGE));
+    let task = project.path().join("task.md");
+    fs::write(
+        &task,
+        format!("Call show-image on {IMAGE} and tell me what it shows.\n"),
+    )
+    .unwrap();
+
+    let output = mur(&home)
+        .current_dir(project.path())
+        .args([
+            "run",
+            "--manifest",
+            manifest.to_str().unwrap(),
+            "--task",
+            task.to_str().unwrap(),
+        ])
+        .arg("--workdir")
+        .arg(&workdir)
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawning `mur run`");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !text.contains("E-RUN-007") && !text.contains("trapped"),
+        "the guest must not trap:\n{text}"
+    );
+    assert!(output.status.success(), "the run must succeed:\n{text}");
+
+    let requests = provider.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "a tool call, then the final answer:\n{text}"
+    );
+    let tool_turn = requests[1]["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(tool_turn["role"], "user");
+    let results = tool_turn["content"].as_array().unwrap();
+    let result = results
+        .iter()
+        .find(|block| block["type"] == "tool_result" && block["tool_use_id"] == "toolu_img1")
+        .unwrap_or_else(|| panic!("no tool_result for the call: {tool_turn}"));
+    let image = result["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|block| block["type"] == "image")
+        .unwrap_or_else(|| panic!("the tool_result holds no image: {result}"));
+    let media_type = image["source"]["media_type"].as_str().unwrap();
+    let bytes = decode_base64(image["source"]["data"].as_str().unwrap()).unwrap();
+    let size = dimensions(media_type, &bytes).unwrap();
+    eprintln!(
+        "model: {MODEL}; tool_result content: {:?}; image {media_type} {}x{} ({} bytes)",
+        result["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|block| block["type"].as_str().unwrap_or("?"))
+            .collect::<Vec<_>>(),
+        size.0,
+        size.1,
+        bytes.len()
+    );
+    assert_eq!(media_type, "image/png");
+    assert_eq!(size, (2352, 1568));
+    assert!(
+        result.get("cache_control").is_some(),
+        "the marker stays on the tool_result"
+    );
+
+    // With `trace.capture: content`, the inference event stores the driver's response whole, so
+    // its `images` report is on disk under the scratch HOME.
+    let stored = files_containing(home.path(), "\"placement\":\"tool_result\"");
+    assert!(
+        !stored.is_empty(),
+        "no stored response carries the images report"
+    );
+    let report_file = fs::read_to_string(&stored[0]).unwrap();
+    eprintln!("images report stored in {}", stored[0].display());
+    assert!(report_file.contains("\"sent_width\":2352"), "{report_file}");
+}

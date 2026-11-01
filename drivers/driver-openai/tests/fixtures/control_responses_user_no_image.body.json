@@ -1,0 +1,1 @@
+{"input":[{"content":[{"text":"First line.","type":"input_text"},{"text":"Second line.","type":"input_text"}],"role":"user"}],"instructions":"Be brief.","max_output_tokens":256,"model":"gpt-5.6-luna","store":false,"stream":true}

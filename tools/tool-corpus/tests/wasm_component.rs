@@ -160,6 +160,10 @@ fn run_corpus(
         .murmur_tool_run()
         .call_run(&mut store, &input)
         .expect("call run");
+    assert!(
+        result.attachments.is_empty(),
+        "this tool attaches no image, so ToolResult.attachments is empty"
+    );
     let envelope: Value = result
         .data
         .as_deref()

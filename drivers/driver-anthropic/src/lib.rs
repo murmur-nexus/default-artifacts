@@ -2,6 +2,10 @@
 // or from cfg(test). Suppress dead_code noise in plain host library builds.
 #![cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
 
+use murmur_driver_image::{
+    largest_fit, prepare_image, prepare_unmeasured, reports_json, Action, ImageReport, Rule,
+    SizeRule,
+};
 use murmur_driver_stream::Failure;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -308,6 +312,214 @@ fn default_object() -> Value {
     json!({})
 }
 
+// ── Images ────────────────────────────────────────────────────────────────────
+
+/// The image resolution tier a model reads at, from the "Resolution and token cost" table of
+/// <https://platform.claude.com/docs/en/build-with-claude/vision>.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageTier {
+    /// "Claude 4.7 and later models": a 2,576 px long edge and 4,784 visual tokens.
+    HighResolution,
+    /// "All other models": 1,568 px and 1,568 visual tokens.
+    Standard,
+    /// A model that reads no image. No model in the table is one today; the variant keeps the
+    /// no-vision path a table edit away, and the tests exercise it through `prepare_images`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    None,
+}
+
+impl ImageTier {
+    /// `(max long edge in px, max visual tokens)`, or `None` for a model without vision.
+    fn limits(self) -> Option<(u32, u32)> {
+        match self {
+            ImageTier::HighResolution => Some((2576, 4784)),
+            ImageTier::Standard => Some((1568, 1568)),
+            ImageTier::None => None,
+        }
+    }
+}
+
+/// The tier of every model `murmur.yaml` declares, each id exactly once; a test keeps the two in
+/// step. Every id appears in the vision page's `supportedModels`, read 2026-11-01. An id outside
+/// the table reads at [`ImageTier::Standard`]: every current Claude model reads images, and no
+/// model rescales an image that fits the smaller tier.
+const MODEL_IMAGE_TIERS: &[(&str, ImageTier)] = &[
+    ("claude-fable-5-1", ImageTier::HighResolution),
+    ("claude-opus-5-5", ImageTier::HighResolution),
+    ("claude-sonnet-5-5", ImageTier::HighResolution),
+    ("claude-haiku-5-5", ImageTier::HighResolution),
+    ("claude-fable-5", ImageTier::HighResolution),
+    ("claude-opus-5", ImageTier::HighResolution),
+    ("claude-sonnet-5", ImageTier::HighResolution),
+    ("claude-opus-4-8", ImageTier::HighResolution),
+    ("claude-opus-4-7", ImageTier::HighResolution),
+    ("claude-opus-4-6", ImageTier::Standard),
+    ("claude-sonnet-4-6", ImageTier::Standard),
+    ("claude-opus-4-5-20251101", ImageTier::Standard),
+    ("claude-opus-4-5", ImageTier::Standard),
+    ("claude-sonnet-4-5-20250929", ImageTier::Standard),
+    ("claude-sonnet-4-5", ImageTier::Standard),
+    ("claude-haiku-4-5-20251001", ImageTier::Standard),
+    ("claude-haiku-4-5", ImageTier::Standard),
+];
+
+fn image_tier(model: &str) -> ImageTier {
+    MODEL_IMAGE_TIERS
+        .iter()
+        .find(|(id, _)| *id == model)
+        .map_or(ImageTier::Standard, |(_, tier)| *tier)
+}
+
+/// The largest per-image base64 payload sent: the vision page's "10 MB (base64-encoded) on the
+/// Claude API", read as decimal megabytes, the smaller reading.
+const MAX_IMAGE_BASE64_BYTES: usize = 10_000_000;
+
+/// Whether Anthropic processes a `width`×`height` image without downscaling it: each side,
+/// padded up to a multiple of 28 px, within `max_edge`, and `⌈w/28⌉·⌈h/28⌉` visual tokens within
+/// `max_tokens`. The rule of the vision-coordinates page's reference implementation.
+fn anthropic_fits(max_edge: u32, max_tokens: u32, width: u32, height: u32) -> bool {
+    width.div_ceil(28) * 28 <= max_edge
+        && height.div_ceil(28) * 28 <= max_edge
+        && width.div_ceil(28) * height.div_ceil(28) <= max_tokens
+}
+
+/// The size `model` sees a `width`×`height` image at — the size this driver sends it at — or
+/// `None` when the model reads no image. The pre-pass sizes through the same tier limits; this is
+/// the entry point for mapping a model's coordinates back onto the original image.
+#[cfg_attr(not(test), allow(dead_code))]
+fn anthropic_image_size(model: &str, width: u32, height: u32) -> Option<(u32, u32)> {
+    let (max_edge, max_tokens) = image_tier(model).limits()?;
+    Some(largest_fit(width, height, |w, h| {
+        anthropic_fits(max_edge, max_tokens, w, h)
+    }))
+}
+
+/// Size every image of every `user` and `tool` message for a model at `tier`, in place, and
+/// report what became of each. A request holding no image is left untouched and nothing is
+/// decoded.
+fn prepare_images(request: &mut MurmurRequest, tier: ImageTier) -> Vec<ImageReport> {
+    let holds_image = request.messages.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, MurmurContentBlock::Image { .. }))
+    });
+    if !holds_image {
+        return Vec::new();
+    }
+
+    let fits = |w: u32, h: u32| {
+        tier.limits()
+            .is_some_and(|(max_edge, max_tokens)| anthropic_fits(max_edge, max_tokens, w, h))
+    };
+    let rule = match tier {
+        ImageTier::None => Rule::NoVision {
+            reason: format!(
+                "model '{}' does not take image input in driver-anthropic's model table",
+                request.model
+            ),
+        },
+        _ => Rule::Sized(SizeRule {
+            fits: &fits,
+            always_reencode: &[],
+            max_base64_len: Some((MAX_IMAGE_BASE64_BYTES, "Anthropic's per-image limit")),
+        }),
+    };
+
+    let mut reports = Vec::new();
+    for (index, message) in request.messages.iter_mut().enumerate() {
+        let placement = match message.role.as_str() {
+            "user" => "user",
+            "tool" => "tool_result",
+            _ => continue,
+        };
+        for (block_index, block) in message.content.iter_mut().enumerate() {
+            let MurmurContentBlock::Image { source } = block else {
+                continue;
+            };
+            let base64 = source.r#type.as_deref().is_none_or(|kind| kind == "base64");
+            let prepared = if base64 {
+                prepare_image(
+                    index,
+                    block_index,
+                    &source.media_type,
+                    &source.data,
+                    placement,
+                    &rule,
+                )
+            } else {
+                prepare_unmeasured(
+                    index,
+                    block_index,
+                    &source.media_type,
+                    &source.data,
+                    placement,
+                    &rule,
+                )
+            };
+            match prepared.action {
+                Action::Keep => {}
+                Action::Replace { media_type, data } => {
+                    source.media_type = media_type;
+                    source.data = data;
+                }
+                Action::Line(text) => *block = MurmurContentBlock::Text { text },
+            }
+            reports.push(prepared.report);
+        }
+    }
+    reports
+}
+
+fn image_block(source: &MurmurImageSource) -> Value {
+    json!({
+        "type": "image",
+        "source": {
+            "type": source.r#type.as_deref().unwrap_or("base64"),
+            "media_type": source.media_type,
+            "data": source.data,
+        }
+    })
+}
+
+/// Add the image report to a successful response as its top-level `images` list. A response to a
+/// request without images gains no key.
+fn attach_image_report(response: &mut Value, reports: &[ImageReport]) {
+    if reports.is_empty() {
+        return;
+    }
+    if let Some(response) = response.as_object_mut() {
+        response.insert("images".to_string(), reports_json(reports));
+    }
+}
+
+/// The provider body for one request — `tool-input.data` as `raw`, under the given
+/// `inference.driver.config` and artifact `config:` — and the report of every image it held.
+/// `run_inner` and the tests build a body through this one path.
+fn build_provider_body(
+    raw: &str,
+    driver_config: Option<&str>,
+    artifact_config: Option<&str>,
+) -> Result<(Value, Vec<ImageReport>), String> {
+    let mut murmur_request: MurmurRequest = serde_json::from_str(raw)
+        .map_err(|err| format!("driver: failed to parse tool-input.data: {err}"))?;
+
+    let family = classify_model(&murmur_request.model);
+    let thinking = driver_config
+        .map(parse_thinking_config)
+        .unwrap_or_else(ThinkingConfig::disabled);
+    // Prompt caching is GA — it needs no `anthropic-beta` header, only the markers.
+    let prompt_cache = artifact_config
+        .map(parse_prompt_cache_config)
+        .unwrap_or_default();
+    let tier = image_tier(&murmur_request.model);
+    let reports = prepare_images(&mut murmur_request, tier);
+    let mut provider_request =
+        translate_murmur_request_to_anthropic(&murmur_request, family, &thinking, &prompt_cache)?;
+    stamp_streaming_flags(&mut provider_request);
+    Ok((provider_request, reports))
+}
+
 fn translate_murmur_request_to_anthropic(
     request: &MurmurRequest,
     family: ModelFamily,
@@ -329,18 +541,35 @@ fn translate_murmur_request_to_anthropic(
                     "driver: tool message is missing required field 'tool_call_id'".to_string()
                 })?;
 
-                let content = message
-                    .content
-                    .iter()
-                    .filter_map(|block| match block {
-                        MurmurContentBlock::Text { text } => Some(json!({
+                // Each text block makes its own `tool_result`. Images join the content of the
+                // last one, after its text, or make one of their own when the message holds no
+                // text.
+                let mut content = Vec::new();
+                let mut images = Vec::new();
+                for block in &message.content {
+                    match block {
+                        MurmurContentBlock::Text { text } => content.push(json!({
                             "type": "tool_result",
                             "tool_use_id": tool_use_id,
                             "content": [{"type": "text", "text": text}],
                         })),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
+                        MurmurContentBlock::Image { source } => images.push(image_block(source)),
+                        _ => {}
+                    }
+                }
+                if !images.is_empty() {
+                    match content
+                        .last_mut()
+                        .and_then(|last| last["content"].as_array_mut())
+                    {
+                        Some(last) => last.extend(images),
+                        None => content.push(json!({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": images,
+                        })),
+                    }
+                }
 
                 messages.push(json!({
                     "role": "user",
@@ -476,14 +705,7 @@ fn translate_standard_content_blocks(
                     None
                 }
             }
-            MurmurContentBlock::Image { source } => Some(json!({
-                "type": "image",
-                "source": {
-                    "type": source.r#type.as_deref().unwrap_or("base64"),
-                    "media_type": source.media_type,
-                    "data": source.data,
-                }
-            })),
+            MurmurContentBlock::Image { source } => Some(image_block(source)),
             MurmurContentBlock::ToolCall { id, name, input } => Some(json!({
                 "type": "tool_use",
                 "id": id,
@@ -1252,11 +1474,9 @@ fn error_payload(message: &str) -> Value {
 #[cfg(target_arch = "wasm32")]
 mod wasm_driver {
     use super::{
-        assemble_anthropic_streaming_response, classify_model, error_payload, parse_beta_features,
-        parse_prompt_cache_config, parse_thinking_config, process_anthropic_sse_bytes,
-        stamp_streaming_flags, status_failure, translate_anthropic_response_to_murmur,
-        translate_murmur_request_to_anthropic, AnthropicSseState, Failure, MurmurRequest,
-        ThinkingConfig, ToolCallSignal,
+        assemble_anthropic_streaming_response, attach_image_report, build_provider_body,
+        error_payload, parse_beta_features, process_anthropic_sse_bytes, status_failure,
+        translate_anthropic_response_to_murmur, AnthropicSseState, Failure, ToolCallSignal,
     };
     use murmur_wasi_http::{write_body, BodyWrite};
     use serde_json::Value;
@@ -1320,6 +1540,7 @@ mod wasm_driver {
                 data_path: None,
                 truncated: false,
                 metadata,
+                attachments: Vec::new(),
             }
         }
     }
@@ -1340,30 +1561,14 @@ mod wasm_driver {
             .data
             .ok_or_else(|| "driver: missing tool-input.data".to_string())?;
 
-        let murmur_request: MurmurRequest = serde_json::from_str(&raw)
-            .map_err(|err| format!("driver: failed to parse tool-input.data: {err}"))?;
-
-        let family = classify_model(&murmur_request.model);
-        let thinking = driver_config
-            .as_deref()
-            .map(parse_thinking_config)
-            .unwrap_or_else(ThinkingConfig::disabled);
-        // Prompt caching is GA — it needs no `anthropic-beta` header, only the markers.
-        let prompt_cache = artifact_config
-            .as_deref()
-            .map(parse_prompt_cache_config)
-            .unwrap_or_default();
-        let mut provider_request = translate_murmur_request_to_anthropic(
-            &murmur_request,
-            family,
-            &thinking,
-            &prompt_cache,
-        )?;
-
-        stamp_streaming_flags(&mut provider_request);
+        // Images are sized here, before translation; `images` is what the response reports.
+        let (provider_request, images) =
+            build_provider_body(&raw, driver_config.as_deref(), artifact_config.as_deref())?;
+        drop(raw);
 
         let body = serde_json::to_vec(&provider_request)
             .map_err(|err| format!("driver: failed to encode request body: {err}"))?;
+        drop(provider_request);
 
         let url = format!("{}/v1/messages", endpoint.trim_end_matches('/'));
 
@@ -1402,7 +1607,7 @@ mod wasm_driver {
             .map(|&b| b == b'{' || b == b'[')
             .unwrap_or(false);
 
-        let result = if is_json {
+        let mut result = if is_json {
             // Non-streaming fallback (test servers, providers ignoring stream:true).
             let mut all = first;
             loop {
@@ -1476,6 +1681,7 @@ mod wasm_driver {
             assemble_anthropic_streaming_response(state)?
         };
 
+        attach_image_report(&mut result, &images);
         Ok(result)
     }
 
@@ -3666,6 +3872,9 @@ mod tests {
             context_window: u32,
             #[serde(default)]
             max_input_tokens: Option<u32>,
+            // Optional to murmur; required of every entry here, and checked below.
+            #[serde(default)]
+            vision: Option<bool>,
         }
 
         // Parsed with the crate murmur parses the bundled manifest with.
@@ -3674,6 +3883,12 @@ mod tests {
             .models;
         assert!(!models.is_empty(), "murmur.yaml's models: block is empty");
         for (id, limits) in &models {
+            let reads_images = super::image_tier(id).limits().is_some();
+            assert_eq!(
+                limits.vision,
+                Some(reads_images),
+                "models.{id}: `vision` must be declared and agree with MODEL_IMAGE_TIERS"
+            );
             assert!(
                 limits.max_output_tokens >= 1
                     && limits.context_window >= 1
@@ -3714,10 +3929,12 @@ mod tests {
                     panic!("README.md row '{id}': '{cell}' is not an integer or none")
                 })),
             };
+            // The Images table documents `vision`; this table only the numbers.
             let limits = Limits {
                 max_output_tokens: number(out),
                 context_window: number(ctx),
                 max_input_tokens: ceiling,
+                vision: models.get(id).and_then(|declared| declared.vision),
             };
             assert!(
                 documented.insert(id.to_string(), limits).is_none(),
@@ -4433,3 +4650,9 @@ mod tests {
         assert!(finish < awaited, "the response is awaited after the body");
     }
 }
+
+#[cfg(test)]
+mod control_tests;
+
+#[cfg(test)]
+mod image_tests;

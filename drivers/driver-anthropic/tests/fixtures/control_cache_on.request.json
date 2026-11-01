@@ -1,0 +1,23 @@
+{
+  "driver_config": null,
+  "artifact_config": null,
+  "request": {
+    "model": "claude-sonnet-5-5",
+    "max_tokens": 4096,
+    "system": "You are a careful assistant.",
+    "prompt_cache_key": "task-7f3a",
+    "messages": [
+      {"role": "user", "content": [{"type": "text", "text": "List the files in src."}]},
+      {"role": "assistant", "content": [
+        {"type": "text", "text": "I'll look."},
+        {"type": "tool_call", "id": "toolu_01", "name": "find", "input": {"path": "src"}}
+      ]},
+      {"role": "tool", "tool_call_id": "toolu_01", "content": [{"type": "text", "text": "lib.rs\nmain.rs"}]}
+    ],
+    "tools": [
+      {"name": "find", "description": "Find files.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
+      {"name": "read", "description": "Read a file.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}
+    ],
+    "params": {"temperature": 0.3}
+  }
+}

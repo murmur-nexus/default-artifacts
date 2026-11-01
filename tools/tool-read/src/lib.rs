@@ -40,6 +40,7 @@ mod wasm_tool {
                 metadata: state_effect
                     .map(|effect| vec![("state_effect".to_string(), effect.to_string())])
                     .unwrap_or_default(),
+                attachments: Vec::new(),
             }
         }
     }

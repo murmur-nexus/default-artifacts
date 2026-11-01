@@ -1,5 +1,5 @@
 name: driver-anthropic
-version: 0.17.0
+version: 0.18.0
 runtime: driver
 description: |
   Anthropic Messages API inference driver for Murmur agent capsules. Translates the Murmur
@@ -20,6 +20,10 @@ description: |
             prompt_cache: enabled
             prompt_cache_ttl: 1h
 
+  It sizes every image in a request to the model's resolution tier before sending it, places a
+  tool's image inside the `tool_result` that answers the call, and reports what it sent in the
+  response's `images` list.
+
   Caching lives on the artifact rather than on `inference.driver.config` because a
   `cache_control` breakpoint is an Anthropic construct — the other drivers have nowhere to put
   one. Extended thinking, `anthropic-beta` features and passthrough `params` are still read from
@@ -33,55 +37,73 @@ upstream_auth:
   value: "{key}"
 
 # The limits of each model this driver serves, from the provider's documentation; README.md cites each number.
+# `vision` is whether the model reads images; README.md's "Images" table cites each one.
 models:
   claude-fable-5-1:
     max_output_tokens: 128000
     context_window: 1000000
+    vision: true
   claude-opus-5-5:
     max_output_tokens: 128000
     context_window: 1000000
+    vision: true
   claude-sonnet-5-5:
     max_output_tokens: 128000
     context_window: 1000000
+    vision: true
   claude-haiku-5-5:
     max_output_tokens: 128000
     context_window: 1000000
+    vision: true
   claude-fable-5:
     max_output_tokens: 128000
     context_window: 1000000
+    vision: true
   claude-opus-5:
     max_output_tokens: 128000
     context_window: 1000000
+    vision: true
   claude-sonnet-5:
     max_output_tokens: 128000
     context_window: 1000000
+    vision: true
   claude-opus-4-8:
     max_output_tokens: 128000
     context_window: 1000000
+    vision: true
   claude-opus-4-7:
     max_output_tokens: 128000
     context_window: 1000000
+    vision: true
   claude-opus-4-6:
     max_output_tokens: 128000
     context_window: 1000000
+    vision: true
   claude-sonnet-4-6:
     max_output_tokens: 128000
     context_window: 1000000
+    vision: true
   claude-opus-4-5-20251101:
     max_output_tokens: 64000
     context_window: 200000
+    vision: true
   claude-opus-4-5:
     max_output_tokens: 64000
     context_window: 200000
+    vision: true
   claude-sonnet-4-5-20250929:
     max_output_tokens: 64000
     context_window: 200000
+    vision: true
   claude-sonnet-4-5:
     max_output_tokens: 64000
     context_window: 200000
+    vision: true
   claude-haiku-4-5-20251001:
     max_output_tokens: 64000
     context_window: 200000
+    vision: true
   claude-haiku-4-5:
     max_output_tokens: 64000
     context_window: 200000
+    vision: true

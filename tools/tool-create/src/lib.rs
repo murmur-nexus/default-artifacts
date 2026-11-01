@@ -1235,6 +1235,7 @@ mod wasm_tool {
                     data_path: None,
                     truncated: false,
                     metadata: Vec::new(),
+                    attachments: Vec::new(),
                 },
                 Err(e) => ToolResult {
                     status: Status::Error,
@@ -1243,6 +1244,7 @@ mod wasm_tool {
                     data_path: None,
                     truncated: false,
                     metadata: Vec::new(),
+                    attachments: Vec::new(),
                 },
             }
         }

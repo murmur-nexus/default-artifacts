@@ -1,0 +1,1 @@
+{"input":[{"call_id":"call_07","output":"Cargo.toml\nsrc","type":"function_call_output"}],"max_output_tokens":4096,"model":"gpt-5.6-luna","previous_response_id":"resp_0123456789","store":true,"stream":true,"tools":[{"name":"find","parameters":{"type":"object"},"strict":false,"type":"function"}]}
