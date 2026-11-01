@@ -233,7 +233,7 @@ cargo test --workspace --locked
 CI runs both, formatting first. The workspace uses rustfmt's defaults (there is no `rustfmt.toml`);
 run `cargo fmt --all` before committing.
 
-Six suites are `#[ignore]`d because they need something the default run does not have. The five
+Seven suites are `#[ignore]`d because they need something the default run does not have. The six
 that drive a real `mur` read it from `MUR_BIN`, else `PATH`, and fail rather than skip without one:
 
 ```bash
@@ -242,6 +242,7 @@ MUR_BIN=$MUR_BIN cargo test -p tool-tavily --test mur_run_gateway -- --ignored  
 MUR_BIN=$MUR_BIN cargo test -p tool-github --test mur_run_gateway -- --ignored       # 2 tests
 MUR_BIN=$MUR_BIN cargo test -p tool-create --test mur_manifest_shape -- --ignored    # 3 tests
 MUR_BIN=$MUR_BIN cargo test -p tool-browser --test mur_run_browser -- --ignored      # 1 test
+MUR_BIN=$MUR_BIN cargo test -p tool-computer --test mur_run_computer -- --ignored    # 3 tests; needs Xvfb, xkbcomp, xmessage
 cargo test -p tool-create --test scaffolded_hook_tests -- --ignored  # needs a cargo registry
 ```
 
@@ -251,6 +252,7 @@ cargo test -p tool-create --test scaffolded_hook_tests -- --ignored  # needs a c
 | `mur_run_gateway` (tool-tavily) | the runtime attaches the Tavily key to the tool's request and it appears nowhere in the session |
 | `mur_run_gateway` (tool-github) | the runtime attaches the GitHub token to the tool's requests and it appears nowhere in the session |
 | `mur_manifest_shape` | an unedited scaffold packs and publishes as the kind its author asked for |
+| `mur_run_computer` | in a `sealed` capsule the tool starts its display, clicks a real button, and both screenshots reach the trace as attachments; a `scoped` capsule is refused with `E-CAP-003`, and a `confirm`-listed click is held. Its `mur` must carry murmur `a9ea4726` |
 | `scaffolded_hook_tests` | a freshly scaffolded hook reports `1 passed`, not `0 passed` |
 | `mur_run_browser` | a capsule granting a browser opens a work-folder page inside its containment and reads its console error through murmur's `<untrusted-content>` fence, and one without the grant gets the single no-grant line |
 

@@ -1,0 +1,30 @@
+[package]
+name = "tool-computer"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tool-computer"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+# The display runs only on Linux; every other OS compiles the refusal alone.
+[target.'cfg(target_os = "linux")'.dependencies]
+flate2 = "1"
+crc32fast = "1"
+libc = "0.2"
+getrandom = "0.2"
+x11rb = { version = "0.13", default-features = false, features = ["xtest"] }
+
+[dev-dependencies]
+tempfile = "3"
+serde_norway = "0.9"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+flate2 = "1"
+libc = "0.2"
+x11rb = { version = "0.13", default-features = false, features = ["xtest"] }
