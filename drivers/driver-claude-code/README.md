@@ -5,7 +5,7 @@ Murmur how to drive the `claude` CLI for one turn: the argument list, the JSON l
 goes out on, the MCP config that points the harness at the capsule's tool bridge, and the
 control request that interrupts a turn.
 
-It is the first artifact in this repo that exports `murmur:driver/process@0.3.0` rather than
+It is the first artifact in this repo that exports `murmur:driver/process@0.4.0` rather than
 `murmur:tool/run`. That export is how the runtime tells a process driver from an HTTP driver —
 both are `runtime: driver` artifacts, and the name decides nothing.
 
@@ -22,20 +22,21 @@ rather than an API key.
 
 ## Which murmur this needs
 
-This artifact exports `murmur:driver/process@0.3.0`, which murmur serves from v0.6.0, and **the
+This artifact exports `murmur:driver/process@0.4.0`, which murmur serves from v0.9.0, and **the
 host accepts exactly one version of that interface and carries no fallback for an earlier one.**
-Installing `murmur/driver-claude-code` by scoped name needs `mur` 0.7.0 or later.
+Installing `murmur/driver-claude-code` by scoped name needs `mur` 0.9.0 or later.
 
-That `mur` refuses `0.3.0` and earlier at launch with `E-WIT-LEVEL-001`, with the clause
-`it exports murmur:driver/process@0.2.0, and level 1 has murmur:driver@0.3.0`. Install `0.4.0` or
+That `mur` refuses `0.7.0` and earlier at launch with `E-WIT-LEVEL-001`, with the clause
+`it exports murmur:driver/process@0.3.0, and level 2 has murmur:driver@0.4.0`. Install `0.8.0` or
 later — a rebuild is the intended cost of the bump. The refusal runs the other way too: a murmur
-at `@0.2.0` refuses this release. Pick the driver by the murmur you run:
+at `@0.3.0` refuses this release. Pick the driver by the murmur you run:
 
 | murmur | Its process-driver interface | Driver release to pin |
 |---|---|---|
 | `v0.3.0` and earlier | none | none: `transport: process` is not supported |
 | `v0.4.0`, `v0.5.0` | `murmur:driver/process@0.2.0` | `0.3.0` |
-| `v0.6.0` and later | `murmur:driver/process@0.3.0` | `0.4.0` and later |
+| `v0.6.0` to `v0.8.0` | `murmur:driver/process@0.3.0` | `0.4.0` to `0.7.0` |
+| `v0.9.0` and later | `murmur:driver/process@0.4.0` | `0.8.0` and later |
 
 A murmur without the runner at all refuses the manifest before the driver is loaded, with
 `E-MAN-003` naming `inference.driver.artifact`.
@@ -58,7 +59,7 @@ capabilities:
 artifacts:
   - name: murmur/driver-claude-code
     runtime: driver
-    version: "0.7.0"
+    version: "0.8.0"
 ```
 
 The harness starts from an **empty** environment and sees exactly the variables
@@ -314,7 +315,7 @@ from a token count and has no equivalent on the http path. Neither are `server_t
 
 #### What goes out is the run's total, not the turn's
 
-`murmur:driver/process@0.3.0` takes every member of `usage` as **cumulative for the harness
+`murmur:driver/process@0.4.0` takes every member of `usage` as **cumulative for the harness
 run**, and the runtime attributes to each turn only the growth of a member over what it has
 already attributed. `claude` reports the opposite — each `result` line carries that turn's own
 spend and nothing earlier — so the driver adds each turn onto the totals it has already
