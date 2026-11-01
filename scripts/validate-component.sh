@@ -127,7 +127,7 @@ validate_one() {
 
   # ---- category resolution ---------------------------------------------------
   case "$name" in
-    tool-git|tool-git-validate|tool-registry-search)
+    tool-git|tool-git-validate|tool-registry-search|tool-browser)
       echo "skip: $base is a native command component (exports wasi:cli/run), not a murmur guest component — not validated"
       return 0
       ;;

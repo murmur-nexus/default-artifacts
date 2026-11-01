@@ -132,8 +132,9 @@ driver.
 Tool artifacts (`runtime: tool`) exposed to the agent as callable functions. `tool-corpus`,
 `tool-create`, `tool-read`, `tool-write`, `tool-edit`, `tool-find`, `tool-github`,
 `tool-report`, `tool-request-input`, and `tool-tavily` are WASM components (`wasm32-wasip2`, exporting `murmur:tool/run`); the
-remaining five are native binaries whose C dependencies (SQLite, tree-sitter, TLS) do not
-cross-compile to wasm32-wasip2 (see [BUILD.md](./BUILD.md)).
+remaining six are native binaries: their C dependencies (SQLite, tree-sitter, TLS) do not
+cross-compile to wasm32-wasip2, or they run a host program a WASM guest cannot, such as `git` or a
+browser (see [BUILD.md](./BUILD.md)).
 
 | Artifact | Location | Implementation | Description |
 |---|---|---|---|
@@ -152,6 +153,7 @@ cross-compile to wasm32-wasip2 (see [BUILD.md](./BUILD.md)).
 | `tool-code-coverage` | `tools/tool-code-coverage/` | native | Spectrum-based fault localization (Ochiai / Tarantula) over per-test LCOV reports |
 | `tool-test-report` | `tools/tool-test-report/` | native | Parses raw test-runner output (cargo, pytest, go, jest) into a structured failure list |
 | `tool-registry-search` | `tools/tool-registry-search/` | native | Searches a Murmur artifact index for artifacts, listing every published version of each `scope/name` |
+| `tool-browser` | `tools/tool-browser/` | native | Drives the host's headless Chrome or Chromium one action per call: opens a page, reads it as an accessibility tree with refs, clicks, types, presses, selects, waits and goes back with a summary of what changed, reads console errors and failed requests, and saves screenshots. Needs one of `chromium`, `chromium-browser`, `google-chrome` or `chrome` in `capabilities.shell.allow`, and on murmur's Full and Sealed tiers `chrome-headless-shell` under that name; see its [README](./tools/tool-browser/README.md) |
 
 ## Skills
 

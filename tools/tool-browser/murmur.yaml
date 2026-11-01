@@ -1,0 +1,71 @@
+name: tool-browser
+version: 0.1.0
+runtime: tool
+implementation: native
+description: |
+  Drives a headless Chrome or Chromium on this host, one action per call. The browser starts on the first call and stays for the session.
+  open url (http, https, file, about:blank, or a work-folder path) returns the page as text: `page: <title> — <url>`, then an indented accessibility tree, one `- role "name" [states] [ref=eN]` per node. Pass a ref to act on that node.
+  click/type/press/select/wait/back answer with what changed (`changed: +A -R lines`, then `+`/`-` lines) or the new page.
+  snapshot (ref for one part), console and network (new errors and failed requests since the last look), screenshot (PNG; full_page or ref), close.
+  Read the text first; take a screenshot only to check layout.
+  Needs chromium, chromium-browser, google-chrome or chrome in capabilities.shell.allow. Writes .tool-browser/<session>/ in the work folder.
+
+requires_files:
+  - bin/tool-browser
+
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - open
+        - snapshot
+        - click
+        - type
+        - press
+        - select
+        - wait
+        - back
+        - console
+        - network
+        - screenshot
+        - close
+    url:
+      type: string
+      description: "open: the URL or work-folder path."
+    ref:
+      type: string
+      description: "A ref from the last snapshot, e.g. e3. Needed by click, type, select; optional for snapshot, wait, screenshot."
+    text:
+      type: string
+      description: "type: text to insert. wait: text to wait for."
+    key:
+      type: string
+      description: "press: Enter, Tab, Escape, Backspace, Delete, Space, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown or one character; may start with Control+, Shift+, Alt+ or Meta+."
+    value:
+      type: string
+      description: "select: the option's value or visible label."
+    submit:
+      type: boolean
+      description: "type: press Enter after."
+    full_page:
+      type: boolean
+      description: "screenshot: the whole page, not the 1280x800 viewport."
+    ms:
+      type: integer
+      description: "wait: timeout for text or ref, or the sleep alone (default 10000, max 60000)."
+  required:
+    - action
+
+capabilities:
+  # Documentary: the runtime does not read this block. The capsule must grant any ONE of these
+  # in its own capabilities.shell.allow, because the sandbox refuses a program it does not list
+  # and the tool finds its grant through the manifest murmur stages for each shell.allow entry.
+  # The README lists the capabilities.resources values Chrome needs.
+  shell:
+    allow:
+      - chromium
+      - chromium-browser
+      - google-chrome
+      - chrome

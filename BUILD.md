@@ -233,7 +233,7 @@ cargo test --workspace --locked
 CI runs both, formatting first. The workspace uses rustfmt's defaults (there is no `rustfmt.toml`);
 run `cargo fmt --all` before committing.
 
-Five suites are `#[ignore]`d because they need something the default run does not have. The four
+Six suites are `#[ignore]`d because they need something the default run does not have. The five
 that drive a real `mur` read it from `MUR_BIN`, else `PATH`, and fail rather than skip without one:
 
 ```bash
@@ -241,6 +241,7 @@ MUR_BIN=$MUR_BIN cargo test -p tool-corpus --test mur_run_state -- --ignored    
 MUR_BIN=$MUR_BIN cargo test -p tool-tavily --test mur_run_gateway -- --ignored       # 2 tests
 MUR_BIN=$MUR_BIN cargo test -p tool-github --test mur_run_gateway -- --ignored       # 2 tests
 MUR_BIN=$MUR_BIN cargo test -p tool-create --test mur_manifest_shape -- --ignored    # 3 tests
+MUR_BIN=$MUR_BIN cargo test -p tool-browser --test mur_run_browser -- --ignored      # 1 test
 cargo test -p tool-create --test scaffolded_hook_tests -- --ignored  # needs a cargo registry
 ```
 
@@ -251,3 +252,14 @@ cargo test -p tool-create --test scaffolded_hook_tests -- --ignored  # needs a c
 | `mur_run_gateway` (tool-github) | the runtime attaches the GitHub token to the tool's requests and it appears nowhere in the session |
 | `mur_manifest_shape` | an unedited scaffold packs and publishes as the kind its author asked for |
 | `scaffolded_hook_tests` | a freshly scaffolded hook reports `1 passed`, not `0 passed` |
+| `mur_run_browser` | a capsule granting a browser opens a work-folder page inside its containment and reads its console error through murmur's `<untrusted-content>` fence, and one without the grant gets the single no-grant line |
+
+`mur_run_browser` needs a browser that starts on the host's tier. murmur's Full and Sealed tiers
+stop full Chrome (see [tool-browser's README](./tools/tool-browser/README.md#which-browser-runs-on-which-tier)),
+so on such a host point `TOOL_BROWSER_TEST_CHROME` at a `chrome-headless-shell`. On a `mur` older
+than the workspace's `driver-openai` interface, set `TOOL_BROWSER_DRIVER_ZIP` to a released
+`driver-openai-<x.y.z>.mur.zip` built for it.
+
+The default run of `tool-browser` (its `browser` suite) needs Chrome or Chromium on Linux: one of
+`chromium`, `chromium-browser`, `google-chrome` or `chrome` on `PATH`, a Playwright Chromium under
+`~/.cache/ms-playwright`, or `TOOL_BROWSER_TEST_CHROME`. Without one it fails, naming what to install.
