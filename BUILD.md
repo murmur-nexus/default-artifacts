@@ -233,7 +233,7 @@ cargo test --workspace --locked
 CI runs both, formatting first. The workspace uses rustfmt's defaults (there is no `rustfmt.toml`);
 run `cargo fmt --all` before committing.
 
-Seven suites are `#[ignore]`d because they need something the default run does not have. The six
+Nine suites are `#[ignore]`d because they need something the default run does not have. The eight
 that drive a real `mur` read it from `MUR_BIN`, else `PATH`, and fail rather than skip without one:
 
 ```bash
@@ -243,6 +243,8 @@ MUR_BIN=$MUR_BIN cargo test -p tool-github --test mur_run_gateway -- --ignored  
 MUR_BIN=$MUR_BIN cargo test -p tool-create --test mur_manifest_shape -- --ignored    # 3 tests
 MUR_BIN=$MUR_BIN cargo test -p tool-browser --test mur_run_browser -- --ignored      # 1 test
 MUR_BIN=$MUR_BIN cargo test -p tool-computer --test mur_run_computer -- --ignored    # 3 tests; needs Xvfb, xkbcomp, xmessage
+MUR_BIN=$MUR_BIN cargo test -p driver-anthropic --test mur_run_computer_tool -- --ignored  # 3 tests
+MUR_BIN=$MUR_BIN cargo test -p driver-openai --test mur_run_computer_tool -- --ignored     # 4 tests
 cargo test -p tool-create --test scaffolded_hook_tests -- --ignored  # needs a cargo registry
 ```
 
@@ -253,6 +255,8 @@ cargo test -p tool-create --test scaffolded_hook_tests -- --ignored  # needs a c
 | `mur_run_gateway` (tool-github) | the runtime attaches the GitHub token to the tool's requests and it appears nowhere in the session |
 | `mur_manifest_shape` | an unedited scaffold packs and publishes as the kind its author asked for |
 | `mur_run_computer` | in a `sealed` capsule the tool starts its display, clicks a real button, and both screenshots reach the trace as attachments; a `scoped` capsule is refused with `E-CAP-003`, and a `confirm`-listed click is held. Its `mur` must carry murmur `a9ea4726` |
+| `mur_run_computer_tool` (driver-anthropic) | in a `sealed` capsule a tool declaring `provider_tool: {kind: computer}` goes to `claude-sonnet-4-6` as `computer_20251124` with its beta header and to `claude-sonnet-5-5` as the toolset; Claude's click reaches the tool scaled to the display, a toolset batch runs in order, and the next request replays the calls in provider form. Without the block the tool stays a function. Its `mur` must carry murmur `a9ea4726` |
+| `mur_run_computer_tool` (driver-openai) | in a `sealed` capsule the same tool goes to `gpt-5.6-luna` as `{"type": "computer"}`, a `computer_call` runs as an ordered group answered by one `computer_call_output`, a flagged call nobody answers under `mur run --task` times out unrun, and a served capsule runs it only after a person's yes over the door and never after a no. Without the block the tool stays a function. Its `mur` must carry murmur `a9ea4726` |
 | `scaffolded_hook_tests` | a freshly scaffolded hook reports `1 passed`, not `0 passed` |
 | `mur_run_browser` | a capsule granting a browser opens a work-folder page inside its containment and reads its console error through murmur's `<untrusted-content>` fence, and one without the grant gets the single no-grant line |
 

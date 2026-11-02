@@ -154,7 +154,7 @@ name: desktop-form
 version: 0.1.0
 artifacts:
   - name: murmur/driver-anthropic
-    version: 0.18.0
+    version: 0.19.0
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com

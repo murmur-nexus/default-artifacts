@@ -37,7 +37,8 @@ fn tool_request(model: &str, content: Value) -> String {
 }
 
 fn body(raw: &str) -> (Value, Vec<Value>) {
-    let (body, reports) = build_provider_body(raw, None, None).unwrap();
+    let built = build_provider_body(raw, None, None).unwrap();
+    let (body, reports) = (built.body, built.images);
     (body, reports.iter().map(|r| r.to_json()).collect())
 }
 
@@ -430,8 +431,8 @@ fn the_same_request_gives_the_same_bytes() {
         "claude-haiku-4-5",
         json!([{"type": "text", "text": "x"}, image("image/png", &png_base64(1700, 1100))]),
     );
-    let first = serde_json::to_vec(&build_provider_body(&raw, None, None).unwrap().0).unwrap();
-    let second = serde_json::to_vec(&build_provider_body(&raw, None, None).unwrap().0).unwrap();
+    let first = serde_json::to_vec(&build_provider_body(&raw, None, None).unwrap().body).unwrap();
+    let second = serde_json::to_vec(&build_provider_body(&raw, None, None).unwrap().body).unwrap();
     assert_eq!(sha256_hex(&first), sha256_hex(&second));
 }
 
@@ -443,7 +444,7 @@ fn the_report_is_added_only_when_the_request_held_an_image() {
         "claude-haiku-4-5",
         json!([image("image/png", &png_base64(8, 8))]),
     );
-    let (_, reports) = build_provider_body(&raw, None, None).unwrap();
+    let reports = build_provider_body(&raw, None, None).unwrap().images;
     let mut response = json!({"stop_reason": "end_turn", "content": []});
     attach_image_report(&mut response, &reports);
     assert_eq!(response["images"][0]["outcome"], "sent");

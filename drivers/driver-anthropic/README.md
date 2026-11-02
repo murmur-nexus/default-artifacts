@@ -258,6 +258,171 @@ have a single result. Found multiple `tool_result` blocks with id". A `claude-so
 `context.images.keep: 1` and two tool images, where every later request carries an aged image line
 beside the tool's text in one `tool_result`, ran seven turns without an error.
 
+## Computer use
+
+A tool artifact whose own `murmur.yaml` declares
+`provider_tool: {kind: computer, display_width, display_height}`, such as `murmur/tool-computer`,
+reaches the driver as a `tools` entry carrying that block. On a model in the table below, the
+driver sends Anthropic's own computer tool in that entry's place, which Claude is trained on,
+instead of a function definition. Everywhere else the entry goes out as an ordinary function and
+the body is byte for byte what it was without the block.
+
+The provider tool is sent when all of these hold:
+
+| Condition | Otherwise |
+|---|---|
+| A tool's `provider_tool` has `kind: computer` and both sizes are integers from 1 to 65535. The first such tool is the computer entry | Every tool is an ordinary function |
+| The model is in the table below | The entry is an ordinary function |
+| The model reads images in the "Images" table | The entry is an ordinary function. A model declared `vision: false` is refused by `mur` at launch (`E-RUN-057`) before the driver runs |
+| No other tool in the request is named `computer` | The entry is an ordinary function: the provider tool cannot sit beside a tool of that name |
+
+A second computer tool in the same request stays an ordinary function.
+
+### Models
+
+From the "Earlier tool versions" and "Availability" sections of
+<https://platform.claude.com/docs/en/agents-and-tools/tool-use/computer-use-tool>, read
+2026-11-01. The table holds exactly the "Images" table's ids; an id outside it has no provider
+tool. Claude 5.5 models accept only the toolset on the Claude API.
+
+| Model | Tool `type` | `anthropic-beta` |
+|---|---|---|
+| `claude-fable-5-1` | `computer_toolset_20260801` | none |
+| `claude-opus-5-5` | `computer_toolset_20260801` | none |
+| `claude-sonnet-5-5` | `computer_toolset_20260801` | none |
+| `claude-haiku-5-5` | `computer_toolset_20260801` | none |
+| `claude-fable-5` | `computer_toolset_20260801` | none |
+| `claude-opus-5` | `computer_toolset_20260801` | none |
+| `claude-sonnet-5` | `computer_toolset_20260801` | none |
+| `claude-opus-4-8` | `computer_toolset_20260801` | none |
+| `claude-opus-4-7` | `computer_20251124` | `computer-use-2025-11-24` |
+| `claude-opus-4-6` | `computer_20251124` | `computer-use-2025-11-24` |
+| `claude-sonnet-4-6` | `computer_20251124` | `computer-use-2025-11-24` |
+| `claude-opus-4-5-20251101` | `computer_20251124` | `computer-use-2025-11-24` |
+| `claude-opus-4-5` | `computer_20251124` | `computer-use-2025-11-24` |
+| `claude-sonnet-4-5-20250929` | `computer_20250124` | `computer-use-2025-01-24` |
+| `claude-sonnet-4-5` | `computer_20250124` | `computer-use-2025-01-24` |
+| `claude-haiku-4-5-20251001` | `computer_20250124` | `computer-use-2025-01-24` |
+| `claude-haiku-4-5` | `computer_20250124` | `computer-use-2025-01-24` |
+
+| Version | `tools` entry |
+|---|---|
+| `computer_toolset_20260801` | `{"type": "computer_toolset_20260801"}`, every member enabled, `zoom` included |
+| `computer_20251124` | `{"type": "computer_20251124", "name": "computer", "display_width_px": sw, "display_height_px": sh, "enable_zoom": true}` |
+| `computer_20250124` | `{"type": "computer_20250124", "name": "computer", "display_width_px": sw, "display_height_px": sh}` |
+
+`sw`×`sh` is the size screenshots are sent at (see [Scaling](#scaling)). The request carries one
+`anthropic-beta` header: the configured `beta_features` first, then the version's beta, added
+only when the list does not already hold it. The prompt-cache marker lands on the entry when it
+is the last tool, as on any tool.
+
+### Mapping Claude's calls
+
+Every computer `tool_use` Claude returns, each block of a batch included, becomes a `tool_call`
+of the computer entry, with the same id and the tool's own input. A toolset call is a block
+carrying `"toolset_name": "computer"` whose `name` is the action; an older-version call is a block
+named `computer` whose `input.action` is the action. Coordinates are multiplied back up from
+screenshot pixels to display pixels (see [Scaling](#scaling)).
+
+| Claude's action and input | Tool input |
+|---|---|
+| `screenshot`, `cursor_position` | `{"action": "screenshot"}` |
+| `left_click`, `right_click`, `middle_click`, `double_click`, `triple_click`: `coordinate?`, `text?` | The same action, `x`,`y` from `coordinate`, `modifiers` from `text` |
+| `left_click_drag`: `start_coordinate`, `coordinate`, `text?` | `x`,`y` from `start_coordinate`, `to_x`,`to_y` from `coordinate`, `modifiers` |
+| `mouse_move`: `coordinate` | `x`,`y` |
+| `left_mouse_down`, `left_mouse_up`: `coordinate?` | The same action, `x`,`y` when given |
+| `scroll`: `coordinate?`, `scroll_direction`, `scroll_amount`, `text?` | The same names, `x`,`y`, `modifiers` |
+| `type`: `text` | `text` |
+| `key`: `text`, `repeat?` | `key`: `text`, repeated `repeat` times and joined by single spaces when `repeat` is an integer from 1 to 100 |
+| `hold_key`: `text`, `duration` | `key`, `duration` |
+| `wait`: `duration` | `duration` |
+| `zoom`: `region [x0, y0, x1, y1]` | `x`,`y` from `x0`,`y0`; `to_x`,`to_y` from `x1`,`y1`, the exclusive corner |
+
+Nothing is clamped or made up. A field the table does not consume or cannot read, such as a
+malformed coordinate or a `repeat` out of range, reaches the tool under its own name, and an
+action outside the table reaches it as `{"action": <name>, …fields}`, so the tool's refusal names
+it. On the stream, a computer call's `tool-call-started` frame carries the entry's name and no
+`tool-call-progress` frame is sent for it, since the input Claude streams is not the input the
+tool receives. Every other `tool_use` is returned as before.
+
+### Rebuilding history
+
+murmur keeps every computer call as the tool's input, in display pixels. Each request rebuilds
+the provider form from it with the inverse of the table, coordinates scaled down onto the
+screenshot, so a session survives a resume or a switch to another model:
+
+| Version | A computer call in history | The `tool_result` answering it |
+|---|---|---|
+| `computer_toolset_20260801` | `{"type": "tool_use", "id", "name": <action>, "toolset_name": "computer", "input": {…}}`. A `key` of one combo repeated, such as `Tab Tab Tab`, goes back as `text` plus `repeat` | Carries `"toolset_name": "computer"` |
+| `computer_20251124`, `computer_20250124` | `{"type": "tool_use", "id", "name": "computer", "input": {"action", …}}` | As any `tool_result` |
+
+A call the version cannot express goes back as an ordinary `tool_use` named after the entry with
+the tool's input, and its result as an ordinary `tool_result`: `zoom` on `computer_20250124`,
+`left_mouse_down` or `left_mouse_up` at a point on the toolset, and an action Claude never names.
+
+### Result text
+
+The text of a result answering a provider-form call is rewritten so it holds no display-pixel
+coordinate and no file the model never sees:
+
+| Line | Becomes |
+|---|---|
+| `screenshot: <path> (<w>x<h>)` | Dropped |
+| The action line just before `cursor:`, such as `left_click at 719,450` | Dropped |
+| `cursor: X,Y` | `cursor: x,y` in screenshot pixels |
+| Every other line: a restart notice, the display banner, a launched program's exit, a refusal | Kept, in order |
+| murmur's `<untrusted-content source=tool:…>` … `</untrusted-content>` fence around the text | Kept around what is left; dropped when nothing is left inside it |
+
+A result left with no text and no image says `OK`. Its screenshot is sized by the image pre-pass
+like any other tool image, which sends a display-size screenshot at exactly `sw`×`sh`.
+
+### Scaling
+
+The size screenshots are sent at is the size the image pre-pass gives a
+`display_width`×`display_height` image on the model's tier, so it is recomputed on every request
+from the declared display and the model, and never stored. Claude's coordinates are in that
+screenshot's pixel space; the driver maps each one to the display as
+`round(x · display_width / sw)`, `round(y · display_height / sh)`, without clamping, and maps a
+display point back as `round(x · sw / display_width)`, clamped onto the screenshot.
+
+| A 1440×900 display on | Sent at | Scale |
+|---|---|---|
+| The high-resolution tier: every toolset model and `claude-opus-4-7` | 1440×900 | 1, identity |
+| The standard tier: `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-opus-4-5`, `claude-sonnet-4-5`, `claude-haiku-4-5` | 1389×868 | below 1 |
+
+### Cost
+
+The toolset adds about 4,500 input tokens to every request that offers it (about 4,590 on
+`claude-sonnet-5`). An older-version definition adds about 735 input tokens, plus a 466–499 token
+system prompt. Screenshots are billed as image input, at the tier's size.
+
+### Checked against the live API
+
+On 2026-11-01, bodies built by this driver, each with the cache markers it adds by default:
+
+| Model and version | Request | Answer |
+|---|---|---|
+| `claude-haiku-5-5`, toolset | History of one `left_click` and its 1440×900 screenshot, buffered and streamed | HTTP 200 both |
+| `claude-haiku-5-5`, toolset | First turn, buffered and streamed | HTTP 200; a `screenshot` member `tool_use` with `"toolset_name": "computer"`, which the stream's `content_block_start` carries too |
+| `claude-sonnet-4-6`, `computer_20251124` + beta | The same history, the screenshot sent at 1389×868, and a first turn | HTTP 200; `{"name": "computer", "input": {"action": "screenshot"}}` |
+| `claude-haiku-4-5`, `computer_20250124` + beta | The same | HTTP 200; the same shape |
+| `claude-haiku-5-5`, toolset | History holding an ordinary `tool_use` named `tool-computer` (a `left_mouse_down` at a point) beside member calls | HTTP 200 |
+| `claude-haiku-5-5`, toolset | A two-call batch answered by two consecutive user messages, one `tool_result` each, as murmur's one tool message per call becomes | HTTP 200 |
+
+Each captured stream, run through the driver, gave one `tool_call` of the computer entry and one
+`tool-call-started` frame under the entry's name.
+
+### Known gaps
+
+- murmur runs every call of a batch, in order, even after one fails; Anthropic asks for the rest
+  of the batch to be skipped. Each skipped-in-spirit call runs and reports its own result.
+- In function mode nothing is rescaled: the model sees the screenshot at the size the pre-pass
+  sends and the tool takes display pixels.
+- `computer_20250124` has no `zoom`; a `zoom` the tool ran under another model replays as an
+  ordinary call there.
+- The text of a refusal is passed on as the tool wrote it, so a refused coordinate it names is in
+  display pixels.
+
 ## Prompt caching
 
 Anthropic caches a prompt prefix only where the request carries a

@@ -41,7 +41,8 @@ fn tool_request(model: &str, answers: Vec<(&str, Value)>) -> Value {
 
 fn build(request: &Value) -> (Value, Vec<Value>) {
     let request: MurmurRequest = serde_json::from_value(request.clone()).unwrap();
-    let (_, body, reports) = build_request_body(request, &DriverConfig::default(), false).unwrap();
+    let built = build_request_body(request, &DriverConfig::default(), false).unwrap();
+    let (body, reports) = (built.body, built.images);
     (body, reports.iter().map(|r| r.to_json()).collect())
 }
 
@@ -349,7 +350,8 @@ fn responses_continuation_keeps_the_image_in_the_function_call_output() {
     );
     request["continuation_id"] = json!("resp_prev_1");
     let request: MurmurRequest = serde_json::from_value(request).unwrap();
-    let (_, body, reports) = build_request_body(request, &DriverConfig::default(), true).unwrap();
+    let built = build_request_body(request, &DriverConfig::default(), true).unwrap();
+    let (body, reports) = (built.body, built.images);
     assert_eq!(body["previous_response_id"], "resp_prev_1");
     let input = body["input"].as_array().unwrap();
     assert!(
@@ -494,7 +496,9 @@ fn the_report_is_added_only_when_the_request_held_an_image() {
         vec![("call_1", json!([image("image/png", &png_base64(8, 8))]))],
     ))
     .unwrap();
-    let (_, _, reports) = build_request_body(request, &DriverConfig::default(), false).unwrap();
+    let reports = build_request_body(request, &DriverConfig::default(), false)
+        .unwrap()
+        .images;
     let mut response = json!({"stop_reason": "end_turn", "content": []});
     attach_image_report(&mut response, &reports);
     assert_eq!(response["images"][0]["placement"], "function_call_output");

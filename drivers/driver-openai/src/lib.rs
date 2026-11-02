@@ -2,6 +2,7 @@
 // or from cfg(test). Suppress dead_code noise in plain host library builds.
 #![cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
 
+use computer::{computer_plan, ComputerPlan};
 use murmur_driver_image::{largest_fit, prepare_source, Action, ImageReport, Rule, SizeRule};
 use murmur_driver_stream::Failure;
 use serde::Deserialize;
@@ -73,20 +74,23 @@ const GPT_5_2_2048_PX: ImageRule = ImageRule {
     patch_budget: 6144,
 };
 
-/// One model this driver accepts: the surface it is sent to, and how it takes images (`None`:
-/// its model page lists no image input).
+/// One model this driver accepts: the surface it is sent to, how it takes images (`None`: its
+/// model page lists no image input), and whether its page lists `computer_use` under "Supported
+/// tools", read 2026-11-01 from `https://developers.openai.com/api/docs/models/<id>.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ModelRoute {
     id: &'static str,
     surface: ApiSurface,
     images: Option<ImageRule>,
+    computer: bool,
 }
 
-const fn responses(id: &'static str, images: Option<ImageRule>) -> ModelRoute {
+const fn responses(id: &'static str, images: Option<ImageRule>, computer: bool) -> ModelRoute {
     ModelRoute {
         id,
         surface: ApiSurface::Responses,
         images,
+        computer,
     }
 }
 
@@ -98,27 +102,28 @@ const fn responses(id: &'static str, images: Option<ImageRule>) -> ModelRoute {
 /// model id. `murmur.yaml`'s `models:` block, README.md's "Model limits", "Endpoints" and "Images"
 /// tables hold the same ids, and tests keep all of them in step.
 const MODEL_ROUTES: &[ModelRoute] = &[
-    responses("gpt-6-astra", Some(ORIGINAL_65535_PX)),
-    responses("gpt-6.1-sol", Some(HIGH_2048_PX)),
-    responses("gpt-6-luna", Some(HIGH_2048_PX)),
-    responses("gpt-5.6-cyber", Some(HIGH_2048_PX)),
-    responses("gpt-oss-120b", None),
-    responses("gpt-oss-20b", None),
-    responses("gpt-6-sol", Some(HIGH_2048_PX)),
-    responses("gpt-5.6-sol", Some(ORIGINAL_65535_PX)),
-    responses("gpt-5.6-terra", Some(ORIGINAL_65535_PX)),
-    responses("gpt-5.6-luna", Some(ORIGINAL_65535_PX)),
-    responses("gpt-5.5", Some(ORIGINAL_6000_PX)),
-    responses("gpt-5.5-pro", Some(HIGH_2048_PX)),
-    responses("gpt-5.4", Some(HIGH_2048_PX)),
-    responses("gpt-5.4-pro", Some(HIGH_2048_PX)),
-    responses("gpt-5.4-mini", Some(HIGH_2048_PX)),
-    responses("gpt-5.2", Some(GPT_5_2_2048_PX)),
-    responses("gpt-5.2-pro", Some(HIGH_2048_PX)),
+    responses("gpt-6-astra", Some(ORIGINAL_65535_PX), true),
+    responses("gpt-6.1-sol", Some(HIGH_2048_PX), true),
+    responses("gpt-6-luna", Some(HIGH_2048_PX), true),
+    responses("gpt-5.6-cyber", Some(HIGH_2048_PX), true),
+    responses("gpt-oss-120b", None, false),
+    responses("gpt-oss-20b", None, false),
+    responses("gpt-6-sol", Some(HIGH_2048_PX), true),
+    responses("gpt-5.6-sol", Some(ORIGINAL_65535_PX), true),
+    responses("gpt-5.6-terra", Some(ORIGINAL_65535_PX), true),
+    responses("gpt-5.6-luna", Some(ORIGINAL_65535_PX), true),
+    responses("gpt-5.5", Some(ORIGINAL_6000_PX), true),
+    responses("gpt-5.5-pro", Some(HIGH_2048_PX), false),
+    responses("gpt-5.4", Some(HIGH_2048_PX), true),
+    responses("gpt-5.4-pro", Some(HIGH_2048_PX), true),
+    responses("gpt-5.4-mini", Some(HIGH_2048_PX), true),
+    responses("gpt-5.2", Some(GPT_5_2_2048_PX), false),
+    responses("gpt-5.2-pro", Some(HIGH_2048_PX), false),
     ModelRoute {
         id: "chat-latest",
         surface: ApiSurface::ChatCompletions,
         images: Some(HIGH_2048_PX),
+        computer: false,
     },
 ];
 
@@ -182,6 +187,19 @@ struct MurmurMessage {
     tool_call_id: Option<String>,
     #[serde(default)]
     content: Vec<MurmurContentBlock>,
+    /// Whether the tool call failed or was not run, as murmur marks it. Neither a
+    /// `function_call_output` nor a `computer_call_output` has a slot for it: each carries the
+    /// tool's text, which says so.
+    #[serde(default)]
+    #[allow(dead_code)]
+    is_error: bool,
+    /// The safety checks a person acknowledged before murmur ran this call, exactly as the call
+    /// carried them. Never sent: the `computer` tool refuses `acknowledged_safety_checks` in its
+    /// input (HTTP 400, "`acknowledged_safety_checks` is not supported for the \"computer\"
+    /// tool."), so the person's yes is what let the call run, and nothing more goes back.
+    #[serde(default)]
+    #[allow(dead_code)]
+    acknowledged_safety_checks: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -191,6 +209,11 @@ struct MurmurTool {
     description: Option<String>,
     #[serde(default = "default_object")]
     parameters: Value,
+    /// The tool artifact's own `provider_tool:` block, when it declares one. Read only to decide
+    /// whether the request offers a computer tool (see `computer::computer_plan`); it never
+    /// reaches the provider body as it is.
+    #[serde(default)]
+    provider_tool: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -213,6 +236,15 @@ enum MurmurContentBlock {
         id: String,
         name: String,
         input: Value,
+        /// The checks OpenAI asked a person to acknowledge before a derived computer call runs,
+        /// in murmur's form, as this driver returned them. Not replayed: the `computer` tool
+        /// refuses checks in its input.
+        #[serde(default)]
+        #[allow(dead_code)]
+        safety_checks: Option<Value>,
+        /// The `id` of the `computer_call` item a derived call came from.
+        #[serde(default)]
+        openai_item_id: Option<String>,
     },
     #[serde(other)]
     Unknown,
@@ -245,7 +277,6 @@ fn openai_fits(rule: ImageRule, width: u32, height: u32) -> bool {
 /// `None` when the model reads no image or is not in `MODEL_ROUTES`. The pre-pass sizes through
 /// the same rule; this is the entry point for mapping a model's coordinates back onto the original
 /// image.
-#[cfg_attr(not(test), allow(dead_code))]
 fn openai_image_size(model: &str, width: u32, height: u32) -> Option<(u32, u32)> {
     let rule = model_route(model)?.images?;
     Some(largest_fit(width, height, |w, h| openai_fits(rule, w, h)))
@@ -256,12 +287,14 @@ fn openai_image_size(model: &str, width: u32, height: u32) -> Option<(u32, u32)>
 const ALWAYS_REENCODED: &[&str] = &["image/gif"];
 
 /// Size every image of every `user` and `tool` message for `model`'s rule, in place, and report
-/// what became of each; `surface` decides where a tool image is placed. A request holding no image
-/// is left untouched and nothing is decoded.
+/// what became of each; `surface` decides where a tool image is placed, and a tool message inside
+/// one of `runs` is placed in its group's `computer_call_output`. A request holding no image is
+/// left untouched and nothing is decoded.
 fn prepare_images(
     request: &mut MurmurRequest,
     images: Option<ImageRule>,
     surface: ApiSurface,
+    runs: &[ComputerRun],
 ) -> Vec<ImageReport> {
     let holds_image = request.messages.iter().any(|message| {
         message
@@ -294,8 +327,10 @@ fn prepare_images(
 
     let mut reports = Vec::new();
     for (index, message) in request.messages.iter_mut().enumerate() {
+        let in_run = runs.iter().any(|run| (run.start..run.end).contains(&index));
         let placement = match message.role.as_str() {
             "user" => "user",
+            "tool" if in_run => computer::COMPUTER_CALL_OUTPUT_PLACEMENT,
             "tool" => tool_placement,
             _ => continue,
         };
@@ -331,21 +366,102 @@ fn image_data_url(source: &MurmurImageSource) -> String {
     format!("data:{};base64,{}", source.media_type, source.data)
 }
 
+/// What [`build_request_body`] builds for one request.
+struct RequestBody {
+    /// The surface the body goes to.
+    surface: ApiSurface,
+    body: Value,
+    /// The report of every image the request held and sent, or replaced with a line.
+    images: Vec<ImageReport>,
+    /// How the request offers its computer tool, or `None` in function mode. `run_inner` maps
+    /// the response's `computer_call` items through it.
+    computer: Option<ComputerPlan>,
+}
+
 /// Route a parsed request, size its images and build its provider body: the surface it goes to,
-/// the body, and the report of every image it held. `run_inner` and the tests build a body
-/// through this one path.
+/// the body, the report of every image it held, and its computer plan. `run_inner` and the tests
+/// build a body through this one path.
 fn build_request_body(
     mut request: MurmurRequest,
     config: &DriverConfig,
     store: bool,
-) -> Result<(ApiSurface, Value, Vec<ImageReport>), String> {
+) -> Result<RequestBody, String> {
     // A model outside MODEL_ROUTES is refused here, before a body is built: it costs no HTTP
     // call.
     let surface = route(&request.model)?;
     let images = model_route(&request.model).and_then(|route| route.images);
-    let reports = prepare_images(&mut request, images, surface);
-    let body = build_provider_request(&request, config, store, surface)?;
-    Ok((surface, body, reports))
+    let computer = computer_plan(&request.model, &request.tools);
+    let runs = match computer {
+        Some(_) => computer_runs(&request.messages),
+        None => Vec::new(),
+    };
+    keep_last_run_images(&mut request, &runs);
+    let reports = prepare_images(&mut request, images, surface, &runs);
+    let body = build_provider_request(&request, config, store, surface, computer.as_ref())?;
+    Ok(RequestBody {
+        surface,
+        body,
+        images: reports,
+        computer,
+    })
+}
+
+/// A run of consecutive tool messages answering the calls derived from one `computer_call`:
+/// `messages[start..end]`, whose `tool_call_id`s are all `<call_id>.cu<i>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ComputerRun {
+    start: usize,
+    end: usize,
+    call_id: String,
+}
+
+/// Every [`ComputerRun`] in `messages`, in order.
+fn computer_runs(messages: &[MurmurMessage]) -> Vec<ComputerRun> {
+    let call_id_of = |message: &MurmurMessage| -> Option<String> {
+        if message.role != "tool" {
+            return None;
+        }
+        let id = message.tool_call_id.as_deref()?;
+        computer::split_derived_id(id).map(|(call_id, _)| call_id.to_string())
+    };
+    let mut runs: Vec<ComputerRun> = Vec::new();
+    for (index, message) in messages.iter().enumerate() {
+        let Some(call_id) = call_id_of(message) else {
+            continue;
+        };
+        match runs.last_mut() {
+            Some(run) if run.end == index && run.call_id == call_id => run.end = index + 1,
+            _ => runs.push(ComputerRun {
+                start: index,
+                end: index + 1,
+                call_id,
+            }),
+        }
+    }
+    runs
+}
+
+/// Remove every image of each run but its last, before the pre-pass, so the others are never
+/// decoded, sent or reported: a `computer_call_output` holds one screenshot.
+fn keep_last_run_images(request: &mut MurmurRequest, runs: &[ComputerRun]) {
+    for run in runs {
+        let last = (run.start..run.end).rev().find_map(|index| {
+            let content = &request.messages[index].content;
+            content
+                .iter()
+                .rposition(|block| matches!(block, MurmurContentBlock::Image { .. }))
+                .map(|block| (index, block))
+        });
+        for index in run.start..run.end {
+            let mut block_index = 0;
+            request.messages[index].content.retain(|block| {
+                let keep = !matches!(block, MurmurContentBlock::Image { .. })
+                    || last == Some((index, block_index));
+                block_index += 1;
+                keep
+            });
+        }
+    }
 }
 
 // ── Server-side response retention (`store`) governance ───────────────────────
@@ -567,10 +683,11 @@ fn build_provider_request(
     config: &DriverConfig,
     store: bool,
     surface: ApiSurface,
+    computer: Option<&ComputerPlan>,
 ) -> Result<Value, String> {
     let mut body = match surface {
         ApiSurface::ChatCompletions => translate_murmur_request_to_openai(request)?,
-        ApiSurface::Responses => translate_murmur_request_to_responses(request, store)?,
+        ApiSurface::Responses => translate_responses_request(request, store, computer)?,
     };
     apply_config_dials(&mut body, config, surface);
     stamp_streaming_flags(&mut body, surface);
@@ -741,7 +858,10 @@ fn translate_assistant_message(message: &MurmurMessage) -> Result<Value, String>
 
     let mut tool_calls = Vec::new();
     for block in &message.content {
-        if let MurmurContentBlock::ToolCall { id, name, input } = block {
+        if let MurmurContentBlock::ToolCall {
+            id, name, input, ..
+        } = block
+        {
             let arguments = serde_json::to_string(input)
                 .map_err(|err| format!("driver: failed to serialize tool_call.input: {err}"))?;
             tool_calls.push(json!({
@@ -833,9 +953,23 @@ fn translate_tool_message(message: &MurmurMessage) -> Result<Value, String> {
 /// canonical Responses continuation shape — and it is exactly what lets reasoning
 /// items round-trip (they stay server-side and are never re-serialized here,
 /// which the Chat Completions path structurally cannot do).
+#[cfg(test)]
 fn translate_murmur_request_to_responses(
     request: &MurmurRequest,
     store: bool,
+) -> Result<Value, String> {
+    translate_responses_request(request, store, None)
+}
+
+/// The Responses body for `request`. With a computer plan, the computer entry goes out as
+/// `{"type": "computer"}`, each group of derived calls in history as one `computer_call` item, and
+/// each run of tool messages answering one as one `computer_call_output` plus, when the run left
+/// more than its screenshot, a notes message; without one, every tool and item is translated as
+/// an ordinary function.
+fn translate_responses_request(
+    request: &MurmurRequest,
+    store: bool,
+    computer: Option<&ComputerPlan>,
 ) -> Result<Value, String> {
     let mut input = Vec::new();
 
@@ -851,14 +985,26 @@ fn translate_murmur_request_to_responses(
     };
     let continuation_active = continuation_id.is_some();
 
-    for message in &request.messages {
+    let runs = match computer {
+        Some(_) => computer_runs(&request.messages),
+        None => Vec::new(),
+    };
+    let mut index = 0;
+    while index < request.messages.len() {
+        if let (Some(plan), Some(run)) = (computer, runs.iter().find(|run| run.start == index)) {
+            input.extend(fold_computer_run(plan, run, &request.messages));
+            index = run.end;
+            continue;
+        }
+        let message = &request.messages[index];
+        index += 1;
         match message.role.as_str() {
             "user" => input.push(translate_user_message_responses(message)),
             // On the continuation path the assistant turn is already retained
             // server-side under `previous_response_id`; skip it to avoid
             // duplicating items (and to let its reasoning items round-trip).
             "assistant" if continuation_active => {}
-            "assistant" => input.extend(translate_assistant_message_responses(message)?),
+            "assistant" => input.extend(translate_assistant_message_responses(message, computer)?),
             "tool" => input.push(translate_tool_message_responses(message)?),
             other => return Err(format!("driver: unsupported message role '{other}'")),
         }
@@ -867,7 +1013,11 @@ fn translate_murmur_request_to_responses(
     let tools = request
         .tools
         .iter()
-        .map(|tool| {
+        .enumerate()
+        .map(|(index, tool)| {
+            if let Some(plan) = computer.filter(|plan| plan.entry_index == index) {
+                return plan.tool_entry();
+            }
             let mut obj = Map::new();
             obj.insert("type".to_string(), Value::String("function".to_string()));
             obj.insert("name".to_string(), Value::String(tool.name.clone()));
@@ -966,7 +1116,13 @@ fn translate_user_message_responses(message: &MurmurMessage) -> Value {
     })
 }
 
-fn translate_assistant_message_responses(message: &MurmurMessage) -> Result<Vec<Value>, String> {
+/// An assistant message as Responses input items: its text as one `message` item, then each tool
+/// call as a `function_call`. With a computer plan, consecutive calls of the computer entry whose
+/// ids share a `<call_id>.cu` prefix go out as the one `computer_call` they came from.
+fn translate_assistant_message_responses(
+    message: &MurmurMessage,
+    computer: Option<&ComputerPlan>,
+) -> Result<Vec<Value>, String> {
     let mut items = Vec::new();
 
     let text = message
@@ -987,8 +1143,39 @@ fn translate_assistant_message_responses(message: &MurmurMessage) -> Result<Vec<
         }));
     }
 
+    // The derived calls of the `computer_call` being gathered: its call id, then each call's
+    // input and item id.
+    type Group<'a> = (&'a str, Vec<(&'a Value, Option<&'a str>)>);
+    let mut group: Option<Group<'_>> = None;
+    let flush = |group: &mut Option<Group<'_>>, items: &mut Vec<Value>| {
+        if let (Some(plan), Some((call_id, calls))) = (computer, group.take()) {
+            items.push(plan.computer_call_item(call_id, &calls));
+        }
+    };
     for block in &message.content {
-        if let MurmurContentBlock::ToolCall { id, name, input } = block {
+        if let MurmurContentBlock::ToolCall {
+            id,
+            name,
+            input,
+            openai_item_id,
+            ..
+        } = block
+        {
+            let derived = computer
+                .filter(|plan| plan.entry_name == *name)
+                .and_then(|_| computer::split_derived_id(id));
+            if let Some((call_id, _)) = derived {
+                let call = (input, openai_item_id.as_deref());
+                match &mut group {
+                    Some((gathering, calls)) if *gathering == call_id => calls.push(call),
+                    _ => {
+                        flush(&mut group, &mut items);
+                        group = Some((call_id, vec![call]));
+                    }
+                }
+                continue;
+            }
+            flush(&mut group, &mut items);
             let arguments = serde_json::to_string(input)
                 .map_err(|err| format!("driver: failed to serialize tool_call.input: {err}"))?;
             items.push(json!({
@@ -999,8 +1186,101 @@ fn translate_assistant_message_responses(message: &MurmurMessage) -> Result<Vec<
             }));
         }
     }
+    flush(&mut group, &mut items);
 
     Ok(items)
+}
+
+/// The first line of the notes message that carries what a computer group returned besides its
+/// screenshot.
+fn notes_heading(call_id: &str) -> String {
+    format!("computer_call {call_id} returned more than its screenshot:")
+}
+
+/// The notes line saying a group returned no screenshot.
+const NO_SCREENSHOT_LINE: &str =
+    "no action in this call returned a screenshot, so the screenshot sent with it is blank";
+
+/// The input items one run of tool messages folds into: one `computer_call_output` holding the
+/// run's last image, or the blank screenshot when it holds none, then a notes message when the
+/// run left text or no screenshot. No `acknowledged_safety_checks` is sent: the `computer` tool
+/// refuses it.
+fn fold_computer_run(
+    plan: &ComputerPlan,
+    run: &ComputerRun,
+    messages: &[MurmurMessage],
+) -> Vec<Value> {
+    let members = &messages[run.start..run.end];
+
+    // Each derived call's tool action, from whichever assistant messages the request holds: on
+    // the continuation path the assistant turn is held server-side and the notes say no action.
+    let action_of = |id: &str| -> Option<&str> {
+        messages.iter().find_map(|message| {
+            message.content.iter().find_map(|block| match block {
+                MurmurContentBlock::ToolCall {
+                    id: call_id, input, ..
+                } if call_id == id => input.get("action").and_then(Value::as_str),
+                _ => None,
+            })
+        })
+    };
+
+    let image_url = members.iter().rev().find_map(|message| {
+        message.content.iter().rev().find_map(|block| match block {
+            MurmurContentBlock::Image { source } => Some(image_data_url(source)),
+            _ => None,
+        })
+    });
+
+    let mut output = Map::new();
+    output.insert("type".into(), json!("computer_call_output"));
+    output.insert("call_id".into(), json!(run.call_id));
+    output.insert(
+        "output".into(),
+        json!({
+            "type": "computer_screenshot",
+            "image_url": image_url.clone().unwrap_or_else(|| computer::BLANK_SCREENSHOT_URL.to_string()),
+        }),
+    );
+
+    let mut lines = Vec::new();
+    for message in members {
+        let id = message.tool_call_id.as_deref().unwrap_or_default();
+        let index = computer::split_derived_id(id).map_or(0, |(_, index)| index);
+        let text = message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                MurmurContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = plan.notes_text(&text);
+        if text.trim().is_empty() {
+            continue;
+        }
+        lines.push(match action_of(id) {
+            Some(action) => format!("{index}. {action}: {text}"),
+            None => format!("{index}. {text}"),
+        });
+    }
+    if image_url.is_none() {
+        lines.push(NO_SCREENSHOT_LINE.to_string());
+    }
+
+    let mut items = vec![Value::Object(output)];
+    if !lines.is_empty() {
+        let notes = std::iter::once(notes_heading(&run.call_id))
+            .chain(lines)
+            .collect::<Vec<_>>()
+            .join("\n");
+        items.push(json!({
+            "role": "user",
+            "content": [{"type": "input_text", "text": notes}],
+        }));
+    }
+    items
 }
 
 fn translate_tool_message_responses(message: &MurmurMessage) -> Result<Value, String> {
@@ -1351,7 +1631,18 @@ fn responses_error_failure(error: &Value) -> Failure {
     ProviderError::of(error).failure(format!("OpenAI Responses error: {msg}"))
 }
 
+#[cfg(test)]
 fn translate_responses_to_murmur(response: &Value) -> Result<Value, Failure> {
+    translate_responses(response, None)
+}
+
+/// Translate a buffered Responses body. With the request's computer plan, each `computer_call`
+/// item becomes its ordered group of derived calls and counts as a tool call for the stop reason;
+/// without one, a `computer_call` is dropped like any other item the driver did not ask for.
+fn translate_responses(
+    response: &Value,
+    computer: Option<&ComputerPlan>,
+) -> Result<Value, Failure> {
     if let Some(err) = response.get("error").filter(|e| !e.is_null()) {
         return Err(responses_error_failure(err));
     }
@@ -1366,9 +1657,14 @@ fn translate_responses_to_murmur(response: &Value) -> Result<Value, Failure> {
         .cloned()
         .unwrap_or_default();
 
-    let has_function_call = output
-        .iter()
-        .any(|item| item.get("type").and_then(Value::as_str) == Some("function_call"));
+    let has_function_call =
+        output
+            .iter()
+            .any(|item| match item.get("type").and_then(Value::as_str) {
+                Some("function_call") => true,
+                Some("computer_call") => computer.is_some(),
+                _ => false,
+            });
 
     let incomplete_reason = response
         .get("incomplete_details")
@@ -1433,6 +1729,11 @@ fn translate_responses_to_murmur(response: &Value) -> Result<Value, Failure> {
                     "name": name,
                     "input": arguments,
                 }));
+            }
+            Some("computer_call") => {
+                if let Some(plan) = computer {
+                    content.extend(plan.tool_calls(item));
+                }
             }
             // "reasoning" items and anything else are intentionally dropped — no
             // request-side round-trip slot for reasoning in this driver (see
@@ -1546,6 +1847,9 @@ struct ToolCallState {
     id: String,
     name: String,
     arguments: String,
+    /// For a `computer_call` item: the tool calls it was derived into, ready to return. Such a
+    /// state is never sized; its calls are started when the item completes.
+    computer: Option<Vec<Value>>,
     /// `Started` has been signalled for this call.
     started: bool,
     /// The last `InputBytes` total signalled for this call.
@@ -1822,6 +2126,17 @@ fn parse_responses_sse_body_with_signals<F: FnMut(&str), G: FnMut(&str)>(
     emit_text: &mut F,
     emit_thinking: &mut G,
 ) -> (Result<Value, Failure>, Vec<RecordedSignal>) {
+    parse_responses_sse_body_with_plan(body, None, emit_text, emit_thinking)
+}
+
+/// [`parse_responses_sse_body_with_signals`] under a request's computer plan (used in tests).
+#[cfg(test)]
+fn parse_responses_sse_body_with_plan<F: FnMut(&str), G: FnMut(&str)>(
+    body: &str,
+    computer: Option<&ComputerPlan>,
+    emit_text: &mut F,
+    emit_thinking: &mut G,
+) -> (Result<Value, Failure>, Vec<RecordedSignal>) {
     let mut signals = Vec::new();
     let mut text_acc = String::new();
     let mut thinking_acc = String::new();
@@ -1846,6 +2161,7 @@ fn parse_responses_sse_body_with_signals<F: FnMut(&str), G: FnMut(&str)>(
             };
             process_responses_sse_line(
                 line,
+                computer,
                 &mut tool_states,
                 &mut tool_index_by_output_index,
                 &mut status,
@@ -2090,6 +2406,7 @@ fn assemble_content_tail(
 #[allow(clippy::too_many_arguments)]
 fn process_responses_sse_line(
     line: &str,
+    computer: Option<&ComputerPlan>,
     tool_states: &mut Vec<ToolCallState>,
     tool_index_by_output_index: &mut std::collections::HashMap<u64, usize>,
     status: &mut Option<String>,
@@ -2150,6 +2467,27 @@ fn process_responses_sse_line(
                 });
                 tool_index_by_output_index.insert(output_index, idx);
                 tool_states[idx].signal_due(signal);
+            }
+        }
+        // A `computer_call` is read whole when it completes: its actions arrive with the item, not
+        // as deltas. Its derived calls are started then, in order, and never sized.
+        "response.output_item.done" => {
+            let item = data.get("item").unwrap_or(&Value::Null);
+            if let (Some(plan), Some("computer_call")) =
+                (computer, item.get("type").and_then(Value::as_str))
+            {
+                let calls = plan.tool_calls(item);
+                for call in &calls {
+                    signal(ToolCallSignal::Started {
+                        id: call["id"].as_str().unwrap_or_default(),
+                        name: &plan.entry_name,
+                    });
+                }
+                tool_states.push(ToolCallState {
+                    computer: Some(calls),
+                    started: true,
+                    ..ToolCallState::default()
+                });
             }
         }
         "response.function_call_arguments.delta" => {
@@ -2246,6 +2584,10 @@ fn assemble_responses_streaming_response(
 
     let mut tool_content = Vec::new();
     for state in tool_states {
+        if let Some(calls) = state.computer {
+            tool_content.extend(calls);
+            continue;
+        }
         let input: Value = match serde_json::from_str(&state.arguments) {
             Ok(value) => value,
             // The stream stops mid-`function_call_arguments.delta` when the cap
@@ -2279,8 +2621,8 @@ mod wasm_driver {
         assemble_openai_streaming_response, assemble_responses_streaming_response,
         build_request_body, parse_driver_config, process_openai_sse_line,
         process_responses_sse_line, render_outcome, status_failure, store_opt_in,
-        translate_openai_response_to_murmur, translate_responses_to_murmur, ApiSurface,
-        MurmurRequest, ThinkingState, ToolCallSignal, ToolCallState, UsageTokens,
+        translate_openai_response_to_murmur, translate_responses, ApiSurface, ComputerPlan,
+        MurmurRequest, RequestBody, ThinkingState, ToolCallSignal, ToolCallState, UsageTokens,
     };
     use murmur_driver_image::attach_image_report;
     use murmur_driver_stream::Failure;
@@ -2383,8 +2725,12 @@ mod wasm_driver {
         drop(raw);
 
         // Images are sized here, before translation; `images` is what the response reports.
-        let (surface, provider_request, images) =
-            build_request_body(murmur_request, &config, store)?;
+        let RequestBody {
+            surface,
+            body: provider_request,
+            images,
+            computer,
+        } = build_request_body(murmur_request, &config, store)?;
 
         let body = serde_json::to_vec(&provider_request)
             .map_err(|err| format!("driver: failed to encode request body: {err}"))?;
@@ -2441,7 +2787,7 @@ mod wasm_driver {
             match surface {
                 ApiSurface::ChatCompletions => (translate_openai_response_to_murmur(&json)?, None),
                 ApiSurface::Responses => (
-                    translate_responses_to_murmur(&json)?,
+                    translate_responses(&json, computer.as_ref())?,
                     json.get("id").and_then(Value::as_str).map(String::from),
                 ),
             }
@@ -2451,7 +2797,9 @@ mod wasm_driver {
                     run_chat_completions_sse(stream, &first, incoming_body, status)?,
                     None,
                 ),
-                ApiSurface::Responses => run_responses_sse(stream, &first, incoming_body, status)?,
+                ApiSurface::Responses => {
+                    run_responses_sse(stream, &first, incoming_body, status, computer.as_ref())?
+                }
             }
         };
 
@@ -2600,6 +2948,7 @@ mod wasm_driver {
         first: &[u8],
         incoming_body: wasip2::http::types::IncomingBody,
         status: u16,
+        computer: Option<&ComputerPlan>,
     ) -> Result<(Value, Option<String>), Failure> {
         let mut line_buf: Vec<u8> = Vec::new();
         let mut text_acc = String::new();
@@ -2634,6 +2983,7 @@ mod wasm_driver {
                         };
                         done = process_responses_sse_line(
                             line,
+                            computer,
                             &mut tool_states,
                             &mut tool_index_by_output_index,
                             &mut terminal_status,
@@ -2677,6 +3027,7 @@ mod wasm_driver {
                                 };
                                 done = process_responses_sse_line(
                                     line,
+                                    computer,
                                     &mut tool_states,
                                     &mut tool_index_by_output_index,
                                     &mut terminal_status,
@@ -2925,6 +3276,7 @@ mod tests {
             &DriverConfig::default(),
             false,
             ApiSurface::ChatCompletions,
+            None,
         )
         .unwrap();
         assert_eq!(body["tools"], translated["tools"]);
@@ -3307,9 +3659,14 @@ mod tests {
             ),
         ] {
             request.continuation_id = continuation.map(str::to_string);
-            let body =
-                build_provider_request(&request, &config(raw_config), store, ApiSurface::Responses)
-                    .unwrap();
+            let body = build_provider_request(
+                &request,
+                &config(raw_config),
+                store,
+                ApiSurface::Responses,
+                None,
+            )
+            .unwrap();
             let tools = body["tools"].as_array().unwrap();
             assert_eq!(tools.len(), 2);
             for tool in tools {
@@ -3338,6 +3695,7 @@ mod tests {
             &DriverConfig::default(),
             false,
             ApiSurface::Responses,
+            None,
         )
         .unwrap();
         assert!(body.get("tools").is_none());
@@ -3365,6 +3723,7 @@ mod tests {
             &DriverConfig::default(),
             false,
             ApiSurface::Responses,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -3674,6 +4033,7 @@ mod tests {
         let line = r#"data: {"type":"response.completed","response":{"id":"resp_stream_42","status":"completed"}}"#;
         let done = process_responses_sse_line(
             line,
+            None,
             &mut tool_states,
             &mut idx,
             &mut status,
@@ -4362,7 +4722,7 @@ mod tests {
     /// the streaming flags. Tests assert on this rather than on a bare translation.
     fn provider_body(request: &MurmurRequest, config: &DriverConfig, store: bool) -> Value {
         let surface = route(&request.model).unwrap();
-        build_provider_request(request, config, store, surface).unwrap()
+        build_provider_request(request, config, store, surface, None).unwrap()
     }
 
     fn config(raw: &str) -> DriverConfig {
@@ -5886,6 +6246,11 @@ mod tests {
         assert!(finish < awaited, "the response is awaited after the body");
     }
 }
+
+mod computer;
+
+#[cfg(test)]
+mod computer_tests;
 
 #[cfg(test)]
 mod control_tests;
