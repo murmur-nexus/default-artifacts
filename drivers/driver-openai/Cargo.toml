@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 serde.workspace = true
 serde_json.workspace = true
 wit-bindgen.workspace = true
+murmur-driver-computer = { path = "../../libs/murmur-driver-computer" }
 murmur-driver-env = { path = "../../libs/murmur-driver-env" }
 murmur-driver-image = { path = "../../libs/murmur-driver-image" }
 murmur-driver-stream = { path = "../../libs/murmur-driver-stream" }

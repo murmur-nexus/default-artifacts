@@ -27,7 +27,16 @@ fn provider_body(control: &Value) -> Vec<u8> {
     let config = parse_driver_config(driver_config.as_deref()).unwrap();
     let store = store_opt_in(driver_config.as_deref());
     let request: MurmurRequest = serde_json::from_str(&raw).unwrap();
-    let (_, body, images) = build_request_body(request, &config, store).unwrap();
+    let super::RequestBody {
+        body,
+        images,
+        computer,
+        ..
+    } = build_request_body(request, &config, store).unwrap();
+    assert!(
+        computer.is_none(),
+        "a control request offers no computer tool"
+    );
     assert!(images.is_empty(), "a control request holds no image");
     serde_json::to_vec(&body).unwrap()
 }

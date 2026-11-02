@@ -1,0 +1,19 @@
+[package]
+name = "murmur-driver-computer"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Internal-only shared library: the provider-neutral half of offering a `provider_tool: {kind:
+# computer}` tool as a provider's own computer tool. It reads the declared display, scales
+# coordinates between the display and the screenshot the model sees, and rewrites a computer
+# tool's result text into the screenshot's pixel space. Each driver keeps its own model table and
+# wire shapes. NOT an artifact: it has no murmur.yaml, so nothing publishes it.
+
+[lib]
+name = "murmur_driver_computer"
+path = "src/lib.rs"
+
+[dependencies]
+serde_json.workspace = true

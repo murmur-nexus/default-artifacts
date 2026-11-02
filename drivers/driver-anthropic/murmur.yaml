@@ -1,5 +1,5 @@
 name: driver-anthropic
-version: 0.18.0
+version: 0.19.0
 runtime: driver
 description: |
   Anthropic Messages API inference driver for Murmur agent capsules. Translates the Murmur
@@ -22,7 +22,9 @@ description: |
 
   It sizes every image in a request to the model's resolution tier before sending it, places a
   tool's image inside the `tool_result` that answers the call, and reports what it sent in the
-  response's `images` list.
+  response's `images` list. A tool declaring `provider_tool: {kind: computer}`, such as
+  `murmur/tool-computer`, goes to Claude as Anthropic's own computer tool on every model in the
+  README's "Computer use" table, with Claude's coordinates scaled back to the tool's display.
 
   Caching lives on the artifact rather than on `inference.driver.config` because a
   `cache_control` breakpoint is an Anthropic construct — the other drivers have nowhere to put

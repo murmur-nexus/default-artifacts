@@ -2,6 +2,7 @@
 // or from cfg(test). Suppress dead_code noise in plain host library builds.
 #![cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
 
+use computer::{computer_plan, ComputerPlan};
 use murmur_driver_image::{largest_fit, prepare_source, Action, ImageReport, Rule, SizeRule};
 use murmur_driver_stream::Failure;
 use serde::Deserialize;
@@ -268,6 +269,11 @@ struct MurmurTool {
     description: Option<String>,
     #[serde(default = "default_object")]
     parameters: Value,
+    /// The tool artifact's own `provider_tool:` block, when it declares one. Read only to decide
+    /// whether the request offers a computer tool (see `computer::computer_plan`); it never
+    /// reaches the provider body as it is.
+    #[serde(default)]
+    provider_tool: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -383,7 +389,6 @@ fn anthropic_fits(max_edge: u32, max_tokens: u32, width: u32, height: u32) -> bo
 /// The size `model` sees a `width`×`height` image at — the size this driver sends it at — or
 /// `None` when the model reads no image. The pre-pass sizes through the same tier limits; this is
 /// the entry point for mapping a model's coordinates back onto the original image.
-#[cfg_attr(not(test), allow(dead_code))]
 fn anthropic_image_size(model: &str, width: u32, height: u32) -> Option<(u32, u32)> {
     let (max_edge, max_tokens) = image_tier(model).limits()?;
     Some(largest_fit(width, height, |w, h| {
@@ -468,14 +473,25 @@ fn image_block(source: &MurmurImageSource) -> Value {
     })
 }
 
+/// What [`build_provider_body`] builds for one request.
+struct ProviderBody {
+    /// The Messages API body.
+    body: Value,
+    /// The report of every image the request held.
+    images: Vec<ImageReport>,
+    /// How the request offers its computer tool, or `None` in function mode. `run_inner` adds
+    /// its beta header and maps the response's computer calls through it.
+    computer: Option<ComputerPlan>,
+}
+
 /// The provider body for one request — `tool-input.data` as `raw`, under the given
-/// `inference.driver.config` and artifact `config:` — and the report of every image it held.
-/// `run_inner` and the tests build a body through this one path.
+/// `inference.driver.config` and artifact `config:` — with the report of every image it held
+/// and its computer plan. `run_inner` and the tests build a body through this one path.
 fn build_provider_body(
     raw: &str,
     driver_config: Option<&str>,
     artifact_config: Option<&str>,
-) -> Result<(Value, Vec<ImageReport>), String> {
+) -> Result<ProviderBody, String> {
     let mut murmur_request: MurmurRequest = serde_json::from_str(raw)
         .map_err(|err| format!("driver: failed to parse tool-input.data: {err}"))?;
 
@@ -487,28 +503,63 @@ fn build_provider_body(
     let prompt_cache = artifact_config
         .map(parse_prompt_cache_config)
         .unwrap_or_default();
+    let computer = computer_plan(&murmur_request.model, &murmur_request.tools);
     let tier = image_tier(&murmur_request.model);
-    let reports = prepare_images(&mut murmur_request, tier);
-    let mut provider_request =
-        translate_murmur_request_to_anthropic(&murmur_request, family, &thinking, &prompt_cache)?;
-    stamp_streaming_flags(&mut provider_request);
-    Ok((provider_request, reports))
+    let images = prepare_images(&mut murmur_request, tier);
+    let mut body = translate_murmur_request(
+        &murmur_request,
+        family,
+        &thinking,
+        &prompt_cache,
+        computer.as_ref(),
+    )?;
+    stamp_streaming_flags(&mut body);
+    Ok(ProviderBody {
+        body,
+        images,
+        computer,
+    })
 }
 
+/// The function-mode translation, which every request without a computer plan gets.
+#[cfg(test)]
 fn translate_murmur_request_to_anthropic(
     request: &MurmurRequest,
     family: ModelFamily,
     thinking: &ThinkingConfig,
     prompt_cache: &PromptCacheConfig,
 ) -> Result<Value, String> {
+    translate_murmur_request(request, family, thinking, prompt_cache, None)
+}
+
+/// The Messages API body for `request`. With a computer plan, the computer entry goes out as the
+/// plan's provider tool, each computer call in history in its provider form, and each result
+/// answering one rewritten for it; without one, every tool and block is translated as an
+/// ordinary function.
+fn translate_murmur_request(
+    request: &MurmurRequest,
+    family: ModelFamily,
+    thinking: &ThinkingConfig,
+    prompt_cache: &PromptCacheConfig,
+    computer: Option<&ComputerPlan>,
+) -> Result<Value, String> {
     let mut messages = Vec::with_capacity(request.messages.len());
+    // The ids of the computer calls history replays in provider form, whose results answer them
+    // in provider form too.
+    let mut provider_calls = std::collections::HashSet::new();
 
     for message in &request.messages {
         match message.role.as_str() {
             "user" | "assistant" => {
+                let content = translate_standard_content_blocks(
+                    &message.content,
+                    thinking.enabled,
+                    computer,
+                    &mut provider_calls,
+                );
                 messages.push(json!({
                     "role": message.role,
-                    "content": translate_standard_content_blocks(&message.content, thinking.enabled),
+                    "content": content,
                 }));
             }
             "tool" => {
@@ -531,7 +582,10 @@ fn translate_murmur_request_to_anthropic(
                         _ => None,
                     })
                     .collect::<Vec<_>>();
-                let content = if parts.is_empty() {
+                let provider_form = computer.filter(|_| provider_calls.contains(&tool_use_id));
+                let content = if let Some(plan) = provider_form {
+                    vec![plan.tool_result(&tool_use_id, parts)]
+                } else if parts.is_empty() {
                     Vec::new()
                 } else {
                     vec![json!({
@@ -555,7 +609,11 @@ fn translate_murmur_request_to_anthropic(
     let mut tools = request
         .tools
         .iter()
-        .map(|tool| {
+        .enumerate()
+        .map(|(index, tool)| {
+            if let Some(plan) = computer.filter(|plan| plan.entry_index == index) {
+                return plan.tool_entry();
+            }
             let mut mapped = Map::new();
             mapped.insert("name".to_string(), Value::String(tool.name.clone()));
             mapped.insert("input_schema".to_string(), tool.parameters.clone());
@@ -650,9 +708,14 @@ fn translate_murmur_request_to_anthropic(
     Ok(Value::Object(body))
 }
 
+/// User and assistant content. With a computer plan, a `tool_call` named after the computer
+/// entry goes out in its provider form when the plan's version can express it, and its id joins
+/// `provider_calls`; one it cannot express goes out as an ordinary `tool_use`.
 fn translate_standard_content_blocks(
     blocks: &[MurmurContentBlock],
     thinking_enabled: bool,
+    computer: Option<&ComputerPlan>,
+    provider_calls: &mut std::collections::HashSet<String>,
 ) -> Vec<Value> {
     blocks
         .iter()
@@ -676,12 +739,21 @@ fn translate_standard_content_blocks(
                 }
             }
             MurmurContentBlock::Image { source } => Some(image_block(source)),
-            MurmurContentBlock::ToolCall { id, name, input } => Some(json!({
-                "type": "tool_use",
-                "id": id,
-                "name": name,
-                "input": input,
-            })),
+            MurmurContentBlock::ToolCall { id, name, input } => {
+                let provider_form = computer
+                    .filter(|plan| plan.entry_name == *name)
+                    .and_then(|plan| plan.provider_call(id, input));
+                if let Some(call) = provider_form {
+                    provider_calls.insert(id.clone());
+                    return Some(call);
+                }
+                Some(json!({
+                    "type": "tool_use",
+                    "id": id,
+                    "name": name,
+                    "input": input,
+                }))
+            }
             MurmurContentBlock::Unknown => None,
         })
         .collect()
@@ -868,9 +940,20 @@ fn map_anthropic_stop_reason(anthropic_stop: &str) -> Result<&'static str, Strin
     }
 }
 
+/// [`translate_anthropic_response`] for a request without a computer plan.
+#[cfg(test)]
+fn translate_anthropic_response_to_murmur(response: &Value) -> Result<Value, Failure> {
+    translate_anthropic_response(response, None)
+}
+
 /// Translate a buffered Messages API body. A provider error, a refusal and a body the driver
 /// cannot read as a finished turn are each a [`Failure`]; only a provider error can be transient.
-fn translate_anthropic_response_to_murmur(response: &Value) -> Result<Value, Failure> {
+/// With the request's computer plan, each computer `tool_use` becomes a call of the computer
+/// entry with the tool's own input.
+fn translate_anthropic_response(
+    response: &Value,
+    computer: Option<&ComputerPlan>,
+) -> Result<Value, Failure> {
     if response.get("type").and_then(Value::as_str) == Some("error") {
         return Err(provider_failure(response.get("error")));
     }
@@ -893,7 +976,7 @@ fn translate_anthropic_response_to_murmur(response: &Value) -> Result<Value, Fai
 
     let mut content = Vec::with_capacity(blocks.len());
     for (index, block) in blocks.iter().enumerate() {
-        if let Some(block) = translate_anthropic_content_block(index, block)? {
+        if let Some(block) = translate_anthropic_content_block(index, block, computer)? {
             content.push(block);
         }
     }
@@ -907,7 +990,11 @@ fn translate_anthropic_response_to_murmur(response: &Value) -> Result<Value, Fai
 }
 
 /// One buffered content block as murmur content, or `None` for a block murmur has no shape for.
-fn translate_anthropic_content_block(index: usize, block: &Value) -> Result<Option<Value>, String> {
+fn translate_anthropic_content_block(
+    index: usize,
+    block: &Value,
+    computer: Option<&ComputerPlan>,
+) -> Result<Option<Value>, String> {
     let field = |key: &str| block.get(key).and_then(Value::as_str);
     let block_type = field("type")
         .ok_or_else(|| malformed_response(format_args!("content block {index} has no type")))?;
@@ -934,6 +1021,15 @@ fn translate_anthropic_content_block(index: usize, block: &Value) -> Result<Opti
                         "tool_use block {index} input is not a JSON object"
                     ))
                 })?;
+            let toolset_name = field("toolset_name");
+            if let Some(plan) = computer.filter(|plan| plan.is_computer_call(name, toolset_name)) {
+                return Ok(Some(json!({
+                    "type": "tool_call",
+                    "id": id,
+                    "name": plan.entry_name,
+                    "input": plan.tool_input(name, toolset_name, input),
+                })));
+            }
             Ok(Some(json!({
                 "type": "tool_call",
                 "id": id,
@@ -973,7 +1069,12 @@ enum AnthropicBlock {
     ToolUse {
         id: String,
         name: String,
+        /// The block's `toolset_name`, which a computer toolset member carries.
+        toolset_name: Option<String>,
         input: String,
+        /// A computer call under the request's plan: started under the computer entry's name and
+        /// never sized, since the input it streams is not the input the tool receives.
+        computer: bool,
     },
     /// A block type murmur has no content block for (see `translate_anthropic_content_block`).
     /// Its deltas are dropped.
@@ -1013,6 +1114,8 @@ enum StreamFailure {
 
 struct AnthropicSseState {
     blocks: Vec<Option<AnthropicBlock>>,
+    /// The request's computer plan, which the stream's computer calls are mapped through.
+    computer: Option<ComputerPlan>,
     stop_reason: Option<String>,
     usage: UsageTokens,
     current_event: String,
@@ -1027,9 +1130,16 @@ struct AnthropicSseState {
 }
 
 impl AnthropicSseState {
+    /// The state for a request without a computer plan.
+    #[cfg(test)]
     fn new() -> Self {
+        Self::with_computer(None)
+    }
+
+    fn with_computer(computer: Option<ComputerPlan>) -> Self {
         Self {
             blocks: Vec::new(),
+            computer,
             stop_reason: None,
             usage: UsageTokens::default(),
             current_event: String::new(),
@@ -1166,16 +1276,26 @@ fn dispatch_anthropic_sse_event(
                             })
                     };
                     let (id, name) = (field("id")?, field("name")?);
+                    let toolset_name = val
+                        .pointer("/content_block/toolset_name")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let plan = state
+                        .computer
+                        .as_ref()
+                        .filter(|plan| plan.is_computer_call(&name, toolset_name.as_deref()));
                     // A call with no id or name could never be matched to the returned block.
                     if !id.is_empty() && !name.is_empty() {
                         signal(ToolCallSignal::Started {
                             id: &id,
-                            name: &name,
+                            name: plan.map_or(name.as_str(), |plan| plan.entry_name.as_str()),
                         });
                     }
                     AnthropicBlock::ToolUse {
+                        computer: plan.is_some(),
                         id,
                         name,
+                        toolset_name,
                         input: String::new(),
                     }
                 }
@@ -1234,11 +1354,20 @@ fn dispatch_anthropic_sse_event(
                         text.push_str(delta);
                     }
                 }
-                ("input_json_delta", AnthropicBlock::ToolUse { id, name, input }) => {
+                (
+                    "input_json_delta",
+                    AnthropicBlock::ToolUse {
+                        id,
+                        name,
+                        input,
+                        computer,
+                        ..
+                    },
+                ) => {
                     let delta = payload()?;
                     input.push_str(delta);
                     // Only a call that was started is sized, and only when its text grew.
-                    if !delta.is_empty() && !id.is_empty() && !name.is_empty() {
+                    if !delta.is_empty() && !id.is_empty() && !name.is_empty() && !*computer {
                         signal(ToolCallSignal::InputBytes {
                             id,
                             bytes: input.len() as u64,
@@ -1373,6 +1502,7 @@ fn assemble_anthropic_streaming_response(state: AnthropicSseState) -> Result<Val
     let stopped_at_cap = anthropic_stop == "max_tokens";
 
     let usage = state.usage;
+    let computer = state.computer;
     let mut content = Vec::new();
     for (index, block) in state.blocks.into_iter().enumerate() {
         match block {
@@ -1386,8 +1516,22 @@ fn assemble_anthropic_streaming_response(state: AnthropicSseState) -> Result<Val
                     "signature": signature,
                 }));
             }
-            Some(AnthropicBlock::ToolUse { id, name, input }) => {
+            Some(AnthropicBlock::ToolUse {
+                id,
+                name,
+                toolset_name,
+                input,
+                computer: is_computer,
+            }) => {
                 let input = parse_streamed_tool_input(index, &name, &input, stopped_at_cap)?;
+                let plan = computer.as_ref().filter(|_| is_computer);
+                let (name, input) = match plan {
+                    Some(plan) => (
+                        plan.entry_name.clone(),
+                        plan.tool_input(&name, toolset_name.as_deref(), &input),
+                    ),
+                    None => (name, input),
+                };
                 content.push(json!({
                     "type": "tool_call",
                     "id": id,
@@ -1444,9 +1588,9 @@ fn error_payload(message: &str) -> Value {
 #[cfg(target_arch = "wasm32")]
 mod wasm_driver {
     use super::{
-        assemble_anthropic_streaming_response, build_provider_body, error_payload,
-        parse_beta_features, process_anthropic_sse_bytes, status_failure,
-        translate_anthropic_response_to_murmur, AnthropicSseState, Failure, ToolCallSignal,
+        assemble_anthropic_streaming_response, build_provider_body, computer::beta_header,
+        error_payload, parse_beta_features, process_anthropic_sse_bytes, status_failure,
+        translate_anthropic_response, AnthropicSseState, Failure, ProviderBody, ToolCallSignal,
     };
     use murmur_driver_image::attach_image_report;
     use murmur_wasi_http::{write_body, BodyWrite};
@@ -1533,8 +1677,11 @@ mod wasm_driver {
             .ok_or_else(|| "driver: missing tool-input.data".to_string())?;
 
         // Images are sized here, before translation; `images` is what the response reports.
-        let (provider_request, images) =
-            build_provider_body(&raw, driver_config.as_deref(), artifact_config.as_deref())?;
+        let ProviderBody {
+            body: provider_request,
+            images,
+            computer,
+        } = build_provider_body(&raw, driver_config.as_deref(), artifact_config.as_deref())?;
         drop(raw);
 
         let body = serde_json::to_vec(&provider_request)
@@ -1543,7 +1690,11 @@ mod wasm_driver {
 
         let url = format!("{}/v1/messages", endpoint.trim_end_matches('/'));
 
-        let beta_features = driver_config.as_deref().and_then(parse_beta_features);
+        // One header: the configured betas, then the computer tool's when its version needs one.
+        let beta_features = beta_header(
+            driver_config.as_deref().and_then(parse_beta_features),
+            computer.as_ref(),
+        );
 
         let mut headers = vec![
             ("content-type", "application/json".to_string()),
@@ -1594,11 +1745,11 @@ mod wasm_driver {
                 .map_err(|err| format!("driver: response body is not UTF-8: {err}"))?;
             let json: Value = serde_json::from_str(&text)
                 .map_err(|err| format!("driver: failed to parse Anthropic response JSON: {err}"))?;
-            translate_anthropic_response_to_murmur(&json)?
+            translate_anthropic_response(&json, computer.as_ref())?
         } else {
             // SSE streaming: process lines incrementally, emitting chunks as they arrive.
             let mut line_buf: Vec<u8> = Vec::new();
-            let mut state = AnthropicSseState::new();
+            let mut state = AnthropicSseState::with_computer(computer);
             let mut done = false;
 
             // Process bytes already read.
@@ -4621,6 +4772,11 @@ mod tests {
         assert!(finish < awaited, "the response is awaited after the body");
     }
 }
+
+mod computer;
+
+#[cfg(test)]
+mod computer_tests;
 
 #[cfg(test)]
 mod control_tests;

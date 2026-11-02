@@ -28,8 +28,15 @@ fn provider_body(control: &Value) -> Vec<u8> {
     let raw = control["request"].to_string();
     let driver_config = config_string(control, "driver_config");
     let artifact_config = config_string(control, "artifact_config");
-    let (body, images) =
-        build_provider_body(&raw, driver_config.as_deref(), artifact_config.as_deref()).unwrap();
+    let super::ProviderBody {
+        body,
+        images,
+        computer,
+    } = build_provider_body(&raw, driver_config.as_deref(), artifact_config.as_deref()).unwrap();
+    assert!(
+        computer.is_none(),
+        "a control request offers no computer tool"
+    );
     assert!(images.is_empty(), "a control request holds no image");
     serde_json::to_vec(&body).unwrap()
 }

@@ -713,6 +713,7 @@ name = "driver-anthropic"
 version = "0.0.0"
 dependencies = [
  "image",
+ "murmur-driver-computer",
  "murmur-driver-env",
  "murmur-driver-image",
  "murmur-driver-stream",
@@ -783,6 +784,7 @@ name = "driver-openai"
 version = "0.0.0"
 dependencies = [
  "image",
+ "murmur-driver-computer",
  "murmur-driver-env",
  "murmur-driver-image",
  "murmur-driver-stream",
@@ -1965,6 +1967,13 @@ checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
+]
+
+[[package]]
+name = "murmur-driver-computer"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

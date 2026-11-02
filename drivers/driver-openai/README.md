@@ -398,6 +398,9 @@ driver adds `"strict": false` to every tool:
 
 `description` is sent only when it is non-blank.
 
+The computer entry of a request in [Computer use](#computer-use) goes out as `{"type":
+"computer"}` instead, with no `strict`.
+
 A Responses tool that omits `strict` is normalised into strict mode whenever its schema allows it.
 In strict mode the model fills every schema property on every call, sending `""`, `0` or `false`
 for the ones it did not mean to set. A tool with optional properties then cannot tell an absent
@@ -407,6 +410,184 @@ non-strict by default, so that surface carries no `strict` key.
 
 Neither the capsule nor `params` can change this: the driver builds `tools` itself, and
 `inference.driver.config` has no strict setting.
+
+## Computer use
+
+A tool artifact whose own `murmur.yaml` declares
+`provider_tool: {kind: computer, display_width, display_height}`, such as `murmur/tool-computer`,
+reaches the driver as a `tools` entry carrying that block. On a Responses model whose page lists
+`computer_use`, the driver sends OpenAI's own `{"type": "computer"}` tool in that entry's place,
+which the model is trained on, instead of a function definition. Everywhere else, including the
+Chat Completions surface, the entry goes out as an ordinary function and the body is byte for
+byte what it was without the block. murmur passes the block on, and asks a person about a call
+carrying `safety_checks`, from `a9ea4726` on; no murmur release has it yet (see the murmur version
+table above).
+
+The provider tool is sent when all of these hold:
+
+| Condition | Otherwise |
+|---|---|
+| A tool's `provider_tool` has `kind: computer` and both sizes are integers from 1 to 65535. The first such tool is the computer entry | Every tool is an ordinary function |
+| The model goes to the Responses surface and is `yes` in the table below | The entry is an ordinary function |
+| The model reads images in the "Images" table | The entry is an ordinary function. A model declared `vision: false` is refused by `mur` at launch (`E-RUN-057`) before the driver runs |
+
+A second computer tool in the same request stays an ordinary function.
+
+### Models
+
+`yes` where the model's page, `https://developers.openai.com/api/docs/models/<id>.md`, lists
+`computer_use` under "Supported tools", read 2026-11-01.
+
+| Model | Computer tool |
+|---|---|
+| `gpt-6-astra` | yes |
+| `gpt-6.1-sol` | yes |
+| `gpt-6-luna` | yes |
+| `gpt-5.6-cyber` | yes |
+| `gpt-oss-120b` | no |
+| `gpt-oss-20b` | no |
+| `gpt-6-sol` | yes |
+| `gpt-5.6-sol` | yes |
+| `gpt-5.6-terra` | yes |
+| `gpt-5.6-luna` | yes |
+| `gpt-5.5` | yes |
+| `gpt-5.5-pro` | no |
+| `gpt-5.4` | yes |
+| `gpt-5.4-pro` | yes |
+| `gpt-5.4-mini` | yes |
+| `gpt-5.2` | no |
+| `gpt-5.2-pro` | no |
+| `chat-latest` | no |
+
+### A `computer_call` as a group of tool calls
+
+The computer tool takes one action per call, and OpenAI batches several actions into one
+`computer_call`. So each `computer_call` becomes an ordered group of `tool_call` blocks of the
+computer entry, one per action, in the order of its `actions` (or its legacy single `action`; an
+empty batch is one `screenshot`):
+
+```json
+{"type": "tool_call", "id": "<call_id>.cu<i>", "name": "tool-computer", "input": {…},
+ "openai_item_id": "<the computer_call's id>", "safety_checks": [ … ]}
+```
+
+`i` counts from 1. `safety_checks` is there only when OpenAI sent pending safety checks. A
+`computer_call` makes the turn stop for a tool call on both the buffered and the streamed path. On
+the stream the item is read when it completes (`response.output_item.done`); each derived call's
+`tool-call-started` frame goes out then, in order, and no `tool-call-progress` frame is sent for
+it. Derived calls keep their item's place among function calls.
+
+| OpenAI action | Tool input |
+|---|---|
+| `click`, `button` `left`/`right`/`wheel`, `x`, `y`, `keys?` | `left_click`/`right_click`/`middle_click`, `x`,`y`, `modifiers`: the keys joined by `+` |
+| `double_click`, `x`, `y`, `keys?` | `double_click`, `x`,`y`, `modifiers` |
+| `drag`, `path` of at least 2 points, `keys?` | `left_click_drag` from the first point to the last, `modifiers` |
+| `move`, `x`, `y` | `mouse_move`, `x`,`y`; `keys` is dropped |
+| `scroll`, `x`, `y`, `scroll_x`, `scroll_y`, `keys?` | One `scroll` at `x`,`y` per non-zero axis, vertical first: `down`/`up` by the sign of `scroll_y`, `right`/`left` by that of `scroll_x`, `scroll_amount` = `round(abs(delta) / 100)` within 1–50, `modifiers`. Both zero: `mouse_move` to `x`,`y` |
+| `keypress`, `keys` | `key`: the keys joined by `+` |
+| `type`, `text` | `type`, `text` |
+| `wait` | `wait` |
+| `screenshot` | `screenshot` |
+| Anything else, `click` with `back` or `forward` included, or an action whose fields cannot be read | `{"action": <type>, …the other fields}`, so the tool's refusal names it |
+
+Key names: `CTRL`/`CONTROL` become `ctrl`, `SHIFT` `shift`, `ALT`/`OPTION` `alt`, and
+`META`/`CMD`/`COMMAND`/`SUPER`/`WIN` `super`, in any case; a single character is lower-cased; any
+other name, such as `ENTER` or `ARROWUP`, passes as given, since the tool matches names without
+regard to case.
+
+### Folding the results
+
+murmur runs each call of a group and answers it with its own tool message. The next request folds
+a consecutive run of tool messages whose `tool_call_id`s share a `<call_id>.cu` prefix into what
+OpenAI expects, on a full resend and on a continuation alike:
+
+1. One `{"type": "computer_call_output", "call_id": <call_id>, "output": {"type":
+   "computer_screenshot", "image_url": <data URL>}}`, at the place of the run's first message.
+   The image is the run's last one. Every other image of the run is removed before the image
+   pre-pass, so it is never decoded, sent or reported; the last one is reported with placement
+   `computer_call_output`. A run with no image gets a 1×1 black PNG.
+2. Then, only when there is something to say, a notes message
+   `{"role": "user", "content": [{"type": "input_text", "text": …}]}`:
+
+   ```text
+   computer_call <call_id> returned more than its screenshot:
+   <i>. <tool action>: <text>
+   no action in this call returned a screenshot, so the screenshot sent with it is blank
+   the screenshot this call returned is not shown (see the line above), so the screenshot sent with it is blank
+   ```
+
+   One `<i>.` line per call whose result text is not empty once the cursor line, the action line
+   before it, the `screenshot:` line and a murmur `<untrusted-content>` fence left empty are taken
+   out: a refusal, the display banner, a launched
+   program's exit, murmur's decline of a safety check, or a line standing in for the run's
+   screenshot. One of the last two lines only when the run holds no image: "not shown" when a
+   member's text holds murmur's `[image not shown: …]` or `[image unavailable: …]` line (murmur
+   keeps only the newest images of a conversation and puts that line in place of each older one,
+   so every older group is sent with the blank PNG), and "no action … returned a screenshot"
+   otherwise. On a continuation the assistant turn is held by OpenAI and not in the request, so a line
+   reads `<i>. <text>`.
+
+On a full resend the assistant turn rebuilds the group as the one item it came from:
+
+```json
+{"type": "computer_call", "id": "<openai_item_id>", "call_id": "<call_id>", "actions": [ … ],
+ "pending_safety_checks": [], "status": "completed"}
+```
+
+The actions are the inverse of the table, in screenshot pixels: a scroll goes back as
+`scroll_x`/`scroll_y` of ±`scroll_amount`·100, a drag as its two end points, keys in upper case,
+and a passed-through action as `{"type": <action>, …fields}`. A `screenshot` goes back only as the
+group's sole action: OpenAI refuses one beside other actions, and the output carries the
+screenshot anyway. Any other `tool_call`, including
+one of the computer entry without the suffix, is translated as before.
+
+### Safety checks
+
+When a `computer_call` carries `pending_safety_checks`, every derived call of it carries
+`"safety_checks": [{"id"?, "code"?, "message"}]`: `id` and `code` only when they are non-empty
+strings, `message` OpenAI's when it is a non-empty string and otherwise
+`OpenAI asks a person to confirm this computer action`. murmur asks a person before each such
+call runs and runs it only after a yes. A call the person declined is never run, and its decline
+text reaches the model in the notes.
+
+Nothing about the checks goes back to OpenAI. The `computer` tool refuses both fields in its
+input: on 2026-11-01 a `gpt-5.6-luna` full resend whose `computer_call` held a non-empty
+`pending_safety_checks` returned HTTP 400 "`pending_safety_checks` is not supported for the
+"computer" tool.", and one whose `computer_call_output` held `acknowledged_safety_checks`
+returned HTTP 400 "`acknowledged_safety_checks` is not supported for the "computer" tool.". So a
+rebuilt `computer_call` always carries `"pending_safety_checks": []`, and the output never
+carries an acknowledgement; the person's yes is what let the call run.
+
+### Scaling
+
+The size screenshots are sent at is the size the image pre-pass gives a
+`display_width`×`display_height` image under the model's image rule, so it is recomputed on every
+request and never stored. The model's coordinates are in that screenshot's pixel space; the driver
+maps each to the display as `round(x · display_width / sw)`, `round(y · display_height / sh)`,
+without clamping, and back as `round(x · sw / display_width)`, clamped onto the screenshot. A
+1440×900 display fits every computer model's rule, so the scale is 1 for each; a 3000×2000 display
+on `gpt-5.4` is sent at 1920×1280.
+
+### Checked against the live API
+
+On 2026-11-01, `gpt-5.6-luna` Responses bodies built by this driver, `store: false`:
+
+| Request | Answer |
+|---|---|
+| A first turn offering `{"type": "computer"}`, buffered and streamed | HTTP 200; a `computer_call` with `actions: [{"type": "screenshot"}]` and no `pending_safety_checks`; the stream carries it whole in `response.output_item.done` |
+| A full resend replaying that `computer_call` with its `id`, its `computer_call_output` and a notes message | HTTP 200 |
+| The same without the `id` | HTTP 200: the `id` is optional, so the driver sends it when it holds one |
+| A replayed eleven-action group holding a `screenshot` beside other actions | HTTP 400 "A screenshot must be the only action in a computer call's `actions` list."; without the `screenshot`, HTTP 200 for every other action shape the inverse table writes |
+| A replayed `computer_call` with non-empty `pending_safety_checks`, or an output with `acknowledged_safety_checks` | HTTP 400 for each (see [Safety checks](#safety-checks)); without both, HTTP 200 |
+
+### Known gaps
+
+- murmur runs every call of a group, in order, even after one fails, though OpenAI meant the
+  batch as one step.
+- In function mode nothing is rescaled.
+- OpenAI has no `zoom`; `drag` keeps only its two end points; `move` drops `keys`.
+- The text of a refusal is passed on as the tool wrote it, so a refused coordinate it names is in
+  display pixels.
 
 ## Tool-call progress
 
