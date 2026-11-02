@@ -2,8 +2,8 @@
 //! `tool`).
 //!
 //! The file logic lives in the shared `murmur-file-tools` library (`libs/murmur-file-tools`).
-//! This crate only binds its own WIT world and maps `murmur_file_tools::dispatch`'s outcome for
-//! `Tool::Find` onto the WIT `ToolResult`.
+//! This crate only binds its own WIT world, gathers the host roots from its WASI preopens, and
+//! maps `murmur_file_tools::dispatch`'s outcome for `Tool::Find` onto the WIT `ToolResult`.
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_tool {
@@ -14,12 +14,29 @@ mod wasm_tool {
     });
 
     use exports::murmur::tool::run::{Attachment, Guest, Status, ToolInput, ToolResult};
-    use murmur_file_tools::{dispatch, OutcomeStatus, Tool, ToolOutcome};
+    use murmur_file_tools::{dispatch, HostRoot, OutcomeStatus, Tool, ToolOutcome};
+    use wasip2::filesystem::{preopens, types::DescriptorFlags};
 
     struct Component;
 
+    /// The host folders murmur opened for this call, in preopen order. A root is writable when
+    /// its descriptor's flags hold `mutate-directory`; a flags error counts as read-only. Each
+    /// descriptor is dropped here, so none outlives the call.
+    fn host_roots() -> Vec<HostRoot> {
+        preopens::get_directories()
+            .into_iter()
+            .filter_map(|(descriptor, name)| {
+                let writable = descriptor
+                    .get_flags()
+                    .is_ok_and(|flags| flags.contains(DescriptorFlags::MUTATE_DIRECTORY));
+                HostRoot::from_preopen(&name, writable)
+            })
+            .collect()
+    }
+
     impl Guest for Component {
         fn run(input: ToolInput) -> ToolResult {
+            let roots = host_roots();
             let ToolOutcome {
                 status,
                 summary,
@@ -27,7 +44,7 @@ mod wasm_tool {
                 truncated,
                 state_effect,
                 attachments,
-            } = dispatch(Tool::Find, input.data.as_deref());
+            } = dispatch(Tool::Find, input.data.as_deref(), &roots);
             ToolResult {
                 status: match status {
                     OutcomeStatus::Passed => Status::Passed,

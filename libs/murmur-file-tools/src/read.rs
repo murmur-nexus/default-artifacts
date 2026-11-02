@@ -5,9 +5,10 @@ use std::fs::File;
 use serde_json::{json, Value};
 
 use crate::image::{has_image_name, image_header};
+use crate::resolve::{resolve_path, Resolved};
 use crate::{
-    err, err_result, format_result_size, io_error_kind, ok_summary_only, ok_with, reject_absolute,
-    required_path,
+    err, err_result, format_result_size, io_error_kind, ok_summary_only, ok_with, required_path,
+    HostRoot, Tool,
 };
 
 // read limits. Every read, with or without a range, returns at most this many lines, this
@@ -24,16 +25,17 @@ pub(crate) const MAX_LINE_CHARS: usize = 2000;
 /// Read the file `path` names: the whole file when it fits every limit, else the lines from
 /// `start_line` up to `end_line` or the first limit reached, with a `truncated` note naming it.
 /// A PNG, JPEG, GIF or WebP file, known by its header whatever its name, is instead attached
-/// by [`read_image`].
-pub(crate) fn read(op: &Value) -> Value {
+/// by [`read_image`]. An absolute `path` opens inside the host root covering it.
+pub(crate) fn read(op: &Value, roots: &[HostRoot]) -> Value {
     let path = match required_path(op, "path") {
         Ok(p) => p,
         Err(failure) => return failure,
     };
-    if let Some(refusal) = reject_absolute("path", &path) {
-        return refusal;
-    }
-    if let Some(result) = read_image(&path) {
+    let resolved = match resolve_path("path", &path, Tool::Read, roots) {
+        Ok(resolved) => resolved,
+        Err(refusal) => return refusal,
+    };
+    if let Some(result) = read_image(&path, &resolved) {
         return result;
     }
 
@@ -44,7 +46,7 @@ pub(crate) fn read(op: &Value) -> Value {
     let start_arg = op.get("start_line").and_then(Value::as_i64);
     let end_arg = op.get("end_line").and_then(Value::as_i64);
 
-    let content = match std::fs::read_to_string(&path) {
+    let content = match std::fs::read_to_string(&resolved.open) {
         Ok(c) => c,
         Err(e) => return err_result(io_error_kind(&e), format!("{path}: {e}")),
     };
@@ -164,30 +166,39 @@ pub(crate) fn read(op: &Value) -> Value {
     ok_with(format!("read {path} lines {start}-{end}"), data, summary)
 }
 
-/// The result for an image file at `path`: attached when its header is a PNG, JPEG, GIF or
-/// WebP one, refused `not_an_image` when only its name says it is one, and `None` for every
-/// other file, which the text path reads.
+/// The result for an image file at `path`, opened at `resolved`: attached when its header is a
+/// PNG, JPEG, GIF or WebP one, refused `not_an_image` when only its name says it is one, and
+/// `None` for every other file, which the text path reads.
 ///
 /// Every failure to open the file, to stat it as a regular file, or to read its header is also
 /// `None`, so a missing file, a directory or a path outside the preopen is refused by the text
 /// path exactly as for any other name. The attachment carries the sniffed type and `path` as
 /// given: murmur checks the file again, and alone enforces its size and per-turn caps.
-fn read_image(path: &str) -> Option<Value> {
-    let mut file = File::open(path).ok()?;
+///
+/// An image under a host root is described but never attached: murmur attaches only a file
+/// under the work folder and refuses any other as `outside_root`.
+fn read_image(path: &str, resolved: &Resolved<'_>) -> Option<Value> {
+    let mut file = File::open(&resolved.open).ok()?;
     let metadata = file.metadata().ok().filter(|m| m.is_file())?;
     match image_header(&mut file).ok()? {
         Some(header) => {
-            let mut result = ok_summary_only(
-                format!("read {path} as an image"),
-                format!(
-                    "{}, {} bytes, {}x{} pixels",
-                    header.media_type,
-                    metadata.len(),
-                    header.width,
-                    header.height
-                ),
+            let mut summary = format!(
+                "{}, {} bytes, {}x{} pixels",
+                header.media_type,
+                metadata.len(),
+                header.width,
+                header.height
             );
-            result["attachments"] = json!([{ "media_type": header.media_type, "path": path }]);
+            if resolved.root.is_some() {
+                summary.push_str(
+                    "; not shown: only an image named by a path relative to the work folder is \
+                     shown to the model",
+                );
+            }
+            let mut result = ok_summary_only(format!("read {path} as an image"), summary);
+            if resolved.root.is_none() {
+                result["attachments"] = json!([{ "media_type": header.media_type, "path": path }]);
+            }
             Some(result)
         }
         None if has_image_name(path) => Some(err_result(

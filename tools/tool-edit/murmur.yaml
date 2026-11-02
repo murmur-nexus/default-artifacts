@@ -1,9 +1,9 @@
 name: tool-edit
-version: 0.2.0
+version: 0.3.0
 runtime: tool
 implementation: wasm
 description: |
-  Replaces text in a file. Edits apply in order, each to the result of the one before; each old must match exactly once. All or nothing: if one fails, the file is unchanged and the error names its position, from 1. path is relative to the work folder; an absolute path is refused.
+  Replaces text in a file. Edits apply in order, each to the result of the one before; each old must match exactly once. All or nothing: if one fails, the file is unchanged and the error names its position, from 1. path is relative to the work folder, or absolute inside a host folder the session opened.
 input_schema:
   type: object
   properties:

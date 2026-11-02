@@ -1,6 +1,6 @@
 # tool-read
 
-Reads a file in the work folder, within fixed line and size limits, or shows a
+Reads a file in the work folder or a host folder the session opened, within fixed line and size limits, or shows a
 PNG, JPEG, GIF or WebP file to the model as an image.
 
 WASM tool component (`runtime: tool`, `implementation: wasm`, world `tool`,
@@ -14,7 +14,7 @@ The model is sent this description and input schema:
 
 ```yaml
 description: |
-  Reads a file. path is relative to the work folder; an absolute path is refused.
+  Reads a file. path is relative to the work folder, or absolute inside a host folder the session opened.
   Returns content and total_lines: at most 2000 lines and 100 KB, lines cut to 2000 characters. A cut read adds a truncated note naming the limit and the start_line that continues it. A range over 2000 lines is refused.
   A PNG, JPEG, GIF or WebP file is shown as an image, with its type, size and dimensions.
 input_schema:
@@ -35,13 +35,13 @@ input_schema:
 declares `state_effect: read`.
 
 The four file tools' definitions are held to 500 cl100k tokens together
-(`libs/murmur-file-tools/tests/definition_token_budget.rs`). The sentence on
-images costs 88 characters and 24 tokens:
+(`libs/murmur-file-tools/tests/definition_token_budget.rs`). The 0.3.0
+sentence on host folders costs 24 characters and 4 tokens over 0.2.0's:
 
 | | tool-read | Sum of the four |
 |---|---|---|
-| Before the sentence | 485 chars, 117 tokens | 1867 chars, 441 tokens |
-| With the sentence | 573 chars, 141 tokens | 1955 chars, 465 tokens |
+| 0.2.0 | 573 chars, 141 tokens | 1955 chars, 465 tokens |
+| 0.3.0 | 597 chars, 145 tokens | 2089 chars, 488 tokens |
 
 ## Reading
 
@@ -109,7 +109,16 @@ ignored on an image.
 | A PNG, JPEG, GIF or WebP header, whatever its name | Attached under the type its header declares |
 | Named `.png`, `.jpg`, `.jpeg`, `.gif` or `.webp` in any case, but none of those headers | Refused with `not_an_image` |
 | Text, a PDF or any other file | Read as text. A file that is not UTF-8 is refused with `io_error` |
-| A missing file, a directory, an absolute path, a path outside the work folder | Refused exactly as for any other name |
+| A missing file, a directory, an absolute path no host folder covers, a relative path outside the work folder | Refused exactly as for any other name |
+| An image inside a host folder, named by its absolute path | Not attached: the summary says so, and `not_an_image` applies as above |
+
+murmur attaches only a file under the work folder, so an image read by an
+absolute path inside a host folder succeeds with no attachment, and its summary
+says why:
+
+```text
+image/png, 2048 bytes, 64x48 pixels; not shown: only an image named by a path relative to the work folder is shown to the model
+```
 
 murmur then checks the attachment and puts the picture in front of the model.
 tool-read applies no limit of its own. murmur refuses an image over
@@ -126,7 +135,7 @@ driver-anthropic and driver-openai send an accepted image to the model as an
 image, and a harness driver shows it as an MCP image. A model that takes no
 image input sees the driver's `[image not shown: …]` line in its place.
 
-tool-read 0.2.0 exports `murmur:tool/run@0.2.0`, so it loads only on a `mur` at
+tool-read exports `murmur:tool/run@0.2.0` from 0.2.0 on, so it loads only on a `mur` at
 WIT level 3, which `mur version` prints. driver-anthropic and driver-openai
 declare which models take images with `models.<id>.vision`, which murmur reads
 from `a9ea4726` on.
@@ -152,7 +161,8 @@ failure is returned. A refused call touches no file and declares no
 3. The required fields are present. A field whose value is `null` counts as
    absent at every level, so murmur's own required-field check, which only
    tests presence, lets it through and the tool refuses it.
-4. Every path is relative to the work folder (see below).
+4. `path` resolves: relative to the work folder, or absolute inside a host folder
+   the session opened (see below).
 
 Every refusal is also the result's `summary`, which is what a host shows for
 the call.
@@ -160,7 +170,9 @@ the call.
 | Failure | `error_kind` | Message |
 |---|---|---|
 | `path` absent, `null` or `""` | — | `missing required field: path` |
-| `path` absolute | `absolute_path` | `'path' must be relative to the capsule workdir; got '/etc/hosts' (did you mean 'hosts'?)` |
+| `path` absolute, no host folder opened | `absolute_path` | `'path' must be relative to the work folder: this session opens no host folder to tool-read; got '/etc/hosts' (did you mean 'hosts'?)` |
+| `path` absolute, outside every host folder | `absolute_path` | `'path' is outside every host folder tool-read may open: /home/op/.cargo (read); got '/etc/hosts'. A relative path opens in the work folder` |
+| `path` relative, starting with `murmur-host`, while a host folder is opened | `reserved_name` | `'path' starts with murmur-host, where this tool's host folders are opened; name the host path absolutely: '/home/op/x'` |
 | `start_line` below 1 | `invalid_range` | `start_line must be >= 1, got 0` |
 | `start_line` past the end | `invalid_range` | `start_line 99 is beyond end of file (4 lines)` |
 | `start_line` after `end_line` | `invalid_range` | `inverted range: start_line 5 is greater than end_line 2` |
@@ -169,21 +181,46 @@ the call.
 | Named as an image, but not a PNG, JPEG, GIF or WebP file | `not_an_image` | `'notes.png' is named as an image but is not a PNG, JPEG, GIF or WebP file` |
 | The file is not UTF-8 and not an image | `io_error` | `blob.bin: stream did not contain valid UTF-8` |
 
-## Absolute paths are refused
+## Host folders
 
-`path` is relative to the work folder, the capsule workdir. A value beginning with
-`/` is refused with `error_kind: "absolute_path"` before any filesystem call:
+`path` is relative to the work folder. An absolute `path` opens only inside a host
+folder the session opened for the tool:
+
+| Session | Host folders |
+|---|---|
+| `mur run --unconfined` | The whole host, `/`, read and write |
+| Contained, with `host_paths` in `~/.murmur/config.yaml` | Each entry's folder, with the entry's `read` or `read-write` access |
+| Contained, no `host_paths` | None |
+
+murmur hands each folder to the tool as a WASI preopen named `murmur-host`
+followed by the folder's absolute path, `murmur-host` alone for `/`. A `mur`
+older than `e86e0b42` hands none, and every absolute `path` is refused. The
+tool lists the folders with `wasi:filesystem/preopens.get-directories`, resolves
+the value's `.` and `..` segments lexically, and opens it through the
+longest folder that covers it.
+A folder covers whole components only: `/home/op/.cargo` covers
+`/home/op/.cargo/bin/x` but not `/home/op/.cargo2`.
+
+| `path` | Result |
+|---|---|
+| Relative | Opens in the work folder, as always |
+| Relative, first segment `murmur-host`, while a host folder is opened | Refused with `reserved_name`, naming the absolute path to use |
+| Absolute, inside a host folder | Opens there |
+| Absolute, no host folder opened | Refused with `absolute_path`, suggesting the value's final component |
+| Absolute, outside every host folder | Refused with `absolute_path`, listing the host folders and their access in preopen order |
 
 ```text
-'path' must be relative to the capsule workdir; got '/app/results.txt' (did you mean 'results.txt'?)
+'path' is outside every host folder tool-read may open: /home/op/.cargo (read), /data (read-write); got '/etc/hosts'. A relative path opens in the work folder
 ```
 
-The message names the field and suggests the value's final component; a value
-with no final component (`/`, or one ending in `..`) gets no suggestion. A tool
-is dispatched with one WASI preopen mapped to the workdir, so an absolute value
-cannot escape it — `/app/x.txt` would resolve to `<workdir>/app/x.txt`, which
-nothing outside the capsule would find where the call named it. Refusing is the
-only way that contract is observable.
+A value with no final component (`/`, or one ending in `..`) gets no
+suggestion. With no host folder opened, `murmur-host/…` is an ordinary
+work-folder path.
+
+A `host_paths` entry that is a symlink is opened at its target, so a path is
+covered only when spelled through the target. An absolute symlink inside a
+folder is not followed: opening one fails with `Operation not permitted`. Every
+message names `path` as the call wrote it.
 
 ## How `read_only` is enforced
 
@@ -206,8 +243,8 @@ tool refuses the nested key as an unknown field, and every earlier shape the sam
 | `{"read": {"path": P}}` | `{"path": P}` |
 | `{"read": {"path": P, "start_line": S, "end_line": E}}` | `{"path": P, "start_line": S, "end_line": E}` |
 
-Messages name the bare field: `missing required field: path`, `'path' must be
-relative …`. Every result, note, limit and error kind is otherwise
+Messages name the bare field: `missing required field: path`, `'path' is
+outside every host folder …`. Every result, note, limit and error kind is otherwise
 tool-editor 0.12.0's `read`.
 
 See [murmur.yaml](./murmur.yaml) for the full manifest.

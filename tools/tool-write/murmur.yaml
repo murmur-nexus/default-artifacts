@@ -1,9 +1,9 @@
 name: tool-write
-version: 0.2.0
+version: 0.3.0
 runtime: tool
 implementation: wasm
 description: |
-  Creates or replaces a file and any missing directories. path is relative to the work folder; an absolute path is refused.
+  Creates or replaces a file and any missing directories. path is relative to the work folder, or absolute inside a host folder the session opened.
 input_schema:
   type: object
   properties:

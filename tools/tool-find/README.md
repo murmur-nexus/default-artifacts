@@ -13,7 +13,7 @@ The model is sent this description and input schema:
 
 ```yaml
 description: |
-  Searches file contents for a regex, skipping hidden directories, target, node_modules and binary files. Stops at 200 matches, 5000 files walked, 32 MiB read or a 500 KB result, returning the matches so far with a capped note naming the limit. dir is relative to the work folder, and match paths to dir.
+  Searches file contents for a regex, skipping hidden directories, target, node_modules and binary files. Stops at 200 matches, 5000 files walked, 32 MiB read or a 500 KB result, returning the matches so far with a capped note naming the limit. dir is relative to the work folder, or absolute inside a host folder the session opened; match paths are relative to dir.
 input_schema:
   type: object
   properties:
@@ -47,6 +47,7 @@ match; with 0 neither key is present.
 normalizes to the workdir root, such as `src/..`, searches the whole workdir.
 `.` segments are dropped and each `..` removes the segment before it; a `..`
 that climbs above the workdir is refused with `error_kind: "outside_workdir"`.
+An absolute `dir` searches a host folder (see [Host folders](#host-folders)).
 
 Below the directory it searches, the walk skips:
 
@@ -125,7 +126,8 @@ failure is returned. A refused call touches no file and declares no
 3. The required fields are present. A field whose value is `null` counts as
    absent at every level, so murmur's own required-field check, which only
    tests presence, lets it through and the tool refuses it.
-4. Every path is relative to the work folder (see below).
+4. `dir` resolves: relative to the work folder, or absolute inside a host folder
+   the session opened (see below). `glob` is relative.
 
 Every refusal is also the result's `summary`, which is what a host shows for
 the call.
@@ -135,29 +137,69 @@ the call.
 | `pattern` absent, `null` or `""` | — | `missing required field: pattern` |
 | `dir` not a string | — | `dir must be a string` |
 | `glob` not a string | — | `glob must be a string` |
-| `dir` absolute | `absolute_path` | `'dir' must be relative to the capsule workdir; got '/app' (did you mean 'app'?)` |
-| `glob` absolute | `absolute_path` | `'glob' must be relative to the capsule workdir; got '/src/*.rs' (did you mean '*.rs'?)` |
+| `dir` absolute, no host folder opened | `absolute_path` | `'dir' must be relative to the work folder: this session opens no host folder to tool-find; got '/app/src' (did you mean 'src'?)` |
+| `dir` absolute, outside every host folder | `absolute_path` | `'dir' is outside every host folder tool-find may open: /home/op/.cargo (read); got '/etc/hosts'. A relative path opens in the work folder` |
+| `dir` relative, starting with `murmur-host`, while a host folder is opened | `reserved_name` | `'dir' starts with murmur-host, where this tool's host folders are opened; name the host path absolutely: '/home/op/x'` |
+| `glob` absolute | `absolute_path` | `'glob' is matched against paths below 'dir' and must be relative; got '/src/*.rs' (did you mean '*.rs'?). Name a host folder in 'dir'` |
 | `context_lines` below 0 or above 20 | `context_too_large` | `context_lines must be between 0 and 20, got 21` |
 | `dir` climbs above the workdir | `outside_workdir` | `'dir' resolves outside the capsule workdir: '../..'` |
 | `pattern` is not a valid regex | `invalid_pattern` | `invalid regex '(': <regex error>` |
 | `glob` cannot be compiled | `invalid_pattern` | `invalid glob '<glob>': <regex error>` |
 | The first match alone exceeds 500 KB | `result_size_exceeded` | `a single match exceeds the find result size limit of 512000 bytes (500 KB).` |
 
-## Absolute paths are refused
+## Host folders
 
-`dir` and `glob` are relative to the work folder, the capsule workdir. A value beginning with
-`/` is refused with `error_kind: "absolute_path"` before any filesystem call:
+`dir` is relative to the work folder. An absolute `dir` opens only inside a host
+folder the session opened for the tool:
+
+| Session | Host folders |
+|---|---|
+| `mur run --unconfined` | The whole host, `/`, read and write |
+| Contained, with `host_paths` in `~/.murmur/config.yaml` | Each entry's folder, with the entry's `read` or `read-write` access |
+| Contained, no `host_paths` | None |
+
+murmur hands each folder to the tool as a WASI preopen named `murmur-host`
+followed by the folder's absolute path, `murmur-host` alone for `/`. A `mur`
+older than `e86e0b42` hands none, and every absolute `dir` is refused. The
+tool lists the folders with `wasi:filesystem/preopens.get-directories`, resolves
+the value's `.` and `..` segments lexically, and opens it through the
+longest folder that covers it.
+A folder covers whole components only: `/home/op/.cargo` covers
+`/home/op/.cargo/bin/x` but not `/home/op/.cargo2`.
+
+| `dir` | Result |
+|---|---|
+| Relative | Opens in the work folder, as always |
+| Relative, first segment `murmur-host`, while a host folder is opened | Refused with `reserved_name`, naming the absolute path to use |
+| Absolute, inside a host folder | Opens there |
+| Absolute, no host folder opened | Refused with `absolute_path`, suggesting the value's final component |
+| Absolute, outside every host folder | Refused with `absolute_path`, listing the host folders and their access in preopen order |
 
 ```text
-'dir' must be relative to the capsule workdir; got '/'
+'dir' is outside every host folder tool-find may open: /home/op/.cargo (read), /data (read-write); got '/etc/hosts'. A relative path opens in the work folder
 ```
 
-The message names the field and suggests the value's final component; a value
-with no final component (`/`, or one ending in `..`) gets no suggestion. A tool
-is dispatched with one WASI preopen mapped to the workdir, so an absolute value
-cannot escape it — `/app/x.txt` would resolve to `<workdir>/app/x.txt`, which
-nothing outside the capsule would find where the call named it. Refusing is the
-only way that contract is observable.
+A value with no final component (`/`, or one ending in `..`) gets no
+suggestion. With no host folder opened, `murmur-host/…` is an ordinary
+work-folder path.
+
+A `host_paths` entry that is a symlink is opened at its target, so a path is
+covered only when spelled through the target. An absolute symlink inside a
+folder is not followed: opening one fails with `Operation not permitted`. Every
+message names `dir` as the call wrote it.
+
+An absolute `dir` is searched with the same rules as a relative one, and match
+`path`s stay relative to it. `glob` is always matched below `dir`, so a value
+beginning with `/` is refused with `absolute_path` whether or not a host folder
+is opened:
+
+```text
+'glob' is matched against paths below 'dir' and must be relative; got '/src/*.rs' (did you mean '*.rs'?). Name a host folder in 'dir'
+```
+
+While a host folder is opened, a search of the work folder's root never reads
+or descends into a top-level entry named `murmur-host`: that name is where the
+host folders are opened.
 
 ## How `read_only` is enforced
 

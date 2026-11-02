@@ -7,10 +7,13 @@
 //! the stdin envelope, the field checks, every limit, message and filesystem call — lives here,
 //! with no WASM bindings and no `cfg`, so it is unit tested on the host with `cargo test`.
 //!
+//! A component also hands [`dispatch`] the host folders the runtime opened for it, as
+//! [`HostRoot`]s it builds with [`HostRoot::from_preopen`] from its WASI preopens. A relative path
+//! opens in the work folder; an absolute one opens only inside one of those roots.
+//!
 //! The crate root holds the envelope, the dispatch, the output constructors and the helpers the
-//! tools share; each tool's handler lives in its own module.
-
-use std::path::Path;
+//! tools share; each tool's handler lives in its own module, and the resolution of one path
+//! input in the `resolve` module.
 
 use serde_json::{json, Value};
 
@@ -18,6 +21,7 @@ mod edit;
 mod find;
 mod image;
 mod read;
+mod resolve;
 #[cfg(test)]
 mod test_png;
 #[cfg(test)]
@@ -47,9 +51,12 @@ mod err {
     pub const RANGE_TOO_LARGE: &str = "range_too_large";
     // tool-find context_lines is negative or exceeds MAX_CONTEXT_LINES.
     pub const CONTEXT_TOO_LARGE: &str = "context_too_large";
-    // A path input (`path`, `dir` or `glob`) was given as an absolute value, which every tool's
-    // description forbids: each path the tools take is relative to the capsule workdir.
+    // An absolute `path` or `dir` no held host root covers, or an absolute `glob`, which is
+    // always matched below `dir`.
     pub const ABSOLUTE_PATH: &str = "absolute_path";
+    // A relative `path` or `dir` whose first segment is `murmur-host`, the name the host roots
+    // are opened under, while the tool holds at least one root.
+    pub const RESERVED_NAME: &str = "reserved_name";
     // tool-find `dir` has a `..` that climbs above the capsule workdir.
     pub const OUTSIDE_WORKDIR: &str = "outside_workdir";
     // tool-read `path` is named as an image but its header is not a PNG, JPEG, GIF or WebP one.
@@ -106,13 +113,69 @@ impl Tool {
 
     /// The tool's handler: the call object in, the old-protocol result out. Each handler finds
     /// only keys from [`Tool::fields`], because [`run`] refuses every other key first.
-    fn handle(self, call: &Value) -> Value {
+    fn handle(self, call: &Value, roots: &[HostRoot]) -> Value {
         match self {
-            Tool::Read => read::read(call),
-            Tool::Write => write::write(call),
-            Tool::Edit => edit::edit(call),
-            Tool::Find => find::find(call),
+            Tool::Read => read::read(call, roots),
+            Tool::Write => write::write(call, roots),
+            Tool::Edit => edit::edit(call, roots),
+            Tool::Find => find::find(call, roots),
         }
+    }
+}
+
+// ── Host roots ──────────────────────────────────────────────────────────────────
+
+/// The preopen name every host root is opened under: `murmur-host` alone for the whole host,
+/// `murmur-host` followed by the folder's absolute path for one host folder.
+pub(crate) const HOST_ROOT_NAME: &str = "murmur-host";
+
+/// A host folder the runtime opened for the tool, besides the work folder: the whole host under
+/// `mur run --unconfined`, or one `host_paths` entry of the operator's config. An absolute path
+/// input opens only inside one of these.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostRoot {
+    /// The folder's absolute host path, lexically normalised: `/` for the whole host.
+    pub path: String,
+    pub access: RootAccess,
+}
+
+/// Whether the tool may change files under a [`HostRoot`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RootAccess {
+    Read,
+    ReadWrite,
+}
+
+impl RootAccess {
+    /// The access as the operator's `host_paths` entry spells it.
+    pub(crate) const fn label(&self) -> &'static str {
+        match self {
+            RootAccess::Read => "read",
+            RootAccess::ReadWrite => "read-write",
+        }
+    }
+}
+
+impl HostRoot {
+    /// The root a WASI preopen named `name` opens, or `None` when the preopen is not a host
+    /// root. `murmur-host` is the whole host, `/`; `murmur-host/<path>` is the host folder
+    /// `/<path>`, normalised. Every other name — `.`, `state`, `murmur-runtime`, or one that only
+    /// begins with the same letters, like `murmur-hostile` — is not a root. `writable` is whether
+    /// the preopen's descriptor flags hold `mutate-directory`.
+    pub fn from_preopen(name: &str, writable: bool) -> Option<HostRoot> {
+        let rest = if name == HOST_ROOT_NAME {
+            ""
+        } else {
+            name.strip_prefix(HOST_ROOT_NAME)?.strip_prefix('/')?
+        };
+        Some(HostRoot {
+            path: resolve::render_absolute(&resolve::normalize_absolute(rest)),
+            access: if writable {
+                RootAccess::ReadWrite
+            } else {
+                RootAccess::Read
+            },
+        })
     }
 }
 
@@ -130,7 +193,10 @@ pub const EDIT_PAIR_FIELDS: &[&str] = &["old", "new"];
 /// key outside [`Tool::fields`], whatever its value; then the tool's handler validates its
 /// fields and only then touches the filesystem. A successful result carries the tool's
 /// [`state_effect`](Tool::state_effect) in `metadata`.
-pub fn run(tool: Tool, raw: &str) -> Value {
+///
+/// `roots` are the host folders the tool may open an absolute path in, in preopen order; empty
+/// when the session opened none, and then every absolute path is refused.
+pub fn run(tool: Tool, raw: &str, roots: &[HostRoot]) -> Value {
     if raw.trim().is_empty() {
         return fail_msg("missing input on stdin");
     }
@@ -179,7 +245,7 @@ pub fn run(tool: Tool, raw: &str) -> Value {
         );
     }
 
-    with_state_effect(tool.handle(&call), tool.state_effect())
+    with_state_effect(tool.handle(&call, roots), tool.state_effect())
 }
 
 /// A tool call's result as a component's `Guest::run` hands it to the WIT `ToolResult`.
@@ -207,7 +273,8 @@ pub struct OutcomeAttachment {
     /// The type the file's leading bytes declare: `image/png`, `image/jpeg`, `image/gif` or
     /// `image/webp`.
     pub media_type: String,
-    /// The file, as the call named it: relative to the work folder.
+    /// The file, as the call named it: relative to the work folder. An image under a host root
+    /// is never attached.
     pub path: String,
 }
 
@@ -228,8 +295,8 @@ pub enum OutcomeStatus {
 /// (crates/capsule-runtime `dispatch_native_tool`): `data` is the result's `data` field, a
 /// string used verbatim, else a non-null value re-serialized, else `None`. `attachments` is the
 /// result's top-level `attachments` array: each `{"media_type", "path"}` entry holding both as
-/// strings, in order, and empty when the result has none.
-pub fn dispatch(tool: Tool, data: Option<&str>) -> ToolOutcome {
+/// strings, in order, and empty when the result has none. `roots` are passed on to [`run`].
+pub fn dispatch(tool: Tool, data: Option<&str>, roots: &[HostRoot]) -> ToolOutcome {
     let raw = match data {
         Some(d) => {
             let data_val =
@@ -239,7 +306,7 @@ pub fn dispatch(tool: Tool, data: Option<&str>) -> ToolOutcome {
         None => "{}".to_string(),
     };
 
-    let result = run(tool, &raw);
+    let result = run(tool, &raw, roots);
 
     let status = match result.get("status").and_then(Value::as_str) {
         Some("passed") => OutcomeStatus::Passed,
@@ -351,35 +418,6 @@ fn required_path(call: &Value, field: &str) -> Result<String, Value> {
         Some(p) if !p.is_empty() => Ok(p.to_string()),
         _ => Err(fail_msg(format!("missing required field: {field}"))),
     }
-}
-
-/// The refusal for an absolute path input, or `None` when `value` is relative.
-///
-/// Under the single WASI preopen a tool is dispatched with, an absolute value resolves *inside*
-/// the preopen: `/app/results.txt` lands at `<workdir>/app/results.txt`, which a later read of
-/// the same value resolves identically, so nothing inside the capsule can see the divergence
-/// from what the caller named. Refusing is therefore the only way the contract in each tool's
-/// description — every path is relative to the work folder — is observable at all.
-///
-/// `location` is the input the caller actually wrote, as murmur renders a flat input location
-/// (`path`, `dir` or `glob`), so the message names the field to fix. The suggestion is the
-/// value's final component: the tool cannot know which leading components the caller mistook
-/// for a root, but under a `Sealed` capsule the workdir is the only writable location, so the
-/// bare file name is the likely intended target. Values with no final component (`/`, or one
-/// ending in `..`) get no suggestion rather than an empty one.
-fn reject_absolute(location: &str, value: &str) -> Option<Value> {
-    let path = Path::new(value);
-    if !path.is_absolute() {
-        return None;
-    }
-    let suggestion = match path.file_name().and_then(|n| n.to_str()) {
-        Some(name) => format!(" (did you mean '{name}'?)"),
-        None => String::new(),
-    };
-    Some(err_result(
-        err::ABSOLUTE_PATH,
-        format!("'{location}' must be relative to the capsule workdir; got '{value}'{suggestion}"),
-    ))
 }
 
 fn io_error_kind(e: &std::io::Error) -> &'static str {
