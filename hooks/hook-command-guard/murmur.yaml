@@ -1,0 +1,9 @@
+name: hook-command-guard
+version: 0.1.0
+runtime: hook
+binding: on-shell
+execution_mode: blocking
+commit_policy: deny
+description: "Refuses a shell command before it runs when it matches a rule from the hook's config: a denied program, a program with argument conditions, or a pattern; reads scripts, wrappers and build-tool recipes, and decides unclear commands by on_unclear."
+requires_files:
+  - hook_command_guard.wasm

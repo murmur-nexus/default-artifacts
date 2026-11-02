@@ -101,6 +101,7 @@ WASM components (`runtime: hook`) that attach to lifecycle events. Each hook dec
 | Artifact | Location | Binding | Mode | Commit policy | Description |
 |---|---|---|---|---|---|
 | `hook-debug` | `hooks/hook-debug/` | *(all events)* | async | none | Writes a JSONL event log to `hook-debug.jsonl` in the session records directory's `hooks/` |
+| `hook-command-guard` | `hooks/hook-command-guard/` | `on-shell` | blocking | deny | Refuses a shell command before it runs when it matches an operator-written rule — a denied program, a program with argument conditions such as `rm -rf` or `git push --force`, or a pattern — and decides commands it cannot read by `on_unclear` |
 | `hook-compact` | `hooks/hook-compact/` | `on-compaction` | blocking | replace-context | Compacts conversation history when the session token threshold is reached |
 | `hook-diff-summary` | `hooks/hook-diff-summary/` | *(all events)* | blocking | none | Snapshots files before each `tool-write` and `tool-edit` call and emits a structured unified-diff summary at end of turn; requires `tool-write` and `tool-edit` 0.1.0 or later |
 | `hook-memory` | `hooks/hook-memory/` | `on-task-start` | blocking | seed-context | Seeds a task with the relevant part of the conversation that came before it, read from the runtime's durable conversation record |
