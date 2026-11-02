@@ -8,7 +8,7 @@ use regex::Regex;
 use serde_json::{json, Value};
 use walkdir::WalkDir;
 
-use crate::resolve::{reject_absolute_glob, resolve_path};
+use crate::resolve::{lexical_segments, reject_absolute_glob, resolve_path};
 use crate::{
     err, err_result, fail_msg, format_result_size, io_error_kind, ok_with, HostRoot, Tool,
     HOST_ROOT_NAME,
@@ -449,17 +449,8 @@ fn relative_path(root: &Path, file: &Path) -> String {
 /// before it, `/`-joined. `""` is the workdir root. `None` when a `..` has no segment left
 /// to pop, i.e. the value climbs above the workdir.
 pub(crate) fn normalize_dir(dir: &str) -> Option<String> {
-    let mut segments: Vec<&str> = Vec::new();
-    for segment in dir.split('/') {
-        match segment {
-            "" | "." => {}
-            ".." => {
-                segments.pop()?;
-            }
-            s => segments.push(s),
-        }
-    }
-    Some(segments.join("/"))
+    let (segments, climbed_above) = lexical_segments(dir);
+    (!climbed_above).then(|| segments.join("/"))
 }
 
 /// An anchored regex for `glob`. `**/` matches zero or more whole segments, a trailing `**`

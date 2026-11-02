@@ -116,8 +116,11 @@ folder the session opened for the tool:
 | Contained, no `host_paths` | None |
 
 murmur hands each folder to the tool as a WASI preopen named `murmur-host`
-followed by the folder's absolute path, `murmur-host` alone for `/`. A `mur`
-older than `e86e0b42` hands none, and every absolute `path` is refused. The
+followed by the folder's absolute path, `murmur-host` alone for `/`. murmur
+does so from commit `e86e0b42` on, which no `mur` release up to v0.8.0
+contains: under v0.8.0 or earlier the tool holds no host folder, and every
+absolute `path` is refused. A tool entry that declares
+`capabilities.filesystem.scope` holds none on any `mur`. The
 tool lists the folders with `wasi:filesystem/preopens.get-directories`, resolves
 the value's `.` and `..` segments lexically, and opens it through the
 longest folder that covers it.

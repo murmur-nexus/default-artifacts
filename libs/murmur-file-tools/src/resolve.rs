@@ -161,17 +161,22 @@ fn file_name_suggestion(value: &str) -> String {
 /// The segments of absolute `value`, lexically normalised: `.` and empty segments dropped, each
 /// `..` popping one segment, and a `..` at `/` staying at `/`.
 pub(crate) fn normalize_absolute(value: &str) -> Vec<&str> {
+    lexical_segments(value).0
+}
+
+/// The segments of `value` with `.` and empty segments dropped and each `..` popping the segment
+/// before it, and whether some `..` found no segment left to pop.
+pub(crate) fn lexical_segments(value: &str) -> (Vec<&str>, bool) {
     let mut segments: Vec<&str> = Vec::new();
+    let mut climbed_above = false;
     for segment in value.split('/') {
         match segment {
             "" | "." => {}
-            ".." => {
-                segments.pop();
-            }
+            ".." => climbed_above |= segments.pop().is_none(),
             s => segments.push(s),
         }
     }
-    segments
+    (segments, climbed_above)
 }
 
 /// `segments` as an absolute path: `/` when there are none.
