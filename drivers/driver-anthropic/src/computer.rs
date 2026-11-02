@@ -361,8 +361,10 @@ impl ComputerPlan {
                         _ => None,
                     });
                 if let Some((x0, y0, x1, y1)) = region {
+                    // The region's bottom-right corner is exclusive on both sides; it scales
+                    // like any other point.
                     let (x, y) = scale.to_display(x0, y0);
-                    let (to_x, to_y) = scale.to_display_edge(x1, y1);
+                    let (to_x, to_y) = scale.to_display(x1, y1);
                     out.insert("x".to_string(), Value::from(x));
                     out.insert("y".to_string(), Value::from(y));
                     out.insert("to_x".to_string(), Value::from(to_x));

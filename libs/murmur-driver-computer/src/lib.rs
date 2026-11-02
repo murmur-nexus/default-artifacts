@@ -8,7 +8,6 @@
 //!
 //! - [`computer_display`] reads the declared display size;
 //! - [`Scale`] maps a point between the screenshot the model sees and the display the tool runs;
-//! - [`TOOL_ACTIONS`] is the tool's action vocabulary;
 //! - [`rewrite_result_text`] turns the tool's result text into what the model should read.
 //!
 //! The model tables and wire shapes stay in each driver.
@@ -75,12 +74,6 @@ impl Scale {
         )
     }
 
-    /// A zoom region's exclusive bottom-right corner as display pixels, rounded as
-    /// [`Scale::to_display`] rounds and never clamped.
-    pub fn to_display_edge(&self, x: f64, y: f64) -> (i64, i64) {
-        self.to_display(x, y)
-    }
-
     /// A display point as screenshot pixels: `(round(x·sw/W), round(y·sh/H))`, clamped onto the
     /// screenshot. Used only to replay history, where a point the tool already took is shown
     /// back to the model.
@@ -98,26 +91,6 @@ impl Scale {
 fn scale_round(v: f64, numerator: u32, denominator: u32) -> i64 {
     (v * f64::from(numerator) / f64::from(denominator)).round() as i64
 }
-
-/// The actions the computer tool (`tools/tool-computer`) takes, in its own order.
-pub const TOOL_ACTIONS: [&str; 16] = [
-    "screenshot",
-    "left_click",
-    "right_click",
-    "middle_click",
-    "double_click",
-    "triple_click",
-    "left_click_drag",
-    "left_mouse_down",
-    "left_mouse_up",
-    "mouse_move",
-    "scroll",
-    "type",
-    "key",
-    "hold_key",
-    "wait",
-    "zoom",
-];
 
 /// A computer tool's result text as the model should read it in its provider's form.
 ///
@@ -235,6 +208,8 @@ mod tests {
         let scale = Scale::new((1440, 900), (1372, 858));
         assert_eq!(scale.to_display(694.0, 434.0), (728, 455));
         assert_eq!(scale.to_display(0.0, 0.0), (0, 0));
+        // A zoom region's exclusive corner at the screenshot's edge lands on the display's edge.
+        assert_eq!(scale.to_display(1372.0, 858.0), (1440, 900));
         // Off the screenshot stays off the display.
         assert_eq!(scale.to_display(2000.0, -10.0), (2099, -10));
         let identity = Scale::new((1440, 900), (1440, 900));
@@ -244,13 +219,6 @@ mod tests {
         // Ties round away from zero, as f64::round does.
         let half = Scale::new((3, 3), (2, 2));
         assert_eq!(half.to_display(1.0, 3.0), (2, 5));
-    }
-
-    #[test]
-    fn to_display_edge_rounds_like_to_display() {
-        let scale = Scale::new((1440, 900), (1372, 858));
-        assert_eq!(scale.to_display_edge(320.0, 200.0), (336, 210));
-        assert_eq!(scale.to_display_edge(1372.0, 858.0), (1440, 900));
     }
 
     #[test]
@@ -285,18 +253,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn tool_actions_are_the_tools_sixteen_in_order() {
-        assert_eq!(TOOL_ACTIONS.len(), 16);
-        assert_eq!(TOOL_ACTIONS[0], "screenshot");
-        assert_eq!(TOOL_ACTIONS[6], "left_click_drag");
-        assert_eq!(TOOL_ACTIONS[15], "zoom");
-        let mut sorted = TOOL_ACTIONS.to_vec();
-        sorted.sort_unstable();
-        sorted.dedup();
-        assert_eq!(sorted.len(), 16);
     }
 
     fn scale_down() -> Scale {

@@ -698,6 +698,41 @@ fn s7_an_all_error_run_gets_the_blank_screenshot_and_a_line_saying_so() {
     assert!(built.images.is_empty());
 }
 
+/// murmur keeps only the newest images of a conversation and puts a line in place of each older
+/// one. A group whose screenshot was aged out that way did return one: its notes say it is not
+/// shown, never that no action returned a screenshot. The text is the shape a live
+/// `gpt-5.6-luna` run's fourth request carried.
+#[test]
+fn s7_a_run_whose_screenshot_murmur_aged_out_says_it_is_not_shown() {
+    let aged = "[image not shown: image/png, 17882 bytes, sha256 d401c731; the 5 newer images in \
+                this conversation are shown instead]";
+    for stand_in in [aged, "[image unavailable: image/png, 4 bytes, sha256 aaaa]"] {
+        let mut messages = s7_messages();
+        for message in messages.as_array_mut().unwrap().iter_mut().skip(2) {
+            message["content"] = json!([
+                {"type": "text", "text": "<untrusted-content source=tool:tool-computer>\nx at 1,1\ncursor: 1,1\nscreenshot: s.png (1440x900)\n</untrusted-content>"},
+                {"type": "text", "text": stand_in}
+            ]);
+        }
+        let raw = request("gpt-5.6-luna", json!([computer_tool(1440, 900)]), messages);
+        let built = build(&raw);
+        let input = built.body["input"].as_array().unwrap();
+        assert_eq!(input[3]["output"]["image_url"], BLANK_SCREENSHOT_URL);
+        let notes = input[4]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            notes.contains(&format!("\n1. left_click: {stand_in}\n")),
+            "{notes}"
+        );
+        assert!(notes.ends_with(
+            "\nthe screenshot this call returned is not shown (see the line above), so the screenshot sent with it is blank"
+        ), "{notes}");
+        assert!(
+            !notes.contains("no action in this call returned a screenshot"),
+            "{notes}"
+        );
+    }
+}
+
 #[test]
 fn s7_a_run_with_nothing_more_than_its_screenshot_has_no_notes() {
     let mut messages = s7_messages();

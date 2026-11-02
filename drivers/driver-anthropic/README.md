@@ -265,7 +265,8 @@ A tool artifact whose own `murmur.yaml` declares
 reaches the driver as a `tools` entry carrying that block. On a model in the table below, the
 driver sends Anthropic's own computer tool in that entry's place, which Claude is trained on,
 instead of a function definition. Everywhere else the entry goes out as an ordinary function and
-the body is byte for byte what it was without the block.
+the body is byte for byte what it was without the block. murmur passes the block on from
+`a9ea4726`; no murmur release has it yet (see the murmur version table above).
 
 The provider tool is sent when all of these hold:
 

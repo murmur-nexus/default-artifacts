@@ -419,7 +419,9 @@ reaches the driver as a `tools` entry carrying that block. On a Responses model 
 `computer_use`, the driver sends OpenAI's own `{"type": "computer"}` tool in that entry's place,
 which the model is trained on, instead of a function definition. Everywhere else, including the
 Chat Completions surface, the entry goes out as an ordinary function and the body is byte for
-byte what it was without the block.
+byte what it was without the block. murmur passes the block on, and asks a person about a call
+carrying `safety_checks`, from `a9ea4726` on; no murmur release has it yet (see the murmur version
+table above).
 
 The provider tool is sent when all of these hold:
 
@@ -511,13 +513,18 @@ OpenAI expects, on a full resend and on a continuation alike:
    computer_call <call_id> returned more than its screenshot:
    <i>. <tool action>: <text>
    no action in this call returned a screenshot, so the screenshot sent with it is blank
+   the screenshot this call returned is not shown (see the line above), so the screenshot sent with it is blank
    ```
 
    One `<i>.` line per call whose result text is not empty once the cursor line, the action line
    before it, the `screenshot:` line and a murmur `<untrusted-content>` fence left empty are taken
    out: a refusal, the display banner, a launched
-   program's exit, murmur's decline of a safety check. The last line only when the run held no
-   image. On a continuation the assistant turn is held by OpenAI and not in the request, so a line
+   program's exit, murmur's decline of a safety check, or a line standing in for the run's
+   screenshot. One of the last two lines only when the run holds no image: "not shown" when a
+   member's text holds murmur's `[image not shown: …]` or `[image unavailable: …]` line (murmur
+   keeps only the newest images of a conversation and puts that line in place of each older one,
+   so every older group is sent with the blank PNG), and "no action … returned a screenshot"
+   otherwise. On a continuation the assistant turn is held by OpenAI and not in the request, so a line
    reads `<i>. <text>`.
 
 On a full resend the assistant turn rebuilds the group as the one item it came from:

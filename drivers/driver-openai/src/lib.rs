@@ -187,19 +187,6 @@ struct MurmurMessage {
     tool_call_id: Option<String>,
     #[serde(default)]
     content: Vec<MurmurContentBlock>,
-    /// Whether the tool call failed or was not run, as murmur marks it. Neither a
-    /// `function_call_output` nor a `computer_call_output` has a slot for it: each carries the
-    /// tool's text, which says so.
-    #[serde(default)]
-    #[allow(dead_code)]
-    is_error: bool,
-    /// The safety checks a person acknowledged before murmur ran this call, exactly as the call
-    /// carried them. Never sent: the `computer` tool refuses `acknowledged_safety_checks` in its
-    /// input (HTTP 400, "`acknowledged_safety_checks` is not supported for the \"computer\"
-    /// tool."), so the person's yes is what let the call run, and nothing more goes back.
-    #[serde(default)]
-    #[allow(dead_code)]
-    acknowledged_safety_checks: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -236,13 +223,9 @@ enum MurmurContentBlock {
         id: String,
         name: String,
         input: Value,
-        /// The checks OpenAI asked a person to acknowledge before a derived computer call runs,
-        /// in murmur's form, as this driver returned them. Not replayed: the `computer` tool
-        /// refuses checks in its input.
-        #[serde(default)]
-        #[allow(dead_code)]
-        safety_checks: Option<Value>,
-        /// The `id` of the `computer_call` item a derived call came from.
+        /// The `id` of the `computer_call` item a derived call came from. A derived call's
+        /// `safety_checks` is not read back: the `computer` tool refuses checks in replayed
+        /// input, so the person's answer stays inside murmur.
         #[serde(default)]
         openai_item_id: Option<String>,
     },
@@ -1201,6 +1184,20 @@ fn notes_heading(call_id: &str) -> String {
 const NO_SCREENSHOT_LINE: &str =
     "no action in this call returned a screenshot, so the screenshot sent with it is blank";
 
+/// The notes line saying a group's screenshot is in the conversation only as a line standing in
+/// for it, so the one sent is blank.
+const SCREENSHOT_NOT_SHOWN_LINE: &str =
+    "the screenshot this call returned is not shown (see the line above), so the screenshot sent with it is blank";
+
+/// Whether `text` holds a line standing in for an image: murmur's
+/// `[image not shown: …]` for an image aged out of the conversation, its
+/// `[image unavailable: …]`, or the image pre-pass's own `[image not shown: …]`.
+fn stands_in_for_an_image(text: &str) -> bool {
+    text.lines().any(|line| {
+        line.starts_with("[image not shown: ") || line.starts_with("[image unavailable: ")
+    })
+}
+
 /// The input items one run of tool messages folds into: one `computer_call_output` holding the
 /// run's last image, or the blank screenshot when it holds none, then a notes message when the
 /// run left text or no screenshot. No `acknowledged_safety_checks` is sent: the `computer` tool
@@ -1244,6 +1241,7 @@ fn fold_computer_run(
     );
 
     let mut lines = Vec::new();
+    let mut stood_in = false;
     for message in members {
         let id = message.tool_call_id.as_deref().unwrap_or_default();
         let index = computer::split_derived_id(id).map_or(0, |(_, index)| index);
@@ -1257,6 +1255,7 @@ fn fold_computer_run(
             .collect::<Vec<_>>()
             .join("\n");
         let text = plan.notes_text(&text);
+        stood_in |= stands_in_for_an_image(&text);
         if text.trim().is_empty() {
             continue;
         }
@@ -1265,8 +1264,10 @@ fn fold_computer_run(
             None => format!("{index}. {text}"),
         });
     }
-    if image_url.is_none() {
-        lines.push(NO_SCREENSHOT_LINE.to_string());
+    match (image_url.is_some(), stood_in) {
+        (true, _) => {}
+        (false, true) => lines.push(SCREENSHOT_NOT_SHOWN_LINE.to_string()),
+        (false, false) => lines.push(NO_SCREENSHOT_LINE.to_string()),
     }
 
     let mut items = vec![Value::Object(output)];
