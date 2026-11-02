@@ -2,21 +2,27 @@
 
 use serde_json::Value;
 
+use crate::resolve::{refuse_read_only, resolve_path};
 use crate::{
-    err, err_result, fail_msg, io_error_kind, ok_summary_only, reject_absolute,
-    reject_unknown_fields, required_path, EDIT_PAIR_FIELDS,
+    err, err_result, fail_msg, io_error_kind, ok_summary_only, reject_unknown_fields,
+    required_path, HostRoot, Tool, EDIT_PAIR_FIELDS,
 };
 
 /// Apply `edits` to one file, all or nothing. Every input is validated before the file is
 /// read; the file is then read once, each `{old, new}` pair is applied in order to the
 /// result of the one before, and the file is written once, only after every pair matched
-/// exactly once. A failing pair is named `edit N of M`, counted from 1.
-pub(crate) fn edit(op: &Value) -> Value {
+/// exactly once. A failing pair is named `edit N of M`, counted from 1. An absolute `path` opens
+/// inside the host root covering it, which must be `read-write`.
+pub(crate) fn edit(op: &Value, roots: &[HostRoot]) -> Value {
     let path = match required_path(op, "path") {
         Ok(p) => p,
         Err(failure) => return failure,
     };
-    if let Some(refusal) = reject_absolute("path", &path) {
+    let resolved = match resolve_path("path", &path, Tool::Edit, roots) {
+        Ok(resolved) => resolved,
+        Err(refusal) => return refusal,
+    };
+    if let Some(refusal) = refuse_read_only(&path, &resolved) {
         return refusal;
     }
     let pairs = match edit_pairs(op) {
@@ -25,7 +31,7 @@ pub(crate) fn edit(op: &Value) -> Value {
     };
     let total = pairs.len();
 
-    let mut text = match std::fs::read_to_string(&path) {
+    let mut text = match std::fs::read_to_string(&resolved.open) {
         Ok(c) => c,
         Err(e) => return err_result(io_error_kind(&e), format!("{path}: {e}")),
     };
@@ -51,7 +57,7 @@ pub(crate) fn edit(op: &Value) -> Value {
         }
     }
 
-    match std::fs::write(&path, text) {
+    match std::fs::write(&resolved.open, text) {
         Ok(()) => ok_summary_only(
             format!("applied {total} edit(s) to {path}"),
             format!("{total} edits"),

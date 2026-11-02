@@ -13,7 +13,7 @@ The model is sent this description and input schema:
 
 ```yaml
 description: |
-  Replaces text in a file. Edits apply in order, each to the result of the one before; each old must match exactly once. All or nothing: if one fails, the file is unchanged and the error names its position, from 1. path is relative to the work folder; an absolute path is refused.
+  Replaces text in a file. Edits apply in order, each to the result of the one before; each old must match exactly once. All or nothing: if one fails, the file is unchanged and the error names its position, from 1. path is relative to the work folder, or absolute inside a host folder the session opened.
 input_schema:
   type: object
   properties:
@@ -75,7 +75,8 @@ failure is returned. A refused call touches no file and declares no
 3. The required fields are present. A field whose value is `null` counts as
    absent at every level, so murmur's own required-field check, which only
    tests presence, lets it through and the tool refuses it.
-4. Every path is relative to the work folder (see below).
+4. `path` resolves: relative to the work folder, or absolute inside a host folder
+   the session opened (see below). A write into a `read` host folder is refused here.
 
 Every refusal is also the result's `summary`, which is what a host shows for
 the call.
@@ -87,7 +88,10 @@ written `edit N of M`:
 | Failure | `error_kind` | Message |
 |---|---|---|
 | `path` absent, `null` or `""` | — | `missing required field: path` |
-| `path` absolute | `absolute_path` | `'path' must be relative to the capsule workdir; got '/app/x.py' (did you mean 'x.py'?)` |
+| `path` absolute, no host folder opened | `absolute_path` | `'path' must be relative to the work folder: this session opens no host folder to tool-edit; got '/app/x.py' (did you mean 'x.py'?)` |
+| `path` absolute, outside every host folder | `absolute_path` | `'path' is outside every host folder tool-edit may open: /home/op/.cargo (read); got '/etc/hosts'. A relative path opens in the work folder` |
+| `path` relative, starting with `murmur-host`, while a host folder is opened | `reserved_name` | `'path' starts with murmur-host, where this tool's host folders are opened; name the host path absolutely: '/home/op/x'` |
+| `path` inside a `read` host folder | `permission_denied` | `'path' '/home/op/.cargo/config.toml' is in /home/op/.cargo, which this session opens read-only` |
 | `edits` absent or `null` | — | `missing required field: edits` |
 | `edits` not an array | — | `edits must be an array of {old, new} objects` |
 | `edits` is `[]` | — | `edits is empty: it takes at least one {old, new} object` |
@@ -100,21 +104,50 @@ written `edit N of M`:
 | `old` occurs 2 or more times | `multiple_matches` | `edit 2 of 2: old occurs 2 times in src/app.py; the file is unchanged` |
 | The file does not exist | `not_found` | `src/app.py: <OS error>` |
 
-## Absolute paths are refused
+## Host folders
 
-`path` is relative to the work folder, the capsule workdir. A value beginning with
-`/` is refused with `error_kind: "absolute_path"` before any filesystem call:
+`path` is relative to the work folder. An absolute `path` opens only inside a host
+folder the session opened for the tool:
+
+| Session | Host folders |
+|---|---|
+| `mur run --unconfined` | The whole host, `/`, read and write |
+| Contained, with `host_paths` in `~/.murmur/config.yaml` | Each entry's folder, with the entry's `read` or `read-write` access |
+| Contained, no `host_paths` | None |
+
+murmur hands each folder to the tool as a WASI preopen named `murmur-host`
+followed by the folder's absolute path, `murmur-host` alone for `/`. murmur
+does so from commit `e86e0b42` on, which no `mur` release up to v0.8.0
+contains: under v0.8.0 or earlier the tool holds no host folder, and every
+absolute `path` is refused. A tool entry that declares
+`capabilities.filesystem.scope` holds none on any `mur`. The
+tool lists the folders with `wasi:filesystem/preopens.get-directories`, resolves
+the value's `.` and `..` segments lexically, and opens it through the
+longest folder that covers it.
+A folder covers whole components only: `/home/op/.cargo` covers
+`/home/op/.cargo/bin/x` but not `/home/op/.cargo2`.
+
+| `path` | Result |
+|---|---|
+| Relative | Opens in the work folder, as always |
+| Relative, first segment `murmur-host`, while a host folder is opened | Refused with `reserved_name`, naming the absolute path to use |
+| Absolute, inside a host folder | Opens there |
+| Absolute, no host folder opened | Refused with `absolute_path`, suggesting the value's final component |
+| Absolute, outside every host folder | Refused with `absolute_path`, listing the host folders and their access in preopen order |
+| Absolute, inside a `read` folder | Refused with `permission_denied` before the file or its folders are touched |
 
 ```text
-'path' must be relative to the capsule workdir; got '/app/x.py' (did you mean 'x.py'?)
+'path' is outside every host folder tool-edit may open: /home/op/.cargo (read), /data (read-write); got '/etc/hosts'. A relative path opens in the work folder
 ```
 
-The message names the field and suggests the value's final component; a value
-with no final component (`/`, or one ending in `..`) gets no suggestion. A tool
-is dispatched with one WASI preopen mapped to the workdir, so an absolute value
-cannot escape it — `/app/x.txt` would resolve to `<workdir>/app/x.txt`, which
-nothing outside the capsule would find where the call named it. Refusing is the
-only way that contract is observable.
+A value with no final component (`/`, or one ending in `..`) gets no
+suggestion. With no host folder opened, `murmur-host/…` is an ordinary
+work-folder path.
+
+A `host_paths` entry that is a symlink is opened at its target, so a path is
+covered only when spelled through the target. An absolute symlink inside a
+folder is not followed: opening one fails with `Operation not permitted`. Every
+message names `path` as the call wrote it.
 
 ## How `read_only` is enforced
 
@@ -131,6 +164,11 @@ destination 'path' declared by the tool's input schema.
 
 `tool-write`'s and `tool-edit`'s `path` are the only declared destinations among
 the file tools; `tool-read` and `tool-find` declare `murmur-destinations: []`.
+
+murmur applies `read_only` to every spelling of `path`: relative, the work
+folder's absolute host path, or a path through `murmur-host/`. A host folder
+opened `read` is a separate fence, held by the tool itself (see
+[Host folders](#host-folders)).
 
 An `edits` element holds no path key, and the call holds no content key beside
 `path`, so murmur's key-name rules add nothing to the declared destination.

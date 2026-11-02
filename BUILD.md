@@ -51,7 +51,7 @@ own manifest, and is what excludes native and internal crates from the wasm buil
 cargo build -p tool-read --target wasm32-wasip2 --release     # wasm
 cargo build --release -p tool-git                              # native
 ./scripts/validate-component.sh target/wasm32-wasip2/release/tool_read.wasm
-./scripts/package-artifact.sh tools/tool-read release/         # → release/tool-read-0.2.0.mur.zip
+./scripts/package-artifact.sh tools/tool-read release/         # → release/tool-read-0.3.0.mur.zip
 ./scripts/local-install.sh tool-read /path/to/capsule-folder
 ```
 

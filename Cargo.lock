@@ -2935,6 +2935,7 @@ name = "tool-edit"
 version = "0.0.0"
 dependencies = [
  "murmur-file-tools",
+ "wasip2",
  "wit-bindgen 0.59.0",
 ]
 
@@ -2943,6 +2944,7 @@ name = "tool-find"
 version = "0.0.0"
 dependencies = [
  "murmur-file-tools",
+ "wasip2",
  "wit-bindgen 0.59.0",
 ]
 
@@ -2990,6 +2992,7 @@ name = "tool-read"
 version = "0.0.0"
 dependencies = [
  "murmur-file-tools",
+ "wasip2",
  "wit-bindgen 0.59.0",
 ]
 
@@ -3052,6 +3055,7 @@ name = "tool-write"
 version = "0.0.0"
 dependencies = [
  "murmur-file-tools",
+ "wasip2",
  "wit-bindgen 0.59.0",
 ]
 

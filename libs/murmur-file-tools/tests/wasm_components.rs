@@ -15,7 +15,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
 use std::time::{Duration, Instant};
 
 use murmur_file_tools::Tool;
@@ -104,15 +104,34 @@ fn component_path(tool: Tool) -> PathBuf {
     wasm
 }
 
-/// `tool`'s compiled component, loaded.
+/// `tool`'s compiled component, loaded once per test process into the shared [`engine`]: each
+/// call still instantiates it in a fresh Store, but compiling it is paid once, not per call.
 fn load(engine: &Engine, tool: Tool) -> Component {
-    Component::from_file(engine, component_path(tool)).expect("load component")
+    static COMPONENTS: [OnceLock<Component>; 4] = [const { OnceLock::new() }; 4];
+    assert!(
+        Engine::same(engine, &self::engine()),
+        "components are compiled for the shared engine"
+    );
+    let slot = match tool {
+        Tool::Read => &COMPONENTS[0],
+        Tool::Write => &COMPONENTS[1],
+        Tool::Edit => &COMPONENTS[2],
+        Tool::Find => &COMPONENTS[3],
+    };
+    slot.get_or_init(|| Component::from_file(engine, component_path(tool)).expect("load component"))
+        .clone()
 }
 
+/// The one Wasmtime engine every test in this process shares.
 fn engine() -> Engine {
-    let mut config = Config::new();
-    config.wasm_component_model(true);
-    Engine::new(&config).expect("failed to create wasmtime engine")
+    static ENGINE: OnceLock<Engine> = OnceLock::new();
+    ENGINE
+        .get_or_init(|| {
+            let mut config = Config::new();
+            config.wasm_component_model(true);
+            Engine::new(&config).expect("failed to create wasmtime engine")
+        })
+        .clone()
 }
 
 fn linker(engine: &Engine) -> Linker<HostState> {
@@ -122,15 +141,9 @@ fn linker(engine: &Engine) -> Linker<HostState> {
 }
 
 /// A fresh Store whose only preopen is `workdir` mapped to `.` (DirPerms/FilePerms::all) —
-/// exactly what the capsule runtime's `build_wasi_ctx` grants a tool at dispatch time. Env
-/// is deliberately NOT inherited, so the component sees nothing of the test process's
-/// environment.
-fn store_for(engine: &Engine, workdir: &Path) -> Store<HostState> {
-    wasi_store(engine, workdir, false)
-}
-
-/// [`store_for`]'s Store with wasmtime-wasi's `allow_blocking_current_thread` set as given.
-/// When `true`, each guest filesystem call runs on the calling thread instead of being handed
+/// what the capsule runtime grants a tool with no host root at dispatch time — with
+/// wasmtime-wasi's `allow_blocking_current_thread` set as given. Env is deliberately NOT
+/// inherited, so the component sees nothing of the test process's environment. When `true`, each guest filesystem call runs on the calling thread instead of being handed
 /// to a tokio `spawn_blocking` pool thread and awaited. The setter must precede
 /// `preopened_dir`: the preopen captures the flag when it is created. murmur's capsule runtime
 /// leaves the flag off (`false`, the builder default).
@@ -139,11 +152,31 @@ fn wasi_store(
     workdir: &Path,
     allow_blocking_current_thread: bool,
 ) -> Store<HostState> {
+    wasi_store_with(engine, workdir, allow_blocking_current_thread, &[])
+}
+
+/// One preopen beyond the work folder: the host directory, the name the guest sees it under,
+/// and its permissions. A host root is named `murmur-host` followed by its absolute path.
+type Preopen = (PathBuf, String, DirPerms, FilePerms);
+
+/// [`wasi_store`]'s Store with `extra` preopened after the work folder, in order — the shape
+/// murmur hands a tool its host roots in.
+fn wasi_store_with(
+    engine: &Engine,
+    workdir: &Path,
+    allow_blocking_current_thread: bool,
+    extra: &[Preopen],
+) -> Store<HostState> {
     let mut builder = WasiCtxBuilder::new();
     builder
         .allow_blocking_current_thread(allow_blocking_current_thread)
         .preopened_dir(workdir, ".", DirPerms::all(), FilePerms::all())
         .expect("preopen workdir");
+    for (host, name, dir_perms, file_perms) in extra {
+        builder
+            .preopened_dir(host, name, *dir_perms, *file_perms)
+            .expect("preopen host root");
+    }
     Store::new(
         engine,
         HostState {
@@ -213,7 +246,19 @@ fn call_tool(
     workdir: &Path,
     data_payload: &str,
 ) -> ToolResult {
-    let mut store = store_for(engine, workdir);
+    call_tool_with(engine, component, linker, workdir, &[], data_payload)
+}
+
+/// [`call_tool`] with `extra` preopened beside the work folder.
+fn call_tool_with(
+    engine: &Engine,
+    component: &Component,
+    linker: &Linker<HostState>,
+    workdir: &Path,
+    extra: &[Preopen],
+    data_payload: &str,
+) -> ToolResult {
+    let mut store = wasi_store_with(engine, workdir, false, extra);
     let tool =
         ToolWorld::instantiate(&mut store, component, linker).expect("instantiate component");
     let input = ToolInput {
@@ -242,8 +287,8 @@ fn dir_entries(dir: &Path) -> Vec<String> {
 
 /// A preopen workdir at `.test-scratch/wasm_<tag>_<pid>`, relative to the process CWD (the
 /// crate root, under `cargo test`). Relative rather than under `std::env::temp_dir()` because
-/// the tool refuses an absolute path input: the host-native baseline in the benchmark below
-/// addresses the same tree through `murmur_file_tools::run`, which only accepts a workdir-relative value.
+/// the host-native baseline in the benchmark below addresses the same tree through
+/// `murmur_file_tools::run` with no host root, which only accepts a workdir-relative value.
 /// Gitignored; each test removes its own subtree.
 fn unique_workdir(tag: &str) -> PathBuf {
     let dir = PathBuf::from(".test-scratch").join(format!("wasm_{tag}_{}", std::process::id()));
@@ -487,9 +532,9 @@ fn component_edit_of_a_missing_file_creates_nothing() {
 }
 
 // The absolute-path tests below are the ones that need the real preopen. On the host an
-// absolute value escapes the fixture tree and fails on its own; under the single preopen a tool
-// is dispatched with, `/app/results.txt` resolves to `<workdir>/app/results.txt` — which is
-// exactly why the tool used to create it, report success, and read it back "correctly" after.
+// absolute value escapes the fixture tree and fails on its own; under the work-folder preopen
+// alone, `/app/results.txt` resolves to `<workdir>/app/results.txt` — which is exactly why the
+// tool refuses it when the session opened no host folder.
 //
 // `error_kind` is a field of the old-protocol envelope, which the WIT adapter maps to
 // `Status::Error` plus the message in `summary` (the envelope's `data` is null on a failure, so
@@ -515,8 +560,8 @@ fn component_refuses_an_absolute_write_path_and_leaves_the_workdir_untouched() {
     assert_eq!(
         summary.as_deref(),
         Some(
-            "'path' must be relative to the capsule workdir; got '/app/results.txt' \
-             (did you mean 'results.txt'?)"
+            "'path' must be relative to the work folder: this session opens no host folder to \
+             tool-write; got '/app/results.txt' (did you mean 'results.txt'?)"
         ),
     );
     assert!(
@@ -583,12 +628,18 @@ fn component_refuses_an_absolute_value_at_every_path_location() {
         assert!(matches!(status, Status::Error), "{call}: {status:?}");
         assert!(payload.is_null(), "{call}: {payload}");
         let summary = summary.unwrap_or_default();
-        assert!(
-            summary.starts_with(&format!(
-                "'{location}' must be relative to the capsule workdir; got '{value}'"
-            )),
-            "{call}: {summary}"
-        );
+        let expected = if location == "glob" {
+            format!(
+                "'glob' is matched against paths below 'dir' and must be relative; got '{value}'"
+            )
+        } else {
+            format!(
+                "'{location}' must be relative to the work folder: this session opens no host \
+                 folder to {}; got '{value}'",
+                tool.name()
+            )
+        };
+        assert!(summary.starts_with(&expected), "{call}: {summary}");
         assert!(meta.is_empty(), "{call}: {meta:?}");
     }
     assert_eq!(
@@ -757,7 +808,10 @@ fn component_refuses_an_absolute_read_path_even_when_the_file_exists() {
     );
     let msg = summary.expect("a refusal carries its message in summary");
     assert!(
-        msg.starts_with("'path' must be relative to the capsule workdir; got '/app/results.txt'"),
+        msg.starts_with(
+            "'path' must be relative to the work folder: this session opens no host folder to \
+             tool-read; got '/app/results.txt'"
+        ),
         "the refusal names `path`, the location the call wrote: {msg}"
     );
 
@@ -1337,8 +1391,9 @@ fn find_benchmark_no_orders_of_magnitude_regression() {
     let rel_payload = r#"{"pattern":"NEEDLE","dir":"bench_tree","recursive":true}"#;
 
     // Host-native baseline: the SAME logic, host-compiled, over the same tree. The dir is
-    // workdir-relative like the wasm payload's — the tool refuses an absolute value — so both
-    // sides walk the identical tree (host `murmur_file_tools::run` takes the stdin-envelope shape).
+    // workdir-relative like the wasm payload's — with no host root the tool refuses an absolute
+    // value — so both sides walk the identical tree (host `murmur_file_tools::run` takes the
+    // stdin-envelope shape).
     let host_dir = tree.to_string_lossy().to_string();
     let envelope = serde_json::json!({
         "data": { "pattern": "NEEDLE", "dir": host_dir, "recursive": true }
@@ -1347,7 +1402,7 @@ fn find_benchmark_no_orders_of_magnitude_regression() {
 
     // Warm both paths once, then time the walk only (instantiation excluded — that is the
     // fair "latency of the walk" comparison; instantiation overhead is reported separately).
-    let _ = murmur_file_tools::run(Tool::Find, &envelope);
+    let _ = murmur_file_tools::run(Tool::Find, &envelope, &[]);
 
     // The sampled walks block on-thread; see the comment above the bound.
     let mut store = wasi_store(&eng, &workdir, true);
@@ -1364,7 +1419,7 @@ fn find_benchmark_no_orders_of_magnitude_regression() {
     let (mut wasm_walk_min, mut wasm_walk_max) = (Duration::MAX, Duration::ZERO);
     for _ in 0..SAMPLES {
         let t = Instant::now();
-        let host_out = murmur_file_tools::run(Tool::Find, &envelope);
+        let host_out = murmur_file_tools::run(Tool::Find, &envelope, &[]);
         let host_walk = t.elapsed();
         assert_eq!(host_out["ok"], true, "host find must succeed: {host_out}");
         assert_eq!(host_out["matches"].as_array().map(|a| a.len()), Some(1));
@@ -1421,4 +1476,766 @@ fn find_benchmark_no_orders_of_magnitude_regression() {
     );
 
     let _ = std::fs::remove_dir_all(&workdir);
+}
+
+// ── Host roots ──────────────────────────────────────────────────────────────────
+//
+// murmur hands a tool each host folder as an extra preopen named `murmur-host` followed by the
+// folder's absolute path. These tests preopen scratch directories outside the work folder the
+// same way: `HOST` read-write and `RO` read-only, each under its canonical absolute path.
+
+/// A work folder plus two host folders beside it, outside it.
+struct HostFixture {
+    parent: PathBuf,
+    workdir: PathBuf,
+    /// `HOST`'s canonical absolute path.
+    host: String,
+    /// `RO`'s canonical absolute path.
+    ro: String,
+}
+
+impl HostFixture {
+    fn new(tag: &str) -> HostFixture {
+        let parent = unique_workdir(&format!("roots_{tag}"));
+        let workdir = parent.join("work");
+        for sub in ["work", "host", "ro"] {
+            std::fs::create_dir_all(parent.join(sub)).unwrap();
+        }
+        let canonical = |sub: &str| {
+            std::fs::canonicalize(parent.join(sub))
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        };
+        HostFixture {
+            host: canonical("host"),
+            ro: canonical("ro"),
+            parent,
+            workdir,
+        }
+    }
+
+    /// `HOST` as a read-write root.
+    fn host_root(&self) -> Preopen {
+        (
+            PathBuf::from(&self.host),
+            format!("murmur-host{}", self.host),
+            DirPerms::all(),
+            FilePerms::all(),
+        )
+    }
+
+    /// `RO` as a read-only root.
+    fn ro_root(&self) -> Preopen {
+        (
+            PathBuf::from(&self.ro),
+            format!("murmur-host{}", self.ro),
+            DirPerms::READ,
+            FilePerms::READ,
+        )
+    }
+
+    /// `HOST` (read-write) then `RO` (read), in that preopen order.
+    fn both(&self) -> Vec<Preopen> {
+        vec![self.host_root(), self.ro_root()]
+    }
+
+    /// One call to `tool` holding `extra`, with the call object `data`.
+    fn call(&self, tool: Tool, extra: &[Preopen], data: Value) -> ToolResult {
+        let eng = engine();
+        let component = load(&eng, tool);
+        let lnk = linker(&eng);
+        call_tool_with(
+            &eng,
+            &component,
+            &lnk,
+            &self.workdir,
+            extra,
+            &data.to_string(),
+        )
+    }
+
+    /// The roots-held refusal for `value` at `location`, with `HOST` and `RO` held.
+    fn outside_both(&self, tool: Tool, location: &str, value: &str) -> String {
+        format!(
+            "'{location}' is outside every host folder {} may open: {} (read-write), {} (read); \
+             got '{value}'. A relative path opens in the work folder",
+            tool.name(),
+            self.host,
+            self.ro
+        )
+    }
+
+    /// The work folder's entries, recursively, relative and sorted.
+    fn work_tree(&self) -> Vec<String> {
+        fn walk(dir: &Path, base: &Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                out.push(
+                    path.strip_prefix(base)
+                        .unwrap()
+                        .to_string_lossy()
+                        .to_string(),
+                );
+                if path.is_dir() {
+                    walk(&path, base, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.workdir, &self.workdir, &mut out);
+        out.sort();
+        out
+    }
+}
+
+impl Drop for HostFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.parent);
+    }
+}
+
+/// `ToolResult.data` decoded, `Null` when absent.
+fn data_of(result: &ToolResult) -> Value {
+    result
+        .data
+        .as_deref()
+        .map(|d| serde_json::from_str(d).expect("ToolResult.data is JSON"))
+        .unwrap_or(Value::Null)
+}
+
+/// Asserts `result` is a refusal carrying exactly `summary`, with no data, attachment or effect.
+fn assert_component_refused(result: &ToolResult, summary: &str) {
+    assert!(
+        matches!(result.status, Status::Error),
+        "{:?}: {:?}",
+        result.status,
+        result.summary
+    );
+    assert_eq!(result.summary.as_deref(), Some(summary));
+    assert_eq!(result.data, None, "{summary}");
+    assert!(result.attachments.is_empty(), "{summary}");
+    assert!(
+        result.metadata.is_empty(),
+        "a refusal declares no effect: {summary}"
+    );
+}
+
+fn assert_passed(result: &ToolResult) {
+    assert!(
+        matches!(result.status, Status::Passed),
+        "{:?}: {:?}",
+        result.status,
+        result.summary
+    );
+}
+
+// S1
+#[test]
+fn component_reads_a_file_in_a_read_write_root() {
+    let fx = HostFixture::new("s1");
+    std::fs::write(format!("{}/notes.txt", fx.host), "alpha\nbeta\n").unwrap();
+    std::fs::write(fx.workdir.join("local.txt"), "local\n").unwrap();
+    let before = fx.work_tree();
+
+    let value = format!("{}/notes.txt", fx.host);
+    let result = fx.call(
+        Tool::Read,
+        &[fx.host_root()],
+        serde_json::json!({ "path": &value }),
+    );
+    assert_passed(&result);
+    assert_eq!(
+        data_of(&result),
+        serde_json::json!({ "content": "alpha\nbeta\n", "total_lines": 2 })
+    );
+    assert_eq!(
+        result.metadata,
+        vec![("state_effect".to_string(), "read".to_string())]
+    );
+
+    // An I/O error names the value as written, never the `murmur-host…` path opened.
+    let missing = format!("{}/missing.txt", fx.host);
+    let result = fx.call(
+        Tool::Read,
+        &[fx.host_root()],
+        serde_json::json!({ "path": &missing }),
+    );
+    assert!(matches!(result.status, Status::Error));
+    let summary = result.summary.unwrap();
+    assert!(summary.starts_with(&format!("{missing}: ")), "{summary}");
+    assert!(!summary.contains("murmur-host"), "{summary}");
+
+    assert_eq!(fx.work_tree(), before, "the work folder is unchanged");
+    assert!(!fx.workdir.join("murmur-host").exists());
+}
+
+// S2
+#[test]
+fn component_writes_a_file_and_its_parents_in_a_read_write_root() {
+    let fx = HostFixture::new("s2");
+    let before = fx.work_tree();
+    let value = format!("{}/new/dir/out.txt", fx.host);
+
+    let result = fx.call(
+        Tool::Write,
+        &[fx.host_root()],
+        serde_json::json!({ "path": &value, "content": "x" }),
+    );
+    assert_passed(&result);
+    assert_eq!(result.summary.as_deref(), Some("1 bytes written"));
+    assert_eq!(
+        result.metadata,
+        vec![("state_effect".to_string(), "mutate".to_string())]
+    );
+    assert_eq!(std::fs::read_to_string(&value).unwrap(), "x");
+
+    let read = fx.call(
+        Tool::Read,
+        &[fx.host_root()],
+        serde_json::json!({ "path": &value }),
+    );
+    assert_passed(&read);
+    assert_eq!(data_of(&read)["content"], "x");
+
+    assert_eq!(fx.work_tree(), before, "the work folder is unchanged");
+}
+
+// S3
+#[test]
+fn component_edits_a_file_in_a_read_write_root() {
+    let fx = HostFixture::new("s3");
+    let value = format!("{}/a.txt", fx.host);
+    std::fs::write(&value, "one two").unwrap();
+
+    let result = fx.call(
+        Tool::Edit,
+        &[fx.host_root()],
+        serde_json::json!({ "path": &value, "edits": [{ "old": "two", "new": "three" }] }),
+    );
+    assert_passed(&result);
+    assert_eq!(std::fs::read_to_string(&value).unwrap(), "one three");
+    assert!(fx.work_tree().is_empty());
+}
+
+// S4
+#[test]
+fn component_finds_in_a_root_with_paths_relative_to_dir() {
+    let fx = HostFixture::new("s4");
+    std::fs::create_dir_all(format!("{}/src", fx.host)).unwrap();
+    std::fs::write(format!("{}/src/lib.rs", fx.host), "fn needle() {}\n").unwrap();
+
+    let result = fx.call(
+        Tool::Find,
+        &[fx.host_root()],
+        serde_json::json!({ "pattern": "needle", "dir": &fx.host }),
+    );
+    assert_passed(&result);
+    assert_eq!(
+        data_of(&result)["matches"],
+        serde_json::json!([{ "path": "src/lib.rs", "line": 1, "text": "fn needle() {}" }])
+    );
+
+    // Non-recursive, and a `dir` naming a file.
+    let result = fx.call(
+        Tool::Find,
+        &[fx.host_root()],
+        serde_json::json!({ "pattern": "needle", "dir": format!("{}/src", fx.host), "recursive": false }),
+    );
+    assert_eq!(match_paths(&data_of(&result)), ["lib.rs"]);
+    let result = fx.call(
+        Tool::Find,
+        &[fx.host_root()],
+        serde_json::json!({ "pattern": "needle", "dir": format!("{}/src/lib.rs", fx.host) }),
+    );
+    assert_eq!(match_paths(&data_of(&result)), ["lib.rs"]);
+
+    // A missing dir names the value as written.
+    let missing = format!("{}/nope", fx.host);
+    let result = fx.call(
+        Tool::Find,
+        &[fx.host_root()],
+        serde_json::json!({ "pattern": "needle", "dir": &missing, "recursive": false }),
+    );
+    assert!(matches!(result.status, Status::Error));
+    let summary = result.summary.unwrap();
+    assert!(summary.starts_with(&format!("{missing}: ")), "{summary}");
+}
+
+// S5
+#[test]
+fn component_refuses_a_path_outside_every_root_and_touches_nothing() {
+    let fx = HostFixture::new("s5");
+    std::fs::write(fx.workdir.join("a.txt"), "original\n").unwrap();
+    let before = fx.work_tree();
+    // The work folder's own absolute path is outside both roots, and the file exists there.
+    let work_abs = std::fs::canonicalize(&fx.workdir)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let file = format!("{work_abs}/a.txt");
+    let fresh = format!("{work_abs}/new/x.txt");
+
+    for (tool, data, location, value) in [
+        (
+            Tool::Read,
+            serde_json::json!({ "path": &file }),
+            "path",
+            file.as_str(),
+        ),
+        (
+            Tool::Write,
+            serde_json::json!({ "path": &fresh, "content": "x" }),
+            "path",
+            fresh.as_str(),
+        ),
+        (
+            Tool::Edit,
+            serde_json::json!({ "path": &file, "edits": [{ "old": "original", "new": "x" }] }),
+            "path",
+            file.as_str(),
+        ),
+        (
+            Tool::Find,
+            serde_json::json!({ "pattern": "original", "dir": &work_abs }),
+            "dir",
+            work_abs.as_str(),
+        ),
+        (Tool::Read, serde_json::json!({ "path": "/" }), "path", "/"),
+    ] {
+        let result = fx.call(tool, &fx.both(), data);
+        assert_component_refused(&result, &fx.outside_both(tool, location, value));
+    }
+    assert_eq!(fx.work_tree(), before);
+    assert_eq!(
+        std::fs::read_to_string(fx.workdir.join("a.txt")).unwrap(),
+        "original\n"
+    );
+}
+
+// S6
+#[test]
+fn component_with_no_roots_refuses_an_absolute_path_naming_none() {
+    let fx = HostFixture::new("s6");
+    for (tool, data, summary) in [
+        (
+            Tool::Write,
+            serde_json::json!({ "path": "/app/results.txt", "content": "x" }),
+            "'path' must be relative to the work folder: this session opens no host folder to \
+             tool-write; got '/app/results.txt' (did you mean 'results.txt'?)",
+        ),
+        (
+            Tool::Read,
+            serde_json::json!({ "path": "/" }),
+            "'path' must be relative to the work folder: this session opens no host folder to \
+             tool-read; got '/'",
+        ),
+        (
+            Tool::Find,
+            serde_json::json!({ "pattern": "x", "dir": "/app/.." }),
+            "'dir' must be relative to the work folder: this session opens no host folder to \
+             tool-find; got '/app/..'",
+        ),
+    ] {
+        assert_component_refused(&fx.call(tool, &[], data), summary);
+    }
+    assert!(fx.work_tree().is_empty());
+}
+
+// S7
+#[test]
+fn component_refuses_a_write_or_edit_into_a_read_only_root() {
+    let fx = HostFixture::new("s7");
+    let keep = format!("{}/keep.txt", fx.ro);
+    std::fs::write(&keep, "kept\n").unwrap();
+    let sub_new = format!("{}/sub/new.txt", fx.ro);
+
+    for (tool, data, value) in [
+        (
+            Tool::Write,
+            serde_json::json!({ "path": &keep, "content": "x" }),
+            keep.as_str(),
+        ),
+        (
+            Tool::Write,
+            serde_json::json!({ "path": &sub_new, "content": "x" }),
+            sub_new.as_str(),
+        ),
+        (
+            Tool::Edit,
+            serde_json::json!({ "path": &keep, "edits": [{ "old": "kept", "new": "x" }] }),
+            keep.as_str(),
+        ),
+    ] {
+        let result = fx.call(tool, &fx.both(), data);
+        assert_component_refused(
+            &result,
+            &format!(
+                "'path' '{value}' is in {}, which this session opens read-only",
+                fx.ro
+            ),
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&keep).unwrap(), "kept\n");
+    assert!(!Path::new(&format!("{}/sub", fx.ro)).exists());
+
+    let read = fx.call(Tool::Read, &fx.both(), serde_json::json!({ "path": &keep }));
+    assert_passed(&read);
+    assert_eq!(data_of(&read)["content"], "kept\n");
+    assert!(fx.work_tree().is_empty());
+}
+
+// S8
+#[test]
+fn component_relative_paths_behave_the_same_with_a_root_held() {
+    // Each run in its own fixture, so a search of the work folder's root sees only its own run.
+    let scenario = |fx: &HostFixture, extra: &[Preopen]| -> Vec<String> {
+        let sub = "w";
+        let calls = [
+            (
+                Tool::Write,
+                serde_json::json!({ "path": format!("{sub}/a.txt"), "content": "one two\n" }),
+            ),
+            (
+                Tool::Edit,
+                serde_json::json!({ "path": format!("{sub}/a.txt"), "edits": [{ "old": "two", "new": "three" }] }),
+            ),
+            (
+                Tool::Read,
+                serde_json::json!({ "path": format!("{sub}/a.txt") }),
+            ),
+            (
+                Tool::Read,
+                serde_json::json!({ "path": format!("{sub}/a.txt"), "start_line": 1, "end_line": 1 }),
+            ),
+            (
+                Tool::Find,
+                serde_json::json!({ "pattern": "three", "dir": sub }),
+            ),
+            (
+                Tool::Find,
+                serde_json::json!({ "pattern": "three", "dir": format!("{sub}/..") }),
+            ),
+            (
+                Tool::Find,
+                serde_json::json!({ "pattern": "three", "dir": "../.." }),
+            ),
+            (
+                Tool::Read,
+                serde_json::json!({ "path": format!("{sub}/missing.txt") }),
+            ),
+            (
+                Tool::Write,
+                serde_json::json!({ "path": format!("{sub}/pic.png"), "content": "not a png" }),
+            ),
+            (
+                Tool::Read,
+                serde_json::json!({ "path": format!("{sub}/pic.png") }),
+            ),
+        ];
+        calls
+            .into_iter()
+            .map(|(tool, data)| {
+                let result = fx.call(tool, extra, data);
+                format!(
+                    "{:?} {:?} {:?} {:?} {:?}",
+                    result.status, result.summary, result.data, result.metadata, result.truncated
+                )
+            })
+            .collect()
+    };
+    let held_fx = HostFixture::new("s8_held");
+    let none_fx = HostFixture::new("s8_none");
+    let held = scenario(&held_fx, &[held_fx.host_root()]);
+    let none = scenario(&none_fx, &[]);
+    assert_eq!(held, none);
+    assert!(held[2].contains("one three"), "{}", held[2]);
+    assert_eq!(
+        std::fs::read_dir(&held_fx.host).unwrap().count(),
+        0,
+        "nothing reached HOST"
+    );
+}
+
+// S9
+#[test]
+fn component_reserves_a_leading_murmur_host_while_a_root_is_held() {
+    let fx = HostFixture::new("s9");
+    let value = format!("murmur-host{}/x.txt", fx.host);
+    std::fs::write(format!("{}/x.txt", fx.host), "host\n").unwrap();
+
+    let result = fx.call(
+        Tool::Read,
+        &[fx.host_root()],
+        serde_json::json!({ "path": &value }),
+    );
+    assert_component_refused(
+        &result,
+        &format!(
+            "'path' starts with murmur-host, where this tool's host folders are opened; name the \
+             host path absolutely: '{}/x.txt'",
+            fx.host
+        ),
+    );
+    let result = fx.call(
+        Tool::Find,
+        &[fx.host_root()],
+        serde_json::json!({ "pattern": "host", "dir": "./murmur-host" }),
+    );
+    assert_component_refused(
+        &result,
+        "'dir' starts with murmur-host, where this tool's host folders are opened; name the host \
+         path absolutely: '/'",
+    );
+    assert!(fx.work_tree().is_empty());
+
+    // With no roots the same values are ordinary work-folder paths.
+    let local = fx.workdir.join(&value);
+    std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+    std::fs::write(&local, "local\n").unwrap();
+    let result = fx.call(Tool::Read, &[], serde_json::json!({ "path": &value }));
+    assert_passed(&result);
+    assert_eq!(data_of(&result)["content"], "local\n");
+    std::fs::create_dir_all(fx.workdir.join("murmur-host/plain")).unwrap();
+    std::fs::write(fx.workdir.join("murmur-host/plain/y.txt"), "local\n").unwrap();
+    let result = fx.call(
+        Tool::Find,
+        &[],
+        serde_json::json!({ "pattern": "local", "dir": "./murmur-host", "glob": "plain/*" }),
+    );
+    assert_passed(&result);
+    assert_eq!(match_paths(&data_of(&result)), ["plain/y.txt"]);
+}
+
+// S10
+#[test]
+fn component_dotdot_cannot_climb_out_of_a_root() {
+    let fx = HostFixture::new("s10");
+    let sibling = format!("{}-sibling", fx.host);
+    std::fs::create_dir_all(&sibling).unwrap();
+    std::fs::write(format!("{sibling}/secret.txt"), "secret\n").unwrap();
+    let base = Path::new(&fx.host)
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let value = format!("{}/../{base}-sibling/secret.txt", fx.host);
+
+    let result = fx.call(
+        Tool::Read,
+        &fx.both(),
+        serde_json::json!({ "path": &value }),
+    );
+    assert_component_refused(&result, &fx.outside_both(Tool::Read, "path", &value));
+    let result = fx.call(
+        Tool::Write,
+        &fx.both(),
+        serde_json::json!({ "path": &value, "content": "x" }),
+    );
+    assert_component_refused(&result, &fx.outside_both(Tool::Write, "path", &value));
+    assert_eq!(
+        std::fs::read_to_string(format!("{sibling}/secret.txt")).unwrap(),
+        "secret\n"
+    );
+    let _ = std::fs::remove_dir_all(&sibling);
+}
+
+// S11
+#[test]
+fn component_root_covers_whole_components_only() {
+    let fx = HostFixture::new("s11");
+    let longer = format!("{}2", fx.host);
+    std::fs::create_dir_all(&longer).unwrap();
+    std::fs::write(format!("{longer}/file"), "not covered\n").unwrap();
+    let value = format!("{longer}/file");
+
+    let result = fx.call(
+        Tool::Read,
+        &[fx.host_root()],
+        serde_json::json!({ "path": &value }),
+    );
+    assert_component_refused(
+        &result,
+        &format!(
+            "'path' is outside every host folder tool-read may open: {} (read-write); got \
+             '{value}'. A relative path opens in the work folder",
+            fx.host
+        ),
+    );
+    let _ = std::fs::remove_dir_all(&longer);
+}
+
+// S12
+#[test]
+fn component_with_the_whole_host_read_only_reads_anywhere_and_writes_nowhere() {
+    let fx = HostFixture::new("s12");
+    let file = format!("{}/fixture.txt", fx.host);
+    std::fs::write(&file, "whole host\n").unwrap();
+    let whole: Vec<Preopen> = vec![(
+        PathBuf::from("/"),
+        "murmur-host".to_string(),
+        DirPerms::READ,
+        FilePerms::READ,
+    )];
+
+    let result = fx.call(Tool::Read, &whole, serde_json::json!({ "path": &file }));
+    assert_passed(&result);
+    assert_eq!(data_of(&result)["content"], "whole host\n");
+
+    let beside = format!("{}/beside.txt", fx.host);
+    let result = fx.call(
+        Tool::Write,
+        &whole,
+        serde_json::json!({ "path": &beside, "content": "x" }),
+    );
+    assert_component_refused(
+        &result,
+        &format!("'path' '{beside}' is in /, which this session opens read-only"),
+    );
+    assert!(!Path::new(&beside).exists());
+    assert!(fx.work_tree().is_empty());
+}
+
+// S13
+#[test]
+fn component_describes_but_does_not_attach_an_image_under_a_root() {
+    let fx = HostFixture::new("s13");
+    let png = test_png::png(64, 48);
+    let value = format!("{}/pic.png", fx.host);
+    std::fs::write(&value, &png).unwrap();
+    std::fs::write(fx.workdir.join("pic.png"), &png).unwrap();
+
+    let result = fx.call(
+        Tool::Read,
+        &[fx.host_root()],
+        serde_json::json!({ "path": &value }),
+    );
+    assert_passed(&result);
+    assert!(result.attachments.is_empty(), "{:?}", result.attachments);
+    assert_eq!(
+        result.summary.as_deref(),
+        Some(
+            format!(
+                "image/png, {} bytes, 64x48 pixels; not shown: only an image named by a path \
+                 relative to the work folder is shown to the model",
+                png.len()
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(result.data, None);
+
+    // A text file named as an image under a root is still `not_an_image`.
+    let fake = format!("{}/fake.png", fx.host);
+    std::fs::write(&fake, "plain text").unwrap();
+    let result = fx.call(
+        Tool::Read,
+        &[fx.host_root()],
+        serde_json::json!({ "path": &fake }),
+    );
+    assert_component_refused(
+        &result,
+        &format!("'{fake}' is named as an image but is not a PNG, JPEG, GIF or WebP file"),
+    );
+
+    // The same PNG in the work folder, read relatively, is attached.
+    let result = fx.call(
+        Tool::Read,
+        &[fx.host_root()],
+        serde_json::json!({ "path": "pic.png" }),
+    );
+    assert_passed(&result);
+    let attachments: Vec<(&str, &str)> = result
+        .attachments
+        .iter()
+        .map(|Attachment { media_type, path }| (media_type.as_str(), path.as_str()))
+        .collect();
+    assert_eq!(attachments, [("image/png", "pic.png")]);
+}
+
+// S14
+#[test]
+fn component_refuses_an_absolute_glob_with_or_without_roots() {
+    let fx = HostFixture::new("s14");
+    let glob = format!("{}/*.rs", fx.host);
+    for extra in [vec![], vec![fx.host_root()], fx.both()] {
+        let result = fx.call(
+            Tool::Find,
+            &extra,
+            serde_json::json!({ "pattern": "x", "dir": &fx.host, "glob": &glob }),
+        );
+        let expected = if extra.is_empty() {
+            // With no root the absolute `dir` is refused first.
+            format!(
+                "'dir' must be relative to the work folder: this session opens no host folder to \
+                 tool-find; got '{}' (did you mean 'host'?)",
+                fx.host
+            )
+        } else {
+            format!(
+                "'glob' is matched against paths below 'dir' and must be relative; got '{glob}' \
+                 (did you mean '*.rs'?). Name a host folder in 'dir'"
+            )
+        };
+        assert_component_refused(&result, &expected);
+
+        let result = fx.call(
+            Tool::Find,
+            &extra,
+            serde_json::json!({ "pattern": "x", "glob": "/src/*.rs" }),
+        );
+        assert_component_refused(
+            &result,
+            "'glob' is matched against paths below 'dir' and must be relative; got '/src/*.rs' \
+             (did you mean '*.rs'?). Name a host folder in 'dir'",
+        );
+    }
+}
+
+// S15
+#[test]
+fn component_find_of_the_work_folder_skips_a_murmur_host_entry() {
+    let fx = HostFixture::new("s15");
+    std::fs::write(format!("{}/host.txt", fx.host), "needle\n").unwrap();
+    std::fs::create_dir_all(fx.workdir.join("murmur-host")).unwrap();
+    std::fs::write(fx.workdir.join("murmur-host/decoy.txt"), "needle\n").unwrap();
+    std::fs::write(fx.workdir.join("real.txt"), "needle\n").unwrap();
+
+    // HOST under its own name, and HOST standing in for the whole host at `murmur-host`, where
+    // a walk into `./murmur-host` would reach it.
+    let as_whole_host: Vec<Preopen> = vec![(
+        PathBuf::from(&fx.host),
+        "murmur-host".to_string(),
+        DirPerms::all(),
+        FilePerms::all(),
+    )];
+    for extra in [vec![fx.host_root()], as_whole_host] {
+        for dir in [
+            Value::Null,
+            Value::from(""),
+            Value::from("."),
+            Value::from("./"),
+        ] {
+            for recursive in [true, false] {
+                let result = fx.call(
+                    Tool::Find,
+                    &extra,
+                    serde_json::json!({ "pattern": "needle", "dir": &dir, "recursive": recursive }),
+                );
+                assert_passed(&result);
+                assert_eq!(
+                    match_paths(&data_of(&result)),
+                    ["real.txt"],
+                    "dir {dir}, recursive {recursive}"
+                );
+            }
+        }
+    }
+
+    // With no root the work folder's `murmur-host` folder is searched like any other.
+    let result = fx.call(Tool::Find, &[], serde_json::json!({ "pattern": "needle" }));
+    assert_eq!(
+        match_paths(&data_of(&result)),
+        ["murmur-host/decoy.txt", "real.txt"]
+    );
 }

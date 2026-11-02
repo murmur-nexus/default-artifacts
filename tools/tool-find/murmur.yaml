@@ -1,9 +1,9 @@
 name: tool-find
-version: 0.2.0
+version: 0.3.0
 runtime: tool
 implementation: wasm
 description: |
-  Searches file contents for a regex, skipping hidden directories, target, node_modules and binary files. Stops at 200 matches, 5000 files walked, 32 MiB read or a 500 KB result, returning the matches so far with a capped note naming the limit. dir is relative to the work folder, and match paths to dir.
+  Searches file contents for a regex, skipping hidden directories, target, node_modules and binary files. Stops at 200 matches, 5000 files walked, 32 MiB read or a 500 KB result, returning the matches so far with a capped note naming the limit. dir is relative to the work folder, or absolute inside a host folder the session opened; match paths are relative to dir.
 input_schema:
   type: object
   properties:

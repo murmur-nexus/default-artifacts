@@ -7,13 +7,14 @@
 //! description and compact schema JSON the same way and holds the sum over the four to a budget.
 //! A driver's wrapper keys around each entry are outside the budget.
 //!
-//! tool-read 0.2.0's sentence on images (`A PNG, JPEG, GIF or WebP file is shown as an image,
-//! with its type, size and dimensions.`) costs 88 characters and 24 tokens:
+//! 0.3.0's path sentence (`path is relative to the work folder, or absolute inside a host folder
+//! the session opened.`, and tool-find's `dir …; match paths are relative to dir.`) costs 134
+//! characters and 23 tokens over 0.2.0's:
 //!
 //! ```text
-//!         tool-read                     sum of the four
-//! before   485 chars 117 tokens         1867 chars 441 tokens
-//! after    573 chars 141 tokens         1955 chars 465 tokens
+//!         tool-read   tool-write  tool-edit   tool-find   sum of the four
+//! 0.2.0   573c 141t   266c  58t   532c 129t   584c 137t   1955 chars 465 tokens
+//! 0.3.0   597c 145t   290c  62t   556c 133t   646c 148t   2089 chars 488 tokens
 //! ```
 //!
 //! `count_definition_file` is `#[ignore]`d: it measures the file `FILE_TOOLS_COUNT` names — a

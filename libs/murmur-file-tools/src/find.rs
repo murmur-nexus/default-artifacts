@@ -8,8 +8,10 @@ use regex::Regex;
 use serde_json::{json, Value};
 use walkdir::WalkDir;
 
+use crate::resolve::{lexical_segments, reject_absolute_glob, resolve_path};
 use crate::{
-    err, err_result, fail_msg, format_result_size, io_error_kind, ok_with, reject_absolute,
+    err, err_result, fail_msg, format_result_size, io_error_kind, ok_with, HostRoot, Tool,
+    HOST_ROOT_NAME,
 };
 
 // find limits. A search stops at the first one it reaches and still succeeds, returning the
@@ -26,8 +28,8 @@ const FIND_MAX_BYTES: u64 = 32 * 1024 * 1024;
 pub(crate) const MAX_CONTEXT_LINES: i64 = 20;
 
 /// Search with the production limits.
-pub(crate) fn find(op: &Value) -> Value {
-    find_with_limits(op, Limits::PRODUCTION)
+pub(crate) fn find(op: &Value, roots: &[HostRoot]) -> Value {
+    find_with_limits(op, Limits::PRODUCTION, roots)
 }
 
 /// The bounds one `find` call works within. Production calls use
@@ -60,7 +62,9 @@ pub(crate) enum CapReason {
     ResultSize,
 }
 
-pub(crate) fn find_with_limits(op: &Value, limits: Limits) -> Value {
+/// An absolute `dir` is searched inside the host root covering it; a relative one in the work
+/// folder, which it may not climb above.
+pub(crate) fn find_with_limits(op: &Value, limits: Limits, roots: &[HostRoot]) -> Value {
     let pattern = match op.get("pattern").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => p.to_string(),
         _ => return fail_msg("missing required field: pattern"),
@@ -71,16 +75,17 @@ pub(crate) fn find_with_limits(op: &Value, limits: Limits) -> Value {
         Some(Value::String(d)) => d.clone(),
         Some(_) => return fail_msg("dir must be a string"),
     };
-    if let Some(refusal) = reject_absolute("dir", &dir) {
-        return refusal;
-    }
+    let resolved = match resolve_path("dir", &dir, Tool::Find, roots) {
+        Ok(resolved) => resolved,
+        Err(refusal) => return refusal,
+    };
     let glob = match op.get("glob") {
         None | Some(Value::Null) => None,
         Some(Value::String(g)) if g.is_empty() => None,
         Some(Value::String(g)) => Some(g.clone()),
         Some(_) => return fail_msg("glob must be a string"),
     };
-    if let Some(refusal) = glob.as_deref().and_then(|g| reject_absolute("glob", g)) {
+    if let Some(refusal) = glob.as_deref().and_then(reject_absolute_glob) {
         return refusal;
     }
     let recursive = op
@@ -100,15 +105,22 @@ pub(crate) fn find_with_limits(op: &Value, limits: Limits) -> Value {
         );
     }
 
-    let root = match normalize_dir(&dir) {
-        Some(n) if n.is_empty() => ".".to_string(),
-        Some(n) => n,
-        None => {
+    let root = match (resolved.root, normalize_dir(&dir)) {
+        (Some(_), _) => resolved.open,
+        (None, Some(n)) if n.is_empty() => ".".to_string(),
+        (None, Some(n)) => n,
+        (None, None) => {
             return err_result(
                 err::OUTSIDE_WORKDIR,
                 format!("'dir' resolves outside the capsule workdir: '{dir}'"),
             )
         }
+    };
+    // Under the work folder's root, a `murmur-host` entry is where wasi-libc opens the host
+    // roots: walking into it would search the host, not the work folder.
+    let hide_host_roots = !roots.is_empty() && root == ".";
+    let is_host_entry = |name: &std::ffi::OsStr, depth: usize| {
+        hide_host_roots && depth == 1 && name == HOST_ROOT_NAME
     };
 
     let re = match Regex::new(&pattern) {
@@ -139,7 +151,10 @@ pub(crate) fn find_with_limits(op: &Value, limits: Limits) -> Value {
             WalkDir::new(root_path)
                 .sort_by_file_name()
                 .into_iter()
-                .filter_entry(|e| e.depth() == 0 || !is_skipped_dir(e))
+                .filter_entry(move |e| {
+                    e.depth() == 0
+                        || !(is_skipped_dir(e) || is_host_entry(e.file_name(), e.depth()))
+                })
                 .filter_map(|e| e.ok())
                 .filter(|e| e.file_type().is_file())
                 .map(|e| e.into_path()),
@@ -149,6 +164,7 @@ pub(crate) fn find_with_limits(op: &Value, limits: Limits) -> Value {
             Ok(entries) => {
                 let mut files: Vec<PathBuf> = entries
                     .filter_map(|e| e.ok())
+                    .filter(|e| !is_host_entry(&e.file_name(), 1))
                     .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
                     .map(|e| e.path())
                     .collect();
@@ -433,17 +449,8 @@ fn relative_path(root: &Path, file: &Path) -> String {
 /// before it, `/`-joined. `""` is the workdir root. `None` when a `..` has no segment left
 /// to pop, i.e. the value climbs above the workdir.
 pub(crate) fn normalize_dir(dir: &str) -> Option<String> {
-    let mut segments: Vec<&str> = Vec::new();
-    for segment in dir.split('/') {
-        match segment {
-            "" | "." => {}
-            ".." => {
-                segments.pop()?;
-            }
-            s => segments.push(s),
-        }
-    }
-    Some(segments.join("/"))
+    let (segments, climbed_above) = lexical_segments(dir);
+    (!climbed_above).then(|| segments.join("/"))
 }
 
 /// An anchored regex for `glob`. `**/` matches zero or more whole segments, a trailing `**`

@@ -13,9 +13,10 @@ use crate::read::{MAX_READ_BYTES, MAX_READ_LINES};
 use crate::*;
 
 // Fixture root for every test that drives a tool, relative to the process CWD (the crate root,
-// under `cargo test`). Every tool refuses an absolute path input, so a fixture under
-// `std::env::temp_dir()` is unreachable through the tool — a workdir-relative tree is the only
-// shape a host test can address, and it is also the shape a real capsule uses. Gitignored; each
+// under `cargo test`). A tool opens an absolute path only through a host root's `murmur-host`
+// preopen, which a host test does not have, so a fixture under `std::env::temp_dir()` is
+// unreachable through the tool — a workdir-relative tree is the only shape a host test can
+// address, and it is also the shape a real capsule uses. Gitignored; each
 // test removes its own subtree.
 const SCRATCH_ROOT: &str = ".test-scratch";
 
@@ -29,7 +30,7 @@ fn scratch(tag: &str) -> std::path::PathBuf {
 
 /// `tool` run on the call `data`, through the stdin envelope.
 fn call(tool: Tool, data: &Value) -> Value {
-    run(tool, &json!({ "data": data }).to_string())
+    run(tool, &json!({ "data": data }).to_string(), &[])
 }
 
 /// The fields of `tool`, as its refusal lists them.
@@ -75,7 +76,7 @@ fn tool_names_fields_and_effects() {
 #[test]
 fn run_returns_error_for_empty_input() {
     for tool in Tool::ALL {
-        let out = run(tool, "");
+        let out = run(tool, "", &[]);
         assert_eq!(out["ok"], false);
         assert_eq!(out["message"], "missing input on stdin");
     }
@@ -93,12 +94,12 @@ fn the_envelope_failures_keep_their_messages() {
                 "data must be a JSON string or object".to_string(),
             ),
         ] {
-            let out = run(tool, raw);
+            let out = run(tool, raw, &[]);
             assert_eq!(out["ok"], false, "{raw}");
             assert_eq!(out["message"], message, "{raw}");
             assert!(out.get("error_kind").is_none(), "{raw}: {out:?}");
         }
-        let out = run(tool, "{");
+        let out = run(tool, "{", &[]);
         assert!(
             out["message"]
                 .as_str()
@@ -106,7 +107,7 @@ fn the_envelope_failures_keep_their_messages() {
                 .starts_with("invalid stdin JSON: "),
             "{out:?}"
         );
-        let out = run(tool, r#"{"data":"{"}"#);
+        let out = run(tool, r#"{"data":"{"}"#, &[]);
         assert!(
             out["message"]
                 .as_str()
@@ -121,7 +122,7 @@ fn the_envelope_failures_keep_their_messages() {
 fn data_that_decodes_to_a_non_object_is_refused() {
     for tool in Tool::ALL {
         for data in [json!("[1,2]"), json!("\"read\""), json!(3), json!([1])] {
-            let out = run(tool, &json!({ "data": data }).to_string());
+            let out = run(tool, &json!({ "data": data }).to_string(), &[]);
             assert_eq!(out["ok"], false, "{data}");
             assert_eq!(
                 out["message"], "data must be a JSON string or object",
@@ -138,7 +139,7 @@ fn run_handles_double_encoded_data() {
         r#"{{"data":"{}","log_path":null}}"#,
         inner.replace('"', "\\\"")
     );
-    let out = run(Tool::Read, &envelope);
+    let out = run(Tool::Read, &envelope, &[]);
     assert_eq!(out["ok"], false);
     assert_eq!(
         out["message"],
@@ -148,7 +149,7 @@ fn run_handles_double_encoded_data() {
     let dir = scratch("double_encoded_read");
     let path = write_numbered_file(&dir, "f.txt", 2);
     let inner = json!({ "path": &path }).to_string();
-    let out = run(Tool::Read, &json!({ "data": inner }).to_string());
+    let out = run(Tool::Read, &json!({ "data": inner }).to_string(), &[]);
     assert_eq!(out["ok"], true, "{out:?}");
     assert_eq!(out["content"], "line 1\nline 2\n");
     let _ = fs::remove_dir_all(&dir);
@@ -485,7 +486,7 @@ fn read_declares_read_effect() {
         "data": { "path": path.to_str().unwrap() },
         "log_path": null,
     });
-    let out = run(Tool::Read, &envelope.to_string());
+    let out = run(Tool::Read, &envelope.to_string(), &[]);
     assert_eq!(out["ok"], true, "read should succeed: {out:?}");
     assert_eq!(out["metadata"]["state_effect"], "read");
     let _ = fs::remove_dir_all(&dir);
@@ -499,7 +500,7 @@ fn write_declares_mutate_effect() {
         "data": { "path": path.to_str().unwrap(), "content": "x" },
         "log_path": null,
     });
-    let out = run(Tool::Write, &envelope.to_string());
+    let out = run(Tool::Write, &envelope.to_string(), &[]);
     assert_eq!(out["ok"], true, "write should succeed: {out:?}");
     assert_eq!(out["metadata"]["state_effect"], "mutate");
     assert_eq!(out["message"], format!("wrote {}", path.display()));
@@ -577,7 +578,7 @@ fn dispatch_maps_status_data_truncated_and_state_effect() {
     .unwrap();
 
     // A whole read: data is the result's `data` field, re-serialized.
-    let out = dispatch(Tool::Read, Some(&json!({ "path": small }).to_string()));
+    let out = dispatch(Tool::Read, Some(&json!({ "path": small }).to_string()), &[]);
     assert_eq!(out.status, OutcomeStatus::Passed);
     assert_eq!(out.summary.as_deref(), Some("8 bytes"));
     assert_eq!(
@@ -589,7 +590,7 @@ fn dispatch_maps_status_data_truncated_and_state_effect() {
     assert_eq!(out.attachments, vec![]);
 
     // A cut read sets `truncated`.
-    let out = dispatch(Tool::Read, Some(&json!({ "path": &big }).to_string()));
+    let out = dispatch(Tool::Read, Some(&json!({ "path": &big }).to_string()), &[]);
     assert_eq!(out.status, OutcomeStatus::Passed);
     assert!(out.truncated);
     let data: Value = serde_json::from_str(out.data.as_deref().unwrap()).unwrap();
@@ -600,6 +601,7 @@ fn dispatch_maps_status_data_truncated_and_state_effect() {
     let out = dispatch(
         Tool::Find,
         Some(&json!({ "pattern": "hit", "dir": many.to_str().unwrap() }).to_string()),
+        &[],
     );
     assert_eq!(out.status, OutcomeStatus::Passed);
     assert!(out.truncated);
@@ -616,6 +618,7 @@ fn dispatch_maps_status_data_truncated_and_state_effect() {
     let out = dispatch(
         Tool::Write,
         Some(&json!({ "path": written, "content": "one" }).to_string()),
+        &[],
     );
     assert_eq!(
         out,
@@ -631,6 +634,7 @@ fn dispatch_maps_status_data_truncated_and_state_effect() {
     let out = dispatch(
         Tool::Edit,
         Some(&json!({ "path": written, "edits": [{ "old": "one", "new": "two" }] }).to_string()),
+        &[],
     );
     assert_eq!(
         out,
@@ -649,6 +653,7 @@ fn dispatch_maps_status_data_truncated_and_state_effect() {
     let out = dispatch(
         Tool::Edit,
         Some(&json!({ "path": written, "edits": [] }).to_string()),
+        &[],
     );
     assert_eq!(
         out,
@@ -664,12 +669,12 @@ fn dispatch_maps_status_data_truncated_and_state_effect() {
 
     // A double-encoded string re-parses inside `run`.
     let double = json!(json!({ "path": small }).to_string()).to_string();
-    let out = dispatch(Tool::Read, Some(&double));
+    let out = dispatch(Tool::Read, Some(&double), &[]);
     assert_eq!(out.status, OutcomeStatus::Passed, "{out:?}");
     assert_eq!(out.state_effect, Some("read"));
 
     // Data that is not JSON travels on as a string, which `run` cannot decode.
-    let out = dispatch(Tool::Read, Some("path=a.txt"));
+    let out = dispatch(Tool::Read, Some("path=a.txt"), &[]);
     assert_eq!(out.status, OutcomeStatus::Error);
     assert!(
         out.summary
@@ -682,7 +687,7 @@ fn dispatch_maps_status_data_truncated_and_state_effect() {
     // Absent data is the envelope with no data key.
     for tool in Tool::ALL {
         assert_eq!(
-            dispatch(tool, None),
+            dispatch(tool, None, &[]),
             ToolOutcome {
                 status: OutcomeStatus::Error,
                 summary: Some("missing data field".to_string()),
@@ -933,62 +938,229 @@ fn edit_of_a_missing_file_is_not_found_and_declares_no_effect() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-// ── Absolute path refusal ───────────────────────────────────────────────
+// ── Absolute paths and host roots ───────────────────────────────────────
 //
-// Every path input is relative to the capsule workdir. Under the single WASI preopen a
-// tool is dispatched with, an absolute value resolves *inside* the preopen rather than
-// failing, and every operation resolves it the same way — so the only place the
-// divergence from the contract shows up is outside the capsule. Each operation
-// therefore refuses an absolute value before it reaches the filesystem.
+// An absolute `path` or `dir` opens only inside a host root the runtime handed the tool, through
+// `murmur-host` + the value. With no root, or outside every root, it is refused before it reaches
+// the filesystem: under the work-folder preopen an absolute value would otherwise resolve
+// *inside* the work folder. These host tests cover the resolution and every refusal; the opens
+// under a real root need real preopens and are in tests/wasm_components.rs.
+
+/// A root at `path` with `access`.
+fn root(path: &str, access: RootAccess) -> HostRoot {
+    HostRoot {
+        path: path.to_string(),
+        access,
+    }
+}
+
+/// `tool` run on the call `data` while holding `roots`.
+fn call_with(tool: Tool, data: &Value, roots: &[HostRoot]) -> Value {
+    run(tool, &json!({ "data": data }).to_string(), roots)
+}
+
+/// A read-write root and a read-only one, in that preopen order.
+fn two_roots() -> Vec<HostRoot> {
+    vec![
+        root("/srv/host", RootAccess::ReadWrite),
+        root("/srv/ro", RootAccess::Read),
+    ]
+}
+
+/// Asserts `out` is a refusal of `kind` with exactly `message`, declaring no effect and carrying
+/// no content, matches or attachments.
+fn assert_refused(out: &Value, kind: &str, message: &str) {
+    assert_eq!(out["ok"], false, "{out:?}");
+    assert_eq!(out["error_kind"], kind, "{out:?}");
+    assert_eq!(out["message"], message, "{out:?}");
+    assert_eq!(out["summary"], message, "{out:?}");
+    assert!(out["metadata"].is_null(), "{out:?}");
+    assert!(
+        out["content"].is_null() && out["matches"].is_null() && out.get("attachments").is_none(),
+        "{out:?}"
+    );
+}
+
+/// No host-test call ever creates the `murmur-host` folder it would open a root through.
+fn assert_no_host_folder() {
+    assert!(
+        !std::path::Path::new(HOST_ROOT_NAME).exists(),
+        "a call created a stray murmur-host folder"
+    );
+}
 
 #[test]
-fn reject_absolute_renders_one_message_shape_for_every_location() {
-    assert!(
-        reject_absolute("path", "src/main.rs").is_none(),
-        "a relative value is not refused"
-    );
-    assert!(
-        reject_absolute("dir", "").is_none(),
-        "an empty value is not absolute — it names the workdir root"
-    );
-
-    for (location, value, expected) in [
+fn from_preopen_accepts_exactly_the_host_root_names() {
+    for (name, writable, expected) in [
+        ("murmur-host", true, Some(root("/", RootAccess::ReadWrite))),
+        ("murmur-host", false, Some(root("/", RootAccess::Read))),
+        ("murmur-host/", true, Some(root("/", RootAccess::ReadWrite))),
         (
-            "path",
-            "/etc/hosts",
-            "'path' must be relative to the capsule workdir; got '/etc/hosts' (did you mean 'hosts'?)",
+            "murmur-host/home/op/.cargo",
+            false,
+            Some(root("/home/op/.cargo", RootAccess::Read)),
         ),
         (
-            "path",
-            "/app/results.txt",
-            "'path' must be relative to the capsule workdir; got '/app/results.txt' (did you mean 'results.txt'?)",
+            "murmur-host/data//cargo/./bin/../",
+            true,
+            Some(root("/data/cargo", RootAccess::ReadWrite)),
         ),
         (
-            "dir",
-            "/app",
-            "'dir' must be relative to the capsule workdir; got '/app' (did you mean 'app'?)",
+            "murmur-host/..",
+            true,
+            Some(root("/", RootAccess::ReadWrite)),
         ),
-        // No final component to suggest: the parenthetical is omitted entirely rather
-        // than rendered empty.
-        ("dir", "/", "'dir' must be relative to the capsule workdir; got '/'"),
-        (
-            "path",
-            "/app/..",
-            "'path' must be relative to the capsule workdir; got '/app/..'",
-        ),
+        ("murmur-hostile", true, None),
+        ("murmur-hostile/x", true, None),
+        (".", true, None),
+        ("state", true, None),
+        ("murmur-runtime", false, None),
+        ("/murmur-host", true, None),
+        ("", true, None),
     ] {
-        let out = reject_absolute(location, value).expect("an absolute value is refused");
-        assert_eq!(out["ok"], false);
-        assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
-        assert_eq!(out["message"], expected);
-        assert_eq!(out["summary"], expected);
+        assert_eq!(HostRoot::from_preopen(name, writable), expected, "{name:?}");
     }
 }
 
 #[test]
+fn absolute_values_normalise_lexically() {
+    use crate::resolve::{normalize_absolute, render_absolute};
+    for (value, expected) in [
+        ("/", "/"),
+        ("/a/b", "/a/b"),
+        ("//a//b/", "/a/b"),
+        ("/a/./b/.", "/a/b"),
+        ("/a/b/../c", "/a/c"),
+        ("/..", "/"),
+        ("/../../a", "/a"),
+        ("/a/../..", "/"),
+    ] {
+        assert_eq!(
+            render_absolute(&normalize_absolute(value)),
+            expected,
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn an_absolute_value_opens_through_the_longest_covering_root() {
+    use crate::resolve::resolve_path;
+    let roots = vec![
+        root("/", RootAccess::Read),
+        root("/srv/host", RootAccess::ReadWrite),
+        root("/srv/host/deep", RootAccess::Read),
+        root("/srv", RootAccess::ReadWrite),
+    ];
+    for (value, open, covering) in [
+        ("/etc/hosts", "murmur-host/etc/hosts", "/"),
+        ("/", "murmur-host", "/"),
+        ("/srv/host/a.txt", "murmur-host/srv/host/a.txt", "/srv/host"),
+        ("/srv/host", "murmur-host/srv/host", "/srv/host"),
+        (
+            "/srv/host/deep/x",
+            "murmur-host/srv/host/deep/x",
+            "/srv/host/deep",
+        ),
+        ("/srv/hostile/x", "murmur-host/srv/hostile/x", "/srv"),
+        ("/srv/host/./b/../c", "murmur-host/srv/host/c", "/srv/host"),
+        ("/srv/host/../other", "murmur-host/srv/other", "/srv"),
+    ] {
+        let resolved = resolve_path("path", value, Tool::Read, &roots).expect(value);
+        assert_eq!(resolved.open, open, "{value}");
+        assert_eq!(
+            resolved.root.map(|r| r.path.as_str()),
+            Some(covering),
+            "{value}"
+        );
+    }
+
+    // Two roots at the same path: the first in preopen order wins.
+    let same = vec![
+        root("/srv/host", RootAccess::Read),
+        root("/srv/host", RootAccess::ReadWrite),
+    ];
+    let resolved = resolve_path("path", "/srv/host/x", Tool::Read, &same).unwrap();
+    assert_eq!(resolved.root, Some(&same[0]));
+
+    // A relative value opens exactly as written, with or without roots.
+    for value in ["src/../a.txt", "./a.txt", "state/x", "murmur-runtime/r"] {
+        let resolved = resolve_path("path", value, Tool::Read, &roots).unwrap();
+        assert_eq!(resolved.open, value);
+        assert_eq!(resolved.root, None);
+    }
+}
+
+#[test]
+fn a_root_covers_whole_components_only() {
+    use crate::resolve::resolve_path;
+    let roots = vec![root("/srv/p", RootAccess::ReadWrite)];
+    assert!(resolve_path("path", "/srv/p/file", Tool::Read, &roots).is_ok());
+    assert!(resolve_path("path", "/srv/p", Tool::Read, &roots).is_ok());
+    for value in ["/srv/p2/file", "/srv/p2", "/srv/pp", "/srv"] {
+        let out = call_with(Tool::Read, &json!({ "path": value }), &roots);
+        assert_refused(
+            &out,
+            err::ABSOLUTE_PATH,
+            &format!(
+                "'path' is outside every host folder tool-read may open: /srv/p (read-write); \
+                 got '{value}'. A relative path opens in the work folder"
+            ),
+        );
+    }
+}
+
+#[test]
+fn with_no_roots_every_absolute_value_is_refused_with_its_file_name_suggested() {
+    for (tool, data, expected) in [
+        (
+            Tool::Read,
+            json!({ "path": "/etc/hosts" }),
+            "'path' must be relative to the work folder: this session opens no host folder to \
+             tool-read; got '/etc/hosts' (did you mean 'hosts'?)",
+        ),
+        (
+            Tool::Write,
+            json!({ "path": "/app/results.txt", "content": "x" }),
+            "'path' must be relative to the work folder: this session opens no host folder to \
+             tool-write; got '/app/results.txt' (did you mean 'results.txt'?)",
+        ),
+        (
+            Tool::Edit,
+            json!({ "path": "/app/results.txt", "edits": [{ "old": "a", "new": "b" }] }),
+            "'path' must be relative to the work folder: this session opens no host folder to \
+             tool-edit; got '/app/results.txt' (did you mean 'results.txt'?)",
+        ),
+        (
+            Tool::Find,
+            json!({ "pattern": "x", "dir": "/app" }),
+            "'dir' must be relative to the work folder: this session opens no host folder to \
+             tool-find; got '/app' (did you mean 'app'?)",
+        ),
+        // No final component to suggest: the parenthetical is omitted entirely rather than
+        // rendered empty.
+        (
+            Tool::Find,
+            json!({ "pattern": "x", "dir": "/" }),
+            "'dir' must be relative to the work folder: this session opens no host folder to \
+             tool-find; got '/'",
+        ),
+        (
+            Tool::Read,
+            json!({ "path": "/app/.." }),
+            "'path' must be relative to the work folder: this session opens no host folder to \
+             tool-read; got '/app/..'",
+        ),
+    ] {
+        assert_refused(&call(tool, &data), err::ABSOLUTE_PATH, expected);
+    }
+    assert_no_host_folder();
+}
+
+#[test]
 fn every_path_location_refuses_an_absolute_value_through_dispatch() {
-    // S8. Each fixture exists at the absolute value's real location, so a not-found
-    // cannot stand in for the refusal, and nothing is created, changed or declared.
+    // Each fixture exists at the absolute value's real location, so a not-found cannot stand in
+    // for the refusal, and nothing is created, changed or declared.
     let dir = scratch("absolute_every_location");
     let file = dir.join("results.txt");
     fs::write(&file, "original\n").unwrap();
@@ -1002,137 +1174,305 @@ fn every_path_location_refuses_an_absolute_value_through_dispatch() {
         .to_string();
     let fresh = format!("{absolute_dir}/app/new.txt");
 
-    for (tool, data, location, value) in [
-        (
-            Tool::Read,
-            json!({ "path": &absolute }),
-            "path",
-            absolute.as_str(),
-        ),
-        (
-            Tool::Write,
-            json!({ "path": &fresh, "content": "x" }),
-            "path",
-            fresh.as_str(),
-        ),
-        (
-            Tool::Edit,
-            json!({ "path": &absolute, "edits": [{ "old": "original", "new": "x" }] }),
-            "path",
-            absolute.as_str(),
-        ),
-        (
-            Tool::Find,
-            json!({ "pattern": "original", "dir": &absolute_dir }),
-            "dir",
-            absolute_dir.as_str(),
-        ),
-        (
-            Tool::Find,
-            json!({ "pattern": "original", "glob": "/src/*.rs" }),
-            "glob",
-            "/src/*.rs",
-        ),
-    ] {
-        let out = call(tool, &data);
-        assert_eq!(out["ok"], false, "{data}");
-        assert_eq!(out["error_kind"], err::ABSOLUTE_PATH, "{data}");
-        let message = out["message"].as_str().unwrap();
-        assert!(
-            message.starts_with(&format!(
-                "'{location}' must be relative to the capsule workdir; got '{value}'"
-            )),
-            "{message}"
-        );
-        assert!(out["metadata"].is_null(), "{data}");
-        assert!(
-            out["content"].is_null() && out["matches"].is_null(),
-            "{out:?}"
-        );
+    for roots in [vec![], two_roots()] {
+        for (tool, data, location, value) in [
+            (
+                Tool::Read,
+                json!({ "path": &absolute }),
+                "path",
+                absolute.as_str(),
+            ),
+            (
+                Tool::Write,
+                json!({ "path": &fresh, "content": "x" }),
+                "path",
+                fresh.as_str(),
+            ),
+            (
+                Tool::Edit,
+                json!({ "path": &absolute, "edits": [{ "old": "original", "new": "x" }] }),
+                "path",
+                absolute.as_str(),
+            ),
+            (
+                Tool::Find,
+                json!({ "pattern": "original", "dir": &absolute_dir }),
+                "dir",
+                absolute_dir.as_str(),
+            ),
+        ] {
+            let name = tool.name();
+            let expected = if roots.is_empty() {
+                let file_name = std::path::Path::new(value)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string();
+                format!(
+                    "'{location}' must be relative to the work folder: this session opens no \
+                     host folder to {name}; got '{value}' (did you mean '{file_name}'?)"
+                )
+            } else {
+                format!(
+                    "'{location}' is outside every host folder {name} may open: /srv/host \
+                     (read-write), /srv/ro (read); got '{value}'. A relative path opens in the \
+                     work folder"
+                )
+            };
+            let out = dispatch(tool, Some(&data.to_string()), &roots);
+            assert_eq!(out.status, OutcomeStatus::Error, "{data}");
+            assert_eq!(out.summary.as_deref(), Some(expected.as_str()), "{data}");
+            assert_eq!(out.state_effect, None, "{data}");
+            assert_eq!(out.data, None, "{data}");
+            assert_eq!(out.attachments, vec![], "{data}");
+        }
     }
     assert_eq!(fs::read_to_string(&file).unwrap(), "original\n");
     assert!(
         !dir.join("app").exists(),
         "a refused write creates no directory"
     );
+    assert_no_host_folder();
     let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn read_refuses_an_absolute_path_even_when_the_file_exists() {
-    // The behaviour this refusal removes: an absolute value that a previous write
-    // already created reads back "correctly" from the wrong place. The fixture exists,
-    // so a not-found cannot stand in for the contract error.
-    let dir = scratch("absolute_read");
-    let file = dir.join("results.txt");
-    fs::write(&file, "content from the wrong place\n").unwrap();
-    let absolute = fs::canonicalize(&file)
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
-
-    let out = call(Tool::Read, &json!({ "path": &absolute }));
-    assert_eq!(out["ok"], false);
-    assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
-    assert!(
-        out["content"].is_null(),
-        "a refused read returns no content: {out:?}"
+fn outside_every_root_lists_the_roots_in_preopen_order() {
+    let roots = two_roots();
+    for (tool, data, location, value) in [
+        (
+            Tool::Read,
+            json!({ "path": "/etc/hosts" }),
+            "path",
+            "/etc/hosts",
+        ),
+        (
+            Tool::Write,
+            json!({ "path": "/srv/other/x.txt", "content": "x" }),
+            "path",
+            "/srv/other/x.txt",
+        ),
+        (
+            Tool::Edit,
+            json!({ "path": "/", "edits": [{ "old": "a", "new": "b" }] }),
+            "path",
+            "/",
+        ),
+        (
+            Tool::Find,
+            json!({ "pattern": "x", "dir": "/srv" }),
+            "dir",
+            "/srv",
+        ),
+    ] {
+        let name = tool.name();
+        assert_refused(
+            &call_with(tool, &data, &roots),
+            err::ABSOLUTE_PATH,
+            &format!(
+                "'{location}' is outside every host folder {name} may open: /srv/host \
+                 (read-write), /srv/ro (read); got '{value}'. A relative path opens in the work \
+                 folder"
+            ),
+        );
+    }
+    // Reversed preopen order, reversed listing.
+    let reversed: Vec<HostRoot> = roots.into_iter().rev().collect();
+    assert_refused(
+        &call_with(Tool::Read, &json!({ "path": "/etc/hosts" }), &reversed),
+        err::ABSOLUTE_PATH,
+        "'path' is outside every host folder tool-read may open: /srv/ro (read), /srv/host \
+         (read-write); got '/etc/hosts'. A relative path opens in the work folder",
     );
-    let msg = out["message"].as_str().unwrap();
-    assert!(
-        msg.starts_with("'path' must be relative to the capsule workdir"),
-        "the refusal names the location the caller wrote: {msg}"
-    );
-    assert!(msg.contains("did you mean 'results.txt'"), "{msg}");
-
-    let _ = fs::remove_dir_all(&dir);
+    assert_no_host_folder();
 }
 
 #[test]
-fn write_refuses_an_absolute_path_before_creating_directories() {
-    // The `create_dir_all` in op_write is what manufactured `<workdir>/app/` for
-    // `/app/results.txt`. The refusal lands ahead of it, so a rejected write leaves no
-    // stray directory behind.
-    let dir = scratch("absolute_write");
-    let absolute = fs::canonicalize(&dir)
-        .unwrap()
-        .join("app")
-        .join("results.txt")
-        .to_string_lossy()
-        .to_string();
+fn a_dotdot_cannot_climb_out_of_a_root() {
+    let roots = two_roots();
+    let value = "/srv/host/../host-sibling/secret.txt";
+    for (tool, data) in [
+        (Tool::Read, json!({ "path": value })),
+        (Tool::Write, json!({ "path": value, "content": "x" })),
+        (
+            Tool::Edit,
+            json!({ "path": value, "edits": [{ "old": "a", "new": "b" }] }),
+        ),
+    ] {
+        assert_refused(
+            &call_with(tool, &data, &roots),
+            err::ABSOLUTE_PATH,
+            &format!(
+                "'path' is outside every host folder {} may open: /srv/host (read-write), \
+                 /srv/ro (read); got '{value}'. A relative path opens in the work folder",
+                tool.name()
+            ),
+        );
+    }
+    assert_refused(
+        &call_with(
+            Tool::Find,
+            &json!({ "pattern": "x", "dir": "/srv/ro/../../srv" }),
+            &roots,
+        ),
+        err::ABSOLUTE_PATH,
+        "'dir' is outside every host folder tool-find may open: /srv/host (read-write), /srv/ro \
+         (read); got '/srv/ro/../../srv'. A relative path opens in the work folder",
+    );
+    assert_no_host_folder();
+}
 
+#[test]
+fn murmur_host_is_a_reserved_first_segment_while_a_root_is_held() {
+    let roots = two_roots();
+    for (tool, data, location, suggestion) in [
+        (
+            Tool::Read,
+            json!({ "path": "murmur-host/srv/host/x.txt" }),
+            "path",
+            "/srv/host/x.txt",
+        ),
+        (
+            Tool::Write,
+            json!({ "path": "./murmur-host/srv/host/new.txt", "content": "x" }),
+            "path",
+            "/srv/host/new.txt",
+        ),
+        (
+            Tool::Edit,
+            json!({ "path": "src/../murmur-host//etc/x", "edits": [{ "old": "a", "new": "b" }] }),
+            "path",
+            "/etc/x",
+        ),
+        (
+            Tool::Find,
+            json!({ "pattern": "x", "dir": "./murmur-host" }),
+            "dir",
+            "/",
+        ),
+        (
+            Tool::Find,
+            json!({ "pattern": "x", "dir": "murmur-host/" }),
+            "dir",
+            "/",
+        ),
+    ] {
+        assert_refused(
+            &call_with(tool, &data, &roots),
+            err::RESERVED_NAME,
+            &format!(
+                "'{location}' starts with murmur-host, where this tool's host folders are \
+                 opened; name the host path absolutely: '{suggestion}'"
+            ),
+        );
+    }
+    // Only the first segment is reserved.
+    let out = call_with(
+        Tool::Read,
+        &json!({ "path": "docs/murmur-host/x.txt" }),
+        &roots,
+    );
+    assert_eq!(out["error_kind"], err::NOT_FOUND, "{out:?}");
+    // A value that climbs above the work folder is left to the filesystem, as before.
+    let out = call_with(
+        Tool::Read,
+        &json!({ "path": "../murmur-host/x.txt" }),
+        &roots,
+    );
+    assert_ne!(out["error_kind"], err::RESERVED_NAME, "{out:?}");
+    assert_no_host_folder();
+}
+
+#[test]
+fn with_no_roots_murmur_host_is_an_ordinary_work_folder_path() {
+    let dir = scratch("murmur_host_no_roots");
+    let nested = dir.join("murmur-host/srv/x.txt");
+    let value = nested.to_string_lossy().to_string();
+    let out = call(Tool::Write, &json!({ "path": &value, "content": "plain" }));
+    assert_eq!(out["ok"], true, "{out:?}");
+    let out = call(Tool::Read, &json!({ "path": &value }));
+    assert_eq!(out["content"], "plain", "{out:?}");
     let out = call(
-        Tool::Write,
-        &json!({
-            "path": &absolute,
-            "content": "written to the wrong place",
-        }),
+        Tool::Find,
+        &json!({ "pattern": "plain", "dir": dir.join("murmur-host").to_string_lossy() }),
     );
-    assert_eq!(out["ok"], false);
-    assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
-    assert!(
-        out["message"].as_str().unwrap().starts_with("'path'"),
-        "the refusal names path: {out:?}"
-    );
-    assert!(
-        !dir.join("app").exists(),
-        "a refused write must not create the directories it named"
-    );
-
+    assert_eq!(matched_paths(&out), ["srv/x.txt"], "{out:?}");
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn write_and_edit_into_a_read_root_are_refused_before_the_file_is_touched() {
+    let roots = two_roots();
+    for (tool, data, value) in [
+        (
+            Tool::Write,
+            json!({ "path": "/srv/ro/keep.txt", "content": "x" }),
+            "/srv/ro/keep.txt",
+        ),
+        (
+            Tool::Write,
+            json!({ "path": "/srv/ro/sub/new.txt", "content": "x" }),
+            "/srv/ro/sub/new.txt",
+        ),
+        // Refused ahead of the missing sibling field, as an absolute refusal is.
+        (
+            Tool::Write,
+            json!({ "path": "/srv/ro/keep.txt" }),
+            "/srv/ro/keep.txt",
+        ),
+        (
+            Tool::Edit,
+            json!({ "path": "/srv/ro/keep.txt", "edits": [{ "old": "a", "new": "b" }] }),
+            "/srv/ro/keep.txt",
+        ),
+        (
+            Tool::Edit,
+            json!({ "path": "/srv/ro/./keep.txt" }),
+            "/srv/ro/./keep.txt",
+        ),
+    ] {
+        assert_refused(
+            &call_with(tool, &data, &roots),
+            err::PERMISSION_DENIED,
+            &format!("'path' '{value}' is in /srv/ro, which this session opens read-only"),
+        );
+    }
+    // The whole host, read-only.
+    let whole = vec![root("/", RootAccess::Read)];
+    assert_refused(
+        &call_with(
+            Tool::Write,
+            &json!({ "path": "/tmp/x.txt", "content": "x" }),
+            &whole,
+        ),
+        err::PERMISSION_DENIED,
+        "'path' '/tmp/x.txt' is in /, which this session opens read-only",
+    );
+    // The longest root decides: a read-write root inside a read one is writable.
+    let nested = vec![
+        root("/srv", RootAccess::Read),
+        root("/srv/host", RootAccess::ReadWrite),
+    ];
+    let resolved =
+        crate::resolve::resolve_path("path", "/srv/host/a", Tool::Write, &nested).unwrap();
+    assert_eq!(
+        crate::resolve::refuse_read_only("/srv/host/a", &resolved),
+        None
+    );
+    assert_no_host_folder();
 }
 
 #[test]
 fn absolute_write_through_dispatch_declares_no_mutation() {
-    // Through `run`, so the state_effect wrapper is in play: a refused write is not
-    // recorded as a mutation.
+    // Through `run`, so the state_effect wrapper is in play: a refused write is not recorded as
+    // a mutation.
     let envelope = json!({
         "data": {
             "path": "/app/results.txt", "content": "written to the wrong place",
         },
         "log_path": null,
     });
-    let out = run(Tool::Write, &envelope.to_string());
+    let out = run(Tool::Write, &envelope.to_string(), &[]);
     assert_eq!(out["ok"], false);
     assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
     assert!(
@@ -1142,122 +1482,128 @@ fn absolute_write_through_dispatch_declares_no_mutation() {
 }
 
 #[test]
-fn edit_refuses_an_absolute_path_and_edits_nothing() {
-    let dir = scratch("absolute_edit");
-    let file = dir.join("patch.txt");
-    fs::write(&file, "hello world\n").unwrap();
-    let absolute = fs::canonicalize(&file)
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
-
-    let out = call(
-        Tool::Edit,
-        &json!({
-            "path": &absolute,
-            "edits": [{ "old": "hello", "new": "goodbye" }],
-        }),
-    );
-    assert_eq!(out["ok"], false);
-    assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
-    assert!(
-        out["message"].as_str().unwrap().starts_with("'path'"),
-        "{out:?}"
-    );
-    assert_eq!(
-        fs::read_to_string(&file).unwrap(),
-        "hello world\n",
-        "a refused edit leaves the file byte-identical"
-    );
-
-    let _ = fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn find_refuses_an_absolute_dir() {
-    let out = call(
-        Tool::Find,
-        &json!({
-            "pattern": "needle",
-            "dir": "/app",
-            "recursive": true,
-        }),
-    );
-    assert_eq!(out["ok"], false);
-    assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
-    let msg = out["message"].as_str().unwrap();
-    assert!(msg.contains("'dir'"), "{msg}");
-    assert!(msg.contains("did you mean 'app'"), "{msg}");
-    assert!(
-        out["matches"].is_null(),
-        "a refused search performs no walk: {out:?}"
-    );
-}
-
-#[test]
-fn find_refuses_the_bare_root_slash_as_absolute() {
-    // Under the preopen "/" resolves to the workdir root, which a relative "" or "."
-    // already names; spelled absolutely it is refused like any other absolute dir. With
-    // no final component there is nothing to suggest.
-    let out = call(
-        Tool::Find,
-        &json!({
-            "pattern": "needle",
-            "dir": "/",
-            "recursive": true,
-        }),
-    );
-    assert_eq!(out["ok"], false);
-    assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
-    let msg = out["message"].as_str().unwrap();
-    assert!(msg.contains("'dir'"), "{msg}");
-    assert!(msg.contains("got '/'"), "{msg}");
-    assert!(
-        !msg.contains("did you mean"),
-        "no file name to suggest: {msg}"
-    );
-}
-
-#[test]
 fn an_absent_path_input_still_reports_the_missing_field() {
-    // The absolute check only runs on a value that was successfully extracted, so an
-    // absent input keeps its missing-field message and carries no error_kind.
-    for (out, location) in [
-        (call(Tool::Read, &json!({})), "path"),
-        (call(Tool::Write, &json!({ "content": "x" })), "path"),
-        (call(Tool::Edit, &json!({ "edits": [] })), "path"),
-        (call(Tool::Find, &json!({ "dir": "src" })), "pattern"),
-    ] {
-        assert_eq!(out["ok"], false);
-        assert!(
-            out["error_kind"].is_null(),
-            "a missing field is not an absolute-path refusal: {out:?}"
-        );
-        assert_eq!(
-            out["message"],
-            format!("missing required field: {location}"),
-            "{out:?}"
-        );
+    // The path check only runs on a value that was successfully extracted, so an absent input
+    // keeps its missing-field message and carries no error_kind.
+    for roots in [vec![], two_roots()] {
+        for (out, location) in [
+            (call_with(Tool::Read, &json!({}), &roots), "path"),
+            (
+                call_with(Tool::Write, &json!({ "content": "x" }), &roots),
+                "path",
+            ),
+            (
+                call_with(Tool::Edit, &json!({ "edits": [] }), &roots),
+                "path",
+            ),
+            (
+                call_with(Tool::Find, &json!({ "dir": "src" }), &roots),
+                "pattern",
+            ),
+        ] {
+            assert_eq!(out["ok"], false);
+            assert!(
+                out["error_kind"].is_null(),
+                "a missing field is not a path refusal: {out:?}"
+            );
+            assert_eq!(
+                out["message"],
+                format!("missing required field: {location}"),
+                "{out:?}"
+            );
+        }
     }
 }
 
 #[test]
 fn an_absolute_path_is_reported_ahead_of_a_missing_sibling_field() {
     // tool-write's and tool-edit's path are validated at their extraction site, before
-    // `content` or `edits` is read, so the caller hears about the path they cannot use
-    // rather than a second field.
-    for out in [
-        call(Tool::Write, &json!({ "path": "/app/results.txt" })),
-        call(Tool::Edit, &json!({ "path": "/app/results.txt" })),
-    ] {
-        assert_eq!(out["ok"], false);
-        assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
-        let message = out["message"].as_str().unwrap();
-        assert!(
-            !message.contains("content") && !message.contains("edits"),
-            "the absolute path is the first thing reported: {out:?}"
+    // `content` or `edits` is read, so the caller hears about the path they cannot use rather
+    // than a second field.
+    for roots in [vec![], two_roots()] {
+        for out in [
+            call_with(Tool::Write, &json!({ "path": "/app/results.txt" }), &roots),
+            call_with(Tool::Edit, &json!({ "path": "/app/results.txt" }), &roots),
+        ] {
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
+            let message = out["message"].as_str().unwrap();
+            assert!(
+                !message.contains("content") && !message.contains("edits"),
+                "the absolute path is the first thing reported: {out:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_absolute_glob_is_refused_with_or_without_roots() {
+    let whole = vec![root("/", RootAccess::ReadWrite)];
+    for roots in [vec![], two_roots(), whole] {
+        assert_refused(
+            &call_with(
+                Tool::Find,
+                &json!({ "pattern": "needle", "glob": "/src/*.rs" }),
+                &roots,
+            ),
+            err::ABSOLUTE_PATH,
+            "'glob' is matched against paths below 'dir' and must be relative; got '/src/*.rs' \
+             (did you mean '*.rs'?). Name a host folder in 'dir'",
+        );
+        assert_refused(
+            &call_with(
+                Tool::Find,
+                &json!({ "pattern": "needle", "glob": "/" }),
+                &roots,
+            ),
+            err::ABSOLUTE_PATH,
+            "'glob' is matched against paths below 'dir' and must be relative; got '/'. Name a \
+             host folder in 'dir'",
         );
     }
+}
+
+#[test]
+fn relative_calls_behave_the_same_with_roots_held() {
+    let dir = scratch("relative_with_roots");
+    let base = dir.to_string_lossy().to_string();
+    let roots = two_roots();
+    let scenario = |roots: &[HostRoot], name: &str| -> Vec<Value> {
+        let file = format!("{base}/{name}/a.txt");
+        let mut outs = vec![
+            call_with(
+                Tool::Write,
+                &json!({ "path": &file, "content": "one two\n" }),
+                roots,
+            ),
+            call_with(
+                Tool::Edit,
+                &json!({ "path": &file, "edits": [{ "old": "two", "new": "three" }] }),
+                roots,
+            ),
+            call_with(Tool::Read, &json!({ "path": &file }), roots),
+            call_with(
+                Tool::Find,
+                &json!({ "pattern": "three", "dir": format!("{base}/{name}") }),
+                roots,
+            ),
+            call_with(
+                Tool::Read,
+                &json!({ "path": format!("{base}/{name}/missing") }),
+                roots,
+            ),
+        ];
+        for out in &mut outs {
+            for key in ["message", "summary"] {
+                if let Some(text) = out[key].as_str() {
+                    out[key] = json!(text.replace(name, "<name>"));
+                }
+            }
+        }
+        outs
+    };
+    assert_eq!(scenario(&roots, "held"), scenario(&[], "none"));
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -1964,7 +2310,7 @@ fn read_png_returns_an_attachment_and_its_dimensions() {
     assert_eq!(out, image_result(&path, "image/png", png.len(), 64, 48));
 
     assert_eq!(
-        dispatch(Tool::Read, Some(&json!({ "path": &path }).to_string())),
+        dispatch(Tool::Read, Some(&json!({ "path": &path }).to_string()), &[]),
         ToolOutcome {
             status: OutcomeStatus::Passed,
             summary: Some(format!("image/png, {} bytes, 64x48 pixels", png.len())),
@@ -2087,7 +2433,8 @@ fn read_refuses_image_paths_as_it_refuses_text_paths() {
     assert_eq!(out["error_kind"], err::ABSOLUTE_PATH, "{out:?}");
     assert_eq!(
         out["message"],
-        "'path' must be relative to the capsule workdir; got '/logo.png' (did you mean 'logo.png'?)"
+        "'path' must be relative to the work folder: this session opens no host folder to \
+         tool-read; got '/logo.png' (did you mean 'logo.png'?)"
     );
     assert!(out.get("attachments").is_none(), "{out:?}");
 
@@ -2461,26 +2808,6 @@ fn find_glob_filters_by_name_or_relative_path() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn find_refuses_an_absolute_glob() {
-    let out = call(
-        Tool::Find,
-        &json!({
-            "pattern": "needle", "glob": "/src/*.rs",
-        }),
-    );
-    assert_eq!(out["ok"], false);
-    assert_eq!(out["error_kind"], err::ABSOLUTE_PATH);
-    assert_eq!(
-        out["message"],
-        "'glob' must be relative to the capsule workdir; got '/src/*.rs' (did you mean '*.rs'?)"
-    );
-    assert!(
-        out["matches"].is_null(),
-        "a refused search performs no walk: {out:?}"
-    );
-}
-
 // ── find: walk rules and budgets ───────────────────────────────
 
 #[test]
@@ -2552,7 +2879,7 @@ fn find_caps_at_the_file_limit() {
     };
     let op = json!({ "pattern": "needle", "dir": dir.to_str().unwrap() });
 
-    let out = find_with_limits(&op, limits);
+    let out = find_with_limits(&op, limits, &[]);
     assert_eq!(out["ok"], true, "{out:?}");
     assert_eq!(matched_paths(&out), ["f0", "f1", "f2"]);
     assert_eq!(
@@ -2566,7 +2893,7 @@ fn find_caps_at_the_file_limit() {
     // stops before it reaches f4.
     let mut globbed = op.clone();
     globbed["glob"] = json!("f4");
-    let out = find_with_limits(&globbed, limits);
+    let out = find_with_limits(&globbed, limits, &[]);
     assert_eq!(out["ok"], true, "{out:?}");
     assert!(matched_paths(&out).is_empty(), "{out:?}");
     assert_eq!(out["summary"], "0 matches in 0 files (capped)");
@@ -2582,6 +2909,7 @@ fn find_caps_at_the_file_limit() {
             files: 5,
             ..Limits::PRODUCTION
         },
+        &[],
     );
     assert_eq!(
         out["data"],
@@ -2597,6 +2925,7 @@ fn find_caps_at_the_file_limit() {
             files: 5,
             ..Limits::PRODUCTION
         },
+        &[],
     );
     assert_eq!(matched_paths(&out), ["f4"]);
     assert!(out["data"].get("capped").is_none(), "{out:?}");
@@ -2618,6 +2947,7 @@ fn find_non_recursive_walk_counts_files_the_glob_excludes() {
             files: 3,
             ..Limits::PRODUCTION
         },
+        &[],
     );
     assert_eq!(out["ok"], true, "{out:?}");
     assert!(matched_paths(&out).is_empty(), "{out:?}");
@@ -2641,6 +2971,7 @@ fn find_caps_at_the_byte_limit() {
     let out = find_with_limits(
         &json!({ "pattern": "needle", "dir": dir.to_str().unwrap() }),
         limits,
+        &[],
     );
     assert_eq!(out["ok"], true, "{out:?}");
     assert_eq!(matched_paths(&out), ["f0", "f1"]);
@@ -2664,6 +2995,7 @@ fn find_caps_at_the_match_limit_and_reads_no_further_file() {
             matches: 3,
             ..Limits::PRODUCTION
         },
+        &[],
     );
     assert_eq!(matched_paths(&out), ["f0", "f1", "f1"]);
     assert_eq!(out["matches"][2]["line"], 2);

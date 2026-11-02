@@ -203,7 +203,7 @@ fn no_schema_node_but_the_root_and_the_edits_item_is_an_object() {
 /// The fields an `unknown_field` refusal from `tool` says `data` accepts, probed with the key
 /// `zz`.
 fn accepted_fields(tool: Tool, data: Value) -> Vec<String> {
-    let out = run(tool, &json!({ "data": data }).to_string());
+    let out = run(tool, &json!({ "data": data }).to_string(), &[]);
     assert_eq!(out["error_kind"], "unknown_field", "{out}");
     let message = out["message"]
         .as_str()

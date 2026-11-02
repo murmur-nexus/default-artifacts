@@ -85,16 +85,16 @@ entry into the project store.
 ```yaml
 artifacts:
   - name: murmur/tool-read
-    version: "0.2.0"
+    version: "0.3.0"
     runtime: tool
   - name: murmur/tool-write
-    version: "0.2.0"
+    version: "0.3.0"
     runtime: tool
   - name: murmur/tool-edit
-    version: "0.2.0"
+    version: "0.3.0"
     runtime: tool
   - name: murmur/tool-find
-    version: "0.2.0"
+    version: "0.3.0"
     runtime: tool
 
   - name: murmur/driver-anthropic
@@ -109,7 +109,7 @@ artifacts:
         records: true          # hook-debug.jsonl goes in the records directory (§4.3a)
 
   - name: murmur/skill-create-manifest
-    version: "0.12.0"
+    version: "0.13.0"
     runtime: skill
 ```
 
@@ -492,16 +492,16 @@ description: "Simple file editing capsule — reads and writes files, exits on c
 
 artifacts:
   - name: murmur/tool-read
-    version: "0.2.0"
+    version: "0.3.0"
     runtime: tool
   - name: murmur/tool-write
-    version: "0.2.0"
+    version: "0.3.0"
     runtime: tool
   - name: murmur/tool-edit
-    version: "0.2.0"
+    version: "0.3.0"
     runtime: tool
   - name: murmur/tool-find
-    version: "0.2.0"
+    version: "0.3.0"
     runtime: tool
   - name: murmur/driver-anthropic
     version: "0.19.0"
@@ -538,16 +538,16 @@ artifacts:
     version: "0.6.0"
     runtime: tool
   - name: murmur/tool-read
-    version: "0.2.0"
+    version: "0.3.0"
     runtime: tool
   - name: murmur/tool-write
-    version: "0.2.0"
+    version: "0.3.0"
     runtime: tool
   - name: murmur/tool-edit
-    version: "0.2.0"
+    version: "0.3.0"
     runtime: tool
   - name: murmur/tool-find
-    version: "0.2.0"
+    version: "0.3.0"
     runtime: tool
   - name: murmur/driver-anthropic
     version: "0.19.0"
@@ -592,10 +592,10 @@ description: "Orchestrator that spawns sub-capsules for parallel task execution"
 
 artifacts:
   - name: murmur/tool-read
-    version: "0.2.0"
+    version: "0.3.0"
     runtime: tool
   - name: murmur/tool-find
-    version: "0.2.0"
+    version: "0.3.0"
     runtime: tool
   - name: murmur/driver-anthropic
     version: "0.19.0"

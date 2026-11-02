@@ -8,13 +8,13 @@ Every artifact here is published under scope `murmur`: the artifact in `tools/to
 `murmur/tool-read`, which is how a capsule's `artifacts:` names it and how it installs:
 
 ```bash
-mur install -g murmur/tool-read@0.2.0
+mur install -g murmur/tool-read@0.3.0
 ```
 
 ```yaml
 artifacts:
   - name: murmur/tool-read
-    version: "0.2.0"
+    version: "0.3.0"
 ```
 
 Installing by scoped name needs `mur` 0.7.0 or later. `mur` v0.6.0 and earlier have no
@@ -141,10 +141,10 @@ browser or an X server (see [BUILD.md](./BUILD.md)).
 |---|---|---|---|
 | `tool-corpus` | `tools/tool-corpus/` | WASM | Append-only record store (`append`, `get`, `read_recent`, `search`, `verify`); requires a `capabilities.state` grant and a `config:` block on its manifest entry declaring the record types |
 | `tool-create` | `tools/tool-create/` | WASM | Scaffolds a new artifact directory (`murmur.yaml`, stub payload, README) for a `native` tool, a `wasm` tool, or a `hook` |
-| `tool-read` | `tools/tool-read/` | WASM | Reads a file: `path`, optional `start_line`/`end_line`. Returns at most 2000 lines and 100 KB and cuts lines over 2000 characters, with a `truncated` note naming the `start_line` that continues the read. Shows a PNG, JPEG, GIF or WebP file to the model as an image, with its type, size and dimensions. Declares `murmur-destinations: []`, so a `capabilities.filesystem.read_only` grant leaves it free to read; see its [README](./tools/tool-read/README.md) |
-| `tool-write` | `tools/tool-write/` | WASM | Creates or replaces a file and any missing directories: `path`, `content`. `path` is declared `format: murmur-destination`, so a `read_only` grant refuses a write under it; see its [README](./tools/tool-write/README.md) |
-| `tool-edit` | `tools/tool-edit/` | WASM | Replaces text in a file: `path`, `edits`, a list of `{old, new}`. The pairs apply in order, each `old` matching exactly once, all or nothing: one failing pair leaves the file unchanged and the error names it `edit N of M`. `path` is declared `format: murmur-destination`; see its [README](./tools/tool-edit/README.md) |
-| `tool-find` | `tools/tool-find/` | WASM | Searches file contents for a regex: `pattern`, optional `dir`, `glob`, `recursive`, `context_lines`. Stops at 200 matches, 5000 files walked, 32 MiB read or a 500 KB result, returning what it found with a `capped` note. Declares `murmur-destinations: []`; see its [README](./tools/tool-find/README.md) |
+| `tool-read` | `tools/tool-read/` | WASM | Reads a file: `path`, relative to the work folder or absolute inside a host folder the session opened (`mur run --unconfined`, or a `host_paths` entry), optional `start_line`/`end_line`. Returns at most 2000 lines and 100 KB and cuts lines over 2000 characters, with a `truncated` note naming the `start_line` that continues the read. Shows a PNG, JPEG, GIF or WebP file to the model as an image, with its type, size and dimensions. Declares `murmur-destinations: []`, so a `capabilities.filesystem.read_only` grant leaves it free to read; see its [README](./tools/tool-read/README.md) |
+| `tool-write` | `tools/tool-write/` | WASM | Creates or replaces a file and any missing directories: `path`, `content`. `path` is relative to the work folder or absolute inside a host folder the session opened, and a `read` host folder refuses the write. `path` is declared `format: murmur-destination`, so a `read_only` grant refuses a write under it; see its [README](./tools/tool-write/README.md) |
+| `tool-edit` | `tools/tool-edit/` | WASM | Replaces text in a file: `path`, `edits`, a list of `{old, new}`. The pairs apply in order, each `old` matching exactly once, all or nothing: one failing pair leaves the file unchanged and the error names it `edit N of M`. `path` is relative to the work folder or absolute inside a host folder the session opened, and a `read` host folder refuses the edit. `path` is declared `format: murmur-destination`; see its [README](./tools/tool-edit/README.md) |
+| `tool-find` | `tools/tool-find/` | WASM | Searches file contents for a regex: `pattern`, optional `dir`, `glob`, `recursive`, `context_lines`. `dir` is relative to the work folder or absolute inside a host folder the session opened. Stops at 200 matches, 5000 files walked, 32 MiB read or a 500 KB result, returning what it found with a `capped` note. Declares `murmur-destinations: []`; see its [README](./tools/tool-find/README.md) |
 | `tool-github` | `tools/tool-github/` | WASM | Pushes a local commit range to one operator-pinned GitHub repo so the remote branch lands on the identical SHA, fetches a branch back, and opens, inspects, lists and merges pull requests on that repo; the GitHub token is bound on the entry as `gateway.api_key` and attached by the runtime, never held by the tool |
 | `tool-report` | `tools/tool-report/` | WASM | The capsule states its own conclusion (`report`, `progress`) into `state/reports/<session_id>.json`, one file per session named by `MURMUR_SESSION_ID`, keeping at most 64 and never the caller's own or one written in the last 7 days; requires a `capabilities.state` grant, and takes an optional `config:` block closing the deliverable-kind and note-stage vocabularies |
 | `tool-request-input` | `tools/tool-request-input/` | WASM | HITL pause gate — suspends the agent loop and waits for human input via `SendMessage` |
