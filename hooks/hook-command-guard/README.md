@@ -249,8 +249,8 @@ refuses only when no command matched a rule or pattern.
 | Substitutions or `-c` scripts nest deeper than 16 levels | 17 nested `$(` |
 | `eval` with any arguments | `eval "$X"` |
 | The program word is built when the command runs | `$CMD -rf x`, `` `echo rm` -rf x `` |
-| A shell interpreter's `-c` script is not literal, or its script operand is a process substitution | `bash -c "$X"`, `bash <(curl -s URL)` |
-| A shell interpreter reads its script from its input — no `-c` and no script operand, or only `-s` or `-` — and it sits after the first stage of a pipeline or its input is redirected | `echo … \| base64 -d \| sh`, `sh <<EOF` |
+| A shell interpreter's `-c` script is not literal, its script operand is a process substitution, or an expansion stands among its options with more words after it (it could be `-c`) | `bash -c "$X"`, `bash <(curl -s URL)`, `bash $OPTS -c 'rm -rf x'` |
+| A shell interpreter reads its script from its input — no `-c` and no script operand, only `-s` or `-`, or a lone expansion that could be `-s` — and it sits after the first stage of a pipeline or its input is redirected | `echo … \| base64 -d \| sh`, `sh <<EOF`, `… \| bash "$O"` |
 | A just shebang recipe in a language other than shell | `#!/usr/bin/env python3` |
 | A rule's program, subcommand and flag conditions hold, but no literal operand satisfies its operand conditions while an operand is not known | `rm -r "$d"` under a `path_is` rule |
 
@@ -316,6 +316,12 @@ The guard stops accidents and plain misuse, not a determined agent: an agent tha
 - Option clusters are expanded for every program, so a value attached to a short option
   (`-mfix`) reads as more flags. Long-option abbreviations (`--forc`) are not recognized.
 - `git push` with no refspec while on `main` is not caught.
-- Wrappers beyond the table above — `doas`, `stdbuf`, `ionice`, `setsid`, `flock`, `watch`
-  and others — are not looked through.
+- A subcommand is found only as the first or second operand, so `cargo +nightly publish` and
+  `git -C dir -c key=value push` do not match a `subcommand` rule.
+- Brace expansion is not performed: `/{etc,usr}` is read as one literal path.
+- A word holding an expansion never satisfies a flag condition, so `rm $(echo -rf) x` does not
+  match a rule that needs `-r` and `-f`.
+- Wrappers beyond the table above — `doas`, `stdbuf`, `ionice`, `setsid`, `flock`, `watch`,
+  `coproc`, `builtin` and others — are not looked through, and the command string a `trap`
+  runs later is not read.
 - Aliases and functions defined earlier in the session are not known.

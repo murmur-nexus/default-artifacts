@@ -461,12 +461,15 @@ fn interpreter(rest: &[Arg], stdin_fed: bool) -> Effect {
     let mut i = 0;
     let mut has_c = false;
     let mut has_s = false;
+    let mut options_ended = false;
     while let Some(text) = lit(rest.get(i)) {
         if text == "--" {
             i += 1;
+            options_ended = true;
             break;
         }
         if text == "-" {
+            options_ended = true;
             break;
         }
         if text.starts_with("--") {
@@ -510,6 +513,12 @@ fn interpreter(rest: &[Arg], stdin_fed: bool) -> Effect {
             },
         };
     }
+    // An expansion where an option may still stand could be `-c` or `-s`: `bash $OPTS 'rm x'`
+    // runs its next word as a script, and `… | bash "$O"` may read its input.
+    let opaque_option = !options_ended && operand.is_some_and(|a| a.literal.is_none());
+    if opaque_option && rest.len() > i + 1 {
+        return Effect::Unclear(Unclear::ShellScriptNotLiteral);
+    }
     if has_s {
         return reads_input();
     }
@@ -517,6 +526,7 @@ fn interpreter(rest: &[Arg], stdin_fed: bool) -> Effect {
         None => reads_input(),
         Some(arg) if arg.literal.as_deref() == Some("-") => reads_input(),
         Some(arg) if arg.procsub => Effect::Unclear(Unclear::ShellScriptNotLiteral),
+        Some(_) if opaque_option => reads_input(),
         Some(_) => Effect::None,
     }
 }
@@ -664,6 +674,23 @@ mod tests {
             effect("sudo sh", true),
             Effect::Unclear(Unclear::ShellReadsInput)
         );
+        // An expansion before the script may be `-c`, so the words after it are unreadable.
+        assert_eq!(
+            effect("bash $OPTS -c 'rm -rf x'", false),
+            Effect::Unclear(Unclear::ShellScriptNotLiteral)
+        );
+        assert_eq!(
+            effect("bash -x \"$O\" 'rm -rf x'", false),
+            Effect::Unclear(Unclear::ShellScriptNotLiteral)
+        );
+        // A lone expansion is a script file, unless the shell's input is fed (it may be `-s`).
+        assert_eq!(effect("bash \"$f\"", false), Effect::None);
+        assert_eq!(
+            effect("bash \"$O\"", true),
+            Effect::Unclear(Unclear::ShellReadsInput)
+        );
+        // After `--` an expansion is the script file and the rest are its arguments.
+        assert_eq!(effect("bash -- \"$f\" x", false), Effect::None);
     }
 
     #[test]
