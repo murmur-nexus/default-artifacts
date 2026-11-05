@@ -132,10 +132,11 @@ driver.
 
 Tool artifacts (`runtime: tool`) exposed to the agent as callable functions. `tool-corpus`,
 `tool-create`, `tool-read`, `tool-write`, `tool-edit`, `tool-find`, `tool-github`,
-`tool-registry-search`, `tool-report`, `tool-request-input`, `tool-tavily` and `tool-browser` are WASM components (`wasm32-wasip2`, exporting `murmur:tool/run`); the
-remaining five are native binaries: their C dependencies (SQLite, tree-sitter) do not
-cross-compile to wasm32-wasip2, or they run a host program a WASM guest cannot, such as `git` or
-an X server (see [BUILD.md](./BUILD.md)).
+`tool-registry-search`, `tool-report`, `tool-request-input`, `tool-tavily`, `tool-test-report`,
+`tool-browser` and `tool-git` are WASM components (`wasm32-wasip2`, exporting `murmur:tool/run`);
+the remaining three are native binaries: `tool-code-graph` and `tool-code-coverage` link C
+sources not yet ported to wasm32-wasip2 (tree-sitter, and the same bundled SQLite as
+`tool-code-graph`), and `tool-computer` runs an X server (see [BUILD.md](./BUILD.md)).
 
 | Artifact | Location | Implementation | Description |
 |---|---|---|---|
@@ -151,7 +152,7 @@ an X server (see [BUILD.md](./BUILD.md)).
 | `tool-request-input` | `tools/tool-request-input/` | WASM | HITL pause gate — suspends the agent loop and waits for human input via `SendMessage` |
 | `tool-tavily` | `tools/tool-tavily/` | WASM | Web search through Tavily, returning a bounded plain-text result; the Tavily key is bound on the entry as `gateway.api_key` and attached by the runtime, never held by the tool, and every cost- and size-bearing lever is in the entry's `config:` block |
 | `tool-test-report` | `tools/tool-test-report/` | WASM | Parses raw test-runner output (cargo, pytest, go, jest) into a structured failure list; `input_path` and `repo_path` are relative to the work folder or absolute inside a host folder the session opened; see its [README](./tools/tool-test-report/README.md) |
-| `tool-git` | `tools/tool-git/` | native | Git operations (clone, checkout, status, diff, commit, push, worktree, and more) |
+| `tool-git` | `tools/tool-git/` | WASM | Git operations (clone, checkout, status, diff, commit, push, worktree, and more), each git command run through `murmur:process`, so it needs a `mur` at WIT level 4 or higher and `git` in `capabilities.shell.allow`; on-shell hooks and the `read_only` check judge every git command it runs; see its [README](./tools/tool-git/README.md) |
 | `tool-code-graph` | `tools/tool-code-graph/` | native | Indexes a Rust and/or Python repo into a SQLite symbol/edge graph; structured queries over stable symbol identities |
 | `tool-code-coverage` | `tools/tool-code-coverage/` | native | Spectrum-based fault localization (Ochiai / Tarantula) over per-test LCOV reports |
 | `tool-browser` | `tools/tool-browser/` | WASM | Drives a headless Chrome or Chromium on the capsule's host one action per call: opens a page, reads it as an accessibility tree with refs, clicks, types, presses, selects, waits and goes back with a summary of what changed, reads console errors and failed requests, and saves screenshots. Starts the browser as a session process through `murmur:process` and keeps it until `close` or the session's end, so it needs a `mur` at WIT level 4 or higher. Needs one of `chromium`, `chromium-browser`, `google-chrome` or `chrome` in `capabilities.shell.allow`, and on murmur's `scoped` and `sealed` tiers `chrome-headless-shell` under that name; see its [README](./tools/tool-browser/README.md) |
@@ -213,13 +214,14 @@ needs one has to detect the refusal itself and say so.
 
 `wit/guest/` also holds `murmur:process@0.1.0`, from murmur `6750b5f9` on `main` (murmur
 `f9d4a1f8`, #390, added it), and `world tool` imports it. It lets a tool start programs that live
-for the whole session and connect to their loopback ports. A `mur` serves it from WIT level 4 on,
-and no murmur release does yet: v0.9.0, the newest tag, serves level 3.
+for the whole session and connect to their loopback ports, or run one to completion and read its
+output. A `mur` serves it from WIT level 4 on, and no murmur release does yet: v0.9.0, the newest
+tag, serves level 3.
 
 A component's level follows the interfaces it actually imports and exports, not the world it was
-built from. `tool-browser` 0.2.0 is the only artifact here that imports `murmur:process`, so it
-is the only one that needs level 4; an older `mur` refuses it with `E-WIT-LEVEL-001`. Every other
-WASM tool and driver still fits level 3.
+built from. `tool-browser` 0.2.0 and `tool-git` 0.7.0 are the only artifacts here that import
+`murmur:process`, so they are the only ones that need level 4; an older `mur` refuses them with
+`E-WIT-LEVEL-001`. Every other WASM tool and driver still fits level 3.
 
 ### WIT level 3
 

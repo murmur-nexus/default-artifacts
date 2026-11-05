@@ -20,12 +20,11 @@
 #   tool-{request-input,create,read,   -> TOOL   category (wasm32-wasip2 components
 #     write,edit,find,corpus,report,            that export murmur:tool/run)
 #     tavily,github,registry-search,
-#     test-report,browser}
-#   tool-{git,git-validate,            -> SKIP   (native bin crates the workspace build
-#     computer}                                 may still leave a .wasm for; shipped as
-#                                               native binaries, they export
-#                                               wasi:cli/run and are NOT murmur guest
-#                                               components)
+#     test-report,browser,git}
+#   tool-computer                      -> SKIP   (a native bin crate the workspace build
+#                                               may still leave a .wasm for; shipped as a
+#                                               native binary, it exports wasi:cli/run and
+#                                               is NOT a murmur guest component)
 #   anything else                      -> ERROR  (fail closed: an unrecognised
 #                                               artifact must not silently skip)
 #
@@ -131,7 +130,7 @@ validate_one() {
 
   # ---- category resolution ---------------------------------------------------
   case "$name" in
-    tool-git|tool-git-validate|tool-computer)
+    tool-computer)
       echo "skip: $base is a native command component (exports wasi:cli/run), not a murmur guest component — not validated"
       return 0
       ;;
@@ -145,7 +144,7 @@ validate_one() {
       expected_export="murmur:driver/process"
       expected_version="$process_driver_version"
       ;;
-    driver-*|tool-request-input|tool-create|tool-read|tool-write|tool-edit|tool-find|tool-corpus|tool-report|tool-tavily|tool-github|tool-registry-search|tool-test-report|tool-browser)
+    driver-*|tool-request-input|tool-create|tool-read|tool-write|tool-edit|tool-find|tool-corpus|tool-report|tool-tavily|tool-github|tool-registry-search|tool-test-report|tool-browser|tool-git)
       category="tool"
       expected_export="murmur:tool/run"
       expected_version="$tool_version"

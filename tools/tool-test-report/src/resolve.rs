@@ -29,7 +29,7 @@ pub fn resolve_stable_ids(db_path: &str, failures: &mut [Failure]) {
         return;
     }
     let conn = match Connection::open_with_flags(
-        format!("file:{}?immutable=1", escape(db_path)),
+        murmur_host_roots::sqlite_immutable_uri(db_path),
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
     ) {
         Ok(c) => c,
@@ -58,23 +58,6 @@ pub fn resolve_stable_ids(db_path: &str, failures: &mut [Failure]) {
     }
 }
 
-/// `path` as the path part of an SQLite `file:` URI: `%`, `?` and `#` are
-/// percent-encoded (`%25`, `%3F`, `%23`), so a path holding them is neither cut
-/// short at a query or fragment nor decoded into a different path. Every other
-/// character is passed through.
-fn escape(path: &str) -> String {
-    let mut out = String::with_capacity(path.len());
-    for c in path.chars() {
-        match c {
-            '%' => out.push_str("%25"),
-            '?' => out.push_str("%3F"),
-            '#' => out.push_str("%23"),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
 /// Split a cargo test path on its last `::` into `(module, qualified_name)`.
 /// `tests::foo` → `("tests", "foo")`; `a::tests::foo` → `("a::tests", "foo")`;
 /// a bare `foo` → `("", "foo")` (crate-root test).
@@ -88,17 +71,6 @@ fn split_test_path(name: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn escape_percent_encodes_only_what_ends_or_decodes_a_uri_path() {
-        assert_eq!(escape(".murmur/code-graph.db"), ".murmur/code-graph.db");
-        assert_eq!(
-            escape("murmur-host/srv/a b/x.db"),
-            "murmur-host/srv/a b/x.db"
-        );
-        assert_eq!(escape("a%b?c#d"), "a%25b%3Fc%23d");
-        assert_eq!(escape("%3F"), "%253F");
-    }
 
     #[test]
     fn a_database_named_with_uri_characters_still_opens() {

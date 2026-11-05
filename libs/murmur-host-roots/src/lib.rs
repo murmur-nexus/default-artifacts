@@ -149,6 +149,29 @@ pub fn describe_roots(roots: &[HostRoot]) -> String {
         .join(", ")
 }
 
+/// The SQLite URI that opens the database at `path` (a path [`locate`] returned) read-only with no
+/// lock and no journal: `file:<path>?immutable=1`, with `%`, `?` and `#` in `path`
+/// percent-encoded (`%25`, `%3F`, `%23`) so a path holding them is neither cut short at a query
+/// or fragment nor decoded into a different path. Open it with `SQLITE_OPEN_READ_ONLY |
+/// SQLITE_OPEN_URI`.
+///
+/// SQLite's WASI build locks with a `<db>.lock` dotfile, which cannot be created in a read-only
+/// host folder and would otherwise appear beside the database; `immutable=1` reads without it.
+pub fn sqlite_immutable_uri(path: &str) -> String {
+    let mut uri = String::with_capacity(path.len() + 17);
+    uri.push_str("file:");
+    for c in path.chars() {
+        match c {
+            '%' => uri.push_str("%25"),
+            '?' => uri.push_str("%3F"),
+            '#' => uri.push_str("%23"),
+            c => uri.push(c),
+        }
+    }
+    uri.push_str("?immutable=1");
+    uri
+}
+
 /// The segments of `value` with `.` and empty segments dropped and each `..` popping the segment
 /// before it, and whether some `..` found no segment left to pop.
 fn lexical_segments(value: &str) -> (Vec<&str>, bool) {
@@ -172,6 +195,21 @@ fn render_absolute(segments: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sqlite_uri_percent_encodes_only_what_ends_or_decodes_a_uri_path() {
+        let uri = sqlite_immutable_uri;
+        assert_eq!(
+            uri(".murmur/code-graph.db"),
+            "file:.murmur/code-graph.db?immutable=1"
+        );
+        assert_eq!(
+            uri("murmur-host/srv/a b/x.db"),
+            "file:murmur-host/srv/a b/x.db?immutable=1"
+        );
+        assert_eq!(uri("a%b?c#d"), "file:a%25b%3Fc%23d?immutable=1");
+        assert_eq!(uri("%3F"), "file:%253F?immutable=1");
+    }
 
     fn root(path: &str, access: RootAccess) -> HostRoot {
         HostRoot {
