@@ -1,6 +1,4 @@
-//! Small helpers shared by the call process and the supervisor.
-
-use std::io::Read;
+//! Small text helpers.
 
 /// `text` on one line: newlines and tabs become spaces, cut at `max` characters with `…`.
 pub fn one_line(text: &str, max: usize) -> String {
@@ -19,13 +17,6 @@ pub fn cut_chars(text: &str, max: usize) -> String {
     }
 }
 
-/// `n` random bytes from `/dev/urandom`, which every murmur tier carries.
-pub fn random_bytes(n: usize) -> std::io::Result<Vec<u8>> {
-    let mut buf = vec![0u8; n];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut buf)?;
-    Ok(buf)
-}
-
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -36,6 +27,26 @@ pub fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// `text` with every `%XX` escape decoded; an escape that is not two hex digits stays as written.
+pub fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(b) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// `a`, `a and b`, `a, b and c`, with `word` in place of `and`.
@@ -55,6 +66,14 @@ mod tests {
     fn one_line_flattens_and_cuts() {
         assert_eq!(one_line("a\nb\tc", 10), "a b c");
         assert_eq!(one_line("abcdef", 3), "abc…");
+    }
+
+    #[test]
+    fn percent_decoding() {
+        assert_eq!(percent_decode("/a%20b/c%23d"), "/a b/c#d");
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz%4"), "%zz%4");
+        assert_eq!(percent_decode("%C3%A9"), "é");
     }
 
     #[test]

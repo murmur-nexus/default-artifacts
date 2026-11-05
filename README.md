@@ -132,10 +132,10 @@ driver.
 
 Tool artifacts (`runtime: tool`) exposed to the agent as callable functions. `tool-corpus`,
 `tool-create`, `tool-read`, `tool-write`, `tool-edit`, `tool-find`, `tool-github`,
-`tool-registry-search`, `tool-report`, `tool-request-input`, and `tool-tavily` are WASM components (`wasm32-wasip2`, exporting `murmur:tool/run`); the
-remaining six are native binaries: their C dependencies (SQLite, tree-sitter) do not
-cross-compile to wasm32-wasip2, or they run a host program a WASM guest cannot, such as `git`, a
-browser or an X server (see [BUILD.md](./BUILD.md)).
+`tool-registry-search`, `tool-report`, `tool-request-input`, `tool-tavily` and `tool-browser` are WASM components (`wasm32-wasip2`, exporting `murmur:tool/run`); the
+remaining five are native binaries: their C dependencies (SQLite, tree-sitter) do not
+cross-compile to wasm32-wasip2, or they run a host program a WASM guest cannot, such as `git` or
+an X server (see [BUILD.md](./BUILD.md)).
 
 | Artifact | Location | Implementation | Description |
 |---|---|---|---|
@@ -154,7 +154,7 @@ browser or an X server (see [BUILD.md](./BUILD.md)).
 | `tool-code-graph` | `tools/tool-code-graph/` | native | Indexes a Rust and/or Python repo into a SQLite symbol/edge graph; structured queries over stable symbol identities |
 | `tool-code-coverage` | `tools/tool-code-coverage/` | native | Spectrum-based fault localization (Ochiai / Tarantula) over per-test LCOV reports |
 | `tool-test-report` | `tools/tool-test-report/` | native | Parses raw test-runner output (cargo, pytest, go, jest) into a structured failure list |
-| `tool-browser` | `tools/tool-browser/` | native | Drives the host's headless Chrome or Chromium one action per call: opens a page, reads it as an accessibility tree with refs, clicks, types, presses, selects, waits and goes back with a summary of what changed, reads console errors and failed requests, and saves screenshots. Needs one of `chromium`, `chromium-browser`, `google-chrome` or `chrome` in `capabilities.shell.allow`, and on murmur's Full and Sealed tiers `chrome-headless-shell` under that name; see its [README](./tools/tool-browser/README.md) |
+| `tool-browser` | `tools/tool-browser/` | WASM | Drives a headless Chrome or Chromium on the capsule's host one action per call: opens a page, reads it as an accessibility tree with refs, clicks, types, presses, selects, waits and goes back with a summary of what changed, reads console errors and failed requests, and saves screenshots. Starts the browser as a session process through `murmur:process` and keeps it until `close` or the session's end, so it needs a `mur` at WIT level 4 or higher. Needs one of `chromium`, `chromium-browser`, `google-chrome` or `chrome` in `capabilities.shell.allow`, and on murmur's `scoped` and `sealed` tiers `chrome-headless-shell` under that name; see its [README](./tools/tool-browser/README.md) |
 | `tool-computer` | `tools/tool-computer/` | native | The capsule's own 1440x900 virtual display (Xvfb): screenshot, click, drag, scroll, type, keys, wait and zoom, one action per call, each returning the cursor and a PNG screenshot. Declares `provider_tool: {kind: computer}`, so it runs only in a `sealed` capsule on Linux and needs a `mur` from murmur `a9ea4726` or later; see its [README](./tools/tool-computer/README.md) |
 
 ## Skills

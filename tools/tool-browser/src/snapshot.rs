@@ -53,6 +53,38 @@ impl Refs {
     pub fn backend(&self, r: u32) -> Option<i64> {
         self.by_ref.get(&r).copied()
     }
+
+    /// The refs as `state.json` keeps them: `eN` → backend node id, the last number given, and
+    /// the document they belong to.
+    pub fn save(&self) -> (std::collections::BTreeMap<String, i64>, u32, Option<i64>) {
+        let map = self
+            .by_ref
+            .iter()
+            .map(|(r, b)| (format!("e{r}"), *b))
+            .collect();
+        (map, self.next, self.document)
+    }
+
+    /// The refs [`Refs::save`] gave; an entry that is not `eN` is dropped.
+    pub fn restore(
+        map: &std::collections::BTreeMap<String, i64>,
+        next: u32,
+        document: Option<i64>,
+    ) -> Self {
+        let mut refs = Self {
+            document,
+            next,
+            ..Self::default()
+        };
+        for (name, backend) in map {
+            if let Some(r) = crate::request::parse_ref(name) {
+                refs.by_ref.insert(r, *backend);
+                refs.by_backend.insert(*backend, r);
+                refs.next = refs.next.max(r);
+            }
+        }
+        refs
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -348,6 +380,27 @@ mod tests {
         // A new document restarts at e1.
         assert!(refs.enter_document(Some(99)));
         assert_eq!(refs.backend(2), None);
+    }
+
+    #[test]
+    fn refs_survive_a_save_and_restore() {
+        let mut refs = Refs::default();
+        refs.enter_document(Some(9));
+        refs.assign(100);
+        refs.assign(200);
+        let (map, next, doc) = refs.save();
+        assert_eq!(map.get("e2"), Some(&200));
+        let mut back = Refs::restore(&map, next, doc);
+        assert_eq!(
+            (back.backend(1), back.backend(2), back.document()),
+            (Some(100), Some(200), Some(9))
+        );
+        assert!(
+            !back.enter_document(Some(9)),
+            "the same document keeps its refs"
+        );
+        assert_eq!(back.assign(200), 2);
+        assert_eq!(back.assign(300), 3);
     }
 
     #[test]

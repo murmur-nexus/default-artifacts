@@ -1,19 +1,25 @@
-//! `tool-browser` under a real `mur run`: the grant, the browser start inside the capsule's
-//! containment, and the fence murmur puts around the result.
+//! `tool-browser` under a real `mur run`: the grant, Chrome started as a session process inside
+//! the capsule's containment on the `scoped` and `sealed` tiers, the fence murmur puts around
+//! every result, the screenshot reaching the model, and nothing left running after the session.
 //!
 //! The test drives the real `mur` binary as a subprocess with `HOME` pointed at a scratch
 //! directory, against a loopback fake Chat Completions provider that scripts the model's tool
-//! calls and records every request body. `driver-openai` (wasm32-wasip2) and `tool-browser`
-//! (native) are built out of this workspace on every run; `mur` comes from `MUR_BIN` or `PATH`,
-//! and a run that finds neither fails rather than skipping. So does a host with no browser.
+//! calls and records every request body. `driver-openai` and `tool-browser` (both
+//! wasm32-wasip2) are built out of this workspace and packed by `scripts/package-artifact.sh`
+//! on every run. `mur` comes from `MUR_BIN` and must report WIT level 4 or higher, the first
+//! with `murmur:process`; a run without one fails rather than skipping.
 //!
-//! The page is a file in the work folder rather than a loopback server: a native tool runs in
-//! the session's network namespace, whose loopback is not the host's, so a server this test
-//! started on the host's `127.0.0.1` is out of the browser's reach.
+//! The browser is `TOOL_BROWSER_TEST_CHROME`, which must be `chrome-headless-shell`: full Chrome
+//! and Chromium cannot start on the scoped and sealed tiers. The test links it as `chromium` in
+//! its own directory (the sealed tier's composed root binds only the resolved binary's
+//! directory) and puts that directory first on `PATH`.
+//!
+//! The page is a file in the work folder rather than a loopback server: Chrome runs in the
+//! session's network namespace, whose loopback is not the host's.
 //!
 //! `#[ignore]`d because the default `cargo test --workspace` has no `mur` to launch.
-//! `MUR_BIN=$(command -v mur) cargo test -p tool-browser --test mur_run_browser -- --ignored
-//! --nocapture` runs it.
+//! `MUR_BIN=<level-4 mur> TOOL_BROWSER_TEST_CHROME=<chrome-headless-shell> cargo test -p
+//! tool-browser --test mur_run_browser -- --ignored --nocapture` runs it.
 
 #![cfg(target_os = "linux")]
 
@@ -42,25 +48,30 @@ const NO_GRANT_LINE: &str = "tool-browser needs a browser: add one of chromium, 
 // ── the runtime under test ───────────────────────────────────────────────────
 
 fn mur_binary() -> PathBuf {
-    if let Some(explicit) = std::env::var_os("MUR_BIN") {
-        let path = PathBuf::from(explicit);
-        assert!(
-            is_executable(&path),
-            "MUR_BIN names {}, which is not executable",
-            path.display()
-        );
-        return path;
-    }
-    let path_var = std::env::var_os("PATH").unwrap_or_default();
-    std::env::split_paths(&path_var)
-        .map(|dir| dir.join("mur"))
-        .find(|candidate| is_executable(candidate))
-        .unwrap_or_else(|| {
-            panic!(
-                "no `mur` binary: set MUR_BIN to one, or put it on PATH. This test launches the \
-                 runtime as a subprocess, so a missing binary is a failure rather than a skip."
-            )
-        })
+    let path = PathBuf::from(std::env::var_os("MUR_BIN").unwrap_or_else(|| {
+        panic!(
+            "set MUR_BIN to a mur whose `mur version` reports WIT level 4 or higher. This test \
+             launches the runtime as a subprocess, so a missing binary is a failure rather than a \
+             skip."
+        )
+    }));
+    assert!(
+        is_executable(&path),
+        "MUR_BIN names {}, which is not executable",
+        path.display()
+    );
+    let version = Command::new(&path).arg("version").output().unwrap();
+    let text = String::from_utf8_lossy(&version.stdout).into_owned();
+    let level: u32 = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("WIT level "))
+        .and_then(|l| l.trim().parse().ok())
+        .unwrap_or(0);
+    assert!(
+        level >= 4,
+        "MUR_BIN must report WIT level 4 or higher (murmur:process); it reports:\n{text}"
+    );
+    path
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -87,12 +98,6 @@ fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-fn target_dir() -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace_root().join("target"))
-}
-
 fn manifest_field(manifest: &str, key: &str) -> String {
     let prefix = format!("{key}:");
     manifest
@@ -102,63 +107,43 @@ fn manifest_field(manifest: &str, key: &str) -> String {
         .unwrap_or_else(|| panic!("no top-level `{key}:` in murmur.yaml"))
 }
 
-/// Build and pack the artifact at `crate_dir`; returns its version and zip.
-fn pack(crate_dir: &str, native: bool, out_dir: &Path) -> (String, PathBuf) {
+/// The `PATH` with `mur`'s directory first, so `scripts/package-artifact.sh` packs with it.
+fn path_with_mur() -> String {
+    format!(
+        "{}:{}",
+        mur_binary().parent().unwrap().display(),
+        std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
+    )
+}
+
+/// Build the wasm artifact at `crate_dir` and pack it; returns its version and zip.
+fn pack(crate_dir: &str, out_dir: &Path) -> (String, PathBuf) {
     let crate_path = workspace_root().join(crate_dir);
     let manifest = fs::read_to_string(crate_path.join("murmur.yaml")).unwrap();
     let name = manifest_field(&manifest, "name");
     let version = manifest_field(&manifest, "version");
-    let mut build = Command::new(env!("CARGO"));
-    build
+    let built = Command::new(env!("CARGO"))
         .current_dir(workspace_root())
-        .args(["build", "-p", &name, "--release"]);
-    if !native {
-        build.args(["--target", "wasm32-wasip2"]);
-    }
-    assert!(
-        build.status().unwrap().success(),
-        "cargo build of {name} failed"
-    );
-    let payload = if native {
-        target_dir().join("release").join(&name)
-    } else {
-        target_dir()
-            .join("wasm32-wasip2/release")
-            .join(format!("{}.wasm", name.replace('-', "_")))
-    };
-    assert!(
-        payload.exists(),
-        "{} not found after a successful build",
-        payload.display()
-    );
-    let package = |dir: &Path| {
-        Command::new("bash")
-            .arg(workspace_root().join("scripts/package-artifact.sh"))
-            .arg(dir)
-            .arg(out_dir)
-            .arg("--payload")
-            .arg(&payload)
-            .env("MUR_BIN", mur_binary())
-            .output()
-            .expect("failed to spawn scripts/package-artifact.sh")
-    };
-    let mut output = package(&crate_path);
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    if !output.status.success() && stderr.contains("E-BLD-005") && stderr.contains(".vision") {
-        // A `mur` older than the driver's `models.<id>.vision` key refuses to pack it. The key
-        // only says which models read images, which this test does not use, so pack a copy
-        // without it rather than require a newer `mur`.
-        println!("note: this mur predates `models.<id>.vision`; packing {name} without it");
-        let copy = out_dir.join("unvisioned").join(&name);
-        fs::create_dir_all(&copy).unwrap();
-        let stripped: String = manifest
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("vision:"))
-            .map(|l| format!("{l}\n"))
-            .collect();
-        fs::write(copy.join("murmur.yaml"), stripped).unwrap();
-        output = package(&copy);
-    }
+        .args([
+            "build",
+            "-p",
+            &name,
+            "--release",
+            "--target",
+            "wasm32-wasip2",
+        ])
+        .status()
+        .unwrap();
+    assert!(built.success(), "cargo build of {name} failed");
+    let output = Command::new("bash")
+        .current_dir(workspace_root())
+        .arg(workspace_root().join("scripts/package-artifact.sh"))
+        .arg(crate_dir)
+        .arg(out_dir)
+        .env("MUR_BIN", mur_binary())
+        .env("PATH", path_with_mur())
+        .output()
+        .expect("failed to spawn scripts/package-artifact.sh");
     assert!(
         output.status.success(),
         "packing {name} failed: {}",
@@ -175,39 +160,44 @@ fn pack(crate_dir: &str, native: bool, out_dir: &Path) -> (String, PathBuf) {
     (version, zip)
 }
 
-/// A released `driver-openai` zip, for a `mur` older than the workspace driver's WIT: such a
-/// `mur` refuses the workspace build at launch with `E-RUN-007` ("missing export").
-fn driver_from_zip(zip: PathBuf) -> (String, PathBuf) {
-    assert!(
-        zip.is_file(),
-        "TOOL_BROWSER_DRIVER_ZIP names {}, which is not a file",
-        zip.display()
-    );
-    let name = zip.file_name().unwrap().to_string_lossy().into_owned();
-    let version = name
-        .strip_prefix("driver-openai-")
-        .and_then(|v| v.strip_suffix(".mur.zip"))
-        .unwrap_or_else(|| {
-            panic!("TOOL_BROWSER_DRIVER_ZIP must name a driver-openai-<x.y.z>.mur.zip")
-        })
-        .to_string();
-    println!("note: using the driver in {}", zip.display());
-    (version, zip)
-}
-
 // ── staging ──────────────────────────────────────────────────────────────────
+
+/// The headless shell, linked as `chromium` in its own directory; returns that directory.
+fn browser_dir() -> PathBuf {
+    let explicit = std::env::var_os("TOOL_BROWSER_TEST_CHROME").unwrap_or_else(|| {
+        panic!("set TOOL_BROWSER_TEST_CHROME to a chrome-headless-shell binary")
+    });
+    let binary = PathBuf::from(explicit).canonicalize().unwrap();
+    assert!(
+        binary
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().contains("headless-shell")),
+        "TOOL_BROWSER_TEST_CHROME must be chrome-headless-shell: full Chrome and Chromium cannot \
+         start on the scoped and sealed tiers ({})",
+        binary.display()
+    );
+    let dir = binary.parent().unwrap().to_path_buf();
+    let link = dir.join("chromium");
+    if !link.exists() {
+        std::os::unix::fs::symlink(binary.file_name().unwrap(), &link).unwrap_or_else(|e| {
+            panic!(
+                "cannot link {} as chromium: {e}; link it by hand",
+                binary.display()
+            )
+        });
+    }
+    dir
+}
 
 struct Staging {
     home: TempDir,
     project: TempDir,
     driver_version: String,
     tool_version: String,
-    /// The `PATH` `mur run` starts with: the test browser's directory first.
+    /// The `PATH` `mur run` starts with: the browser's directory first.
     path: String,
-    /// The name the capsule grants, which resolves to the test browser on `path`.
-    browser_name: String,
+    browser_dir: PathBuf,
     _artifacts: TempDir,
-    _bin: TempDir,
 }
 
 impl Staging {
@@ -237,6 +227,7 @@ impl Staging {
                  gateway:\n      endpoint: {endpoint}\n      api_key: test-key\n\
                  \x20 - name: local/tool-browser\n    version: {}\n    runtime: tool\n\
                  capabilities:\n{capabilities}\
+                 trace:\n  capture: content\n\
                  inference:\n  transport: http\n  model: chat-latest\n  max_tokens: 4000\n  \
                  driver:\n    artifact: local/driver-openai\n",
                 self.driver_version, self.tool_version
@@ -252,33 +243,50 @@ impl Staging {
             "--manifest",
             self.manifest(name).to_str().unwrap(),
             "--task",
-            "open page.html and report its console errors",
+            "open page.html, read its console and take a screenshot",
             "--workdir",
             self.workdir(name).to_str().unwrap(),
         ]);
         command.args(extra);
         command.output().expect("spawning `mur run`")
     }
+
+    /// The trace lines of every session this staging ran with `workdir`.
+    fn trace(&self, workdir: &Path) -> Vec<Value> {
+        let mut lines = Vec::new();
+        let mut stack = vec![self.home.path().join(".murmur")];
+        while let Some(dir) = stack.pop() {
+            for e in fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.file_name().is_some_and(|n| n == "trace.jsonl") {
+                    let text = fs::read_to_string(&p).unwrap_or_default();
+                    let parsed: Vec<Value> = text
+                        .lines()
+                        .filter_map(|l| serde_json::from_str(l).ok())
+                        .collect();
+                    if text.contains(&*workdir.to_string_lossy())
+                        || p.to_string_lossy()
+                            .contains(&*workdir.file_name().unwrap().to_string_lossy())
+                    {
+                        lines.extend(parsed);
+                    }
+                }
+            }
+        }
+        lines
+    }
 }
 
 fn stage() -> Staging {
     let artifacts = tempfile::tempdir().unwrap();
-    let (driver_version, driver_zip) = match std::env::var_os("TOOL_BROWSER_DRIVER_ZIP") {
-        Some(zip) => driver_from_zip(PathBuf::from(zip)),
-        None => pack("drivers/driver-openai", false, artifacts.path()),
-    };
-    let (tool_version, tool_zip) = pack("tools/tool-browser", true, artifacts.path());
-
-    // The capsule's PATH puts the test browser first under the name it is found by.
-    let browser = common::test_browser();
-    let bin = tempfile::tempdir().unwrap();
-    let browser_name = common::name_on_path(&browser).unwrap_or_else(|| {
-        std::os::unix::fs::symlink(&browser, bin.path().join("chromium")).unwrap();
-        "chromium".to_string()
-    });
+    let (driver_version, driver_zip) = pack("drivers/driver-openai", artifacts.path());
+    let (tool_version, tool_zip) = pack("tools/tool-browser", artifacts.path());
+    let browser_dir = browser_dir();
     let path = format!(
         "{}:{}",
-        bin.path().display(),
+        browser_dir.display(),
         std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
     );
     let staging = Staging {
@@ -287,9 +295,8 @@ fn stage() -> Staging {
         driver_version,
         tool_version,
         path,
-        browser_name,
+        browser_dir,
         _artifacts: artifacts,
-        _bin: bin,
     };
     // `mur install` installs into the project whose murmur.yaml it finds.
     staging.write_manifest("murmur", "http://127.0.0.1:1/v1", "");
@@ -466,24 +473,11 @@ fn result_of<'a>(results: &'a [(String, String)], id: &str) -> &'a str {
 
 const FENCE_OPEN: &str = "<untrusted-content source=tool:tool-browser>";
 
-/// A granted capsule opens a work-folder page inside its containment, reads `boom-load` from
-/// the console through the fence, and saves a screenshot; a capsule without the grant gets the
-/// one no-grant line, fenced.
-#[test]
-#[ignore = "launches the real mur binary; run with --ignored"]
-fn granted_capsule_reads_console_through_the_fence_and_ungranted_gets_one_line() {
-    let staging = stage();
-    // The grants the README gives for a browser binary on the Full and Sealed tiers: its own
-    // directory (resources, ICU data), /proc, and the fonts.
-    let browser_dir = common::test_browser()
-        .canonicalize()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .display()
-        .to_string();
+/// What `capabilities.containment: <tier>` grants a browser: `chromium` in `shell.allow`, the
+/// README's `interpreter_runtime` dirs (its own directory, `/proc`, the fonts) and resources.
+fn granted_capabilities(staging: &Staging, tier: &str) -> String {
     let dirs: String = [
-        browser_dir.as_str(),
+        staging.browser_dir.display().to_string().as_str(),
         "/proc",
         "/etc/fonts",
         "/usr/share/fonts",
@@ -491,53 +485,97 @@ fn granted_capsule_reads_console_through_the_fence_and_ungranted_gets_one_line()
     .iter()
     .map(|d| format!("          - path: {d}\n            list_dir: true\n"))
     .collect();
-    let granted = format!(
-        "  shell:\n    allow:\n      - {name}\n    interpreter_runtime:\n      - binary: {name}\n        dirs:\n{dirs}{RESOURCES}",
-        name = staging.browser_name
-    );
+    format!(
+        "  containment: {tier}\n  shell:\n    allow:\n      - chromium\n    interpreter_runtime:\n      - binary: chromium\n        dirs:\n{dirs}{RESOURCES}"
+    )
+}
+
+/// Print the tail of every `browser.log`; with `TOOL_BROWSER_KEEP_LOGS=<dir>`, copy each there.
+fn print_browser_logs(workdir: &Path) {
+    let keep = std::env::var_os("TOOL_BROWSER_KEEP_LOGS").map(PathBuf::from);
+    for e in fs::read_dir(workdir.join(".tool-browser"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        if let Some(keep) = &keep {
+            let _ = fs::create_dir_all(keep);
+            let _ = fs::copy(
+                e.path().join("browser.log"),
+                keep.join(format!(
+                    "{}-{}.log",
+                    workdir.file_name().unwrap().to_string_lossy(),
+                    e.file_name().to_string_lossy()
+                )),
+            );
+        }
+        if let Ok(log) = fs::read_to_string(e.path().join("browser.log")) {
+            let tail: Vec<&str> = log.lines().rev().take(60).collect();
+            println!(
+                "--- {}/browser.log (last {} lines) ---",
+                e.path().display(),
+                tail.len()
+            );
+            for line in tail.into_iter().rev() {
+                println!("{line}");
+            }
+        }
+    }
+}
+
+/// One granted session on `tier`: open → console → screenshot, all inside the fence, the image
+/// in the next request, the browser a session process murmur kills at the session's end.
+fn granted_session(staging: &Staging, tier: &str) {
+    let name = format!("granted-{tier}");
     let provider = Provider::start(scripted_calls());
-    staging.write_manifest("granted", &provider.endpoint, &granted);
-    let workdir = staging.workdir("granted");
+    staging.write_manifest(
+        &name,
+        &provider.endpoint,
+        &granted_capabilities(staging, tier),
+    );
+    let workdir = staging.workdir(&name);
     fs::create_dir_all(&workdir).unwrap();
     fs::write(workdir.join("page.html"), common::FIXTURE_PAGE).unwrap();
 
-    let scope = staging.run("granted", &["--explain-scope"]);
+    let scope = staging.run(&name, &["--explain-scope"]);
     let scope_text = combined(&scope);
-    let tier = scope_text
+    let achieved: Vec<&str> = scope_text
         .lines()
-        .find(|l| l.to_ascii_lowercase().contains("achieved"))
-        .unwrap_or("(no achieved line)")
-        .trim()
-        .to_string();
-    println!("--- mur run --explain-scope ---\n{scope_text}");
-    println!("achieved tier: {tier}");
+        .filter(|l| {
+            let l = l.to_ascii_lowercase();
+            l.contains("achieved") || l.contains("tier")
+        })
+        .collect();
+    println!("--- {tier}: mur run --explain-scope (tier lines) ---");
+    for line in &achieved {
+        println!("{line}");
+    }
 
-    let output = staging.run("granted", &[]);
+    let output = staging.run(&name, &[]);
     let text = combined(&output);
-    println!("--- granted run ---\n{text}");
-    assert!(
-        !text.contains("missing export murmur:tool/run"),
-        "this mur is older than the workspace driver's WIT: set TOOL_BROWSER_DRIVER_ZIP to a \
-         driver-openai zip built for it (e.g. ~/.murmur/artifacts/murmur/driver-openai/<v>/...)"
-    );
+    println!("--- {tier}: granted run ---\n{text}");
     let results = tool_results(&provider.last_request());
     for (id, content) in &results {
         println!("{id}: {content}");
     }
+    print_browser_logs(&workdir);
     assert!(
         output.status.success(),
-        "the granted session must succeed:\n{text}"
+        "the granted session on {tier} must succeed:\n{text}"
     );
     let opened = result_of(&results, "call_1");
+    assert!(opened.contains(FENCE_OPEN), "open is fenced: {opened}");
     assert!(
-        opened.contains("page: Fixture Page"),
-        "open returns the page: {opened}"
+        opened.contains("page: Fixture Page — file://"),
+        "open returns the page on {tier}: {opened}"
+    );
+    assert!(
+        opened.contains("browser: chromium ")
+            && opened.contains(", local, headless; Chrome sandbox "),
+        "open carries the banner: {opened}"
     );
     let console = result_of(&results, "call_2");
-    assert!(
-        console.contains(FENCE_OPEN),
-        "the console result is fenced: {console}"
-    );
+    assert!(console.contains(FENCE_OPEN), "console is fenced: {console}");
     let inside = &console[console.find(FENCE_OPEN).unwrap() + FENCE_OPEN.len()..];
     assert!(
         inside.contains("[error] boom-load"),
@@ -545,22 +583,75 @@ fn granted_capsule_reads_console_through_the_fence_and_ungranted_gets_one_line()
     );
     let shot = result_of(&results, "call_3");
     assert!(
-        shot.contains("saved .tool-browser/"),
+        shot.contains("saved .tool-browser/") && shot.contains("(1280x800, "),
         "the screenshot is saved: {shot}"
     );
+    let last = provider.last_request();
     assert!(
-        fs::read_dir(workdir.join(".tool-browser"))
-            .unwrap()
-            .flatten()
-            .any(|session| {
-                fs::read_dir(session.path())
-                    .into_iter()
-                    .flatten()
-                    .flatten()
-                    .any(|f| f.file_name().to_string_lossy().ends_with(".png"))
-            }),
-        "a screenshot PNG is in the work folder"
+        last.contains("data:image/png;base64,"),
+        "the request after the screenshot carries the image"
     );
+
+    let trace = staging.trace(&workdir);
+    let starts: Vec<&Value> = trace
+        .iter()
+        .filter(|l| l["event_type"] == "process_start" && l["name"] == "browser")
+        .collect();
+    // Two when Chrome's own sandbox could not start and it ran again with --no-sandbox.
+    assert!(
+        (1..=2).contains(&starts.len()),
+        "a process_start for browser on {tier}: {starts:?}"
+    );
+    for start in &starts {
+        println!("process_start: {start}");
+    }
+    let exits: Vec<&Value> = trace
+        .iter()
+        .filter(|l| l["event_type"] == "process_exit" && l["name"] == "browser")
+        .collect();
+    assert!(
+        exits.iter().any(|l| l["reason"] == "session_end"),
+        "process_exit with reason session_end on {tier}: {exits:?}"
+    );
+    for exit in &exits {
+        println!("process_exit: {exit}");
+    }
+    assert_eq!(
+        exits
+            .iter()
+            .filter(|l| l["reason"] == "session_end")
+            .count(),
+        1,
+        "exactly one browser ran until the session's end on {tier}"
+    );
+    let refused: Vec<&Value> = trace
+        .iter()
+        .filter(|l| l["event_type"] == "process_refused")
+        .collect();
+    assert!(refused.is_empty(), "no process_refused: {refused:?}");
+    let attachments: Vec<&Value> = trace
+        .iter()
+        .filter(|l| l.to_string().contains("screenshot-1.png"))
+        .collect();
+    println!("trace lines naming screenshot-1.png: {}", attachments.len());
+
+    let left = common::pids_mentioning(&format!("{}/.tool-browser/", workdir.display()));
+    let rel_left = common::pids_mentioning("--user-data-dir=.tool-browser/");
+    assert!(
+        left.is_empty() && rel_left.is_empty(),
+        "no process names .tool-browser/ after mur run exits on {tier}: {left:?} {rel_left:?}"
+    );
+}
+
+/// A granted capsule runs the browser on `scoped` and on `sealed`; a capsule without the grant
+/// gets the one no-grant line, fenced.
+#[test]
+#[ignore = "launches the real mur binary; run with --ignored"]
+fn browser_runs_on_scoped_and_sealed_and_ungranted_gets_one_line() {
+    let staging = stage();
+    for tier in ["scoped", "sealed"] {
+        granted_session(&staging, tier);
+    }
 
     // Without the grant: exactly the one line, fenced, and nothing in the work folder.
     let provider = Provider::start(vec![json!({"action": "open", "url": "page.html"})]);
@@ -584,9 +675,9 @@ fn granted_capsule_reads_console_through_the_fence_and_ungranted_gets_one_line()
         .next()
         .unwrap_or("")
         .trim();
-    assert!(
-        inside.ends_with(NO_GRANT_LINE) && inside.matches(NO_GRANT_LINE).count() >= 1,
-        "the fence holds the no-grant line: {refused}"
+    assert_eq!(
+        inside, NO_GRANT_LINE,
+        "the fence holds exactly the no-grant line"
     );
     assert!(
         !workdir.join(".tool-browser").exists(),

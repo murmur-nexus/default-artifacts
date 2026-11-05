@@ -1,295 +1,254 @@
-//! The DevTools protocol over one WebSocket: commands answered by id, and the page events the
-//! tool keeps between calls.
+//! The DevTools protocol over one WebSocket, for the length of one call: commands answered by
+//! id, and the page events folded into what the tool keeps between calls.
 //!
-//! One I/O thread owns the socket. Commands reach it through a channel; responses and events
-//! land in [`State`] behind a mutex, and callers wait on a condition variable. The thread also
-//! dismisses a JavaScript dialog the moment one opens, because every other command on the page
-//! blocks until it is gone.
+//! There is one thread. A command is sent, then messages are read until its answer arrives;
+//! every event read on the way is folded into [`Events`]. A JavaScript dialog is dismissed the
+//! moment it opens, because every other command on the page blocks until it is gone.
+//!
+//! `Runtime.enable` and `Log.enable` make Chrome replay the current document's stored console
+//! messages, exceptions and log entries to every new DevTools session, and every call opens a
+//! new one. Each such event is folded into a fingerprint (see [`fingerprint`]); one already
+//! recorded in `state.json` is skipped, so an entry is reported once.
 
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        mpsc, Arc, Condvar, Mutex, MutexGuard,
-    },
-    thread,
-    time::{Duration, Instant},
-};
+use std::collections::HashMap;
 
 use serde_json::{json, Value};
 
 use crate::{
-    buffers::{LogBuffer, CONSOLE_CAP, NETWORK_CAP},
-    ws::{Message, WebSocket, WsUrl},
+    host::Clock,
+    state::PageLog,
+    ws::{Message, WebSocket},
 };
 
 /// How long one DevTools command may take before the call gives up on it.
-pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+pub const COMMAND_TIMEOUT_MS: u64 = 30_000;
+/// The longest text a fingerprint keeps of an entry.
+pub const FINGERPRINT_TEXT_CHARS: usize = 200;
 
-/// Everything the I/O thread records.
-#[derive(Debug)]
-pub struct State {
-    responses: HashMap<u64, Result<Value, String>>,
-    /// Why the connection ended, once it has.
-    pub closed: Option<String>,
+/// What this call has seen on the page, plus the [`PageLog`] carried between calls.
+#[derive(Debug, Default)]
+pub struct Events {
     /// The flattened session of the page this tool drives.
     pub page_session: Option<String>,
     /// The page's main frame id, which is its target id.
     pub main_frame: Option<String>,
     pub load_events: u64,
     pub main_loading: bool,
-    pub console: LogBuffer,
-    pub network: LogBuffer,
-    /// Console errors, exceptions and error log entries seen since the connection opened.
-    pub errors: u64,
-    /// Dialogs dismissed since the last change summary, already formatted.
+    /// Dialogs dismissed during this call, already formatted.
     pub dialogs: Vec<String>,
-    /// `requestId` → `(method, url)` for requests still in flight.
+    /// Why the connection ended, once it has.
+    pub closed: Option<String>,
+    pub log: PageLog,
+    /// `requestId` → `(method, url)` for requests seen starting in this call.
     requests: HashMap<String, (String, String)>,
 }
 
-impl State {
-    fn new() -> Self {
+impl Events {
+    pub fn new(log: PageLog) -> Self {
         Self {
+            log,
+            ..Self::default()
+        }
+    }
+}
+
+pub struct Cdp<'a> {
+    ws: WebSocket<'a>,
+    clock: &'a dyn Clock,
+    next_id: u64,
+    /// The call's end, on `clock`.
+    deadline_ms: u64,
+    responses: HashMap<u64, Result<Value, String>>,
+    pub ev: Events,
+}
+
+pub const OUT_OF_TIME: &str = "tool-browser: the call ran out of its 90 s";
+
+impl<'a> Cdp<'a> {
+    pub fn new(ws: WebSocket<'a>, clock: &'a dyn Clock, deadline_ms: u64, log: PageLog) -> Self {
+        Self {
+            ws,
+            clock,
+            next_id: 1,
+            deadline_ms,
             responses: HashMap::new(),
-            closed: None,
-            page_session: None,
-            main_frame: None,
-            load_events: 0,
-            main_loading: false,
-            console: LogBuffer::new(CONSOLE_CAP),
-            network: LogBuffer::new(NETWORK_CAP),
-            errors: 0,
-            dialogs: Vec::new(),
-            requests: HashMap::new(),
-        }
-    }
-}
-
-enum Outgoing {
-    Text(String),
-    Close,
-}
-
-struct Shared {
-    state: Mutex<State>,
-    cond: Condvar,
-}
-
-pub struct Cdp {
-    tx: mpsc::Sender<Outgoing>,
-    shared: Arc<Shared>,
-    next_id: Arc<AtomicU64>,
-    /// The timeout of [`Cdp::browser`] and [`Cdp::page`], in milliseconds.
-    timeout_ms: AtomicU64,
-}
-
-impl Cdp {
-    pub fn connect(url: &str) -> Result<Self, String> {
-        let url = WsUrl::parse(url)?;
-        let ws = WebSocket::connect(&url, Duration::from_millis(15))?;
-        let shared = Arc::new(Shared {
-            state: Mutex::new(State::new()),
-            cond: Condvar::new(),
-        });
-        let next_id = Arc::new(AtomicU64::new(1));
-        let (tx, rx) = mpsc::channel();
-        {
-            let shared = Arc::clone(&shared);
-            let next_id = Arc::clone(&next_id);
-            thread::Builder::new()
-                .name("cdp-io".into())
-                .spawn(move || io_loop(ws, rx, &shared, &next_id))
-                .map_err(|e| format!("cannot start the DevTools reader: {e}"))?;
-        }
-        Ok(Self {
-            tx,
-            shared,
-            next_id,
-            timeout_ms: AtomicU64::new(COMMAND_TIMEOUT.as_millis() as u64),
-        })
-    }
-
-    pub fn state(&self) -> MutexGuard<'_, State> {
-        self.shared
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Wait until `ready` holds or `deadline` passes; true when it held.
-    pub fn wait_until(&self, deadline: Instant, ready: impl Fn(&State) -> bool) -> bool {
-        let mut state = self.state();
-        loop {
-            if ready(&state) {
-                return true;
-            }
-            if state.closed.is_some() {
-                return false;
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return false;
-            }
-            state = self
-                .shared
-                .cond
-                .wait_timeout(state, deadline - now)
-                .unwrap_or_else(|p| p.into_inner())
-                .0;
+            ev: Events::new(log),
         }
     }
 
-    /// Set the timeout of later [`Cdp::browser`] and [`Cdp::page`] commands.
-    pub fn set_timeout(&self, timeout: Duration) {
-        self.timeout_ms
-            .store(timeout.as_millis() as u64, Ordering::SeqCst);
-    }
-
-    fn timeout(&self) -> Duration {
-        Duration::from_millis(self.timeout_ms.load(Ordering::SeqCst))
+    pub fn clock(&self) -> &'a dyn Clock {
+        self.clock
     }
 
     /// A browser-level command.
-    pub fn browser(&self, method: &str, params: Value) -> Result<Value, String> {
-        self.command(None, method, params, self.timeout())
+    pub fn browser(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        self.command(None, method, params, COMMAND_TIMEOUT_MS)
     }
 
     /// A command on the page session.
-    pub fn page(&self, method: &str, params: Value) -> Result<Value, String> {
-        let session = self
-            .state()
-            .page_session
-            .clone()
-            .ok_or("no page is attached")?;
-        self.command(Some(&session), method, params, self.timeout())
+    pub fn page(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        let session = self.ev.page_session.clone().ok_or("no page is attached")?;
+        self.command(Some(&session), method, params, COMMAND_TIMEOUT_MS)
     }
 
-    pub fn command(
-        &self,
-        session: Option<&str>,
-        method: &str,
-        params: Value,
-        timeout: Duration,
-    ) -> Result<Value, String> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+    fn send(&mut self, session: Option<&str>, method: &str, params: Value) -> Result<u64, String> {
+        if let Some(reason) = &self.ev.closed {
+            return Err(format!("the browser connection is closed ({reason})"));
+        }
+        let id = self.next_id;
+        self.next_id += 1;
         let mut message = json!({"id": id, "method": method, "params": params});
         if let Some(session) = session {
             message["sessionId"] = json!(session);
         }
-        if let Some(reason) = &self.state().closed {
-            return Err(format!("the browser connection is closed ({reason})"));
+        if let Err(e) = self.ws.send_text(&message.to_string()) {
+            self.ev.closed = Some(e.to_string());
+            return Err(format!("the browser connection is closed ({e})"));
         }
-        self.tx
-            .send(Outgoing::Text(message.to_string()))
-            .map_err(|_| "the browser connection is closed".to_string())?;
-        let deadline = Instant::now() + timeout;
-        let mut state = self.state();
+        Ok(id)
+    }
+
+    pub fn command(
+        &mut self,
+        session: Option<&str>,
+        method: &str,
+        params: Value,
+        timeout_ms: u64,
+    ) -> Result<Value, String> {
+        let id = self.send(session, method, params)?;
+        let until = self.clock.now_ms() + timeout_ms;
         loop {
-            if let Some(result) = state.responses.remove(&id) {
+            if let Some(result) = self.responses.remove(&id) {
                 return result.map_err(|e| format!("{method}: {e}"));
             }
-            if let Some(reason) = &state.closed {
+            if let Some(reason) = &self.ev.closed {
                 return Err(format!(
                     "the browser connection closed during {method} ({reason})"
                 ));
             }
-            let now = Instant::now();
-            if now >= deadline {
+            let now = self.clock.now_ms();
+            if now >= self.deadline_ms {
+                return Err(OUT_OF_TIME.into());
+            }
+            if now >= until {
                 return Err(format!(
                     "{method} got no answer from the browser within {} s",
-                    timeout.as_secs_f64()
+                    timeout_ms as f64 / 1000.0
                 ));
             }
-            state = self
-                .shared
-                .cond
-                .wait_timeout(state, deadline - now)
-                .unwrap_or_else(|p| p.into_inner())
-                .0;
+            self.read_one(until.min(self.deadline_ms) - now);
         }
     }
 
-    /// Close the socket; later commands fail at once.
-    pub fn disconnect(&self) {
-        let _ = self.tx.send(Outgoing::Close);
-    }
-}
-
-fn io_loop(mut ws: WebSocket, rx: mpsc::Receiver<Outgoing>, shared: &Shared, next_id: &AtomicU64) {
-    let reason = loop {
-        let mut stop = None;
+    /// Read events until `ready` holds or `until_ms` passes; true when it held.
+    pub fn wait_until(&mut self, until_ms: u64, ready: impl Fn(&Events) -> bool) -> bool {
         loop {
-            match rx.try_recv() {
-                Ok(Outgoing::Text(text)) => {
-                    if let Err(e) = ws.send_text(&text) {
-                        stop = Some(e.to_string());
-                        break;
-                    }
-                }
-                Ok(Outgoing::Close) => {
-                    ws.close();
-                    stop = Some("disconnected".to_string());
-                    break;
-                }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    ws.close();
-                    stop = Some("disconnected".to_string());
-                    break;
-                }
+            if ready(&self.ev) {
+                return true;
             }
+            if self.ev.closed.is_some() {
+                return false;
+            }
+            let now = self.clock.now_ms();
+            let end = until_ms.min(self.deadline_ms);
+            if now >= end {
+                return false;
+            }
+            self.read_one((end - now).min(100));
         }
-        if let Some(reason) = stop {
-            break reason;
-        }
-        match ws.poll() {
-            Ok(None) => {}
+    }
+
+    /// Sleep `ms` while folding whatever events arrive.
+    pub fn pump(&mut self, ms: u64) {
+        let until = self.clock.now_ms() + ms;
+        self.wait_until(until, |_| false);
+    }
+
+    /// Read and handle at most one message, waiting up to `wait_ms`.
+    fn read_one(&mut self, wait_ms: u64) {
+        match self.ws.poll(wait_ms.clamp(1, 1_000) as u32) {
+            Ok(None) | Ok(Some(Message::Binary(_))) => {}
             Ok(Some(Message::Text(text))) => {
                 let Ok(value) = serde_json::from_str::<Value>(&text) else {
-                    continue;
+                    return;
                 };
-                let mut state = shared.state.lock().unwrap_or_else(|p| p.into_inner());
-                if let Some(dismiss) = handle_message(&mut state, value) {
-                    let id = next_id.fetch_add(1, Ordering::SeqCst);
-                    let mut msg = json!({"id": id, "method": "Page.handleJavaScriptDialog", "params": {"accept": false}});
-                    msg["sessionId"] = json!(dismiss);
-                    drop(state);
-                    if let Err(e) = ws.send_text(&msg.to_string()) {
-                        break e.to_string();
-                    }
+                if let Some(id) = value.get("id").and_then(Value::as_u64) {
+                    self.responses.insert(id, response_of(&value));
+                    return;
                 }
-                shared.cond.notify_all();
+                if let Some(dismiss) = handle_event(&mut self.ev, &value) {
+                    // The answer is never waited for; a stray response is dropped.
+                    let _ = self.send(
+                        Some(&dismiss),
+                        "Page.handleJavaScriptDialog",
+                        json!({"accept": false}),
+                    );
+                }
             }
-            Ok(Some(Message::Binary(_))) => {}
-            Err(e) => break e.to_string(),
+            Err(e) => self.ev.closed = Some(e.to_string()),
         }
-    };
-    let mut state = shared.state.lock().unwrap_or_else(|p| p.into_inner());
-    state.closed = Some(reason);
-    drop(state);
-    shared.cond.notify_all();
+    }
+
+    /// Close the socket.
+    pub fn close(&mut self) {
+        self.ws.close();
+    }
 }
 
-/// Record one message. Returns the session to dismiss a dialog on, when one just opened.
-fn handle_message(state: &mut State, msg: Value) -> Option<String> {
-    if let Some(id) = msg.get("id").and_then(Value::as_u64) {
-        let result = match msg.get("error") {
-            Some(err) => Err(err
-                .get("message")
+fn response_of(msg: &Value) -> Result<Value, String> {
+    match msg.get("error") {
+        Some(err) => Err(err
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown error")
+            .to_string()
+            + &err
+                .get("data")
                 .and_then(Value::as_str)
-                .unwrap_or("unknown error")
-                .to_string()
-                + &err
-                    .get("data")
-                    .and_then(Value::as_str)
-                    .map(|d| format!(" ({d})"))
-                    .unwrap_or_default()),
-            None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
-        };
-        state.responses.insert(id, result);
-        return None;
+                .map(|d| format!(" ({d})"))
+                .unwrap_or_default()),
+        None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
     }
+}
+
+/// One console event's identity across DevTools sessions: its kind, Chrome's timestamp, the
+/// exception id where there is one, and the first [`FINGERPRINT_TEXT_CHARS`] characters of the
+/// entry as formatted.
+pub fn fingerprint(
+    kind: &str,
+    timestamp: Option<&Value>,
+    exception_id: Option<&Value>,
+    text: &str,
+) -> String {
+    let num = |v: Option<&Value>| v.map(Value::to_string).unwrap_or_default();
+    let head: String = text.chars().take(FINGERPRINT_TEXT_CHARS).collect();
+    format!("{kind}|{}|{}|{head}", num(timestamp), num(exception_id))
+}
+
+/// `Failed to load resource: the server responded with a status of 404 (Not Found)` or
+/// `Failed to load resource: net::ERR_CONNECTION_REFUSED`, from a network log entry, as the
+/// method-less network line.
+pub fn network_line_from_log(text: &str, url: &str) -> Option<String> {
+    if let Some(i) = text.find("status of ") {
+        let digits: String = text[i + 10..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        if !digits.is_empty() {
+            return Some(format!("[{digits}] {url}"));
+        }
+    }
+    let err = text.find("net::ERR_").map(|i| {
+        text[i..]
+            .split(|c: char| c.is_whitespace() || c == ')')
+            .next()
+            .unwrap_or("")
+    })?;
+    Some(format!("[failed] {url} — {err}"))
+}
+
+/// Fold one event. Returns the session to dismiss a dialog on, when one just opened.
+pub fn handle_event(ev: &mut Events, msg: &Value) -> Option<String> {
     let method = msg.get("method").and_then(Value::as_str)?;
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
     let session = msg.get("sessionId").and_then(Value::as_str);
@@ -297,31 +256,43 @@ fn handle_message(state: &mut State, msg: Value) -> Option<String> {
     if session.is_none() {
         // Browser-level events: only our page going away matters.
         if method == "Target.detachedFromTarget"
-            && params.get("sessionId").and_then(Value::as_str) == state.page_session.as_deref()
-            && state.page_session.is_some()
+            && ev.page_session.is_some()
+            && params.get("sessionId").and_then(Value::as_str) == ev.page_session.as_deref()
         {
-            state.closed = Some("the page was closed".into());
+            ev.closed = Some("the page was closed".into());
         }
         return None;
     }
-    if session != state.page_session.as_deref() {
+    if session != ev.page_session.as_deref() {
         return None;
     }
     let str_of = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     match method {
-        "Page.loadEventFired" => state.load_events += 1,
+        "Page.loadEventFired" => ev.load_events += 1,
         "Page.frameStartedLoading" | "Page.frameStoppedLoading"
-            if params.get("frameId").and_then(Value::as_str) == state.main_frame.as_deref() =>
+            if params.get("frameId").and_then(Value::as_str) == ev.main_frame.as_deref() =>
         {
-            state.main_loading = method == "Page.frameStartedLoading";
+            ev.main_loading = method == "Page.frameStartedLoading";
+        }
+        "Page.frameNavigated" => {
+            let frame = params.get("frame").cloned().unwrap_or(Value::Null);
+            let main = frame.get("parentId").is_none()
+                && frame.get("id").and_then(Value::as_str) == ev.main_frame.as_deref();
+            let loader = frame
+                .get("loaderId")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if main && loader.is_some() && loader != ev.log.loader_id {
+                ev.log.new_document(loader);
+            }
         }
         "Page.javascriptDialogOpening" => {
-            state.dialogs.push(format!(
+            ev.dialogs.push(format!(
                 "dialog: {} \"{}\" (dismissed)",
                 str_of(&params, "type"),
                 crate::util::one_line(&str_of(&params, "message"), 300)
             ));
-            return state.page_session.clone();
+            return ev.page_session.clone();
         }
         "Runtime.consoleAPICalled" => {
             let kind = str_of(&params, "type");
@@ -330,9 +301,6 @@ fn handle_message(state: &mut State, msg: Value) -> Option<String> {
                 "warning" => "warning",
                 other => other,
             };
-            if level == "error" {
-                state.errors += 1;
-            }
             let text = params
                 .get("args")
                 .and_then(Value::as_array)
@@ -351,10 +319,15 @@ fn handle_message(state: &mut State, msg: Value) -> Option<String> {
                 "[{level}] {text}{}",
                 location(&str_of(&frame, "url"), frame.get("lineNumber"))
             );
-            state.console.push(&entry);
+            let fp = fingerprint("console", params.get("timestamp"), None, &entry);
+            if ev.log.take_fingerprint(fp) {
+                if level == "error" {
+                    ev.log.new_errors += 1;
+                }
+                ev.log.console.push(&entry);
+            }
         }
         "Runtime.exceptionThrown" => {
-            state.errors += 1;
             let d = params
                 .get("exceptionDetails")
                 .cloned()
@@ -375,7 +348,16 @@ fn handle_message(state: &mut State, msg: Value) -> Option<String> {
                 "[exception] {message}{}",
                 location(&str_of(&d, "url"), d.get("lineNumber"))
             );
-            state.console.push(&entry);
+            let fp = fingerprint(
+                "exception",
+                params.get("timestamp"),
+                d.get("exceptionId"),
+                &entry,
+            );
+            if ev.log.take_fingerprint(fp) {
+                ev.log.new_errors += 1;
+                ev.log.console.push(&entry);
+            }
         }
         "Log.entryAdded" => {
             let e = params.get("entry").cloned().unwrap_or(Value::Null);
@@ -383,15 +365,27 @@ fn handle_message(state: &mut State, msg: Value) -> Option<String> {
                 "verbose" => "debug".to_string(),
                 other => other.to_string(),
             };
-            if level == "error" {
-                state.errors += 1;
+            let url = str_of(&e, "url");
+            let text = str_of(&e, "text");
+            let entry = format!("[{level}] {text}{}", location(&url, e.get("lineNumber")));
+            let fp = fingerprint("log", e.get("timestamp"), None, &entry);
+            if !ev.log.take_fingerprint(fp) {
+                return None;
             }
-            let entry = format!(
-                "[{level}] {}{}",
-                str_of(&e, "text"),
-                location(&str_of(&e, "url"), e.get("lineNumber"))
-            );
-            state.console.push(&entry);
+            if level == "error" {
+                ev.log.new_errors += 1;
+            }
+            ev.log.console.push(&entry);
+            let request = str_of(&e, "networkRequestId");
+            if str_of(&e, "source") == "network"
+                && !request.is_empty()
+                && !ev.log.request_seen(&request)
+            {
+                if let Some(line) = network_line_from_log(&text, &url) {
+                    ev.log.take_request(&request);
+                    ev.log.network.push(&line);
+                }
+            }
         }
         "Network.requestWillBeSent" => {
             let url = params
@@ -403,8 +397,8 @@ fn handle_message(state: &mut State, msg: Value) -> Option<String> {
                     .pointer("/request/method")
                     .and_then(Value::as_str)
                     .unwrap_or("GET");
-                if state.requests.len() < 10_000 {
-                    state.requests.insert(
+                if ev.requests.len() < 10_000 {
+                    ev.requests.insert(
                         str_of(&params, "requestId"),
                         (method.to_string(), url.to_string()),
                     );
@@ -412,45 +406,49 @@ fn handle_message(state: &mut State, msg: Value) -> Option<String> {
             }
         }
         "Network.responseReceived" => {
+            let id = str_of(&params, "requestId");
             let status = params
                 .pointer("/response/status")
                 .and_then(Value::as_f64)
                 .unwrap_or(0.0) as u64;
-            if status >= 400 {
+            if ev.log.take_request(&id) && status >= 400 {
                 let url = params
                     .pointer("/response/url")
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                let method = state
+                let method = ev
                     .requests
-                    .get(&str_of(&params, "requestId"))
+                    .get(&id)
                     .map(|(m, _)| m.clone())
                     .unwrap_or_else(|| "GET".into());
-                let entry = format!("[{status}] {method} {url}");
-                state.network.push(&entry);
+                ev.log.network.push(&format!("[{status}] {method} {url}"));
             }
         }
         "Network.loadingFailed" => {
-            if let Some((method, url)) = state.requests.remove(&str_of(&params, "requestId")) {
+            let id = str_of(&params, "requestId");
+            if let Some((method, url)) = ev.requests.remove(&id) {
                 let canceled = params
                     .get("canceled")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                if !canceled {
+                if ev.log.take_request(&id) && !canceled {
                     let mut reason = str_of(&params, "errorText");
                     let blocked = str_of(&params, "blockedReason");
                     if !blocked.is_empty() {
                         reason = format!("{reason} (blocked: {blocked})");
                     }
-                    let entry = format!("[failed] {method} {url} — {reason}");
-                    state.network.push(&entry);
+                    ev.log
+                        .network
+                        .push(&format!("[failed] {method} {url} — {reason}"));
                 }
             }
         }
         "Network.loadingFinished" => {
-            state.requests.remove(&str_of(&params, "requestId"));
+            let id = str_of(&params, "requestId");
+            ev.requests.remove(&id);
+            ev.log.take_request(&id);
         }
-        "Inspector.detached" => state.closed = Some("the page was detached".into()),
+        "Inspector.detached" => ev.closed = Some("the page was detached".into()),
         _ => {}
     }
     None
@@ -490,77 +488,171 @@ fn remote_object_text(arg: &Value) -> String {
 mod tests {
     use super::*;
 
-    fn page_state() -> State {
-        let mut s = State::new();
-        s.page_session = Some("S".into());
-        s.main_frame = Some("F".into());
-        s
+    fn page_events() -> Events {
+        Events {
+            page_session: Some("S".into()),
+            main_frame: Some("F".into()),
+            ..Events::default()
+        }
+    }
+
+    fn console_error(text: &str, ts: f64) -> Value {
+        json!({"sessionId":"S","method":"Runtime.consoleAPICalled","params":{
+            "type":"error","timestamp":ts,"args":[{"type":"string","value":text}],
+            "stackTrace":{"callFrames":[{"url":"http://h/","lineNumber":4}]}}})
     }
 
     #[test]
     fn console_and_exceptions_are_formatted_and_counted() {
-        let mut s = page_state();
-        handle_message(
+        let mut s = page_events();
+        handle_event(&mut s, &console_error("boom-load", 1.5));
+        handle_event(
             &mut s,
-            json!({"sessionId":"S","method":"Runtime.consoleAPICalled","params":{
-            "type":"error","args":[{"type":"string","value":"boom-load"}],
-            "stackTrace":{"callFrames":[{"url":"http://h/","lineNumber":4}]}}}),
+            &json!({"sessionId":"S","method":"Runtime.exceptionThrown","params":{"timestamp":2.0,
+            "exceptionDetails":{"exceptionId":1,"text":"Uncaught","url":"file:///w/p.html","lineNumber":10,
+            "exception":{"description":"TypeError: x is not a function\n    at y"}}}}),
         );
-        handle_message(
+        handle_event(
             &mut s,
-            json!({"sessionId":"S","method":"Runtime.exceptionThrown","params":{
-            "exceptionDetails":{"text":"Uncaught","url":"http://h/a.js","lineNumber":0,
-            "exception":{"description":"Error: bad\n    at x"}}}}),
+            &json!({"sessionId":"OTHER","method":"Runtime.consoleAPICalled","params":{"type":"error","args":[]}}),
         );
-        handle_message(
-            &mut s,
-            json!({"sessionId":"OTHER","method":"Runtime.consoleAPICalled","params":{"type":"error","args":[]}}),
-        );
-        assert_eq!(s.errors, 2);
+        assert_eq!(s.log.new_errors, 2);
         assert_eq!(
-            s.console.drain(),
+            s.log.console.drain(),
             vec![
                 "[error] boom-load (http://h/:5)",
-                "[exception] Uncaught Error: bad (http://h/a.js:1)"
+                "[exception] Uncaught TypeError: x is not a function (file:///w/p.html:11)"
             ]
         );
     }
 
     #[test]
+    fn replayed_events_are_skipped_and_new_ones_kept() {
+        let mut first = page_events();
+        handle_event(&mut first, &console_error("boom-load", 1.5));
+        let log = first.log.clone();
+        // A later call: a new session with the saved log; Chrome replays the stored message
+        // and one that arrived between the calls.
+        let mut later = Events::new(log);
+        later.page_session = Some("S".into());
+        later.main_frame = Some("F".into());
+        later.log.console.drain();
+        later.log.new_errors = 0;
+        handle_event(&mut later, &console_error("boom-load", 1.5));
+        handle_event(&mut later, &console_error("late", 9.0));
+        assert_eq!(
+            later.log.console.drain(),
+            vec!["[error] late (http://h/:5)"]
+        );
+        assert_eq!(later.log.new_errors, 1);
+        // The same text at another time is another message.
+        handle_event(&mut later, &console_error("late", 9.5));
+        assert_eq!(later.log.console.drain().len(), 1);
+    }
+
+    #[test]
+    fn a_new_document_starts_a_new_fingerprint_set() {
+        let mut s = page_events();
+        handle_event(&mut s, &console_error("a", 1.0));
+        let nav = |loader: &str| json!({"sessionId":"S","method":"Page.frameNavigated","params":{"frame":{"id":"F","loaderId":loader,"url":"x"}}});
+        handle_event(&mut s, &nav("L1"));
+        assert!(s.log.fingerprints.is_empty());
+        handle_event(&mut s, &console_error("a", 1.0));
+        handle_event(&mut s, &nav("L1"));
+        assert_eq!(
+            s.log.fingerprints.len(),
+            1,
+            "the same loader is the same document"
+        );
+        handle_event(
+            &mut s,
+            &json!({"sessionId":"S","method":"Page.frameNavigated","params":{"frame":{"id":"C","parentId":"F","loaderId":"L9"}}}),
+        );
+        assert_eq!(
+            s.log.loader_id.as_deref(),
+            Some("L1"),
+            "a child frame is not the document"
+        );
+    }
+
+    #[test]
+    fn fingerprint_keeps_kind_time_id_and_200_characters() {
+        let long = "x".repeat(500);
+        let fp = fingerprint("exception", Some(&json!(12.25)), Some(&json!(3)), &long);
+        assert_eq!(fp, format!("exception|12.25|3|{}", "x".repeat(200)));
+        assert_eq!(fingerprint("log", None, None, "t"), "log|||t");
+    }
+
+    #[test]
     fn network_failures_and_error_statuses() {
-        let mut s = page_state();
+        let mut s = page_events();
         for (id, url) in [("1", "http://h/missing.js"), ("2", "http://h/down")] {
-            handle_message(
+            handle_event(
                 &mut s,
-                json!({"sessionId":"S","method":"Network.requestWillBeSent","params":{
+                &json!({"sessionId":"S","method":"Network.requestWillBeSent","params":{
                 "requestId":id,"request":{"url":url,"method":"GET"}}}),
             );
         }
-        handle_message(
+        handle_event(
             &mut s,
-            json!({"sessionId":"S","method":"Network.responseReceived","params":{
+            &json!({"sessionId":"S","method":"Network.responseReceived","params":{
             "requestId":"1","response":{"url":"http://h/missing.js","status":404}}}),
         );
-        handle_message(
+        handle_event(
             &mut s,
-            json!({"sessionId":"S","method":"Network.loadingFailed","params":{
+            &json!({"sessionId":"S","method":"Network.loadingFailed","params":{
             "requestId":"2","errorText":"net::ERR_CONNECTION_REFUSED","canceled":false}}),
         );
+        // Chrome's log entry for the same 404 goes to the console, not again to network.
+        handle_event(
+            &mut s,
+            &json!({"sessionId":"S","method":"Log.entryAdded","params":{"entry":{"source":"network","level":"error",
+            "text":"Failed to load resource: the server responded with a status of 404 (Not Found)",
+            "url":"http://h/missing.js","timestamp":5.0,"networkRequestId":"1"}}}),
+        );
         assert_eq!(
-            s.network.drain(),
+            s.log.network.drain(),
             vec![
                 "[404] GET http://h/missing.js",
                 "[failed] GET http://h/down — net::ERR_CONNECTION_REFUSED"
             ]
         );
+        assert_eq!(
+            s.log.console.drain(),
+            vec!["[error] Failed to load resource: the server responded with a status of 404 (Not Found) (http://h/missing.js)"]
+        );
+    }
+
+    #[test]
+    fn a_network_failure_between_calls_has_no_method() {
+        let mut s = page_events();
+        for (id, text, url) in [
+            ("7", "Failed to load resource: net::ERR_CONNECTION_REFUSED", "http://127.0.0.1:9/x"),
+            ("8", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "http://h/api"),
+        ] {
+            let event = json!({"sessionId":"S","method":"Log.entryAdded","params":{"entry":{"source":"network","level":"error",
+                "text":text,"url":url,"timestamp":1.0,"networkRequestId":id}}});
+            handle_event(&mut s, &event);
+            // The replay in the call after does not report it again.
+            handle_event(&mut s, &event);
+        }
+        assert_eq!(
+            s.log.network.drain(),
+            vec![
+                "[failed] http://127.0.0.1:9/x — net::ERR_CONNECTION_REFUSED",
+                "[500] http://h/api"
+            ]
+        );
+        assert_eq!(s.log.console.drain().len(), 2);
+        assert_eq!(network_line_from_log("something else", "u"), None);
     }
 
     #[test]
     fn dialogs_are_recorded_and_dismissed() {
-        let mut s = page_state();
-        let dismiss = handle_message(
+        let mut s = page_events();
+        let dismiss = handle_event(
             &mut s,
-            json!({"sessionId":"S","method":"Page.javascriptDialogOpening","params":{"type":"alert","message":"hi"}}),
+            &json!({"sessionId":"S","method":"Page.javascriptDialogOpening","params":{"type":"alert","message":"hi"}}),
         );
         assert_eq!(dismiss.as_deref(), Some("S"));
         assert_eq!(s.dialogs, vec!["dialog: alert \"hi\" (dismissed)"]);

@@ -1,4 +1,4 @@
-//! The tool's published interface: `murmur.yaml` declares a native tool with its binary, the
+//! The tool's published interface: `murmur.yaml` declares a WASM tool with its component, the
 //! twelve actions, and only scalar top-level properties, read by line scan from
 //! `CARGO_MANIFEST_DIR`.
 
@@ -20,13 +20,13 @@ fn block<'a>(text: &'a str, key: &str) -> Vec<&'a str> {
 }
 
 #[test]
-fn declares_a_native_tool_with_its_binary() {
+fn declares_a_wasm_tool_with_its_component() {
     let m = manifest();
     for line in [
         "name: tool-browser",
-        "version: 0.1.0",
+        "version: 0.2.0",
         "runtime: tool",
-        "implementation: native",
+        "implementation: wasm",
     ] {
         assert!(m.lines().any(|l| l == line), "missing `{line}`");
     }
@@ -35,7 +35,8 @@ fn declares_a_native_tool_with_its_binary() {
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .collect();
-    assert_eq!(files, vec!["- bin/tool-browser"]);
+    assert_eq!(files, vec!["- tool_browser.wasm"]);
+    assert!(!m.contains("supervisor") && !m.contains("on this host"));
 }
 
 #[test]

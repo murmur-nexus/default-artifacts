@@ -61,11 +61,12 @@ jobs:
       # --locked: a Cargo.lock that no longer matches the workspace (a member renamed,
       # added, or its version changed without `cargo update --workspace --offline`)
       # fails here instead of being rewritten in place and passing.
-      # tool-browser's `browser` suite starts the runner's Chromium outside any capsule, where
-      # the tool keeps Chrome's own sandbox on. That sandbox needs unprivileged user namespaces,
-      # which Ubuntu 24.04 restricts with AppArmor to binaries holding a profile; the runner's
-      # Chromium has none, so it aborts with "No usable sandbox!". Lift the restriction for
-      # this job, as Chromium's apparmor-userns-restrictions.md describes.
+      # tool-browser's `browser` suite starts the runner's Chromium through its test host for
+      # murmur:process, outside any capsule, and the tool tries Chrome's own sandbox first. That
+      # sandbox needs unprivileged user namespaces, which Ubuntu 24.04 restricts with AppArmor to
+      # binaries holding a profile; the runner's Chromium has none, so it aborts with "No usable
+      # sandbox!" and the tool falls back to --no-sandbox. Lift the restriction for this job, as
+      # Chromium's apparmor-userns-restrictions.md describes, so the suite runs Chrome's sandbox.
       - name: Allow unprivileged user namespaces for Chrome's sandbox
         run: |
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then

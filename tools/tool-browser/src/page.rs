@@ -1,11 +1,7 @@
-//! The actions, run against the one page this session's supervisor attached to.
+//! The actions, run against the one page the tool drives, over this call's DevTools
+//! connection.
 
-use std::{
-    path::PathBuf,
-    sync::Arc,
-    thread,
-    time::{Duration, Instant},
-};
+use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use serde_json::{json, Value};
@@ -14,13 +10,13 @@ use crate::{
     cdp::Cdp,
     request::{self, Action, OpenTarget, Request, WAIT_DEFAULT_MS},
     snapshot::{self, AxTree, Refs, DIFF_MAX_LINES},
-    state::StateDir,
+    state::{DocumentState, SavedSnapshot, StateDir},
 };
 
 /// How long `open` and `back` wait for the page's load event.
-const LOAD_WAIT: Duration = Duration::from_secs(30);
+const LOAD_WAIT_MS: u64 = 30_000;
 /// How long a change summary waits for a navigation an action started.
-const SETTLE_WAIT: Duration = Duration::from_secs(10);
+const SETTLE_WAIT_MS: u64 = 10_000;
 /// The viewport, which a plain screenshot captures.
 pub const VIEWPORT: (u32, u32) = (1280, 800);
 
@@ -49,69 +45,72 @@ struct Snap {
     document: Option<i64>,
 }
 
-pub struct Page {
-    cdp: Arc<Cdp>,
+pub struct Page<'a> {
+    pub cdp: Cdp<'a>,
     pub target_id: String,
     refs: Refs,
     last: Option<Snap>,
-    errors_reported: u64,
-    workdir: PathBuf,
-    state: StateDir,
-    remote: bool,
+    /// The work folder as the tool opens it.
+    work: PathBuf,
+    /// The work folder's host path, as Chrome sees it.
+    workdir_abs: PathBuf,
+    dir: StateDir,
+    /// Screenshots written so far.
+    pub screenshots: u32,
+    /// Dialogs dismissed before this call and not yet reported.
+    pending_dialogs: Vec<String>,
 }
 
-impl Page {
-    /// Create this session's page, attach to it and turn on the domains the actions read.
-    pub fn attach(
-        cdp: Arc<Cdp>,
-        remote: bool,
-        workdir: PathBuf,
-        state: StateDir,
-    ) -> Result<Self, String> {
-        let target = cdp.browser("Target.createTarget", json!({"url": "about:blank"}))?;
-        let target_id = target["targetId"]
-            .as_str()
-            .ok_or("Target.createTarget returned no targetId")?
-            .to_string();
-        let attached = cdp.browser(
-            "Target.attachToTarget",
-            json!({"targetId": target_id, "flatten": true}),
-        )?;
-        let session = attached["sessionId"]
-            .as_str()
-            .ok_or("Target.attachToTarget returned no sessionId")?
-            .to_string();
-        {
-            let mut s = cdp.state();
-            s.page_session = Some(session);
-            s.main_frame = Some(target_id.clone());
-        }
-        for domain in ["Page", "Runtime", "Log", "Network", "DOM"] {
-            cdp.page(&format!("{domain}.enable"), json!({}))?;
-        }
-        cdp.page(
-            "Emulation.setDeviceMetricsOverride",
-            json!({"width": VIEWPORT.0, "height": VIEWPORT.1, "deviceScaleFactor": 1, "mobile": false}),
-        )?;
-        if !remote {
-            let downloads = state.downloads();
-            std::fs::create_dir_all(&downloads)
-                .map_err(|e| format!("cannot create {}: {e}", downloads.display()))?;
-            cdp.browser(
-                "Browser.setDownloadBehavior",
-                json!({"behavior": "allow", "downloadPath": downloads, "eventsEnabled": false}),
-            )?;
-        }
-        Ok(Self {
+impl<'a> Page<'a> {
+    /// The page `cdp` is attached to, with what the earlier calls saved of its document.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        cdp: Cdp<'a>,
+        target_id: String,
+        doc: &DocumentState,
+        work: &Path,
+        workdir_abs: PathBuf,
+        dir: StateDir,
+        screenshots: u32,
+        pending_dialogs: Vec<String>,
+    ) -> Self {
+        Self {
             cdp,
             target_id,
-            refs: Refs::default(),
-            last: None,
-            errors_reported: 0,
-            workdir,
-            state,
-            remote,
-        })
+            refs: Refs::restore(&doc.refs, doc.next_ref, doc.root),
+            last: doc.last.as_ref().map(|l| Snap {
+                lines: l.lines.clone(),
+                url: l.url.clone(),
+                title: l.title.clone(),
+                document: l.document,
+            }),
+            work: work.to_path_buf(),
+            workdir_abs,
+            dir,
+            screenshots,
+            pending_dialogs,
+        }
+    }
+
+    /// The document state to save, and the dialogs not yet reported.
+    pub fn saved(&mut self) -> (DocumentState, Vec<String>) {
+        let (refs, next_ref, root) = self.refs.save();
+        let mut dialogs = std::mem::take(&mut self.pending_dialogs);
+        dialogs.append(&mut self.cdp.ev.dialogs);
+        (
+            DocumentState {
+                root,
+                refs,
+                next_ref,
+                last: self.last.as_ref().map(|l| SavedSnapshot {
+                    lines: l.lines.clone(),
+                    url: l.url.clone(),
+                    title: l.title.clone(),
+                    document: l.document,
+                }),
+            },
+            dialogs,
+        )
     }
 
     pub fn run(&mut self, req: &Request) -> Result<Outcome, String> {
@@ -126,7 +125,7 @@ impl Page {
                 let backend = self.resolve(req.r#ref.unwrap_or_default())?;
                 self.cdp
                     .page("DOM.focus", json!({"backendNodeId": backend}))
-                    .map_err(|e| self.node_error(req.r#ref.unwrap_or_default(), e))?;
+                    .map_err(|e| node_error(req.r#ref.unwrap_or_default(), e))?;
                 self.cdp.page(
                     "Input.insertText",
                     json!({"text": req.text.clone().unwrap_or_default()}),
@@ -156,7 +155,7 @@ impl Page {
                 self.change_summary()
             }
             Action::Console => {
-                let lines = self.cdp.state().console.drain();
+                let lines = self.cdp.ev.log.console.drain();
                 Ok(Outcome::text(if lines.is_empty() {
                     "no new console messages".to_string()
                 } else {
@@ -164,7 +163,7 @@ impl Page {
                 }))
             }
             Action::Network => {
-                let lines = self.cdp.state().network.drain();
+                let lines = self.cdp.ev.log.network.drain();
                 Ok(Outcome::text(if lines.is_empty() {
                     "no failed requests".to_string()
                 } else {
@@ -172,13 +171,13 @@ impl Page {
                 }))
             }
             Action::Screenshot => self.screenshot(req.r#ref, req.full_page),
-            Action::Close => Err("close is handled by the supervisor".into()),
+            Action::Close => Err("close is handled before the page is attached".into()),
         }
     }
 
     // ── reading the page ────────────────────────────────────────────────────
 
-    fn title_and_url(&self) -> (String, String) {
+    fn title_and_url(&mut self) -> (String, String) {
         let evaluated = self
             .cdp
             .page(
@@ -191,9 +190,10 @@ impl Page {
             let s = |i: usize| v.get(i).and_then(Value::as_str).unwrap_or("").to_string();
             return (s(0), s(1));
         }
+        let target_id = self.target_id.clone();
         let info = self
             .cdp
-            .browser("Target.getTargetInfo", json!({"targetId": self.target_id}))
+            .browser("Target.getTargetInfo", json!({"targetId": target_id}))
             .unwrap_or(Value::Null);
         let s = |k: &str| {
             info.pointer(&format!("/targetInfo/{k}"))
@@ -247,17 +247,8 @@ impl Page {
         self.refs.backend(r).ok_or_else(|| unknown_ref(r))
     }
 
-    /// A DevTools error about a node, as the line a model can act on.
-    fn node_error(&self, r: u32, e: String) -> String {
-        if e.contains("No node") || e.contains("Could not find node") || e.contains("not found") {
-            unknown_ref(r)
-        } else {
-            e
-        }
-    }
-
     /// The centre of `eN`'s content box, scrolled into view, in viewport coordinates.
-    fn box_of(&self, r: u32, backend: i64) -> Result<[f64; 8], String> {
+    fn box_of(&mut self, r: u32, backend: i64) -> Result<[f64; 8], String> {
         let _ = self.cdp.page(
             "DOM.scrollIntoViewIfNeeded",
             json!({"backendNodeId": backend}),
@@ -266,7 +257,7 @@ impl Page {
             .cdp
             .page("DOM.getBoxModel", json!({"backendNodeId": backend}))
             .map_err(|e| {
-                let e = self.node_error(r, e);
+                let e = node_error(r, e);
                 if e.starts_with("unknown ref") {
                     e
                 } else {
@@ -288,17 +279,12 @@ impl Page {
     // ── actions ─────────────────────────────────────────────────────────────
 
     fn open(&mut self, url: &str) -> Result<Outcome, String> {
-        let target = request::open_target(url, &self.workdir)?;
+        let target = request::open_target(url, &self.work, Some(&self.workdir_abs))?;
         let url = match target {
             OpenTarget::Url(u) => u,
-            OpenTarget::WorkFile(_) if self.remote => {
-                return Err(format!(
-                    "open refuses {url}: a remote browser cannot see the work folder; serve the page over http instead"
-                ))
-            }
-            OpenTarget::WorkFile(path) => request::file_url(&path),
+            OpenTarget::WorkFile(rel) => request::file_url(&self.workdir_abs.join(rel)),
         };
-        let before = self.cdp.state().load_events;
+        let before = self.cdp.ev.load_events;
         let result = self.cdp.page("Page.navigate", json!({"url": url}))?;
         if let Some(err) = result
             .get("errorText")
@@ -315,15 +301,15 @@ impl Page {
         }
         let mut still_loading = false;
         if result.get("loaderId").is_some() {
-            still_loading = !self
-                .cdp
-                .wait_until(Instant::now() + LOAD_WAIT, |s| s.load_events > before);
+            let until = self.cdp.clock().now_ms() + LOAD_WAIT_MS;
+            still_loading = !self.cdp.wait_until(until, |s| s.load_events > before);
         }
-        thread::sleep(Duration::from_millis(250));
+        self.cdp.pump(250);
         let (mut text, snap) = self.full_snapshot()?;
         self.last = Some(snap);
-        self.errors_reported = self.cdp.state().errors;
-        self.cdp.state().dialogs.clear();
+        self.cdp.ev.log.new_errors = 0;
+        self.cdp.ev.dialogs.clear();
+        self.pending_dialogs.clear();
         if still_loading {
             text.push_str("\npage still loading after 30 s");
         }
@@ -350,7 +336,7 @@ impl Page {
         Ok(())
     }
 
-    fn press(&self, key: &request::KeySpec) -> Result<(), String> {
+    fn press(&mut self, key: &request::KeySpec) -> Result<(), String> {
         let mut down = json!({
             "type": if key.text.is_some() { "keyDown" } else { "rawKeyDown" },
             "modifiers": key.modifiers,
@@ -383,7 +369,7 @@ impl Page {
         let object = self
             .cdp
             .page("DOM.resolveNode", json!({"backendNodeId": backend}))
-            .map_err(|e| self.node_error(r, e))?;
+            .map_err(|e| node_error(r, e))?;
         let object_id = object
             .pointer("/object/objectId")
             .and_then(Value::as_str)
@@ -422,7 +408,7 @@ impl Page {
 
     fn wait(&mut self, req: &Request) -> Result<(), String> {
         let timeout = req.ms.unwrap_or(WAIT_DEFAULT_MS);
-        let deadline = Instant::now() + Duration::from_millis(timeout);
+        let deadline = self.cdp.clock().now_ms() + timeout;
         if let Some(text) = &req.text {
             let expression = format!(
                 "(document.body || document.documentElement).innerText.includes({})",
@@ -441,13 +427,13 @@ impl Page {
                 if found {
                     return Ok(());
                 }
-                if Instant::now() >= deadline {
+                if self.cdp.clock().now_ms() >= deadline {
                     return Err(format!(
                         "wait: \"{}\" did not appear within {timeout} ms",
                         crate::util::one_line(text, 80)
                     ));
                 }
-                thread::sleep(Duration::from_millis(100));
+                self.cdp.pump(100);
             }
         }
         if let Some(r) = req.r#ref {
@@ -460,13 +446,13 @@ impl Page {
                 {
                     return Ok(());
                 }
-                if Instant::now() >= deadline {
+                if self.cdp.clock().now_ms() >= deadline {
                     return Err(format!("wait: e{r} had no box within {timeout} ms"));
                 }
-                thread::sleep(Duration::from_millis(100));
+                self.cdp.pump(100);
             }
         }
-        thread::sleep(Duration::from_millis(timeout));
+        self.cdp.pump(timeout);
         Ok(())
     }
 
@@ -480,8 +466,8 @@ impl Page {
         let entry_id = entries[index - 1]["id"].clone();
         self.cdp
             .page("Page.navigateToHistoryEntry", json!({"entryId": entry_id}))?;
-        let deadline = Instant::now() + LOAD_WAIT;
-        while Instant::now() < deadline {
+        let deadline = self.cdp.clock().now_ms() + LOAD_WAIT_MS;
+        while self.cdp.clock().now_ms() < deadline {
             let moved = self
                 .cdp
                 .page("Page.getNavigationHistory", json!({}))
@@ -504,7 +490,7 @@ impl Page {
             if moved && ready {
                 break;
             }
-            thread::sleep(Duration::from_millis(100));
+            self.cdp.pump(100);
         }
         Ok(())
     }
@@ -555,11 +541,12 @@ impl Page {
             .map_err(|e| format!("screenshot: the browser sent invalid base64: {e}"))?;
         let (w, h) =
             png_size(&png).ok_or("screenshot: the browser sent something that is not a PNG")?;
-        let n = next_screenshot_number(&self.state.root);
+        let n = self.screenshots + 1;
         let name = format!("screenshot-{n}.png");
-        std::fs::write(self.state.root.join(&name), &png)
-            .map_err(|e| format!("screenshot: cannot write {}/{name}: {e}", self.state.rel))?;
-        let rel = format!("{}/{name}", self.state.rel);
+        std::fs::write(self.dir.file(&name), &png)
+            .map_err(|e| format!("screenshot: cannot write {}/{name}: {e}", self.dir.rel))?;
+        self.screenshots = n;
+        let rel = format!("{}/{name}", self.dir.rel);
         Ok(Outcome {
             data: format!("saved {rel} ({w}x{h}, {} KB)", png.len().div_ceil(1024)),
             attachment: Some(rel),
@@ -570,17 +557,13 @@ impl Page {
 
     /// Wait for a navigation the action started, then compare a new snapshot with the last.
     fn change_summary(&mut self) -> Result<Outcome, String> {
-        thread::sleep(Duration::from_millis(200));
-        let settled = self
-            .cdp
-            .wait_until(Instant::now() + SETTLE_WAIT, |s| !s.main_loading);
+        self.cdp.pump(200);
+        let until = self.cdp.clock().now_ms() + SETTLE_WAIT_MS;
+        let settled = self.cdp.wait_until(until, |s| !s.main_loading);
         let (text, snap) = self.full_snapshot()?;
-        let (dialogs, errors) = {
-            let mut s = self.cdp.state();
-            (std::mem::take(&mut s.dialogs), s.errors)
-        };
-        let new_errors = errors.saturating_sub(self.errors_reported);
-        self.errors_reported = errors;
+        let mut dialogs = std::mem::take(&mut self.pending_dialogs);
+        dialogs.append(&mut self.cdp.ev.dialogs);
+        let new_errors = std::mem::take(&mut self.cdp.ev.log.new_errors);
 
         let mut out: Vec<String> = Vec::new();
         match &self.last {
@@ -623,6 +606,15 @@ impl Page {
     }
 }
 
+/// A DevTools error about a node, as the line a model can act on.
+fn node_error(r: u32, e: String) -> String {
+    if e.contains("No node") || e.contains("Could not find node") || e.contains("not found") {
+        unknown_ref(r)
+    } else {
+        e
+    }
+}
+
 fn unknown_ref(r: u32) -> String {
     format!("unknown ref e{r}; take a snapshot first")
 }
@@ -652,23 +644,6 @@ pub fn png_size(png: &[u8]) -> Option<(u32, u32)> {
     let w = u32::from_be_bytes(png[16..20].try_into().ok()?);
     let h = u32::from_be_bytes(png[20..24].try_into().ok()?);
     Some((w, h))
-}
-
-fn next_screenshot_number(dir: &std::path::Path) -> u32 {
-    std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            name.strip_prefix("screenshot-")?
-                .strip_suffix(".png")?
-                .parse::<u32>()
-                .ok()
-        })
-        .max()
-        .unwrap_or(0)
-        + 1
 }
 
 #[cfg(test)]

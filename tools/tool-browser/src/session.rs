@@ -1,0 +1,810 @@
+//! One call, from its input to its reply: find the session's browser by its process name, or
+//! start it; take the browser's call lock; open this call's DevTools connection; run the
+//! action; save what the next call needs.
+
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+use serde_json::json;
+
+use crate::{
+    cdp::Cdp,
+    discovery,
+    envelope::{self, Reply},
+    host::{Clock, ProcError, ProcState, Processes},
+    launch::{self, PROCESS_NAME},
+    page::Page,
+    request::{self, Action, Request},
+    state::{self, BrowserInfo, CallLock, DocumentState, PageLog, State, StateDir},
+    ws::{Random, WebSocket},
+};
+
+/// The longest a call runs, by its own clock.
+pub const CALL_LIMIT_MS: u64 = 90_000;
+/// How long a call waits for the `state.json` of a browser another call is starting.
+const JOIN_WAIT_MS: u64 = 30_000;
+/// `browser.log` stops growing here, with one closing line.
+pub const LOG_MAX_BYTES: u64 = 1024 * 1024;
+const LOG_CUT_LINE: &str = "\n… browser.log cut at 1 MiB; later output is not kept\n";
+/// How long each read of Chrome's output and of the DevTools socket may wait.
+const POLL_MS: u64 = 100;
+/// How long the WebSocket upgrade may take.
+const HANDSHAKE_MS: u32 = 10_000;
+
+/// What a call runs with.
+pub struct Ctx<'a> {
+    pub procs: &'a mut dyn Processes,
+    pub clock: &'a dyn Clock,
+    pub random: Random<'a>,
+    /// The work folder, as the tool opens it: `.` in the component.
+    pub work: PathBuf,
+    /// The session's runtime directory, `murmur-runtime` in the component; `None` when it is not
+    /// preopened.
+    pub runtime: Option<PathBuf>,
+}
+
+/// Run one call. `data` is the call's input and `config` the entry's `config:` JSON.
+pub fn call(data: &str, config: Option<&str>, ctx: &mut Ctx) -> Reply {
+    match run(data, config, ctx) {
+        Ok(reply) => reply,
+        Err(line) => envelope::error(&line),
+    }
+}
+
+fn run(data: &str, config: Option<&str>, ctx: &mut Ctx) -> Result<Reply, String> {
+    let params = request::params_from_data(data)?;
+    let req = request::parse_request(&params)?;
+    discovery::check_config(config)?;
+    if let (Action::Open, Some(url)) = (req.action, req.url.as_deref()) {
+        // An absolute path is checked once Chrome has shown where the work folder is.
+        if !Path::new(url.trim()).is_absolute() {
+            request::open_target(url, &ctx.work, None)?;
+        }
+    }
+    let deadline = ctx.clock.now_ms() + CALL_LIMIT_MS;
+
+    // Close needs no grant: with no browser running it starts nothing.
+    let found = ctx.procs.find(PROCESS_NAME);
+    let status = found.as_ref().map(|h| ctx.procs.status(h));
+    let running = match (&found, &status) {
+        (Some(h), Some(Ok(ProcState::Running))) => Some(h.clone()),
+        _ => None,
+    };
+    if req.action == Action::Close && running.is_none() {
+        return Ok(envelope::passed("close", "browser closed", None));
+    }
+
+    let Some(runtime) = ctx.runtime.clone() else {
+        return Err(discovery::SCOPE_LINE.into());
+    };
+    let granted = discovery::granted_names(&runtime);
+    if granted.is_empty() {
+        return Err(discovery::NO_GRANT_LINE.into());
+    }
+
+    let attached = match running {
+        Some(handle) => join(ctx, &handle, deadline)?,
+        None => {
+            let note = match (&found, &status) {
+                (Some(h), Some(Ok(ProcState::Exited(code)))) => {
+                    // Only a browser that was running gets a note: a start that failed left
+                    // no state.json, and `close` marks its state closed.
+                    match state::find_by_handle(&ctx.work, h) {
+                        Some((_, old)) if !old.closed => Some(launch::replaced_note(*code)),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            match start(ctx, &granted, note, deadline)? {
+                Started::Fresh(attached) => *attached,
+                Started::Joined(handle) => join(ctx, &handle, deadline)?,
+            }
+        }
+    };
+    Ok(finish(ctx, attached, &req))
+}
+
+/// A browser this call holds the lock of, with its open connection.
+struct Attached<'a> {
+    dir: StateDir,
+    state: State,
+    /// Taken by the action that uses it.
+    cdp: Option<Cdp<'a>>,
+    _lock: CallLock,
+    /// This call started the browser.
+    fresh: bool,
+}
+
+enum Started<'a> {
+    Fresh(Box<Attached<'a>>),
+    /// Another call started it first.
+    Joined(String),
+}
+
+/// Attach to a running browser by its handle.
+fn join<'a>(ctx: &mut Ctx<'a>, handle: &str, deadline: u64) -> Result<Attached<'a>, String> {
+    let wait_until = ctx.clock.now_ms() + JOIN_WAIT_MS;
+    let dir = loop {
+        if let Some((dir, _)) = state::find_by_handle(&ctx.work, handle) {
+            break dir;
+        }
+        if ctx.clock.now_ms() >= wait_until.min(deadline) {
+            let _ = ctx.procs.stop(handle);
+            return Err(format!(
+                "tool-browser: the running browser ({handle}) has no state.json under {}/, so it was stopped; the next call starts a new one",
+                state::STATE_ROOT
+            ));
+        }
+        ctx.clock.sleep_ms(POLL_MS);
+    };
+    let wait = state::LOCK_WAIT_MS.min(deadline.saturating_sub(ctx.clock.now_ms()));
+    let lock = CallLock::acquire(&dir, ctx.clock, wait)?;
+    let state = dir
+        .load()
+        .ok_or_else(|| format!("tool-browser: cannot read {}/state.json", dir.rel))?;
+    let ws = open_ws(ctx, &state.handle, state.port, &state.browser_ws_path)?;
+    let log = state.log.clone();
+    Ok(Attached {
+        cdp: Some(Cdp::new(ws, ctx.clock, deadline, log)),
+        dir,
+        state,
+        _lock: lock,
+        fresh: false,
+    })
+}
+
+fn open_ws<'a>(
+    ctx: &mut Ctx<'a>,
+    handle: &str,
+    port: u16,
+    path: &str,
+) -> Result<WebSocket<'a>, String> {
+    let conn = ctx.procs.connect(handle, port).map_err(|e| match e {
+        ProcError::Refused { rule, reason } => {
+            format!("tool-browser: murmur refused the DevTools connection: {rule}: {reason}")
+        }
+        other => format!("tool-browser: cannot reach the browser's DevTools port {port}: {other}"),
+    })?;
+    WebSocket::handshake(conn, port, path, ctx.random, HANDSHAKE_MS)
+        .map_err(|e| format!("tool-browser: the browser's DevTools connection failed: {e}"))
+}
+
+/// Append what Chrome printed to `browser.log`, which stops at [`LOG_MAX_BYTES`].
+fn append_log(dir: &StateDir, bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    let path = dir.file("browser.log");
+    let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    if size >= LOG_MAX_BYTES {
+        return;
+    }
+    let room = (LOG_MAX_BYTES - size) as usize;
+    let mut out = bytes[..bytes.len().min(room)].to_vec();
+    if bytes.len() > room {
+        out.extend_from_slice(LOG_CUT_LINE.as_bytes());
+    }
+    use std::io::Write as _;
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(&out);
+    }
+}
+
+/// Read everything Chrome printed since the last read into `browser.log`; the stderr text.
+fn drain_output(procs: &mut dyn Processes, handle: &str, dir: &StateDir) -> String {
+    let mut stderr = Vec::new();
+    for _ in 0..64 {
+        match procs.read(handle, 65_536) {
+            Ok(out) if out.stdout.is_empty() && out.stderr.is_empty() => break,
+            Ok(out) => {
+                append_log(dir, &out.stdout);
+                append_log(dir, &out.stderr);
+                stderr.extend_from_slice(&out.stderr);
+            }
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&stderr).into_owned()
+}
+
+enum DevTools {
+    Ready(u16, String),
+    Exited(i32, String),
+    Silent,
+}
+
+/// Wait for Chrome's `DevTools listening on …` line.
+fn wait_devtools(ctx: &mut Ctx, handle: &str, dir: &StateDir, until: u64) -> DevTools {
+    let mut stderr = String::new();
+    loop {
+        stderr.push_str(&drain_output(ctx.procs, handle, dir));
+        if let Some((port, path)) = launch::parse_devtools_line(&stderr) {
+            return DevTools::Ready(port, path);
+        }
+        match ctx.procs.status(handle) {
+            Ok(ProcState::Exited(code)) => {
+                // The last lines can still be on their way through the runtime's reader.
+                ctx.clock.sleep_ms(300);
+                stderr.push_str(&drain_output(ctx.procs, handle, dir));
+                return DevTools::Exited(code, stderr);
+            }
+            Err(_) => return DevTools::Exited(-1, stderr),
+            Ok(ProcState::Running) => {}
+        }
+        if ctx.clock.now_ms() >= until {
+            return DevTools::Silent;
+        }
+        ctx.clock.sleep_ms(POLL_MS);
+    }
+}
+
+/// Remove a folder this call made and does not keep.
+fn discard(dir: &StateDir) {
+    let _ = fs::remove_dir_all(&dir.root);
+    if let Some(parent) = dir.root.parent() {
+        // Only when empty: another browser's folder stays.
+        let _ = fs::remove_dir(parent);
+    }
+}
+
+/// Start Chrome under the process name `browser`.
+fn start<'a>(
+    ctx: &mut Ctx<'a>,
+    granted: &[&'static str],
+    note: Option<String>,
+    deadline: u64,
+) -> Result<Started<'a>, String> {
+    let start_deadline = (ctx.clock.now_ms() + launch::START_LIMIT_MS).min(deadline);
+    let id = crate::util::hex(&(ctx.random)(8));
+    let dir = StateDir::new(&ctx.work, &id);
+    for sub in ["profile", "downloads"] {
+        fs::create_dir_all(dir.file(sub))
+            .map_err(|e| format!("tool-browser: cannot create {}/{sub}: {e}", dir.rel))?;
+    }
+    fs::write(dir.file(launch::BLANK_PAGE), launch::BLANK_HTML).map_err(|e| {
+        format!(
+            "tool-browser: cannot write {}/{}: {e}",
+            dir.rel,
+            launch::BLANK_PAGE
+        )
+    })?;
+    let lock = CallLock::acquire(&dir, ctx.clock, 0)?;
+
+    let mut sandbox_off = false;
+    let mut chosen: Option<&'static str> = None;
+    let (name, handle, port, path) = loop {
+        let names: Vec<&'static str> = chosen.map_or_else(|| granted.to_vec(), |n| vec![n]);
+        let args = launch::browser_args(&dir.rel, sandbox_off);
+        let mut started = None;
+        for name in names {
+            match ctx.procs.start(PROCESS_NAME, name, &args, &[]) {
+                Err(ProcError::Failed(text)) if discovery::is_not_found(&text) => continue,
+                Err(ProcError::Refused { rule, reason }) => {
+                    drop(lock);
+                    discard(&dir);
+                    return Err(launch::refused_line(name, &rule, &reason));
+                }
+                Err(ProcError::Failed(text)) => {
+                    drop(lock);
+                    discard(&dir);
+                    return Err(launch::spawn_failed_line(name, &text));
+                }
+                Err(other) => {
+                    drop(lock);
+                    discard(&dir);
+                    return Err(launch::spawn_failed_line(name, &other.to_string()));
+                }
+                Ok(s) if s.already_running => {
+                    drop(lock);
+                    discard(&dir);
+                    return Ok(Started::Joined(s.handle));
+                }
+                Ok(s) => {
+                    started = Some((name, s.handle));
+                    break;
+                }
+            }
+        }
+        let Some((name, handle)) = started else {
+            drop(lock);
+            discard(&dir);
+            return Err(discovery::not_installed_line(granted));
+        };
+        let until = (ctx.clock.now_ms() + launch::DEVTOOLS_WAIT_MS).min(start_deadline);
+        match wait_devtools(ctx, &handle, &dir, until) {
+            DevTools::Ready(port, path) => break (name, handle, port, path),
+            DevTools::Exited(_, stderr) if !sandbox_off && launch::sandbox_failed(&stderr) => {
+                sandbox_off = true;
+                chosen = Some(name);
+                let _ = fs::remove_dir_all(dir.file("profile"));
+                let _ = fs::create_dir_all(dir.file("profile"));
+            }
+            DevTools::Exited(code, stderr) => return Err(launch::exit_line(name, code, &stderr)),
+            DevTools::Silent => {
+                let _ = ctx.procs.stop(&handle);
+                drain_output(ctx.procs, &handle, &dir);
+                return Err(launch::no_port_line(name, &dir.rel));
+            }
+        }
+    };
+
+    let fail = |ctx: &mut Ctx, line: String| -> String {
+        let _ = ctx.procs.stop(&handle);
+        line
+    };
+    let ws = match open_ws(ctx, &handle, port, &path) {
+        Ok(ws) => ws,
+        Err(e) => return Err(fail(ctx, e)),
+    };
+    let mut cdp = Cdp::new(ws, ctx.clock, deadline, PageLog::default());
+    let version = cdp
+        .browser("Browser.getVersion", json!({}))
+        .ok()
+        .and_then(|v| v["product"].as_str().map(launch::version_from_product))
+        .unwrap_or_else(|| "(unknown version)".into());
+    let targets = match cdp.browser("Target.getTargets", json!({})) {
+        Ok(t) => t,
+        Err(e) => return Err(fail(ctx, format!("tool-browser: {e}"))),
+    };
+    let Some((target_id, workdir_url)) = launch::initial_page(&targets, &dir.rel) else {
+        return Err(fail(
+            ctx,
+            format!(
+                "tool-browser: {name} did not open {}/{} as a file in the work folder, so the tool cannot tell where the work folder is",
+                dir.rel,
+                launch::BLANK_PAGE
+            ),
+        ));
+    };
+    let state = State {
+        handle,
+        browser: BrowserInfo {
+            name: name.to_string(),
+            version,
+            sandbox: !sandbox_off,
+        },
+        port,
+        browser_ws_path: path,
+        workdir_url,
+        target_id,
+        started_at: ctx.clock.unix_secs(),
+        banner_shown: false,
+        screenshots: 0,
+        closed: false,
+        viewport_override: false,
+        replaced_note: note,
+        dialogs: Vec::new(),
+        document: DocumentState::default(),
+        log: PageLog::default(),
+    };
+    dir.save(&state)?;
+    Ok(Started::Fresh(Box::new(Attached {
+        dir,
+        state,
+        cdp: Some(cdp),
+        _lock: lock,
+        fresh: true,
+    })))
+}
+
+/// Attach to the page target, creating one when it is gone; true when it was created.
+fn attach(cdp: &mut Cdp, state: &mut State) -> Result<bool, String> {
+    let mut created = false;
+    let attached = match cdp.browser(
+        "Target.attachToTarget",
+        json!({"targetId": state.target_id, "flatten": true}),
+    ) {
+        Ok(a) => a,
+        Err(_) => {
+            let target = cdp.browser("Target.createTarget", json!({"url": "about:blank"}))?;
+            state.target_id = target["targetId"]
+                .as_str()
+                .ok_or("Target.createTarget returned no targetId")?
+                .to_string();
+            created = true;
+            cdp.browser(
+                "Target.attachToTarget",
+                json!({"targetId": state.target_id, "flatten": true}),
+            )?
+        }
+    };
+    let session = attached["sessionId"]
+        .as_str()
+        .ok_or("Target.attachToTarget returned no sessionId")?
+        .to_string();
+    cdp.ev.page_session = Some(session);
+    cdp.ev.main_frame = Some(state.target_id.clone());
+    Ok(created)
+}
+
+/// How long `Page.enable` may take: a page blocked by a dialog never answers it.
+const ENABLE_TIMEOUT_MS: u64 = 10_000;
+
+/// Replaces `alert`, `confirm` and `prompt` in a document with functions that record the dialog
+/// and return what dismissing it returns. Full Chrome keeps a dialog that opens while no DevTools
+/// session has the page enabled, blocking the page, and refuses to let a later session dismiss
+/// it (`Page.handleJavaScriptDialog` answers "No dialog is showing"), so the tool keeps such
+/// dialogs from opening between its calls. Defined on every document a call sees.
+pub const DIALOG_SHIM: &str = r#"(() => {
+  if (window.__toolBrowserDialogs) return;
+  const seen = [];
+  Object.defineProperty(window, '__toolBrowserDialogs', {value: seen});
+  const stand_in = (type, answer) => function (message) {
+    seen.push([type, message === undefined ? '' : String(message)]);
+    return answer;
+  };
+  window.alert = stand_in('alert', undefined);
+  window.confirm = stand_in('confirm', false);
+  window.prompt = stand_in('prompt', null);
+})()"#;
+
+/// The dialogs the stand-ins recorded since the last call, taken from the page.
+const TAKE_DIALOGS: &str = "(window.__toolBrowserDialogs || []).splice(0)";
+
+/// Turn on what the actions read, dismiss a dialog left open between calls, and point downloads
+/// at the browser's folder.
+fn prepare(cdp: &mut Cdp, dir: &StateDir, workdir_abs: &str) -> Result<(), String> {
+    let session = cdp.ev.page_session.clone();
+    cdp.command(session.as_deref(), "Page.enable", json!({}), ENABLE_TIMEOUT_MS)
+        .map_err(|e| {
+            if e.contains("got no answer") {
+                "the page does not answer within 10 s (a JavaScript dialog may be open on it, or its renderer could not start); call close, and the next call starts a new browser".to_string()
+            } else {
+                e
+            }
+        })?;
+    let dialogs_before = cdp.ev.dialogs.len();
+    let dismissed = cdp
+        .page("Page.handleJavaScriptDialog", json!({"accept": false}))
+        .is_ok();
+    if dismissed && cdp.ev.dialogs.len() == dialogs_before {
+        cdp.ev.dialogs.push("dialog: (dismissed)".into());
+    }
+    for domain in ["Runtime", "Log", "Network", "DOM", "Accessibility"] {
+        cdp.page(&format!("{domain}.enable"), json!({}))?;
+    }
+    let taken = cdp
+        .page(
+            "Runtime.evaluate",
+            json!({"expression": TAKE_DIALOGS, "returnByValue": true}),
+        )
+        .ok()
+        .and_then(|r| r.pointer("/result/value").cloned());
+    for d in taken
+        .as_ref()
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let kind = d.get(0).and_then(|v| v.as_str()).unwrap_or("alert");
+        let message = d.get(1).and_then(|v| v.as_str()).unwrap_or("");
+        cdp.ev.dialogs.push(format!(
+            "dialog: {kind} \"{}\" (dismissed)",
+            crate::util::one_line(message, 300)
+        ));
+    }
+    cdp.page(
+        "Page.addScriptToEvaluateOnNewDocument",
+        json!({"source": DIALOG_SHIM}),
+    )?;
+    let _ = cdp.page("Runtime.evaluate", json!({"expression": DIALOG_SHIM}));
+    cdp.browser(
+        "Browser.setDownloadBehavior",
+        json!({"behavior": "allow", "downloadPath": format!("{workdir_abs}/{}/downloads", dir.rel), "eventsEnabled": false}),
+    )?;
+    Ok(())
+}
+
+/// Make the page's viewport 1280×800. Full Chrome's `--window-size` counts its window frame, so
+/// the window is grown by the difference; where that does not land on 1280×800, the call keeps
+/// the size with `Emulation.setDeviceMetricsOverride`, which ends with the DevTools session.
+fn fit_viewport(cdp: &mut Cdp, state: &mut State) {
+    let measure = |cdp: &mut Cdp| -> Option<(i64, i64)> {
+        let v = cdp
+            .page(
+                "Runtime.evaluate",
+                json!({"expression": "[innerWidth, innerHeight]", "returnByValue": true}),
+            )
+            .ok()?;
+        let a = v.pointer("/result/value")?.as_array()?.clone();
+        Some((a.first()?.as_i64()?, a.get(1)?.as_i64()?))
+    };
+    let (want_w, want_h) = (
+        crate::page::VIEWPORT.0 as i64,
+        crate::page::VIEWPORT.1 as i64,
+    );
+    let Some((w, h)) = measure(cdp) else { return };
+    if (w, h) == (want_w, want_h) {
+        return;
+    }
+    let target = state.target_id.clone();
+    let grown = cdp
+        .browser("Browser.getWindowForTarget", json!({"targetId": target}))
+        .ok()
+        .and_then(|win| {
+            let id = win.get("windowId")?.as_i64()?;
+            let bw = win.pointer("/bounds/width")?.as_i64()?;
+            let bh = win.pointer("/bounds/height")?.as_i64()?;
+            cdp.browser(
+                "Browser.setWindowBounds",
+                json!({"windowId": id, "bounds": {"width": bw + want_w - w, "height": bh + want_h - h}}),
+            )
+            .ok()
+        })
+        .is_some();
+    if grown {
+        cdp.pump(200);
+    }
+    if !grown || measure(cdp) != Some((want_w, want_h)) {
+        state.viewport_override = true;
+    }
+}
+
+/// Run the action on an attached browser, then save and release it.
+fn finish(ctx: &mut Ctx, mut a: Attached, req: &Request) -> Reply {
+    let workdir_abs = launch::workdir_path(&a.state.workdir_url).unwrap_or_default();
+    let mut reply = if req.action == Action::Close {
+        close(ctx, &mut a)
+    } else {
+        act(ctx, &mut a, req, &workdir_abs)
+    };
+    if !a.state.banner_shown && req.action != Action::Close {
+        let mut head = launch::banner(
+            &a.state.browser.name,
+            &a.state.browser.version,
+            a.state.browser.sandbox,
+        );
+        if let Some(note) = a.state.replaced_note.take() {
+            head = format!("{head}\n{note}");
+        }
+        envelope::prepend_banner(&mut reply, &head);
+        a.state.banner_shown = true;
+    }
+    drain_output(ctx.procs, &a.state.handle, &a.dir);
+    if let Err(e) = a.dir.save(&a.state) {
+        if reply.passed {
+            return envelope::error(&e);
+        }
+    }
+    reply
+}
+
+fn act(ctx: &mut Ctx, a: &mut Attached, req: &Request, workdir_abs: &str) -> Reply {
+    let Some(mut cdp) = a.cdp.take() else {
+        return envelope::error("tool-browser: no DevTools connection");
+    };
+    let created = match attach(&mut cdp, &mut a.state) {
+        Ok(c) => c,
+        Err(e) => return envelope::error(&format!("tool-browser: {e}")),
+    };
+    if created {
+        a.state.document = DocumentState::default();
+        cdp.ev.log = PageLog::default();
+    }
+    if let Err(e) = prepare(&mut cdp, &a.dir, workdir_abs) {
+        a.state.log = std::mem::take(&mut cdp.ev.log);
+        return envelope::error(&format!("tool-browser: {e}"));
+    }
+    if a.fresh {
+        let before = cdp.ev.load_events;
+        if cdp
+            .page("Page.navigate", json!({"url": "about:blank"}))
+            .is_ok()
+        {
+            let until = ctx.clock.now_ms() + 5_000;
+            cdp.wait_until(until, |s| s.load_events > before);
+        }
+        // The initial page is not history `back` can return to.
+        let _ = cdp.page("Page.resetNavigationHistory", json!({}));
+        fit_viewport(&mut cdp, &mut a.state);
+    }
+    if a.state.viewport_override {
+        let (w, h) = crate::page::VIEWPORT;
+        if let Err(e) = cdp.page(
+            "Emulation.setDeviceMetricsOverride",
+            json!({"width": w, "height": h, "deviceScaleFactor": 1, "mobile": false}),
+        ) {
+            a.state.log = std::mem::take(&mut cdp.ev.log);
+            return envelope::error(&format!("tool-browser: {e}"));
+        }
+    }
+    let mut page = Page::new(
+        cdp,
+        a.state.target_id.clone(),
+        &a.state.document,
+        &ctx.work,
+        PathBuf::from(workdir_abs),
+        a.dir.clone(),
+        a.state.screenshots,
+        std::mem::take(&mut a.state.dialogs),
+    );
+    let outcome = page.run(req);
+    let (document, dialogs) = page.saved();
+    a.state.document = document;
+    a.state.dialogs = dialogs;
+    a.state.screenshots = page.screenshots;
+    a.state.log = std::mem::take(&mut page.cdp.ev.log);
+    page.cdp.close();
+    let action = req.action.name();
+    match outcome {
+        Ok(out) => envelope::passed(action, &out.data, out.attachment.as_deref()),
+        Err(e) => envelope::error(&e),
+    }
+}
+
+fn close(ctx: &mut Ctx, a: &mut Attached) -> Reply {
+    if let Some(cdp) = a.cdp.as_mut() {
+        let _ = cdp.command(None, "Browser.close", json!({}), 2_000);
+        cdp.close();
+    }
+    let _ = ctx.procs.stop(&a.state.handle);
+    let _ = fs::remove_dir_all(a.dir.file("profile"));
+    a.state.closed = true;
+    a.state.banner_shown = true;
+    envelope::passed("close", "browser closed", None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::{Conn, Output, Started as ProcStarted};
+    use crate::state::tests::FakeClock;
+    use std::collections::VecDeque;
+
+    /// A scripted `murmur:process`: each start takes the next answer; a started process prints
+    /// `stderr` once and is then exited with `exit`.
+    #[derive(Default)]
+    struct FakeProcs {
+        starts: VecDeque<Result<(), ProcError>>,
+        started: Vec<(String, Vec<String>)>,
+        stderr: Vec<u8>,
+        exit: i32,
+        unread: bool,
+    }
+
+    impl Processes for FakeProcs {
+        fn start(
+            &mut self,
+            _name: &str,
+            program: &str,
+            args: &[String],
+            _env: &[(String, String)],
+        ) -> Result<ProcStarted, ProcError> {
+            self.starts
+                .pop_front()
+                .unwrap_or(Err(ProcError::Failed("unscripted".into())))?;
+            self.started.push((program.to_string(), args.to_vec()));
+            self.unread = true;
+            Ok(ProcStarted {
+                handle: format!("prc_{:02x}", self.started.len()),
+                already_running: false,
+            })
+        }
+        fn find(&mut self, _name: &str) -> Option<String> {
+            (!self.started.is_empty()).then(|| format!("prc_{:02x}", self.started.len()))
+        }
+        fn status(&mut self, _handle: &str) -> Result<ProcState, ProcError> {
+            Ok(ProcState::Exited(self.exit))
+        }
+        fn read(&mut self, _handle: &str, _max: u32) -> Result<Output, ProcError> {
+            let stderr = if std::mem::take(&mut self.unread) {
+                self.stderr.clone()
+            } else {
+                Vec::new()
+            };
+            Ok(Output {
+                stdout: Vec::new(),
+                stderr,
+            })
+        }
+        fn stop(&mut self, _handle: &str) -> Result<ProcState, ProcError> {
+            Ok(ProcState::Exited(self.exit))
+        }
+        fn connect(&mut self, _handle: &str, _port: u16) -> Result<Box<dyn Conn>, ProcError> {
+            Err(ProcError::NotRunning)
+        }
+    }
+
+    fn zeros(n: usize) -> Vec<u8> {
+        vec![0; n]
+    }
+
+    /// A work folder and a runtime directory granting `granted`.
+    fn folders(granted: &[&str]) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        let runtime = dir.path().join("runtime");
+        fs::create_dir_all(&work).unwrap();
+        for name in granted {
+            fs::create_dir_all(runtime.join("tools").join(name)).unwrap();
+            fs::write(runtime.join("tools").join(name).join("murmur.yaml"), "x").unwrap();
+        }
+        (dir, work, runtime)
+    }
+
+    fn run_with(procs: &mut FakeProcs, work: &Path, runtime: &Path, data: &str) -> Reply {
+        let clock = FakeClock::default();
+        let mut ctx = Ctx {
+            procs,
+            clock: &clock,
+            random: &zeros,
+            work: work.to_path_buf(),
+            runtime: Some(runtime.to_path_buf()),
+        };
+        call(data, None, &mut ctx)
+    }
+
+    #[test]
+    fn every_name_not_found_gives_the_install_line_and_leaves_nothing() {
+        let (_d, work, runtime) = folders(&["chromium", "chrome"]);
+        let not_found = || {
+            Err(ProcError::Failed(
+                "No such file or directory (os error 2)".into(),
+            ))
+        };
+        let mut procs = FakeProcs {
+            starts: VecDeque::from([not_found(), not_found()]),
+            ..FakeProcs::default()
+        };
+        let r = run_with(&mut procs, &work, &runtime, r#"{"action":"snapshot"}"#);
+        assert_eq!(
+            r.data,
+            discovery::not_installed_line(&["chromium", "chrome"])
+        );
+        assert!(!work.join(".tool-browser").exists());
+    }
+
+    #[test]
+    fn a_refusal_names_its_rule_and_removes_the_folder() {
+        let (_d, work, runtime) = folders(&["chromium"]);
+        let mut procs = FakeProcs {
+            starts: VecDeque::from([Err(ProcError::Refused {
+                rule: "on-shell".into(),
+                reason: "denied by hook-command-guard".into(),
+            })]),
+            ..FakeProcs::default()
+        };
+        let r = run_with(&mut procs, &work, &runtime, r#"{"action":"snapshot"}"#);
+        assert_eq!(
+            r.data,
+            "tool-browser: murmur refused to start chromium: on-shell: denied by hook-command-guard"
+        );
+        assert!(!work.join(".tool-browser").exists());
+    }
+
+    #[test]
+    fn a_sandbox_failure_restarts_once_without_the_sandbox() {
+        let (_d, work, runtime) = folders(&["chromium"]);
+        let mut procs = FakeProcs {
+            starts: VecDeque::from([Ok(()), Ok(())]),
+            stderr: b"[1105/074242.297415:FATAL:content/browser/zygote_host/zygote_host_impl_linux.cc:128] No usable sandbox! If you are running on Ubuntu 23.10+\n".to_vec(),
+            exit: 133,
+            ..FakeProcs::default()
+        };
+        let r = run_with(&mut procs, &work, &runtime, r#"{"action":"snapshot"}"#);
+        assert_eq!(procs.started.len(), 2, "one retry, no more");
+        assert!(!procs.started[0].1.iter().any(|a| a == "--no-sandbox"));
+        assert!(procs.started[1].1.iter().any(|a| a == "--no-sandbox"));
+        assert!(
+            r.data.starts_with(
+                "tool-browser: chromium exited with 133 while starting: [1105/074242.297415:FATAL:"
+            ),
+            "{}",
+            r.data
+        );
+        let dirs: Vec<_> = fs::read_dir(work.join(".tool-browser")).unwrap().collect();
+        assert_eq!(dirs.len(), 1, "both attempts share one folder");
+    }
+
+    #[test]
+    fn close_with_no_browser_starts_nothing() {
+        let (_d, work, runtime) = folders(&[]);
+        let mut procs = FakeProcs::default();
+        let r = run_with(&mut procs, &work, &runtime, r#"{"action":"close"}"#);
+        assert_eq!((r.passed, r.data.as_str()), (true, "browser closed"));
+        assert!(procs.started.is_empty());
+    }
+}

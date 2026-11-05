@@ -1,5 +1,5 @@
-//! The tool's input: the native envelope on stdin, the `data` object inside it, and the checks
-//! that refuse a call before anything is started.
+//! The tool's input: the `data` object of the call, and the checks that refuse a call before
+//! anything is started.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -92,17 +92,30 @@ pub struct Request {
     pub ms: Option<u64>,
 }
 
-/// The `data` object of the native envelope: an object, or a JSON-encoded string of one.
+/// The call's `data`: a JSON object, or a JSON-encoded string of one.
+pub fn params_from_data(raw: &str) -> Result<Value, String> {
+    if raw.trim().is_empty() {
+        return Err("tool-browser: missing input".into());
+    }
+    let data: Value =
+        serde_json::from_str(raw).map_err(|e| format!("tool-browser: invalid input JSON: {e}"))?;
+    params_from_value(data)
+}
+
+/// The `data` field of an `{"data": …}` envelope, as [`params_from_data`] reads it.
 pub fn params_from_envelope(raw: &str) -> Result<Value, String> {
     if raw.trim().is_empty() {
-        return Err("tool-browser: missing input on stdin".into());
+        return Err("tool-browser: missing input".into());
     }
     let envelope: Value =
-        serde_json::from_str(raw).map_err(|e| format!("tool-browser: invalid stdin JSON: {e}"))?;
-    let data = match envelope.get("data") {
-        None | Some(Value::Null) => return Err("tool-browser: missing data field".into()),
-        Some(v) => v.clone(),
-    };
+        serde_json::from_str(raw).map_err(|e| format!("tool-browser: invalid input JSON: {e}"))?;
+    match envelope.get("data") {
+        None | Some(Value::Null) => Err("tool-browser: missing data field".into()),
+        Some(v) => params_from_value(v.clone()),
+    }
+}
+
+fn params_from_value(data: Value) -> Result<Value, String> {
     match data {
         Value::String(s) => serde_json::from_str(&s)
             .map_err(|e| format!("tool-browser: invalid data JSON string: {e}")),
@@ -376,7 +389,7 @@ pub fn parse_key(spec: &str) -> Result<KeySpec, String> {
 pub enum OpenTarget {
     /// An `http`, `https` or `file` URL, or `about:blank`, passed on as written.
     Url(String),
-    /// A file inside the work folder, canonical.
+    /// A file inside the work folder, relative to it.
     WorkFile(PathBuf),
 }
 
@@ -392,8 +405,17 @@ fn scheme_of(text: &str) -> Option<String> {
 }
 
 /// Classify `url` for `open`, refusing the schemes it never navigates to and any path that is
-/// not an existing file inside `workdir`.
-pub fn open_target(url: &str, workdir: &Path) -> Result<OpenTarget, String> {
+/// not an existing file inside the work folder.
+///
+/// `workdir` is the work folder as the tool opens it (`.` in the component, whose WASI preopen
+/// refuses every path out of it, a link included); `workdir_abs` is its host path, once Chrome has
+/// shown it, against which an absolute path is checked. With no `workdir_abs`, an absolute path
+/// is refused as outside the work folder.
+pub fn open_target(
+    url: &str,
+    workdir: &Path,
+    workdir_abs: Option<&Path>,
+) -> Result<OpenTarget, String> {
     let url = url.trim();
     match scheme_of(url).as_deref() {
         Some("http" | "https" | "file") => return Ok(OpenTarget::Url(url.to_string())),
@@ -413,38 +435,42 @@ pub fn open_target(url: &str, workdir: &Path) -> Result<OpenTarget, String> {
         None => {}
     }
     let given = Path::new(url);
-    if given.is_relative() && given.components().any(|c| c == Component::ParentDir) {
-        // Resolved below as well; refusing here names `..` rather than a missing file.
-        let mut depth: i32 = 0;
-        for c in given.components() {
-            match c {
-                Component::ParentDir => depth -= 1,
-                Component::Normal(_) => depth += 1,
-                _ => {}
+    let relative: PathBuf = if given.is_absolute() {
+        match workdir_abs.and_then(|root| given.strip_prefix(root).ok()) {
+            Some(rest) => rest.to_path_buf(),
+            None => {
+                return Err(format!(
+                    "open refuses {url}: the path is outside the work folder"
+                ))
             }
-            if depth < 0 {
+        }
+    } else {
+        given.to_path_buf()
+    };
+    // Resolved lexically: a `..` that climbs above the work folder is refused by name.
+    let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
+    for c in relative.components() {
+        match c {
+            Component::ParentDir if parts.pop().is_none() => {
                 return Err(format!(
                     "open refuses {url}: the path climbs out of the work folder"
                 ));
             }
+            Component::Normal(p) => parts.push(p),
+            _ => {}
         }
     }
-    let root = workdir
-        .canonicalize()
-        .map_err(|e| format!("open: cannot resolve the work folder: {e}"))?;
-    let joined = root.join(given);
-    let resolved = joined
-        .canonicalize()
-        .map_err(|_| format!("open: {url} is not a URL and no such file is in the work folder"))?;
-    if !resolved.starts_with(&root) {
-        return Err(format!(
-            "open refuses {url}: the path is outside the work folder"
-        ));
-    }
-    if !resolved.is_file() {
+    let normal: PathBuf = parts.iter().collect();
+    if normal.as_os_str().is_empty() {
         return Err(format!("open: {url} is not a file in the work folder"));
     }
-    Ok(OpenTarget::WorkFile(resolved))
+    match workdir.join(&normal).metadata() {
+        Err(_) => Err(format!(
+            "open: {url} is not a URL and no such file is in the work folder"
+        )),
+        Ok(m) if !m.is_file() => Err(format!("open: {url} is not a file in the work folder")),
+        Ok(_) => Ok(OpenTarget::WorkFile(normal)),
+    }
 }
 
 /// `file://` URL for an absolute path, percent-encoding every byte outside the unreserved set.
@@ -476,6 +502,13 @@ mod tests {
         assert_eq!(a, b);
         assert!(params_from_envelope("").is_err());
         assert!(params_from_envelope(r#"{"data":3}"#).is_err());
+        assert_eq!(params_from_data(r#"{"action":"snapshot"}"#).unwrap(), a);
+        assert_eq!(
+            params_from_data(r#""{\"action\":\"snapshot\"}""#).unwrap(),
+            a
+        );
+        assert!(params_from_data("3").is_err());
+        assert!(params_from_data(" ").is_err());
     }
 
     #[test]
@@ -542,28 +575,37 @@ mod tests {
     #[test]
     fn open_targets() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("page.html"), "<p>x</p>").unwrap();
-        assert!(matches!(
-            open_target("page.html", dir.path()),
-            Ok(OpenTarget::WorkFile(_))
-        ));
-        assert!(matches!(
-            open_target("https://example.com/", dir.path()),
-            Ok(OpenTarget::Url(_))
-        ));
-        assert!(open_target("javascript:alert(1)", dir.path())
+        let root = dir.path();
+        std::fs::write(root.join("page.html"), "<p>x</p>").unwrap();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let t = |u: &str| open_target(u, root, Some(root));
+        assert_eq!(t("page.html"), Ok(OpenTarget::WorkFile("page.html".into())));
+        assert_eq!(
+            t("./sub/../page.html"),
+            Ok(OpenTarget::WorkFile("page.html".into()))
+        );
+        assert_eq!(
+            t(&root.join("page.html").display().to_string()),
+            Ok(OpenTarget::WorkFile("page.html".into()))
+        );
+        assert!(matches!(t("https://example.com/"), Ok(OpenTarget::Url(_))));
+        assert!(t("javascript:alert(1)")
             .unwrap_err()
             .contains("javascript:"));
-        assert!(open_target("data:text/html,x", dir.path())
-            .unwrap_err()
-            .contains("data:"));
-        assert!(open_target("../outside.html", dir.path())
+        assert!(t("data:text/html,x").unwrap_err().contains("data:"));
+        assert!(t("chrome://version").unwrap_err().contains("chrome:"));
+        assert!(t("../outside.html").unwrap_err().contains("climbs out"));
+        assert!(t("sub/../../outside.html")
             .unwrap_err()
             .contains("climbs out"));
-        assert!(open_target("/etc/hostname", dir.path())
+        assert!(t("/etc/hostname")
             .unwrap_err()
             .contains("outside the work folder"));
-        assert!(open_target("nope.html", dir.path()).is_err());
+        assert!(open_target("/etc/hostname", root, None)
+            .unwrap_err()
+            .contains("outside the work folder"));
+        assert!(t("nope.html").unwrap_err().contains("no such file"));
+        assert!(t("sub").unwrap_err().contains("is not a file"));
     }
 
     #[test]

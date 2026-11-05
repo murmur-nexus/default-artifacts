@@ -2,13 +2,16 @@
 
 use std::collections::VecDeque;
 
+use serde::{Deserialize, Serialize};
+
 /// The most entries each log keeps; older ones are dropped and counted.
 pub const CONSOLE_CAP: usize = 500;
 pub const NETWORK_CAP: usize = 200;
 /// The longest entry kept, in characters.
 pub const ENTRY_MAX_CHARS: usize = 2_000;
 
-#[derive(Debug)]
+/// Saved in `state.json` between calls, unread entries and the dropped count with them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogBuffer {
     entries: VecDeque<String>,
     cap: usize,
@@ -60,6 +63,17 @@ mod tests {
             vec!["… 2 earlier entries dropped", "e2", "e3", "e4"]
         );
         assert!(b.drain().is_empty());
+    }
+
+    #[test]
+    fn round_trips_through_json() {
+        let mut b = LogBuffer::new(2);
+        for e in ["a", "b", "c"] {
+            b.push(e);
+        }
+        let mut back: LogBuffer =
+            serde_json::from_str(&serde_json::to_string(&b).unwrap()).unwrap();
+        assert_eq!(back.drain(), vec!["… 1 earlier entries dropped", "b", "c"]);
     }
 
     #[test]
