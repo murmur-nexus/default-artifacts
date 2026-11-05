@@ -19,9 +19,9 @@
 #   driver-*                           -> TOOL   category
 #   tool-{request-input,create,read,   -> TOOL   category (wasm32-wasip2 components
 #     write,edit,find,corpus,report,            that export murmur:tool/run)
-#     tavily}
+#     tavily,github,registry-search}
 #   tool-{git,git-validate,            -> SKIP   (native bin crates the workspace build
-#     registry-search,browser,computer}         may still leave a .wasm for; shipped as
+#     browser,computer}                         may still leave a .wasm for; shipped as
 #                                               native binaries, they export
 #                                               wasi:cli/run and are NOT murmur guest
 #                                               components)
@@ -127,7 +127,7 @@ validate_one() {
 
   # ---- category resolution ---------------------------------------------------
   case "$name" in
-    tool-git|tool-git-validate|tool-registry-search|tool-browser|tool-computer)
+    tool-git|tool-git-validate|tool-browser|tool-computer)
       echo "skip: $base is a native command component (exports wasi:cli/run), not a murmur guest component — not validated"
       return 0
       ;;
@@ -141,7 +141,7 @@ validate_one() {
       expected_export="murmur:driver/process"
       expected_version="$process_driver_version"
       ;;
-    driver-*|tool-request-input|tool-create|tool-read|tool-write|tool-edit|tool-find|tool-corpus|tool-report|tool-tavily|tool-github)
+    driver-*|tool-request-input|tool-create|tool-read|tool-write|tool-edit|tool-find|tool-corpus|tool-report|tool-tavily|tool-github|tool-registry-search)
       category="tool"
       expected_export="murmur:tool/run"
       expected_version="$tool_version"

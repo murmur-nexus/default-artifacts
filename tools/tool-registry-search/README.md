@@ -11,7 +11,8 @@ It reads schema 2 indexes, the kind `mur index` writes. A schema 1 index is refu
 | Needs | From |
 |---|---|
 | `mur index`, `murmur/<name>` installs, and fit chosen at install | `mur` 0.7.0 or later |
-| The default index | the first default-artifacts release after v0.24.0; until then the default answers `fetch_error` `HTTP 404` |
+| A WASM tool exporting `murmur:tool/run@0.2.0` | `mur` 0.9.0 or later |
+| The default index | a default-artifacts release that publishes `artifacts-index.json`; with none, the default answers `HTTP 404 fetching …` |
 
 The tool's description tells the agent to install `<scope>/<name>` with no version and let `mur`
 pick the newest fitting one. A `mur` at v0.6.0 or earlier does not do that.
@@ -21,14 +22,13 @@ pick the newest fitting one. A `mur` at v0.6.0 or earlier does not do that.
 | Field | Required | Meaning |
 |---|---|---|
 | `query` | yes | Matched case-insensitively against the full `<scope>/<name>`, the bare name, the description and the tags |
-| `index` | no | A URL (`http://`/`https://`), or a path to an `artifacts-index.json` file, relative to the working directory or absolute |
+| `index` | no | A URL (`http://`/`https://`), or a path to an `artifacts-index.json` file: relative to the work folder (or the entry's `capabilities.filesystem.scope`), or absolute inside a host folder the session opened |
 | `limit` | no | Maximum number of results. Default: 10 |
 
 With no `index`, the tool reads the index on the latest default-artifacts release:
 `https://github.com/murmur-nexus/default-artifacts/releases/latest/download/artifacts-index.json`.
-That URL redirects to `release-assets.githubusercontent.com`, so the capsule's own
-`capabilities.network.allow` must list both `https://github.com` and
-`https://release-assets.githubusercontent.com`; an index on another host needs that host there too
+That URL redirects to `release-assets.githubusercontent.com`, so the network allow-list the tool
+runs under must list both `https://github.com` and `https://release-assets.githubusercontent.com`
 (see [What the capsule must grant](#what-the-capsule-must-grant)).
 
 The `registry` input and `index: "local"` are refused. The global artifact store is on the host,
@@ -38,6 +38,8 @@ and a capsule cannot see it; `mur search <query> --index local` searches it ther
 
 Results are ranked: an exact name first, then a name prefix, then a substring of the name, the
 description or a tag. Within a rank they keep the index's name order.
+
+The result's `summary` is `N result(s)`, and its `data` is:
 
 ```json
 {"index": "<url or path read>", "scope": "murmur", "count": 1,
@@ -58,30 +60,83 @@ without a version.
 
 ## Errors
 
-| `error_kind` | When |
+A failure has status `error`, no `data`, and one of these summaries. `<index>` is the `index`
+value as the caller wrote it, or the default URL.
+
+| When | Summary |
 |---|---|
-| `fetch_error` | The URL answered an HTTP error status, could not be reached, or sent more than 16 MiB |
-| `io_error` | The file could not be read |
-| `parse_error` | The index is not JSON, not a JSON object, or a field is missing or of the wrong type |
-| `schema_error` | The index is schema 1, has another `schema_version`, or has none |
+| The URL answered 400 or more, after any redirects | `HTTP <code> fetching <index>` |
+| The URL, or a host it redirects to, is outside the network allow-list | `failed to fetch <index>: <host> is not in the network allow-list this tool runs under; list it in the capsule's capabilities.network.allow, and in capabilities.network.allow on this tool's entry if the entry narrows it` |
+| More than 5 redirects | `failed to fetch <index>: more than 5 redirects` |
+| A redirect with no `Location` | `failed to fetch <index>: HTTP <code> from <url> redirects with no Location header` |
+| A redirect to a scheme other than `http`/`https` | `failed to fetch <index>: HTTP <code> from <url> redirects to <location>, which is not an http or https URL` |
+| The host could not be reached, the TLS session failed, or a timeout passed | `failed to fetch <index>: <wasi:http error code>` |
+| The body ran past 16 MiB | `<index> answered with more than 16 MiB; an artifact index is never that large` |
+| An absolute path, and the session opens no host folder to the tool | `failed to read <index>: this session opens no host folder to this tool, so an absolute path cannot be read; a relative path opens in the work folder` |
+| An absolute path outside every host folder the tool holds | `failed to read <index>: it is outside every host folder this session opens to this tool (<folders>); a relative path opens in the work folder` |
+| The file could not be read | `failed to read <index>: <OS error>` |
+| The index is not JSON, not a JSON object, or a field is missing or of the wrong type | `failed to parse the artifact index from <index>: …` |
+| The index is schema 1, has another `schema_version`, or has none | `<index> is a schema 1 artifact index, …`, `<index> has schema_version <v>; …`, `<index> has no schema_version; …` |
+
+The tool also tags each failure with an internal kind (`fetch_error`, `io_error`, `parse_error`,
+`schema_error`); it is not part of what reaches the model.
 
 ## What the capsule must grant
 
-On Linux, with `mur` 0.7.0 or later, the tool runs in the capsule's own sandbox, with the capsule-wide grants ([Native tools](https://docs.murmur.nexus/reference/containment/#native-tools)). A `capabilities:` block on the tool's entry in the capsule's `artifacts:` does not narrow them and prints `W-SEC-008`.
+The tool fetches over `wasi:http`. The runtime checks every request, and every redirect hop, as
+a separate request against the capsule's `capabilities.network.allow`, narrowed by any
+`capabilities.network` on the tool's entry. The tool follows at most 5 redirects itself.
 
-| Need | Capsule grant |
+| Need | Grant |
 |---|---|
-| The default index | `https://github.com` and `https://release-assets.githubusercontent.com` in `capabilities.network.allow` |
-| An `index` URL | Its host, and any host it redirects to, in `capabilities.network.allow` |
-| An `index` file | The file inside the session workdir |
+| The default index | `https://github.com` and `https://release-assets.githubusercontent.com` in the capsule's `capabilities.network.allow` |
+| An `index` URL | Its host, and every host it redirects to, in the capsule's `capabilities.network.allow` |
+| Only those hosts for this tool | The same list as `capabilities.network.allow` on the tool's entry; `allow: []` there takes the network away |
+| An `index` file | The file inside the work folder, or the entry's `capabilities.filesystem.scope` |
+| An absolute `index` path | A host folder the session opened that covers it: the whole host under `mur run --unconfined`, or a `host_paths` entry in `~/.murmur/config.yaml` |
+
+```yaml
+capabilities:
+  network:
+    allow:
+      - "https://github.com"
+      - "https://release-assets.githubusercontent.com"
+artifacts:
+  - name: murmur/tool-registry-search
+    version: "0.6.0"
+    runtime: tool
+    capabilities:            # optional: this tool reaches only these two hosts
+      network:
+        allow:
+          - "https://github.com"
+          - "https://release-assets.githubusercontent.com"
+```
+
+The `capabilities:` block in the tool's own bundled `murmur.yaml` grants nothing; the runtime
+reads grants only from the capsule's manifest.
+
+murmur hands each host folder to the tool as a WASI preopen named `murmur-host` followed by the
+folder's absolute path, `murmur-host` alone for `/`. The tool resolves the value's `.` and `..`
+segments lexically and opens it only when a folder covers it whole-component: `/home/op/idx`
+covers `/home/op/idx/artifacts-index.json` but not `/home/op/idx2/…`.
+
+## Breaking in 0.6.0
+
+- The tool is a `wasm32-wasip2` component: one `.mur.zip` for every platform, and no
+  per-platform zips.
+- An absolute `index` path opens only inside a host folder the session opened. Under
+  `--unconfined` that is the whole host; in a contained session with no `host_paths`, every
+  absolute path is refused.
+- A `capabilities:` block on the tool's entry now narrows the tool: its `network.allow` is the
+  list the tool's requests are checked against, within the capsule's. Before 0.6.0 it narrowed
+  nothing and printed `W-SEC-008`.
 
 ## Build
 
-Native binary tool (`runtime: tool`, `implementation: native`), built with
-`cargo build --release -p tool-registry-search`. HTTPS goes through rustls with its bundled
-webpki roots and the *ring* crypto provider, so it needs no system certificate store and works
-under `scoped` containment, where `/etc/ssl` is not readable.
+WASM tool (`runtime: tool`, `implementation: wasm`), built with
+`cargo build -p tool-registry-search --target wasm32-wasip2 --release`. The tool opens no socket
+itself: the runtime's `wasi:http` makes each connection and its TLS session.
 
-`tests/fixtures/README.md` says how the test indexes were made.
+`tests/fixtures/README.md` says how the test indexes and the recorded 0.5.0 answers were made.
 
 See [murmur.yaml](./murmur.yaml) for the full manifest.

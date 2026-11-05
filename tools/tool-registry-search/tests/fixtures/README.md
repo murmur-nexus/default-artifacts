@@ -1,6 +1,6 @@
 # Test fixtures
 
-Neither file is edited by hand.
+No file here is edited by hand.
 
 ## `artifacts-index-schema1.json`
 
@@ -54,3 +54,58 @@ cp "$W/dirB/artifacts-index.json" tools/tool-registry-search/tests/fixtures/arti
 
 `package-artifact.sh` packs the scratch copy of `tool-editor` as it is; it needs only the
 directory to be named after the artifact.
+
+## `native-0.5.0-results.json`
+
+What the native 0.5.0 build answered for 14 inputs, as the runtime turned each answer into a
+`ToolResult`: `status` (`passed`, `failed`, anything else `error`), `summary`, and `data`, the
+printed `data` value, or `null`. `error_kind`, `message`, `ok` and the top-level mirror of `data`
+never reached the model, so they are not recorded. The `native_0_5_0_results` test in
+`../search_index.rs` runs each input through the component from the crate directory and requires
+an equal `status`, `summary` and `data`.
+
+One case differs by design: the missing file's summary ends in ` (os error 2)` here, and WASI
+numbers the same error 44. The test compares that summary with the trailing ` (os error N)` cut.
+
+Recorded from commit `95e17e1` (`ci: bump version to v0.36.0`), the last commit with the native
+build, on linux-x86_64, with `jq` 1.7. From the repository root, with `$S` an empty scratch
+directory under `/space`:
+
+```bash
+git worktree add --detach "$S/native-0.5.0" 95e17e1
+(cd "$S/native-0.5.0" && cargo build --release -p tool-registry-search --target-dir "$S/native-target")
+cd tools/tool-registry-search
+bash "$S/record-native.sh" "$S/native-target/release/tool-registry-search" tests/fixtures/native-0.5.0-results.json
+git worktree remove "$S/native-0.5.0"
+```
+
+`$S/record-native.sh`, run from `tools/tool-registry-search`:
+
+```bash
+#!/usr/bin/env bash
+# record-native.sh <native-binary> <out.json> — run from tools/tool-registry-search.
+set -euo pipefail
+bin="$1"; out="$2"
+fx=tests/fixtures/artifacts-index.json
+cases=()
+for q in tool-editor murmur/tool-editor TOOL-EDITOR tool; do
+  cases+=("$(jq -cn --arg q "$q" --arg i "$fx" '{query:$q,index:$i}')")
+done
+cases+=("$(jq -cn --arg i "$fx" '{query:"tool",index:$i,limit:1}')")
+for q in Messages tool-git skill-create-manifest murmur/ zzz; do
+  cases+=("$(jq -cn --arg q "$q" --arg i "$fx" '{query:$q,index:$i}')")
+done
+cases+=('{"query":"git","index":"tests/fixtures/artifacts-index-schema1.json"}')
+cases+=('{"query":"x","index":"no/such/artifacts-index.json"}')
+cases+=('{"query":"editor","index":"local"}')
+cases+=('{"query":"x","registry":"local"}')
+for input in "${cases[@]}"; do
+  jq -cn --argjson d "$input" '{data:$d, log_path:null}' | "$bin" \
+    | jq -c --argjson input "$input" '{
+        input: $input,
+        status: (if .status == "passed" or .status == "failed" then .status else "error" end),
+        summary: .summary,
+        data: (if .data == null then null else .data end)
+      }'
+done | jq -s '.' > "$out"
+```

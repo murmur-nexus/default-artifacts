@@ -91,7 +91,7 @@ jobs:
       # only murmur:stream/events and/or murmur:task/task), at the exact interface
       # version the vendored WIT declares — a component built against a stale WIT
       # is unloadable by the host. Native command components
-      # (tool-{git,git-validate,registry-search}) are skipped by name.
+      # (tool-{git,git-validate,browser,computer}) are skipped by name.
       # A malformed or mis-bound component fails here instead of at `mur run`.
       #
       # Invoked bare, the script walks target/wasm32-wasip2/release/ itself, so

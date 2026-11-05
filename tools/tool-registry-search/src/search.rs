@@ -1,21 +1,29 @@
+//! The search itself: the `{"data": …}` envelope in, one result object out.
+//!
+//! [`run`] takes its I/O as parameters — a transport for an `http(s)://` index and the host
+//! roots for an absolute path — so it runs unchanged natively under `cargo test` and inside the
+//! component. The object it returns is the one the native 0.5.0 binary printed, `error_kind` and
+//! the top-level mirror of `data` included; [`crate::outcome_of`] keeps what the runtime keeps.
+
 use std::collections::BTreeSet;
-use std::io::Read;
-use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::fetch::{fetch, Http};
+use crate::paths::open_path;
+
 /// The index the latest default-artifacts release publishes beside its zips.
-const DEFAULT_INDEX_URL: &str =
+pub const DEFAULT_INDEX_URL: &str =
     "https://github.com/murmur-nexus/default-artifacts/releases/latest/download/artifacts-index.json";
 
 /// The largest response body read as an index. A real index is a few hundred KiB at most.
-const MAX_INDEX_BYTES: u64 = 16 * 1024 * 1024;
+pub const MAX_INDEX_BYTES: u64 = 16 * 1024 * 1024;
 
 /// The `schema_version` this tool reads, as `mur index` writes it.
-const INDEX_SCHEMA_VERSION: u64 = 2;
+pub const INDEX_SCHEMA_VERSION: u64 = 2;
 
-mod err {
+pub(crate) mod err {
     pub const FETCH_ERROR: &str = "fetch_error";
     pub const PARSE_ERROR: &str = "parse_error";
     pub const SCHEMA_ERROR: &str = "schema_error";
@@ -69,19 +77,13 @@ struct SearchParams {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-fn main() {
-    let mut raw = String::new();
-    if std::io::stdin().read_to_string(&mut raw).is_err() {
-        eprintln!("fatal: failed to read stdin");
-        std::process::exit(1);
-    }
-    let result = run(&raw);
-    let output = serde_json::to_string(&result)
-        .unwrap_or_else(|_| r#"{"ok":false,"message":"failed to serialize output"}"#.to_string());
-    println!("{output}");
-}
-
-fn run(raw: &str) -> Value {
+/// Runs one search for the envelope `raw`, `{"data": <object or JSON-encoded object>}`.
+///
+/// An `http://`/`https://` index is fetched through `http`; a file index opens relative to the
+/// current directory, or, when absolute, through the covering root among `host_roots` (the
+/// `murmur-host…` preopen names). Returns the result object: `status`, `summary`, `data`, and
+/// on failure `error_kind` beside them.
+pub fn run(raw: &str, http: &mut dyn Http, host_roots: &[String]) -> Value {
     if raw.trim().is_empty() {
         return fail_msg("missing input on stdin");
     }
@@ -134,7 +136,7 @@ fn run(raw: &str) -> Value {
     let limit = params.limit.unwrap_or(10);
     let query_lower = params.query.to_lowercase();
 
-    let index = match load_index(source) {
+    let index = match load_index(source, http, host_roots) {
         Ok(index) => index,
         Err(e) => return e,
     };
@@ -159,54 +161,17 @@ fn run(raw: &str) -> Value {
 // ── Loading the index ─────────────────────────────────────────────────────────
 
 /// Reads the index at `source`: a URL when it starts with `http://` or `https://`, otherwise a
-/// file path, resolved against the working directory when relative. This is how
-/// `mur search --index` reads its value.
-fn load_index(source: &str) -> Result<Index, Value> {
+/// file path, resolved against the current directory when relative and through a host root when
+/// absolute. This is how `mur search --index` reads its value.
+fn load_index(source: &str, http: &mut dyn Http, host_roots: &[String]) -> Result<Index, Value> {
     let bytes = if source.starts_with("http://") || source.starts_with("https://") {
-        fetch(source)?
+        fetch(source, http)?
     } else {
-        std::fs::read(source)
+        let open = open_path(source, host_roots)?;
+        std::fs::read(&open)
             .map_err(|e| err_result(err::IO_ERROR, format!("failed to read {source}: {e}")))?
     };
     read_index(&bytes, source)
-}
-
-/// GETs `url`, following redirects, and returns its body of at most [`MAX_INDEX_BYTES`].
-fn fetch(url: &str) -> Result<Vec<u8>, Value> {
-    let response = match ureq::get(url).timeout(Duration::from_secs(30)).call() {
-        Ok(r) => r,
-        Err(ureq::Error::Status(code, _)) => {
-            return Err(err_result(
-                err::FETCH_ERROR,
-                format!("HTTP {code} fetching {url}"),
-            ))
-        }
-        Err(e) => {
-            return Err(err_result(
-                err::FETCH_ERROR,
-                format!("failed to fetch {url}: {e}"),
-            ))
-        }
-    };
-
-    let mut body = Vec::new();
-    if let Err(e) = response
-        .into_reader()
-        .take(MAX_INDEX_BYTES + 1)
-        .read_to_end(&mut body)
-    {
-        return Err(err_result(
-            err::FETCH_ERROR,
-            format!("failed to fetch {url}: {e}"),
-        ));
-    }
-    if body.len() as u64 > MAX_INDEX_BYTES {
-        return Err(err_result(
-            err::FETCH_ERROR,
-            format!("{url} answered with more than 16 MiB; an artifact index is never that large"),
-        ));
-    }
-    Ok(body)
 }
 
 /// Parses `bytes` read from `source` as a schema 2 artifact index. A schema 1 index is refused
@@ -370,7 +335,7 @@ fn fail_msg(message: impl Into<String>) -> Value {
     })
 }
 
-fn err_result(error_kind: &str, message: impl Into<String>) -> Value {
+pub(crate) fn err_result(error_kind: &str, message: impl Into<String>) -> Value {
     let msg = message.into();
     json!({
         "ok": false,
@@ -389,11 +354,24 @@ fn err_result(error_kind: &str, message: impl Into<String>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fetch::{HttpFailure, HttpReply};
 
-    const FIXTURE: &str = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/artifacts-index.json"
-    );
+    /// Relative to the crate directory, the working directory of a unit test: an absolute path
+    /// opens only through a host root, which a native test process does not have.
+    const FIXTURE: &str = "tests/fixtures/artifacts-index.json";
+
+    /// A transport no test in this module may reach.
+    struct NoNetwork;
+
+    impl Http for NoNetwork {
+        fn get(&mut self, url: &str) -> Result<HttpReply, HttpFailure> {
+            panic!("unexpected GET {url}")
+        }
+    }
+
+    fn run(raw: &str) -> Value {
+        super::run(raw, &mut NoNetwork, &[])
+    }
 
     fn artifact(name: &str, description: Option<&str>, tags: &[&str]) -> IndexedArtifact {
         IndexedArtifact {
@@ -529,6 +507,86 @@ mod tests {
         assert_eq!(out["data"]["scope"], "murmur");
         assert_eq!(out["data"]["index"], FIXTURE);
         assert_eq!(out["count"], out["data"]["count"]);
+    }
+
+    // ── error kinds the model never sees, asserted where they are made ──
+
+    #[test]
+    fn a_missing_file_is_an_io_error_naming_the_path() {
+        let out = run(r#"{"data":{"query":"x","index":"no/such/artifacts-index.json"}}"#);
+        assert_eq!(out["error_kind"], err::IO_ERROR, "{out}");
+        assert!(message(&out).starts_with("failed to read no/such/artifacts-index.json: "));
+    }
+
+    #[test]
+    fn an_absolute_path_with_no_root_is_an_io_error() {
+        let out = run(r#"{"data":{"query":"x","index":"/etc/artifacts-index.json"}}"#);
+        assert_eq!(out["error_kind"], err::IO_ERROR, "{out}");
+        assert!(message(&out).starts_with("failed to read /etc/artifacts-index.json: "));
+    }
+
+    #[test]
+    fn a_schema_1_file_is_a_schema_error() {
+        let index = "tests/fixtures/artifacts-index-schema1.json";
+        let out = run(&json!({ "data": { "query": "git", "index": index } }).to_string());
+        assert_eq!(out["error_kind"], err::SCHEMA_ERROR, "{out}");
+        assert!(message(&out).starts_with(index));
+    }
+
+    #[test]
+    fn a_fetch_failure_keeps_its_error_kind() {
+        struct NotFound;
+        impl Http for NotFound {
+            fn get(&mut self, _: &str) -> Result<HttpReply, HttpFailure> {
+                Ok(HttpReply {
+                    status: 404,
+                    location: None,
+                    body: Vec::new(),
+                })
+            }
+        }
+        let raw = json!({ "data": { "query": "x", "index": "https://h/i.json" } }).to_string();
+        let out = super::run(&raw, &mut NotFound, &[]);
+        assert_eq!(out["error_kind"], err::FETCH_ERROR, "{out}");
+        assert_eq!(message(&out), "HTTP 404 fetching https://h/i.json");
+    }
+
+    #[test]
+    fn a_non_json_body_is_a_parse_error_naming_the_url() {
+        struct Html;
+        impl Http for Html {
+            fn get(&mut self, _: &str) -> Result<HttpReply, HttpFailure> {
+                Ok(HttpReply {
+                    status: 200,
+                    location: None,
+                    body: b"<html>hello</html>".to_vec(),
+                })
+            }
+        }
+        let raw = json!({ "data": { "query": "x", "index": "http://h/i.json" } }).to_string();
+        let out = super::run(&raw, &mut Html, &[]);
+        assert_eq!(out["error_kind"], err::PARSE_ERROR, "{out}");
+        assert!(message(&out).contains("http://h/i.json"));
+    }
+
+    #[test]
+    fn omitting_index_fetches_the_default_url() {
+        struct Record(Vec<String>);
+        impl Http for Record {
+            fn get(&mut self, url: &str) -> Result<HttpReply, HttpFailure> {
+                self.0.push(url.to_string());
+                Ok(HttpReply {
+                    status: 200,
+                    location: None,
+                    body: std::fs::read(FIXTURE).unwrap(),
+                })
+            }
+        }
+        let mut http = Record(Vec::new());
+        let out = super::run(r#"{"data":{"query":"tool-editor"}}"#, &mut http, &[]);
+        assert_eq!(out["ok"], true, "{out}");
+        assert_eq!(out["data"]["index"], DEFAULT_INDEX_URL);
+        assert_eq!(http.0, [DEFAULT_INDEX_URL]);
     }
 
     // ── reading the index ──
