@@ -4,6 +4,10 @@
 # Rust build artifacts
 /target/
 
+# The pinned wasi-sdk (wasi-sdk.toml), linked here by scripts/wasi-sdk.sh from its shared
+# cache; .cargo/config.toml points CC_wasm32_wasip2 / AR_wasm32_wasip2 at it.
+/.wasi-sdk
+
 # Compiled driver WASMs and packaged artifacts (build outputs — uploaded to GitHub Releases)
 **/*.wasm
 **/*.mur.zip

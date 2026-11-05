@@ -1,0 +1,6 @@
+# The wasm32-wasip2 C compiler and archiver: the pinned wasi-sdk that scripts/wasi-sdk.sh
+# links at .wasi-sdk. Target-scoped, so host builds are untouched. An exported
+# CC_wasm32_wasip2 / AR_wasm32_wasip2 wins (no `force`).
+[env]
+CC_wasm32_wasip2 = { value = ".wasi-sdk/bin/clang", relative = true }
+AR_wasm32_wasip2 = { value = ".wasi-sdk/bin/llvm-ar", relative = true }

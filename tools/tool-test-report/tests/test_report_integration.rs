@@ -1,13 +1,13 @@
-//! Real-filesystem integration tests for tool-test-report.
+//! Behaviour tests for tool-test-report, run against the compiled `wasm32-wasip2` component.
 //!
-//! Each test spawns the actual compiled binary via `std::process::Command`,
-//! feeds a real JSON envelope on stdin, and inspects the real JSON on stdout —
-//! no mocks. Format fixtures live under `tests/fixtures/`; the code-graph
-//! fixture db (scenarios 7–9) is built at test time with `rusqlite` against the
-//! schema `tool-code-graph` documents, because that tool's branch was not
-//! merged to `main` when this slice was written.
+//! Each call instantiates the component in a fresh Wasmtime `Store` with the test's scratch
+//! directory preopened at `.`, the work folder murmur gives a WASM tool, and sends a real call
+//! as `tool-input.data` — no mocks. Paths are relative to the scratch directory, into which
+//! the format fixtures under `tests/fixtures/` are copied. Assertions read what the model
+//! receives: `status`, `summary` and the parsed `data`. The code-graph fixture db (scenarios
+//! 7–9) is built on the host with `rusqlite` against tool-code-graph's schema.
 //!
-//! Scenario map (14 total):
+//! Scenario map (15 total):
 //!   1  cargo_test explicit parse
 //!   2  pytest explicit parse
 //!   3  go_test explicit parse (test-failure block + panic dump)
@@ -24,133 +24,47 @@
 //!   14 malformed operation / unparseable input → failed
 //!   15 all tests passing → status "passed", zero failures, no crash
 
-use std::{
-    fs,
-    io::Write,
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
-};
+mod common;
 
-use rusqlite::Connection;
+use std::fs;
+use std::path::Path;
+
+use common::{build_graph_db, call, copy_fixture, many_cargo_failures, Outcome, TestDir};
 use serde_json::{json, Value};
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-struct TestDir {
-    path: PathBuf,
+/// One call with `dir` as the work folder and no host folder.
+fn run_tool(dir: &Path, op: Value) -> Outcome {
+    call(dir, &[], &op)
 }
 
-impl TestDir {
-    fn new() -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should be valid")
-            .as_nanos();
-        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "tool-test-report-it-{}-{nanos}-{n}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&path).expect("temp test directory should be created");
-        Self { path }
-    }
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
-fn fixtures_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
-}
-
-/// Spawn the compiled binary, feed one envelope, return the parsed stdout JSON.
-fn run_tool(op: Value) -> Value {
-    let envelope = json!({ "data": op.to_string(), "log_path": null }).to_string();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tool-test-report"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("binary should start");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(envelope.as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().expect("tool should complete");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // Invariant: stdout is always exactly one JSON object, never partial output.
-    serde_json::from_str(stdout.trim())
-        .unwrap_or_else(|e| panic!("stdout must be valid JSON ({e}): {stdout:?}"))
-}
-
-fn parse_op(input_path: &Path, format: &str) -> Value {
+fn parse_op(input_path: &str, format: &str) -> Value {
     json!({
         "operation": "parse",
-        "input_path": input_path.display().to_string(),
+        "input_path": input_path,
         "format": format,
     })
 }
 
-/// Build a code-graph.db under `repo/.murmur/` with the documented schema and the
-/// given `(module, qualified_name, symbol_id)` function rows.
-fn build_graph_db(repo: &Path, rows: &[(&str, &str, &str)]) {
-    let dir = repo.join(".murmur");
-    fs::create_dir_all(&dir).unwrap();
-    let conn = Connection::open(dir.join("code-graph.db")).unwrap();
-    conn.execute_batch(
-        r#"
-        CREATE TABLE files (
-            id INTEGER PRIMARY KEY, path TEXT UNIQUE, content_hash TEXT,
-            language TEXT DEFAULT 'rust'
-        );
-        CREATE TABLE symbols (
-            id INTEGER PRIMARY KEY, symbol_id TEXT UNIQUE, language TEXT, package TEXT,
-            module TEXT, qualified_name TEXT, simple_name TEXT, signature TEXT, kind TEXT,
-            file_id INTEGER, start_line INTEGER, end_line INTEGER, doc_comment TEXT DEFAULT ''
-        );
-        "#,
-    )
-    .unwrap();
-    for (module, qname, symbol_id) in rows {
-        conn.execute(
-            "INSERT INTO symbols
-                (symbol_id, language, package, module, qualified_name, simple_name, signature, kind, file_id, start_line, end_line)
-             VALUES (?1, 'rust', 'fixture_crate', ?2, ?3, ?3, '(->())', 'function', 1, 1, 3)",
-            rusqlite::params![symbol_id, module, qname],
-        )
-        .unwrap();
-    }
-}
-
-fn failures(res: &Value) -> &Vec<Value> {
-    res["data"]["failures"].as_array().expect("failures array")
+/// A scratch work folder holding the fixture `name`.
+fn with_fixture(name: &str) -> TestDir {
+    let dir = TestDir::new("it");
+    copy_fixture(name, dir.path());
+    dir
 }
 
 // ── 1. cargo_test ─────────────────────────────────────────────────────────────
 
 #[test]
 fn scenario_01_cargo_test_parse() {
-    let res = run_tool(parse_op(
-        &fixtures_dir().join("cargo_test.txt"),
-        "cargo_test",
-    ));
-    assert_eq!(res["status"], "failed"); // tests failed → status mirrors outcome
-    assert_eq!(res["data"]["format_used"], "cargo_test");
-    assert_eq!(res["data"]["passed"], 3);
-    assert_eq!(res["data"]["failed"], 2);
-    assert_eq!(res["data"]["total"], 5);
-    let f = failures(&res);
+    let dir = with_fixture("cargo_test.txt");
+    let res = run_tool(dir.path(), parse_op("cargo_test.txt", "cargo_test"));
+    assert_eq!(res.status, "failed"); // tests failed → status mirrors outcome
+    assert_eq!(res.summary(), "3 passed, 2 failed");
+    assert_eq!(res.data["format_used"], "cargo_test");
+    assert_eq!(res.data["passed"], 3);
+    assert_eq!(res.data["failed"], 2);
+    assert_eq!(res.data["total"], 5);
+    let f = res.failures();
     assert_eq!(f.len(), 2);
     assert_eq!(f[0]["test_name"], "tests::test_add_wrong");
     assert_eq!(f[0]["file"], "src/lib.rs");
@@ -166,10 +80,11 @@ fn scenario_01_cargo_test_parse() {
 
 #[test]
 fn scenario_02_pytest_parse() {
-    let res = run_tool(parse_op(&fixtures_dir().join("pytest.txt"), "pytest"));
-    assert_eq!(res["data"]["format_used"], "pytest");
-    assert_eq!(res["data"]["passed"], 3);
-    let f = failures(&res);
+    let dir = with_fixture("pytest.txt");
+    let res = run_tool(dir.path(), parse_op("pytest.txt", "pytest"));
+    assert_eq!(res.data["format_used"], "pytest");
+    assert_eq!(res.data["passed"], 3);
+    let f = res.failures();
     assert_eq!(f.len(), 2);
     assert_eq!(f[0]["test_name"], "test_math.py::test_add");
     assert_eq!(f[0]["file"], "test_math.py");
@@ -184,10 +99,11 @@ fn scenario_02_pytest_parse() {
 
 #[test]
 fn scenario_03_go_test_parse() {
-    let res = run_tool(parse_op(&fixtures_dir().join("go_test.txt"), "go_test"));
-    assert_eq!(res["data"]["format_used"], "go_test");
-    assert_eq!(res["data"]["passed"], 1);
-    let f = failures(&res);
+    let dir = with_fixture("go_test.txt");
+    let res = run_tool(dir.path(), parse_op("go_test.txt", "go_test"));
+    assert_eq!(res.data["format_used"], "go_test");
+    assert_eq!(res.data["passed"], 1);
+    let f = res.failures();
     assert_eq!(f.len(), 2);
     assert_eq!(f[0]["test_name"], "TestSubtractWrong");
     assert_eq!(f[0]["file"], "sub_test.go");
@@ -205,10 +121,11 @@ fn scenario_03_go_test_parse() {
 
 #[test]
 fn scenario_04_jest_parse() {
-    let res = run_tool(parse_op(&fixtures_dir().join("jest.txt"), "jest"));
-    assert_eq!(res["data"]["format_used"], "jest");
-    assert_eq!(res["data"]["passed"], 2);
-    let f = failures(&res);
+    let dir = with_fixture("jest.txt");
+    let res = run_tool(dir.path(), parse_op("jest.txt", "jest"));
+    assert_eq!(res.data["format_used"], "jest");
+    assert_eq!(res.data["passed"], 2);
+    let f = res.failures();
     assert_eq!(f.len(), 2);
     assert_eq!(f[0]["test_name"], "math \u{203a} subtracts numbers");
     assert_eq!(f[0]["file"], "src/math.test.js");
@@ -226,14 +143,16 @@ fn scenario_04_jest_parse() {
 #[test]
 fn scenario_05_auto_matches_explicit() {
     for fmt in ["cargo_test", "pytest", "go_test", "jest"] {
-        let path = fixtures_dir().join(format!("{fmt}.txt"));
-        let explicit = run_tool(parse_op(&path, fmt));
-        let auto = run_tool(parse_op(&path, "auto"));
-        assert_eq!(auto["data"]["format_used"], fmt, "auto should detect {fmt}");
+        let name = format!("{fmt}.txt");
+        let dir = with_fixture(&name);
+        let explicit = run_tool(dir.path(), parse_op(&name, fmt));
+        let auto = run_tool(dir.path(), parse_op(&name, "auto"));
+        assert_eq!(auto.data["format_used"], fmt, "auto should detect {fmt}");
         assert_eq!(
-            auto["data"], explicit["data"],
+            auto.data, explicit.data,
             "auto output must equal explicit for {fmt}"
         );
+        assert_eq!(auto.summary, explicit.summary);
     }
 }
 
@@ -241,18 +160,16 @@ fn scenario_05_auto_matches_explicit() {
 
 #[test]
 fn scenario_06_auto_unrecognized_fails() {
-    let dir = TestDir::new();
-    let path = dir.path().join("garbage.txt");
+    let dir = TestDir::new("it");
     fs::write(
-        &path,
+        dir.path().join("garbage.txt"),
         "this is not any known test runner output\njust prose\n",
     )
     .unwrap();
-    let res = run_tool(parse_op(&path, "auto"));
-    assert_eq!(res["status"], "failed");
-    assert_eq!(res["ok"], false);
-    assert!(res["data"].is_null());
-    let msg = res["message"].as_str().unwrap();
+    let res = run_tool(dir.path(), parse_op("garbage.txt", "auto"));
+    assert_eq!(res.status, "failed");
+    assert!(res.data.is_null());
+    let msg = res.summary();
     assert!(
         msg.contains("auto-detect") && msg.contains("format"),
         "msg was: {msg}"
@@ -263,16 +180,22 @@ fn scenario_06_auto_unrecognized_fails() {
 
 #[test]
 fn scenario_07_stable_id_unique_match() {
-    let repo = TestDir::new();
+    let dir = with_fixture("cargo_test.txt");
     let sid = "rust://fixture_crate/tests#test_add_wrong(->())";
-    build_graph_db(repo.path(), &[("tests", "test_add_wrong", sid)]);
-    let res = run_tool(json!({
-        "operation": "parse",
-        "input_path": fixtures_dir().join("cargo_test.txt").display().to_string(),
-        "format": "cargo_test",
-        "repo_path": repo.path().display().to_string(),
-    }));
-    let f = failures(&res);
+    build_graph_db(
+        &dir.path().join("repo"),
+        &[("tests", "test_add_wrong", sid)],
+    );
+    let res = run_tool(
+        dir.path(),
+        json!({
+            "operation": "parse",
+            "input_path": "cargo_test.txt",
+            "format": "cargo_test",
+            "repo_path": "repo",
+        }),
+    );
+    let f = res.failures();
     // tests::test_add_wrong resolves uniquely; math::tests::test_divide has no row.
     assert_eq!(f[0]["stable_id"], sid);
     assert!(f[1]["stable_id"].is_null());
@@ -282,15 +205,19 @@ fn scenario_07_stable_id_unique_match() {
 
 #[test]
 fn scenario_08_stable_id_null_without_db() {
-    let repo = TestDir::new(); // exists, but has no .murmur/code-graph.db
-    let res = run_tool(json!({
-        "operation": "parse",
-        "input_path": fixtures_dir().join("cargo_test.txt").display().to_string(),
-        "format": "cargo_test",
-        "repo_path": repo.path().display().to_string(),
-    }));
-    assert_eq!(res["status"], "failed"); // still a normal parse, tests failed
-    for f in failures(&res) {
+    let dir = with_fixture("cargo_test.txt");
+    fs::create_dir(dir.path().join("repo")).unwrap(); // exists, but has no .murmur/code-graph.db
+    let res = run_tool(
+        dir.path(),
+        json!({
+            "operation": "parse",
+            "input_path": "cargo_test.txt",
+            "format": "cargo_test",
+            "repo_path": "repo",
+        }),
+    );
+    assert_eq!(res.status, "failed"); // still a normal parse, tests failed
+    for f in res.failures() {
         assert!(f["stable_id"].is_null(), "no db → stable_id null");
     }
 }
@@ -299,10 +226,10 @@ fn scenario_08_stable_id_null_without_db() {
 
 #[test]
 fn scenario_09_stable_id_null_when_ambiguous() {
-    let repo = TestDir::new();
+    let dir = with_fixture("cargo_test.txt");
     // Two rows with the same (module, qualified_name) → ambiguous → null.
     build_graph_db(
-        repo.path(),
+        &dir.path().join("repo"),
         &[
             (
                 "tests",
@@ -316,13 +243,16 @@ fn scenario_09_stable_id_null_when_ambiguous() {
             ),
         ],
     );
-    let res = run_tool(json!({
-        "operation": "parse",
-        "input_path": fixtures_dir().join("cargo_test.txt").display().to_string(),
-        "format": "cargo_test",
-        "repo_path": repo.path().display().to_string(),
-    }));
-    for f in failures(&res) {
+    let res = run_tool(
+        dir.path(),
+        json!({
+            "operation": "parse",
+            "input_path": "cargo_test.txt",
+            "format": "cargo_test",
+            "repo_path": "repo",
+        }),
+    );
+    for f in res.failures() {
         assert!(f["stable_id"].is_null(), "ambiguous match → stable_id null");
     }
 }
@@ -331,118 +261,111 @@ fn scenario_09_stable_id_null_when_ambiguous() {
 
 #[test]
 fn scenario_10_large_list_truncated_to_disk() {
-    let dir = TestDir::new();
-    let path = dir.path().join("big_cargo.txt");
-    let mut raw = String::from("\nrunning 60 tests\n");
-    for i in 0..60 {
-        raw.push_str(&format!("test tests::t{i} ... FAILED\n"));
-    }
-    raw.push_str("\nfailures:\n\n");
-    for i in 0..60 {
-        raw.push_str(&format!(
-            "---- tests::t{i} stdout ----\nthread 'tests::t{i}' panicked at src/lib.rs:{}:5:\nboom {i}\n\n",
-            i + 1
-        ));
-    }
-    raw.push_str("test result: FAILED. 0 passed; 60 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n");
-    fs::write(&path, raw).unwrap();
+    let dir = TestDir::new("it");
+    fs::create_dir(dir.path().join("out")).unwrap();
+    fs::write(
+        dir.path().join("out/big_cargo.txt"),
+        many_cargo_failures(60),
+    )
+    .unwrap();
 
-    let res = run_tool(parse_op(&path, "cargo_test"));
-    assert_eq!(res["data"]["failed"], 60);
-    assert_eq!(res["data"]["truncated"], true);
-    assert_eq!(failures(&res).len(), 50, "inline list capped at 50");
+    let res = run_tool(dir.path(), parse_op("out/big_cargo.txt", "cargo_test"));
+    assert_eq!(res.data["failed"], 60);
+    assert_eq!(res.data["truncated"], true);
+    assert_eq!(res.failures().len(), 50, "inline list capped at 50");
 
-    let data_path = res["data"]["data_path"]
+    // Named as the input was, beside it.
+    let data_path = res.data["data_path"]
         .as_str()
         .expect("data_path set when truncated");
-    let disk: Value = serde_json::from_str(&fs::read_to_string(data_path).unwrap()).unwrap();
+    assert_eq!(data_path, "out/big_cargo.failures.json");
+    let disk: Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join(data_path)).unwrap()).unwrap();
     assert_eq!(
         disk["failures"].as_array().unwrap().len(),
         60,
         "full list on disk"
     );
     assert_eq!(disk["truncated"], false);
-    // written next to the input file
-    assert_eq!(
-        Path::new(data_path).parent().unwrap(),
-        dir.path(),
-        "full payload lives beside input_path"
-    );
 }
 
 // ── 11. below cap → inline, no data_path ──────────────────────────────────────
 
 #[test]
 fn scenario_11_below_cap_inline() {
-    let res = run_tool(parse_op(
-        &fixtures_dir().join("cargo_test.txt"),
-        "cargo_test",
-    ));
-    assert_eq!(res["data"]["truncated"], false);
-    assert!(res["data"]["data_path"].is_null());
-    assert_eq!(failures(&res).len(), 2);
+    let dir = with_fixture("cargo_test.txt");
+    let res = run_tool(dir.path(), parse_op("cargo_test.txt", "cargo_test"));
+    assert_eq!(res.data["truncated"], false);
+    assert!(res.data["data_path"].is_null());
+    assert_eq!(res.failures().len(), 2);
 }
 
 // ── 12. unreadable input_path ─────────────────────────────────────────────────
 
 #[test]
 fn scenario_12_missing_input_file_fails() {
-    let res = run_tool(parse_op(
-        Path::new("/nonexistent/definitely/missing.txt"),
-        "cargo_test",
-    ));
-    assert_eq!(res["status"], "failed");
-    assert_eq!(res["ok"], false);
-    assert!(res["data"].is_null());
-    assert!(res["message"]
-        .as_str()
-        .unwrap()
-        .contains("could not read input_path"));
+    let dir = TestDir::new("it");
+    for input in [
+        "nonexistent/definitely/missing.txt",
+        "/nonexistent/definitely/missing.txt",
+    ] {
+        let res = run_tool(dir.path(), parse_op(input, "cargo_test"));
+        assert_eq!(res.status, "failed");
+        assert!(res.data.is_null());
+        assert!(
+            res.summary()
+                .starts_with(&format!("could not read input_path '{input}': ")),
+            "{}",
+            res.summary()
+        );
+    }
 }
 
 // ── 13. missing required field ────────────────────────────────────────────────
 
 #[test]
 fn scenario_13_missing_required_field_fails() {
+    let dir = TestDir::new("it");
     // Missing input_path.
-    let res = run_tool(json!({ "operation": "parse", "format": "cargo_test" }));
-    assert_eq!(res["status"], "failed");
-    assert!(res["message"].as_str().unwrap().contains("input_path"));
+    let res = run_tool(
+        dir.path(),
+        json!({ "operation": "parse", "format": "cargo_test" }),
+    );
+    assert_eq!(res.status, "failed");
+    assert!(res.summary().contains("input_path"));
 
     // Missing operation.
-    let res2 = run_tool(json!({ "input_path": "/tmp/x.txt" }));
-    assert_eq!(res2["status"], "failed");
-    assert!(res2["message"].as_str().unwrap().contains("operation"));
+    let res2 = run_tool(dir.path(), json!({ "input_path": "x.txt" }));
+    assert_eq!(res2.status, "failed");
+    assert!(res2.summary().contains("operation"));
 }
 
 // ── 14. malformed operation / unparseable input ───────────────────────────────
 
 #[test]
 fn scenario_14_malformed_operation_and_format_fails() {
-    let res = run_tool(json!({ "operation": "explode", "input_path": "/tmp/x.txt" }));
-    assert_eq!(res["status"], "failed");
-    assert!(res["message"]
-        .as_str()
-        .unwrap()
-        .contains("unknown operation"));
+    let dir = TestDir::new("it");
+    let res = run_tool(
+        dir.path(),
+        json!({ "operation": "explode", "input_path": "x.txt" }),
+    );
+    assert_eq!(res.status, "failed");
+    assert!(res.summary().contains("unknown operation"));
 
     // Unknown explicit format.
-    let dir = TestDir::new();
-    let path = dir.path().join("x.txt");
-    fs::write(&path, "whatever").unwrap();
-    let res2 = run_tool(parse_op(&path, "junit"));
-    assert_eq!(res2["status"], "failed");
-    assert!(res2["message"].as_str().unwrap().contains("unknown format"));
+    fs::write(dir.path().join("x.txt"), "whatever").unwrap();
+    let res2 = run_tool(dir.path(), parse_op("x.txt", "junit"));
+    assert_eq!(res2.status, "failed");
+    assert!(res2.summary().contains("unknown format"));
 }
 
 // ── 15. all tests passing — zero failures ─────────────────────────────────────
 
 #[test]
 fn scenario_15_all_passing_zero_failures() {
-    let dir = TestDir::new();
-    let path = dir.path().join("all_green.txt");
+    let dir = TestDir::new("it");
     fs::write(
-        &path,
+        dir.path().join("all_green.txt"),
         "\nrunning 5 tests\n\
          test tests::a ... ok\n\
          test tests::b ... ok\n\
@@ -452,11 +375,10 @@ fn scenario_15_all_passing_zero_failures() {
          test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
     )
     .unwrap();
-    let res = run_tool(parse_op(&path, "cargo_test"));
-    assert_eq!(res["status"], "passed");
-    assert_eq!(res["ok"], true);
-    assert_eq!(res["data"]["passed"], 5);
-    assert_eq!(res["data"]["failed"], 0);
-    assert_eq!(failures(&res).len(), 0);
-    assert_eq!(res["summary"], "5 passed, 0 failed");
+    let res = run_tool(dir.path(), parse_op("all_green.txt", "cargo_test"));
+    assert_eq!(res.status, "passed");
+    assert_eq!(res.data["passed"], 5);
+    assert_eq!(res.data["failed"], 0);
+    assert_eq!(res.failures().len(), 0);
+    assert_eq!(res.summary(), "5 passed, 0 failed");
 }

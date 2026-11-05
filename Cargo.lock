@@ -2028,6 +2028,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "murmur-host-roots"
+version = "0.0.0"
+
+[[package]]
 name = "murmur-test-parse"
 version = "0.0.0"
 dependencies = [
@@ -3050,10 +3054,15 @@ dependencies = [
 name = "tool-test-report"
 version = "0.0.0"
 dependencies = [
+ "murmur-file-tools",
+ "murmur-host-roots",
  "murmur-test-parse",
  "rusqlite",
- "serde",
  "serde_json",
+ "wasip2",
+ "wasmtime",
+ "wasmtime-wasi",
+ "wit-bindgen 0.59.0",
 ]
 
 [[package]]

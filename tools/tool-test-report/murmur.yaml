@@ -1,7 +1,7 @@
 name: tool-test-report
-version: 0.5.0
+version: 0.6.0
 runtime: tool
-implementation: native
+implementation: wasm
 description: |
   Parses a raw test-runner output file (already captured on disk by the agent's
   own shell call — this tool never runs a test process) into a structured list
@@ -16,15 +16,17 @@ description: |
 
   format: auto (default) | cargo_test | pytest | go_test | jest. `auto` detects
   from the text's own markers; a failed detection asks for an explicit format.
+  input_path and repo_path are relative to the work folder, or absolute inside a
+  host folder the session opened; repo_path "." is the work folder itself.
   repo_path (optional): a Rust repo with `.murmur/code-graph.db`; cargo_test
   failures then get a best-effort `stable_id` (the code-graph symbol identity).
   Other formats always report `stable_id: null` (code-graph MVP is Rust-only).
   Above 50 failures the inline `failures` array is capped, `truncated` is true,
   and the full list is written to `data_path`.
-  All responses: {ok:bool, message:string, status, summary, data, ...fields}.
+  Every result has status (passed|failed), summary and data.
 
 requires_files:
-  - bin/tool-test-report
+  - tool_test_report.wasm
 
 input_schema:
   type: object
@@ -36,7 +38,7 @@ input_schema:
       description: "Operation to perform. Only 'parse' is supported."
     input_path:
       type: string
-      description: "Required. Path to the raw test-runner output file to parse (the agent captured it beforehand via its own shell command)."
+      description: "Required. Path to the raw test-runner output file (the agent captured it beforehand via its own shell command), relative to the work folder or absolute inside a host folder the session opened."
     format:
       type: string
       enum:
@@ -48,18 +50,19 @@ input_schema:
       description: "Optional. Runner output format. Default 'auto' detects it from signature markers; a failed detection returns a 'failed' result asking for an explicit format."
     repo_path:
       type: string
-      description: "Optional. Absolute path to a Rust repository containing .murmur/code-graph.db. When present, cargo_test failures get a best-effort stable_id resolved read-only from that db. Ignored for other formats. Missing db or no unique match degrades to stable_id: null."
+      description: "Optional. Path to a Rust repository containing .murmur/code-graph.db, relative to the work folder ('.' for the work folder itself) or absolute inside a host folder the session opened. When present, cargo_test failures get a best-effort stable_id resolved read-only from that db. Ignored for other formats. A missing db, a db in WAL mode or no unique match degrades to stable_id: null."
   required:
     - operation
     - input_path
 
 capabilities:
   filesystem:
-    # Documents what the tool works on; the runtime does not read this block. A
-    # native tool runs in the capsule's own sandbox under the capsule-wide
-    # capabilities, so on Linux every path below must be inside the session
-    # workdir. This tool reads input_path and an optional
-    # read-only code-graph db under repo_path, and writes the full-failures
-    # payload next to input_path when the inline cap is exceeded.
+    # Documents what the tool works on; the runtime reads grants only from the
+    # tool's entry in the capsule's `artifacts:`, never from this bundled file.
+    # The tool needs only the work folder (or a host folder) holding input_path
+    # and repo_path: it reads input_path, reads code-graph's db under repo_path
+    # read-only, and writes the full-failures payload next to input_path when the
+    # inline cap is exceeded. Copy this block onto the entry to narrow the tool
+    # to the work folder.
     allow:
       - "."

@@ -22,6 +22,7 @@ members = [
   "libs/murmur-driver-stream",
   "libs/murmur-file-tools",
   "libs/murmur-hook-transcript",
+  "libs/murmur-host-roots",
   "libs/murmur-test-parse",
   "libs/murmur-time",
   "libs/murmur-wasi-http",
@@ -57,9 +58,10 @@ rust-version = "1.95"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 wit-bindgen = "0.59"
-# Native-only dependencies for tool-code-graph. These pull in C sources
-# (SQLite via `bundled`, and tree-sitter's C runtime + grammar), which do not
-# cross-compile to wasm32-wasip2 — hence the tool is native, like tool-git.
+# Dependencies that pull in C sources: SQLite via `bundled`, and tree-sitter's C
+# runtime + grammars. Bundled SQLite compiles for wasm32-wasip2 with the pinned
+# wasi-sdk (wasi-sdk.toml; tool-test-report links it as a component); the native
+# tools that use these (tool-code-graph and others) are native until their ports.
 rusqlite = { version = "0.31", features = ["bundled"] }
 tree-sitter = "0.22"
 tree-sitter-rust = "0.21"

@@ -73,12 +73,26 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
+      # Pinned WASI C toolchain (wasi-sdk.toml) beside wasm-tools: the wasm32-wasip2 C
+      # compiler that .cargo/config.toml names, for C sources compiled into a component
+      # (tool-test-report's bundled SQLite). The tests below build that component, so it
+      # is installed before them. Cached by the pin's hash; build-wasm.sh would install
+      # it on demand anyway, but the ~190 MB download should not repeat on every push.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/murmur-default-artifacts
+          key: wasi-sdk-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('wasi-sdk.toml') }}
+      - name: Install wasi-sdk
+        run: ./scripts/wasi-sdk.sh
+
       - name: Cargo test
         run: cargo test --workspace --locked
 
       # Native tools (`implementation: native` in their murmur.yaml) are excluded:
-      # they are host binaries, not components, and their C dependencies
-      # (libsqlite3-sys, tree-sitter) do not cross-compile to wasm32-wasip2.
+      # they are host binaries, not components. Their C dependencies that are not
+      # yet ported (tree-sitter, and the SQLite of the tools not yet ported) do not
+      # build for wasm32-wasip2; tool-test-report's bundled SQLite does, with the
+      # pinned wasi-sdk installed above.
       #
       # The script derives that exclusion set from the manifests rather than
       # repeating it here, so "build everything that targets wasm" has one
@@ -92,7 +106,7 @@ jobs:
       # only murmur:stream/events and/or murmur:task/task), at the exact interface
       # version the vendored WIT declares — a component built against a stale WIT
       # is unloadable by the host. Native command components
-      # (tool-{git,git-validate,browser,computer}) are skipped by name.
+      # (tool-{git,git-validate,computer}) are skipped by name.
       # A malformed or mis-bound component fails here instead of at `mur run`.
       #
       # Invoked bare, the script walks target/wasm32-wasip2/release/ itself, so
@@ -255,6 +269,16 @@ jobs:
           workspaces: |
             default-artifacts
             murmur
+
+      # Pinned WASI C toolchain (wasi-sdk.toml), as in build-and-test: the release
+      # build this check reruns compiles tool-test-report's bundled SQLite with it.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/murmur-default-artifacts
+          key: wasi-sdk-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('default-artifacts/wasi-sdk.toml') }}
+      - name: Install wasi-sdk
+        working-directory: default-artifacts
+        run: ./scripts/wasi-sdk.sh
 
       - name: Check every artifact packs the same bytes alone as in the release build
         working-directory: default-artifacts

@@ -11,7 +11,15 @@ this page covers what is particular to this repository.
 |---|---|---|
 | Rust | the `channel` in `rust-toolchain.toml`, with `wasm32-wasip2` | `rustup` reads the file at every cargo call; never `rustup target add` by hand |
 | `wasm-tools` | `1.247.0` | the `Install wasm-tools` steps in `.github/workflows/` |
+| wasi-sdk | 34.0 | wasi-sdk.toml; installed by ./scripts/wasi-sdk.sh (build-wasm.sh and local-install.sh run it; ci.yml caches it) |
 | `mur` with the `index` subcommand | murmur at `MURMUR_REV` | `env:` in `.github/workflows/build.yml`; `ci.yml`'s `build-isolation` and `wit-sync` jobs read it through `./scripts/murmur-pin.sh` |
+
+wasi-sdk is the C compiler and wasi-libc sysroot for C sources compiled into a `wasm32-wasip2`
+component, currently rusqlite's bundled SQLite in `tool-test-report`; `.cargo/config.toml` points
+`CC_wasm32_wasip2` and `AR_wasm32_wasip2` at the `.wasi-sdk` link the script makes in the
+repository root. The script installs it once into
+`${WASI_SDK_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/murmur-default-artifacts}`, shared by every
+checkout and worktree; set `WASI_SDK_CACHE` to put that ~630 MB elsewhere.
 
 Build `mur` from a murmur checkout, from inside it so this repository's toolchain file is not
 picked up, and point `MUR_BIN` at it. Every script below reads `MUR_BIN`, else `mur` on `PATH`,
@@ -37,10 +45,12 @@ from its `name:` or a name with a `murmur-` prefix.
 | native | `implementation: native` | `bin/<name>`, one zip per platform | `./scripts/build-native.sh` (all) / `cargo build --release -p <name>` (one) |
 | skill | `runtime: skill` | `skill.md` | nothing to compile |
 
-A tool is native only when a `wasm32-wasip2` guest cannot do its job — spawning `git`, or C sources
-that do not cross-compile. A WASM tool reaches the network through `wasi:http`, under
-`capabilities.network.allow`, so network access never makes a tool native. A tool that calls a
-third-party API stays wasm: the credential gateway serves wasm stores alone.
+A tool is native only when a `wasm32-wasip2` guest cannot do its job — spawning `git`, a display,
+or C sources not yet ported to wasm (tree-sitter). C sources are no reason on their own: rusqlite's
+bundled SQLite compiles into a component with the pinned wasi-sdk (see Prerequisites). A WASM tool
+reaches the network through `wasi:http`, under `capabilities.network.allow`, so network access never
+makes a tool native. A tool that calls a third-party API stays wasm: the credential gateway serves
+wasm stores alone.
 
 `libs/` holds shared crates compiled into the artifacts that use them; they have no `murmur.yaml`
 and are never published. `./scripts/classify-crates.sh` classifies every workspace member from its
@@ -211,7 +221,7 @@ packs identical bytes, and a re-run over one commit writes the same index.
 | `own tree` | the artifact's `murmur.yaml`, `Cargo.toml`, `src/`, `skill.md` |
 | `path deps` | each `libs/*` it links, transitively |
 | `wit mirror` | the `wit/` subtree its bindgen `path:` names |
-| `workspace` | `[workspace.package]` minus its version (with it, for a crate that inherits `version.workspace = true`), the `[workspace.dependencies]` it declares, its resolved third-party versions in `Cargo.lock`, `rust-toolchain.toml` |
+| `workspace` | `[workspace.package]` minus its version (with it, for a crate that inherits `version.workspace = true`), the `[workspace.dependencies]` it declares, its resolved third-party versions in `Cargo.lock`, `rust-toolchain.toml`, and `wasi-sdk.toml` for a wasm artifact linking `libsqlite3-sys` (the crates in `WASM_C_CRATES`) |
 
 ## WIT mirror
 
@@ -246,7 +256,7 @@ cargo test --workspace --locked
 CI runs both, formatting first. The workspace uses rustfmt's defaults (there is no `rustfmt.toml`);
 run `cargo fmt --all` before committing.
 
-Nine suites are `#[ignore]`d because they need something the default run does not have. The eight
+Ten suites are `#[ignore]`d because they need something the default run does not have. The nine
 that drive a real `mur` read it from `MUR_BIN`, else `PATH`, and fail rather than skip without one:
 
 ```bash
@@ -254,6 +264,7 @@ MUR_BIN=$MUR_BIN cargo test -p tool-corpus --test mur_run_state -- --ignored    
 MUR_BIN=$MUR_BIN cargo test -p tool-tavily --test mur_run_gateway -- --ignored       # 2 tests
 MUR_BIN=$MUR_BIN cargo test -p tool-github --test mur_run_gateway -- --ignored       # 2 tests
 MUR_BIN=$MUR_BIN cargo test -p tool-create --test mur_manifest_shape -- --ignored    # 3 tests
+MUR_BIN=$MUR_BIN cargo test -p tool-test-report --test mur_run_stable_id -- --ignored  # 2 tests
 MUR_BIN=$MUR_BIN TOOL_BROWSER_TEST_CHROME=<chrome-headless-shell> cargo test -p tool-browser --test mur_run_browser -- --ignored  # 1 test; its mur must be WIT level 4
 MUR_BIN=$MUR_BIN cargo test -p tool-computer --test mur_run_computer -- --ignored    # 3 tests; needs Xvfb, xkbcomp, xmessage
 MUR_BIN=$MUR_BIN cargo test -p driver-anthropic --test mur_run_computer_tool -- --ignored  # 3 tests
@@ -267,6 +278,7 @@ cargo test -p tool-create --test scaffolded_hook_tests -- --ignored  # needs a c
 | `mur_run_gateway` (tool-tavily) | the runtime attaches the Tavily key to the tool's request and it appears nowhere in the session |
 | `mur_run_gateway` (tool-github) | the runtime attaches the GitHub token to the tool's requests and it appears nowhere in the session |
 | `mur_manifest_shape` | an unedited scaffold packs and publishes as the kind its author asked for |
+| `mur_run_stable_id` | under a real `mur run`, a code-graph database written into the work folder between two calls of one session gives the next call its `stable_id`, and one in a `read` host path resolves through an absolute `repo_path` with no lock file beside it |
 | `mur_run_computer` | in a `sealed` capsule the tool starts its display, clicks a real button, and both screenshots reach the trace as attachments; a `scoped` capsule is refused with `E-CAP-003`, and a `confirm`-listed click is held. Its `mur` must carry murmur `a9ea4726` |
 | `mur_run_computer_tool` (driver-anthropic) | in a `sealed` capsule a tool declaring `provider_tool: {kind: computer}` goes to `claude-sonnet-4-6` as `computer_20251124` with its beta header and to `claude-sonnet-5-5` as the toolset; Claude's click reaches the tool scaled to the display, a toolset batch runs in order, and the next request replays the calls in provider form. Without the block the tool stays a function. Its `mur` must carry murmur `a9ea4726` |
 | `mur_run_computer_tool` (driver-openai) | in a `sealed` capsule the same tool goes to `gpt-5.6-luna` as `{"type": "computer"}`, a `computer_call` runs as an ordered group answered by one `computer_call_output`, a flagged call nobody answers under `mur run --task` times out unrun, and a served capsule runs it only after a person's yes over the door and never after a no. Without the block the tool stays a function. Its `mur` must carry murmur `a9ea4726` |
