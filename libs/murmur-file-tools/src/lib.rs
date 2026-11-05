@@ -68,8 +68,6 @@ mod tests;
 #[cfg(feature = "write")]
 pub mod write;
 
-use std::path::Path;
-
 use serde_json::{json, Value};
 
 // ── The tools ───────────────────────────────────────────────────────────────────
@@ -123,75 +121,17 @@ impl Tool {
 
 // ── Host roots ──────────────────────────────────────────────────────────────────
 
-/// The preopen name every host root is opened under: `murmur-host` alone for the whole host,
-/// `murmur-host` followed by the folder's absolute path for one host folder.
-pub(crate) const HOST_ROOT_NAME: &str = "murmur-host";
-
-/// A host folder the runtime opened for the tool, besides the work folder: the whole host under
-/// `mur run --unconfined`, or one `host_paths` entry of the operator's config. An absolute path
-/// input opens only inside one of these.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HostRoot {
-    /// The folder's absolute host path, lexically normalised: `/` for the whole host.
-    pub path: String,
-    pub access: RootAccess,
-}
-
-/// Whether the tool may change files under a [`HostRoot`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RootAccess {
-    Read,
-    ReadWrite,
-}
-
-impl HostRoot {
-    /// The root a WASI preopen named `name` opens, or `None` when the preopen is not a host
-    /// root. `murmur-host` is the whole host, `/`; `murmur-host/<path>` is the host folder
-    /// `/<path>`, normalised. Every other name — `.`, `state`, `murmur-runtime`, or one that only
-    /// begins with the same letters, like `murmur-hostile` — is not a root. `writable` is whether
-    /// the preopen's descriptor flags hold `mutate-directory`.
-    pub fn from_preopen(name: &str, writable: bool) -> Option<HostRoot> {
-        let rest = if name == HOST_ROOT_NAME {
-            ""
-        } else {
-            name.strip_prefix(HOST_ROOT_NAME)?.strip_prefix('/')?
-        };
-        Some(HostRoot {
-            path: render_absolute(&normalize_absolute(rest)),
-            access: if writable {
-                RootAccess::ReadWrite
-            } else {
-                RootAccess::Read
-            },
-        })
-    }
-}
-
-/// The segments of absolute `value`, lexically normalised: `.` and empty segments dropped, each
-/// `..` popping one segment, and a `..` at `/` staying at `/`.
-pub(crate) fn normalize_absolute(value: &str) -> Vec<&str> {
-    lexical_segments(value).0
-}
-
-/// The segments of `value` with `.` and empty segments dropped and each `..` popping the segment
-/// before it, and whether some `..` found no segment left to pop.
-pub(crate) fn lexical_segments(value: &str) -> (Vec<&str>, bool) {
-    let mut segments: Vec<&str> = Vec::new();
-    let mut climbed_above = false;
-    for segment in value.split('/') {
-        match segment {
-            "" | "." => {}
-            ".." => climbed_above |= segments.pop().is_none(),
-            s => segments.push(s),
-        }
-    }
-    (segments, climbed_above)
-}
-
-/// `segments` as an absolute path: `/` when there are none.
-pub(crate) fn render_absolute(segments: &[&str]) -> String {
-    format!("/{}", segments.join("/"))
-}
+// The host-root rules (which preopens are host folders, and where a path value opens among
+// them) live in libs/murmur-host-roots, shared with every other wasm32-wasip2 tool. The tool
+// crates build their roots with `murmur_file_tools::HostRoot::from_preopen`.
+#[cfg(any(
+    feature = "read",
+    feature = "write",
+    feature = "edit",
+    feature = "find"
+))]
+pub(crate) use murmur_host_roots::HOST_ROOT_NAME;
+pub use murmur_host_roots::{HostRoot, RootAccess};
 
 /// Where the absolute path `value` opens, and the root it opens through, or `None` when no root
 /// among `roots` covers it.
@@ -204,22 +144,10 @@ pub(crate) fn render_absolute(segments: &[&str]) -> String {
 /// opens through a host root. Compiled with no tool feature, so a tool outside this crate links
 /// it alone.
 pub fn open_in_host_root<'a>(value: &str, roots: &'a [HostRoot]) -> Option<(String, &'a HostRoot)> {
-    let segments = normalize_absolute(value);
-    let normalized = render_absolute(&segments);
-    let mut covering: Option<&HostRoot> = None;
-    for root in roots {
-        let covers = Path::new(&normalized).starts_with(&root.path);
-        if covers && covering.is_none_or(|best| root.path.len() > best.path.len()) {
-            covering = Some(root);
-        }
+    match murmur_host_roots::locate(value, roots) {
+        Ok(murmur_host_roots::Located::Host { open, root }) => Some((open, root)),
+        _ => None,
     }
-    let root = covering?;
-    let mut open = HOST_ROOT_NAME.to_string();
-    for segment in &segments {
-        open.push('/');
-        open.push_str(segment);
-    }
-    Some((open, root))
 }
 
 /// The keys an element of `tool-edit`'s `edits` accepts, in the order its `input_schema` lists

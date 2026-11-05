@@ -2010,6 +2010,7 @@ version = "0.0.0"
 name = "murmur-file-tools"
 version = "0.0.0"
 dependencies = [
+ "murmur-host-roots",
  "regex",
  "serde_json",
  "serde_norway",

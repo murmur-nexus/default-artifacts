@@ -1,17 +1,15 @@
 //! Where one path input opens: in the work folder, inside a host root, or nowhere.
 //!
-//! wasi-libc resolves a relative path through the longest preopen name it begins with, so the
-//! host root `murmur-host/home/op` is reached by opening `murmur-host/home/op/…`. A path that
-//! begins with `murmur-host` but that no held root covers falls through to the work folder, and
-//! an absolute path opened without the prefix resolves into the work folder too. Each value is
-//! therefore checked against the held roots before anything is opened.
+//! [`murmur_host_roots::locate`] decides it, by the rules every wasm32-wasip2 tool shares; this
+//! module turns its refusals into the file tools' `absolute_path` and `reserved_name` results.
 
 use std::path::Path;
 
+use murmur_host_roots::{locate, Located, Refusal};
 use serde_json::Value;
 
-use crate::{err, err_result, lexical_segments, open_in_host_root};
-use crate::{HostRoot, RootAccess, Tool, HOST_ROOT_NAME};
+use crate::{err, err_result};
+use crate::{HostRoot, Tool, HOST_ROOT_NAME};
 
 /// Where a path input opens, once [`resolve_path`] accepted it.
 #[derive(Debug, PartialEq, Eq)]
@@ -37,54 +35,22 @@ pub(crate) fn resolve_path<'a>(
     tool: Tool,
     roots: &'a [HostRoot],
 ) -> Result<Resolved<'a>, Value> {
-    if !Path::new(value).is_absolute() {
-        if let Some(refusal) = reserved_prefix(location, value, roots) {
-            return Err(refusal);
-        }
-        return Ok(Resolved {
-            open: value.to_string(),
-            root: None,
-        });
-    }
-
-    match open_in_host_root(value, roots) {
-        Some((open, root)) => Ok(Resolved {
+    match locate(value, roots) {
+        Ok(Located::Relative(open)) => Ok(Resolved { open, root: None }),
+        Ok(Located::Host { open, root }) => Ok(Resolved {
             open,
             root: Some(root),
         }),
-        None => Err(outside_every_root(location, value, tool, roots)),
-    }
-}
-
-/// The `reserved_name` refusal for a relative `value` whose first normalised segment is
-/// `murmur-host` while at least one root is held, or `None`. A value that climbs above the work
-/// folder is left to the filesystem, as before.
-fn reserved_prefix(location: &str, value: &str, roots: &[HostRoot]) -> Option<Value> {
-    if roots.is_empty() {
-        return None;
-    }
-    let normalized = normalize_dir(value)?;
-    let mut segments = normalized.split('/');
-    if segments.next() != Some(HOST_ROOT_NAME) {
-        return None;
-    }
-    let suggestion = format!("/{}", segments.collect::<Vec<_>>().join("/"));
-    Some(err_result(
-        err::RESERVED_NAME,
-        format!(
-            "'{location}' starts with {HOST_ROOT_NAME}, where this tool's host folders are \
-             opened; name the host path absolutely: '{suggestion}'"
-        ),
-    ))
-}
-
-impl RootAccess {
-    /// The access as the operator's `host_paths` entry spells it.
-    const fn label(&self) -> &'static str {
-        match self {
-            RootAccess::Read => "read",
-            RootAccess::ReadWrite => "read-write",
+        Err(Refusal::NoRoots | Refusal::Uncovered) => {
+            Err(outside_every_root(location, value, tool, roots))
         }
+        Err(Refusal::ReservedName { suggestion }) => Err(err_result(
+            err::RESERVED_NAME,
+            format!(
+                "'{location}' starts with {HOST_ROOT_NAME}, where this tool's host folders are \
+                 opened; name the host path absolutely: '{suggestion}'"
+            ),
+        )),
     }
 }
 
@@ -98,11 +64,7 @@ fn outside_every_root(location: &str, value: &str, tool: Tool, roots: &[HostRoot
             file_name_suggestion(value)
         )
     } else {
-        let listed = roots
-            .iter()
-            .map(|root| format!("{} ({})", root.path, root.access.label()))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let listed = murmur_host_roots::describe_roots(roots);
         format!(
             "'{location}' is outside every host folder {name} may open: {listed}; got \
              '{value}'. A relative path opens in the work folder"
@@ -133,7 +95,7 @@ pub(crate) fn reject_absolute_glob(glob: &str) -> Option<Value> {
 #[cfg(any(feature = "write", feature = "edit"))]
 pub(crate) fn refuse_read_only(value: &str, resolved: &Resolved<'_>) -> Option<Value> {
     let root = resolved.root?;
-    if root.access != RootAccess::Read {
+    if root.access != crate::RootAccess::Read {
         return None;
     }
     Some(err_result(
@@ -158,7 +120,17 @@ fn file_name_suggestion(value: &str) -> String {
 /// `dir` with its `.` and empty segments dropped and each `..` applied to the segment
 /// before it, `/`-joined. `""` is the workdir root. `None` when a `..` has no segment left
 /// to pop, i.e. the value climbs above the workdir.
+#[cfg(feature = "find")]
 pub(crate) fn normalize_dir(dir: &str) -> Option<String> {
-    let (segments, climbed_above) = lexical_segments(dir);
-    (!climbed_above).then(|| segments.join("/"))
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in dir.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop()?;
+            }
+            s => segments.push(s),
+        }
+    }
+    Some(segments.join("/"))
 }

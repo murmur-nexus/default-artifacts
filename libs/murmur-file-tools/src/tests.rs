@@ -1057,56 +1057,21 @@ fn assert_no_host_folder() {
 }
 
 #[test]
-fn from_preopen_accepts_exactly_the_host_root_names() {
-    for (name, writable, expected) in [
-        ("murmur-host", true, Some(root("/", RootAccess::ReadWrite))),
-        ("murmur-host", false, Some(root("/", RootAccess::Read))),
-        ("murmur-host/", true, Some(root("/", RootAccess::ReadWrite))),
-        (
-            "murmur-host/home/op/.cargo",
-            false,
-            Some(root("/home/op/.cargo", RootAccess::Read)),
-        ),
-        (
-            "murmur-host/data//cargo/./bin/../",
-            true,
-            Some(root("/data/cargo", RootAccess::ReadWrite)),
-        ),
-        (
-            "murmur-host/..",
-            true,
-            Some(root("/", RootAccess::ReadWrite)),
-        ),
-        ("murmur-hostile", true, None),
-        ("murmur-hostile/x", true, None),
-        (".", true, None),
-        ("state", true, None),
-        ("murmur-runtime", false, None),
-        ("/murmur-host", true, None),
-        ("", true, None),
-    ] {
-        assert_eq!(HostRoot::from_preopen(name, writable), expected, "{name:?}");
-    }
-}
-
-#[test]
 fn absolute_values_normalise_lexically() {
-    use crate::{normalize_absolute, render_absolute};
+    use crate::resolve::resolve_path;
+    let whole = vec![root("/", RootAccess::Read)];
     for (value, expected) in [
-        ("/", "/"),
-        ("/a/b", "/a/b"),
-        ("//a//b/", "/a/b"),
-        ("/a/./b/.", "/a/b"),
-        ("/a/b/../c", "/a/c"),
-        ("/..", "/"),
-        ("/../../a", "/a"),
-        ("/a/../..", "/"),
+        ("/", "murmur-host"),
+        ("/a/b", "murmur-host/a/b"),
+        ("//a//b/", "murmur-host/a/b"),
+        ("/a/./b/.", "murmur-host/a/b"),
+        ("/a/b/../c", "murmur-host/a/c"),
+        ("/..", "murmur-host"),
+        ("/../../a", "murmur-host/a"),
+        ("/a/../..", "murmur-host"),
     ] {
-        assert_eq!(
-            render_absolute(&normalize_absolute(value)),
-            expected,
-            "{value}"
-        );
+        let resolved = resolve_path("path", value, Tool::Read, &whole).expect(value);
+        assert_eq!(resolved.open, expected, "{value}");
     }
 }
 

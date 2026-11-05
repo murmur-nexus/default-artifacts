@@ -10,7 +10,7 @@ license.workspace = true
 # in anything else, and its rules are unit-tested on the host. NOT an artifact: it has no
 # murmur.yaml, so nothing publishes it.
 #
-# libs/murmur-file-tools holds the same rules privately (it predates this crate); moving it
-# onto this one would change the four file tools' payloads, so that is its own change.
+# This crate is the one place those rules live: libs/murmur-file-tools (tool-read, tool-write,
+# tool-edit, tool-find) and tool-test-report both resolve through it.
 
 [dependencies]

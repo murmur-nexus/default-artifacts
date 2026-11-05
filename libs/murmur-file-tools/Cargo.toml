@@ -30,6 +30,9 @@ find = ["dep:regex", "dep:walkdir"]
 
 [dependencies]
 serde_json.workspace = true
+# Which preopens are host folders and where a path value opens among them: the rules every
+# wasm32-wasip2 tool shares. Dependency-free.
+murmur-host-roots = { path = "../murmur-host-roots" }
 regex = { version = "1", optional = true }
 walkdir = { version = "2", optional = true }
 
