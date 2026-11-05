@@ -1,11 +1,9 @@
 //! Best-effort `stable_id` resolution for each failing test's *own* symbol.
 //!
-//! Duplicated (not shared — both tools are `[[bin]]`-only) from
-//! `tool-test-report`'s `resolve.rs`: identical `split_test_path` and the
-//! identical `SELECT symbol_id FROM symbols WHERE kind = 'function' AND module =
-//! ?1 AND qualified_name = ?2` join. The one difference: this tool reuses the
-//! read-write connection already open for scoring rather than opening its own
-//! read-only one, since the query itself needs no special flags.
+//! The same `split_test_path` and `SELECT symbol_id FROM symbols WHERE kind = 'function' AND
+//! module = ?1 AND qualified_name = ?2` join as `tool-test-report`'s `resolve.rs`. The one
+//! difference: this tool reuses the read-write connection already open for scoring rather than
+//! opening its own read-only one.
 //!
 //! Resolution is soft: a zero-row or ambiguous (>1 row) match resolves to
 //! `None`, never an error.

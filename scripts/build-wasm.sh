@@ -31,7 +31,7 @@
 # builds them instead.
 #
 # C sources that are compiled for wasm32-wasip2 (rusqlite's bundled SQLite, in
-# tool-test-report) need the pinned wasi-sdk (wasi-sdk.toml), and this script
+# tool-test-report and tool-code-coverage) need the pinned wasi-sdk (wasi-sdk.toml), and this script
 # installs it itself through scripts/wasi-sdk.sh before its first cargo
 # invocation. The release workflow (build.yml) calls this script and is not
 # edited for a toolchain, so the script provisions its own; with the toolchain

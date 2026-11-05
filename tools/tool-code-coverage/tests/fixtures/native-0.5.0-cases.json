@@ -1,0 +1,277 @@
+[
+  {
+    "name": "scenario_01_happy_path_exact_scores",
+    "symbols": [
+      ["rust://fixture/#add(->i64)", "", "add", "function", 5, 8],
+      ["rust://fixture/#sub(->i64)", "", "sub", "function", 10, 13],
+      ["rust://fixture/#unused(->i64)", "", "unused", "function", 40, 45],
+      ["rust://fixture/tests#test_add(->())", "tests", "test_add", "function", 20, 25],
+      ["rust://fixture/tests#test_sub(->())", "tests", "test_sub", "function", 30, 35]
+    ],
+    "db_at": "repo",
+    "extra_files": {},
+    "coverage": {
+      "cov/tests::test_add.info": "TN:\nSF:@SCRATCH@/repo/src/lib.rs\nDA:5,1\nDA:6,1\nDA:20,1\nDA:21,1\nLF:1\nLH:1\nend_of_record\n",
+      "cov/tests::test_sub.info": "TN:\nSF:@SCRATCH@/repo/src/lib.rs\nDA:10,1\nDA:11,1\nDA:30,1\nDA:31,1\nLF:1\nLH:1\nend_of_record\n"
+    },
+    "calls": [
+      {"operation": "localize", "repo_path": "repo", "coverage_dir": "cov", "failing_tests": ["tests::test_add"]}
+    ]
+  },
+  {
+    "name": "scenario_03_shared_symbol_lower_suspicion",
+    "symbols": [
+      ["rust://fixture/#add(->i64)", "", "add", "function", 5, 8],
+      ["rust://fixture/#sub(->i64)", "", "sub", "function", 10, 13],
+      ["rust://fixture/#unused(->i64)", "", "unused", "function", 40, 45],
+      ["rust://fixture/tests#test_add(->())", "tests", "test_add", "function", 20, 25],
+      ["rust://fixture/tests#test_sub(->())", "tests", "test_sub", "function", 30, 35]
+    ],
+    "db_at": "repo",
+    "extra_files": {},
+    "coverage": {
+      "cov/tests::test_add.info": "TN:\nSF:@SCRATCH@/repo/src/lib.rs\nDA:5,1\nLF:1\nLH:1\nend_of_record\n",
+      "cov/tests::test_sub.info": "TN:\nSF:@SCRATCH@/repo/src/lib.rs\nDA:5,1\nLF:1\nLH:1\nend_of_record\n"
+    },
+    "calls": [
+      {"operation": "localize", "repo_path": "repo", "coverage_dir": "cov", "failing_tests": ["tests::test_add"]}
+    ]
+  },
+  {
+    "name": "scenario_05_reset_between_runs",
+    "symbols": [
+      ["rust://fixture/#add(->i64)", "", "add", "function", 5, 8],
+      ["rust://fixture/#sub(->i64)", "", "sub", "function", 10, 13],
+      ["rust://fixture/#unused(->i64)", "", "unused", "function", 40, 45],
+      ["rust://fixture/tests#test_add(->())", "tests", "test_add", "function", 20, 25],
+      ["rust://fixture/tests#test_sub(->())", "tests", "test_sub", "function", 30, 35]
+    ],
+    "db_at": "repo",
+    "extra_files": {},
+    "coverage": {
+      "cov1/tests::test_add.info": "TN:\nSF:@SCRATCH@/repo/src/lib.rs\nDA:5,1\nLF:1\nLH:1\nend_of_record\n",
+      "cov2/tests::test_sub.info": "TN:\nSF:@SCRATCH@/repo/src/lib.rs\nDA:10,1\nLF:1\nLH:1\nend_of_record\n"
+    },
+    "calls": [
+      {"operation": "localize", "repo_path": "repo", "coverage_dir": "cov1", "failing_tests": ["tests::test_add"]},
+      {"operation": "localize", "repo_path": "repo", "coverage_dir": "cov2", "failing_tests": ["tests::test_sub"]}
+    ]
+  },
+  {
+    "name": "scenario_06_failing_without_coverage",
+    "symbols": [
+      ["rust://fixture/#add(->i64)", "", "add", "function", 5, 8],
+      ["rust://fixture/#sub(->i64)", "", "sub", "function", 10, 13],
+      ["rust://fixture/#unused(->i64)", "", "unused", "function", 40, 45],
+      ["rust://fixture/tests#test_add(->())", "tests", "test_add", "function", 20, 25],
+      ["rust://fixture/tests#test_sub(->())", "tests", "test_sub", "function", 30, 35]
+    ],
+    "db_at": "repo",
+    "extra_files": {},
+    "coverage": {
+      "cov/tests::test_add.info": "TN:\nSF:@SCRATCH@/repo/src/lib.rs\nDA:5,1\nLF:1\nLH:1\nend_of_record\n"
+    },
+    "calls": [
+      {"operation": "localize", "repo_path": "repo", "coverage_dir": "cov", "failing_tests": ["tests::test_add", "tests::test_missing"]}
+    ]
+  },
+  {
+    "name": "scenario_07_unparseable_skipped",
+    "symbols": [
+      ["rust://fixture/#add(->i64)", "", "add", "function", 5, 8],
+      ["rust://fixture/#sub(->i64)", "", "sub", "function", 10, 13],
+      ["rust://fixture/#unused(->i64)", "", "unused", "function", 40, 45],
+      ["rust://fixture/tests#test_add(->())", "tests", "test_add", "function", 20, 25],
+      ["rust://fixture/tests#test_sub(->())", "tests", "test_sub", "function", 30, 35]
+    ],
+    "db_at": "repo",
+    "extra_files": {},
+    "coverage": {
+      "cov/tests::test_add.info": "TN:\nSF:@SCRATCH@/repo/src/lib.rs\nDA:5,1\nLF:1\nLH:1\nend_of_record\n",
+      "cov/tests::test_junk.info": "not lcov at all\n"
+    },
+    "calls": [
+      {"operation": "localize", "repo_path": "repo", "coverage_dir": "cov", "failing_tests": ["tests::test_add"]}
+    ]
+  },
+  {
+    "name": "scenario_08_zero_failing_coverage_fails",
+    "symbols": [
+      ["rust://fixture/#add(->i64)", "", "add", "function", 5, 8],
+      ["rust://fixture/#sub(->i64)", "", "sub", "function", 10, 13],
+      ["rust://fixture/#unused(->i64)", "", "unused", "function", 40, 45],
+      ["rust://fixture/tests#test_add(->())", "tests", "test_add", "function", 20, 25],
+      ["rust://fixture/tests#test_sub(->())", "tests", "test_sub", "function", 30, 35]
+    ],
+    "db_at": "repo",
+    "extra_files": {},
+    "coverage": {
+      "cov/tests::test_sub.info": "TN:\nSF:@SCRATCH@/repo/src/lib.rs\nDA:10,1\nLF:1\nLH:1\nend_of_record\n"
+    },
+    "calls": [
+      {"operation": "localize", "repo_path": "repo", "coverage_dir": "cov", "failing_tests": ["tests::test_add"]}
+    ]
+  },
+  {
+    "name": "scenario_09_missing_db_fails",
+    "symbols": null,
+    "db_at": "repo",
+    "extra_files": {"repo/src/lib.rs": "// fixture\n"},
+    "coverage": {
+      "cov/tests::test_add.info": "TN:\nSF:@SCRATCH@/repo/src/lib.rs\nDA:5,1\nLF:1\nLH:1\nend_of_record\n"
+    },
+    "calls": [
+      {"operation": "localize", "repo_path": "repo", "coverage_dir": "cov", "failing_tests": ["tests::test_add"]}
+    ]
+  },
+  {
+    "name": "scenario_10_coverage_dir_invalid",
+    "symbols": [
+      ["rust://fixture/#add(->i64)", "", "add", "function", 5, 8],
+      ["rust://fixture/#sub(->i64)", "", "sub", "function", 10, 13],
+      ["rust://fixture/#unused(->i64)", "", "unused", "function", 40, 45],
+      ["rust://fixture/tests#test_add(->())", "tests", "test_add", "function", 20, 25],
+      ["rust://fixture/tests#test_sub(->())", "tests", "test_sub", "function", 30, 35]
+    ],
+    "db_at": "repo",
+    "extra_files": {"repo/not_a_dir.txt": "x"},
+    "coverage": {},
+    "calls": [
+      {"operation": "localize", "repo_path": "repo", "coverage_dir": "missing-cov", "failing_tests": ["tests::test_add"]},
+      {"operation": "localize", "repo_path": "repo", "coverage_dir": "repo/not_a_dir.txt", "failing_tests": ["tests::test_add"]}
+    ]
+  },
+  {
+    "name": "scenario_11_malformed_input",
+    "symbols": [
+      ["rust://fixture/#add(->i64)", "", "add", "function", 5, 8],
+      ["rust://fixture/#sub(->i64)", "", "sub", "function", 10, 13],
+      ["rust://fixture/#unused(->i64)", "", "unused", "function", 40, 45],
+      ["rust://fixture/tests#test_add(->())", "tests", "test_add", "function", 20, 25],
+      ["rust://fixture/tests#test_sub(->())", "tests", "test_sub", "function", 30, 35]
+    ],
+    "db_at": "repo",
+    "extra_files": {"cov/README": "no coverage here\n"},
+    "coverage": {},
+    "calls": [
+      {"coverage_dir": "cov", "failing_tests": ["t"]},
+      {"operation": "explode"},
+      {"operation": "localize", "repo_path": "repo", "failing_tests": ["tests::test_add"]},
+      {"operation": "localize", "repo_path": "repo", "coverage_dir": "cov", "failing_tests": []}
+    ]
+  },
+  {
+    "name": "scenario_12_stable_id_resolution",
+    "symbols": [
+      ["rust://fixture/#add(->i64)", "", "add", "function", 5, 8],
+      ["rust://fixture/#sub(->i64)", "", "sub", "function", 10, 13],
+      ["rust://fixture/#unused(->i64)", "", "unused", "function", 40, 45],
+      ["rust://fixture/tests#test_add(->())", "tests", "test_add", "function", 20, 25],
+      ["rust://fixture/tests#test_sub(->())", "tests", "test_sub", "function", 30, 35],
+      ["rust://fixture/tests#dupe(->())", "tests", "dupe", "function", 50, 55],
+      ["rust://fixture/tests#dupe(i64->())", "tests", "dupe", "function", 56, 60]
+    ],
+    "db_at": "repo",
+    "extra_files": {},
+    "coverage": {
+      "cov/tests::test_add.info": "TN:\nSF:@SCRATCH@/repo/src/lib.rs\nDA:5,1\nDA:20,1\nLF:1\nLH:1\nend_of_record\n",
+      "cov/tests::dupe.info": "TN:\nSF:@SCRATCH@/repo/src/lib.rs\nDA:50,1\nLF:1\nLH:1\nend_of_record\n"
+    },
+    "calls": [
+      {"operation": "localize", "repo_path": "repo", "coverage_dir": "cov", "failing_tests": ["tests::test_add", "tests::dupe"]}
+    ]
+  },
+  {
+    "name": "scenario_13_migration_adds_columns",
+    "symbols": [
+      ["rust://fixture/#add(->i64)", "", "add", "function", 5, 8],
+      ["rust://fixture/#sub(->i64)", "", "sub", "function", 10, 13],
+      ["rust://fixture/#unused(->i64)", "", "unused", "function", 40, 45],
+      ["rust://fixture/tests#test_add(->())", "tests", "test_add", "function", 20, 25],
+      ["rust://fixture/tests#test_sub(->())", "tests", "test_sub", "function", 30, 35]
+    ],
+    "db_at": "repo",
+    "extra_files": {},
+    "coverage": {
+      "cov/tests::test_add.info": "TN:\nSF:@SCRATCH@/repo/src/lib.rs\nDA:5,1\nLF:1\nLH:1\nend_of_record\n"
+    },
+    "calls": [
+      {"operation": "localize", "repo_path": "repo", "coverage_dir": "cov", "failing_tests": ["tests::test_add"]}
+    ]
+  },
+  {
+    "name": "scenario_14_truncation_to_disk",
+    "symbols": [
+      ["rust://fixture/#f0(->i64)", "", "f0", "function", 1, 5],
+      ["rust://fixture/#f1(->i64)", "", "f1", "function", 11, 15],
+      ["rust://fixture/#f2(->i64)", "", "f2", "function", 21, 25],
+      ["rust://fixture/#f3(->i64)", "", "f3", "function", 31, 35],
+      ["rust://fixture/#f4(->i64)", "", "f4", "function", 41, 45]
+    ],
+    "db_at": "repo",
+    "extra_files": {},
+    "coverage": {
+      "cov/tests::t.info": "TN:\nSF:@SCRATCH@/repo/src/lib.rs\nDA:1,1\nDA:11,1\nDA:21,1\nDA:31,1\nDA:41,1\nLF:1\nLH:1\nend_of_record\n"
+    },
+    "calls": [
+      {"operation": "localize", "repo_path": "repo", "coverage_dir": "cov", "failing_tests": ["tests::t"], "limit": 2}
+    ]
+  },
+  {
+    "name": "scenario_15_no_passing_tests",
+    "symbols": [
+      ["rust://fixture/#add(->i64)", "", "add", "function", 5, 8],
+      ["rust://fixture/#sub(->i64)", "", "sub", "function", 10, 13],
+      ["rust://fixture/#unused(->i64)", "", "unused", "function", 40, 45],
+      ["rust://fixture/tests#test_add(->())", "tests", "test_add", "function", 20, 25],
+      ["rust://fixture/tests#test_sub(->())", "tests", "test_sub", "function", 30, 35]
+    ],
+    "db_at": "repo",
+    "extra_files": {},
+    "coverage": {
+      "cov/tests::test_add.info": "TN:\nSF:@SCRATCH@/repo/src/lib.rs\nDA:5,1\nDA:20,1\nLF:1\nLH:1\nend_of_record\n"
+    },
+    "calls": [
+      {"operation": "localize", "repo_path": "repo", "coverage_dir": "cov", "failing_tests": ["tests::test_add"]}
+    ]
+  },
+  {
+    "name": "repo_omitted_absolute_sf",
+    "symbols": [
+      ["rust://fixture/#add(->i64)", "", "add", "function", 5, 8],
+      ["rust://fixture/#sub(->i64)", "", "sub", "function", 10, 13],
+      ["rust://fixture/#unused(->i64)", "", "unused", "function", 40, 45],
+      ["rust://fixture/tests#test_add(->())", "tests", "test_add", "function", 20, 25],
+      ["rust://fixture/tests#test_sub(->())", "tests", "test_sub", "function", 30, 35]
+    ],
+    "db_at": ".",
+    "extra_files": {},
+    "coverage": {
+      "cov/tests::test_add.info": "TN:\nSF:@SCRATCH@/src/lib.rs\nDA:5,1\nDA:20,1\nLF:1\nLH:1\nend_of_record\n",
+      "cov/tests::test_sub.info": "TN:\nSF:@SCRATCH@/src/lib.rs\nDA:5,1\nDA:10,1\nDA:30,1\nLF:1\nLH:1\nend_of_record\n"
+    },
+    "calls": [
+      {"operation": "localize", "coverage_dir": "cov", "failing_tests": ["tests::test_add"]},
+      {"operation": "localize", "coverage_dir": "cov", "failing_tests": ["tests::test_add"], "limit": 1}
+    ]
+  },
+  {
+    "name": "relative_sf",
+    "symbols": [
+      ["rust://fixture/#add(->i64)", "", "add", "function", 5, 8],
+      ["rust://fixture/#sub(->i64)", "", "sub", "function", 10, 13],
+      ["rust://fixture/#unused(->i64)", "", "unused", "function", 40, 45],
+      ["rust://fixture/tests#test_add(->())", "tests", "test_add", "function", 20, 25],
+      ["rust://fixture/tests#test_sub(->())", "tests", "test_sub", "function", 30, 35]
+    ],
+    "db_at": ".",
+    "extra_files": {},
+    "coverage": {
+      "cov/tests::test_add.info": "TN:\nSF:src/lib.rs\nDA:5,1\nDA:20,1\nLF:1\nLH:1\nend_of_record\n",
+      "cov/tests::test_sub.info": "TN:\nSF:./src/lib.rs\nDA:10,1\nDA:30,1\nLF:1\nLH:1\nend_of_record\n"
+    },
+    "calls": [
+      {"operation": "localize", "coverage_dir": "cov", "failing_tests": ["tests::test_add"]}
+    ]
+  }
+]

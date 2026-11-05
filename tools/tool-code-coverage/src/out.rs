@@ -1,16 +1,16 @@
 //! Output-envelope constructors.
 //!
-//! Copied verbatim from `tool-code-graph`'s `src/out.rs` (these tools
-//! share no library crate — each is `[[bin]]`-only — so the envelope is
-//! duplicated, not imported). Every response is a single JSON object emitting
-//! BOTH protocols in one object:
+//! Every response is the single JSON object the native 0.5.0 tool printed, kept so its messages
+//! and shape stay exactly as they were:
 //!   • the tool's own shape: `{ok, message, ...op fields}`
 //!   • the capsule-runtime shape: `{status, summary, data, data_path, metadata}`
 //!
+//! Only `status`, `summary` and `data` reach the model: `NativeOutcome::of` reduces the envelope
+//! to them the way murmur's native dispatch did, and the component returns nothing else.
+//!
 //! This tool keeps the three-way envelope (`passed`/`failed`/`errored`), unlike
-//! `tool-test-report`'s two-way one, because it can hit genuine internal
-//! errors: it opens, migrates, and writes a SQLite database whose schema it does
-//! not own.
+//! `tool-test-report`'s two-way one, because it can hit genuine internal errors: it opens,
+//! migrates, and writes a SQLite database whose schema it does not own.
 
 use serde_json::{json, Value};
 

@@ -6,11 +6,18 @@
 //! tool never runs coverage itself) plus the list of failing test names. Output
 //! is a ranked suspect list, with the four suspicion scores written back onto the
 //! shared `symbols` table.
+//!
+//! `repo_path` and `coverage_dir` go through `murmur_host_roots::locate` before anything is
+//! opened: a relative value opens in the work folder as written, an absolute one only through
+//! the host root covering it (as `murmur-host/…`). An absolute value handed to the filesystem or
+//! SQLite as written would resolve into the work folder, not onto the host. Messages and `data`
+//! name each path as the call named it; `SF:` paths are never opened ([`crate::sf_paths`]).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use rusqlite::{params, Connection};
+use murmur_host_roots::{describe_roots, locate, HostRoot, Located, Refusal, RootAccess};
+use rusqlite::{params, Connection, ErrorCode};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -18,8 +25,12 @@ use crate::db;
 use crate::lcov;
 use crate::out::{errored, failed, passed, Meta};
 use crate::resolve::resolve_failing_ids;
+use crate::sf_paths::{self, SfPath};
 
-// ── Input helpers (mirrors tool-code-graph's ops.rs) ────────────────────
+/// The tool's name, as refusals name it.
+const TOOL_NAME: &str = "tool-code-coverage";
+
+// ── Input helpers ───────────────────────────────────────────────────────────────
 
 fn str_field<'a>(op: &'a Value, key: &str) -> Option<&'a str> {
     op.get(key)
@@ -31,51 +42,136 @@ fn opt_i64(op: &Value, key: &str, default: i64) -> i64 {
     op.get(key).and_then(|v| v.as_i64()).unwrap_or(default)
 }
 
-/// Resolve and validate `repo_path`; defaults to the current directory. Returns
-/// a `failed` envelope if the path is missing, not found, or not a directory.
-fn resolve_repo(op: &Value, operation: &str) -> Result<PathBuf, Value> {
-    let raw = str_field(op, "repo_path")
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .ok_or_else(|| failed(format!("{operation}: could not determine repo_path")))?;
-    if !raw.exists() {
-        return Err(failed(format!(
-            "{operation}: repo_path does not exist: {}",
-            raw.display()
-        )));
+// ── Paths as the call named them ────────────────────────────────────────────────
+
+/// `repo_path` as reported: the value as written with trailing `/` trimmed (`/` itself stays
+/// `/`), or `.` (the work folder) when absent or empty.
+fn shown_repo(written: Option<&str>) -> String {
+    match written {
+        None => ".".to_string(),
+        Some(value) => match value.trim_end_matches('/') {
+            "" => "/".to_string(),
+            trimmed => trimmed.to_string(),
+        },
     }
-    if !raw.is_dir() {
-        return Err(failed(format!(
-            "{operation}: repo_path is not a directory: {}",
-            raw.display()
-        )));
+}
+
+/// `rel` under the repository as the call named it: `rel` alone when `shown` is the work folder
+/// itself (`.`, `./`, …), else `shown/rel`.
+fn display_join(shown: &str, rel: &str) -> String {
+    let is_work_folder =
+        !shown.starts_with('/') && shown.split('/').all(|s| s.is_empty() || s == ".");
+    if is_work_folder {
+        rel.to_string()
+    } else if shown.ends_with('/') {
+        format!("{shown}{rel}")
+    } else {
+        format!("{shown}/{rel}")
     }
-    Ok(raw.canonicalize().unwrap_or(raw))
+}
+
+/// The message for a path value `locate` refused. `field` is the input's name and `value` the
+/// value as written; `repo_path`'s no-root message adds that `.` is the work folder.
+fn refusal_message(field: &str, value: &str, refusal: Refusal, roots: &[HostRoot]) -> String {
+    match refusal {
+        Refusal::NoRoots => {
+            let dot = if field == "repo_path" {
+                " ('.' is the work folder itself)"
+            } else {
+                ""
+            };
+            format!(
+                "localize: could not open {field} '{value}': this session opens no host folder to {TOOL_NAME}; a relative path opens in the work folder{dot}"
+            )
+        }
+        Refusal::Uncovered => format!(
+            "localize: could not open {field} '{value}': it is outside every host folder {TOOL_NAME} may open: {}. A relative path opens in the work folder",
+            describe_roots(roots)
+        ),
+        Refusal::ReservedName { suggestion } => format!(
+            "localize: '{field}' starts with murmur-host, where this tool's host folders are opened; name the host path absolutely: '{suggestion}'"
+        ),
+    }
+}
+
+/// Where a located value opens: as written in the work folder, or `murmur-host/…`.
+fn open_path(located: &Located<'_>) -> String {
+    match located {
+        Located::Relative(value) => value.clone(),
+        Located::Host { open, .. } => open.clone(),
+    }
+}
+
+// ── Database errors ─────────────────────────────────────────────────────────────
+
+/// `errored(message)`, unless SQLite reported the database busy while the dotfile lock
+/// `<db>.lock` exists: then the message names the lock, as the call named the repository, and
+/// how to clear one a cut-off call left behind.
+fn db_failure(message: String, e: &rusqlite::Error, lock: &Path, shown: &str) -> Value {
+    if e.sqlite_error_code() == Some(ErrorCode::DatabaseBusy) && lock.exists() {
+        return errored(format!(
+            "localize: code graph db is locked: {} exists; a localize call that was cut off leaves it behind — if no other call is using the database, delete it and retry",
+            display_join(shown, ".murmur/code-graph.db.lock")
+        ));
+    }
+    errored(message)
 }
 
 // ── op: localize ───────────────────────────────────────────────────────────────
 
-pub fn op_localize(op: &Value) -> Value {
-    let repo = match resolve_repo(op, "localize") {
-        Ok(r) => r,
-        Err(e) => return e,
+pub fn op_localize(op: &Value, roots: &[HostRoot]) -> Value {
+    // repo_path: defaults to the work folder; must exist, be a directory, and be writable.
+    let repo_written = str_field(op, "repo_path");
+    let shown = shown_repo(repo_written);
+    let repo_value = repo_written.unwrap_or(".");
+    let repo_located = match locate(&shown, roots) {
+        Ok(located) => located,
+        Err(refusal) => {
+            return failed(refusal_message("repo_path", repo_value, refusal, roots));
+        }
     };
+    if let Located::Host { root, .. } = &repo_located {
+        if root.access == RootAccess::Read {
+            return failed(format!(
+                "localize: repo_path '{repo_value}' is in {}, which this session opens read-only; localize writes its scores into .murmur/code-graph.db there",
+                root.path
+            ));
+        }
+    }
+    let repo = PathBuf::from(open_path(&repo_located));
+    if !repo.exists() {
+        return failed(format!("localize: repo_path does not exist: {repo_value}"));
+    }
+    if !repo.is_dir() {
+        return failed(format!(
+            "localize: repo_path is not a directory: {repo_value}"
+        ));
+    }
 
-    // coverage_dir: required, must exist and be a directory.
-    let coverage_dir = match str_field(op, "coverage_dir") {
-        Some(c) => PathBuf::from(c),
+    // coverage_dir: required, must exist and be a directory. A read-only host folder is fine.
+    let coverage_value = match str_field(op, "coverage_dir") {
+        Some(c) => c,
         None => return failed("localize: missing required field 'coverage_dir'"),
+    };
+    let coverage_dir = match locate(coverage_value, roots) {
+        Ok(located) => PathBuf::from(open_path(&located)),
+        Err(refusal) => {
+            return failed(refusal_message(
+                "coverage_dir",
+                coverage_value,
+                refusal,
+                roots,
+            ))
+        }
     };
     if !coverage_dir.exists() {
         return failed(format!(
-            "localize: coverage_dir does not exist: {}",
-            coverage_dir.display()
+            "localize: coverage_dir does not exist: {coverage_value}"
         ));
     }
     if !coverage_dir.is_dir() {
         return failed(format!(
-            "localize: coverage_dir is not a directory: {}",
-            coverage_dir.display()
+            "localize: coverage_dir is not a directory: {coverage_value}"
         ));
     }
 
@@ -104,32 +200,43 @@ pub fn op_localize(op: &Value) -> Value {
     let limit = opt_i64(op, "limit", 50).clamp(1, 10_000);
 
     // The database must already exist — this tool never creates it.
-    let db_file = db::db_path(&repo);
+    let store = repo.join(db::STORE_DIR);
+    let db_file = store.join(db::DB_FILE);
+    let lock_file = store.join(format!("{}.lock", db::DB_FILE));
     if !db_file.exists() {
         return failed(format!(
             "localize: code graph db not found at {} — run tool-code-graph index_repository first",
-            db_file.display()
+            display_join(&shown, ".murmur/code-graph.db")
         ));
     }
 
-    let conn = match db::open(&repo) {
+    let conn = match db::open(&db_file.to_string_lossy()) {
         Ok(c) => c,
         Err(e) => {
-            return errored(format!(
-                "localize: failed to open/migrate code graph db: {e}"
-            ))
+            let mut message = format!("localize: failed to open/migrate code graph db: {e}");
+            if e.sqlite_error_code() == Some(ErrorCode::NotADatabase) {
+                message.push_str(
+                    " (if the database is in WAL mode, which this tool cannot open, switch it back with PRAGMA journal_mode=DELETE)",
+                );
+            }
+            return db_failure(message, &e, &lock_file, &shown);
         }
     };
 
     // Load the symbol table once: repo-relative file path → its symbols' ranges,
-    // and symbol_id → display detail (for the suspect list).
+    // and symbol_id → display detail (for the suspect list); and every indexed path.
     let (path_to_syms, detail) = match load_symbols(&conn) {
         Ok(v) => v,
-        Err(e) => return errored(format!("localize: {e}")),
+        Err(e) => return db_failure(format!("localize: {e}"), &e, &lock_file, &shown),
+    };
+    let indexed = match load_indexed_paths(&conn) {
+        Ok(v) => v,
+        Err(e) => return db_failure(format!("localize: {e}"), &e, &lock_file, &shown),
     };
 
-    // Parse every `.info` file in coverage_dir, classifying by whether its stem
-    // is a failing-test name, and mapping covered lines to covered symbols.
+    // Parse every `.info` file in coverage_dir first, classifying by whether its stem is a
+    // failing-test name; then infer the repository's host prefix from every absolute `SF:` path
+    // of the call, and map covered lines to covered symbols.
     let failing_set: HashSet<&str> = failing_tests.iter().map(|s| s.as_str()).collect();
     let mut skipped_files: Vec<String> = Vec::new();
     let mut covered_failing: HashSet<String> = HashSet::new();
@@ -139,12 +246,11 @@ pub fn op_localize(op: &Value) -> Value {
 
     let mut info_files = list_info_files(&coverage_dir);
     info_files.sort();
+    let mut parsed: Vec<(String, Vec<lcov::FileCoverage>)> = Vec::new();
     for path in &info_files {
         let Some(stem) = info_stem(path) else {
             continue;
         };
-        let is_failing = failing_set.contains(stem.as_str());
-
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
             Err(_) => {
@@ -157,11 +263,27 @@ pub fn op_localize(op: &Value) -> Value {
             skipped_files.push(file_name(path));
             continue;
         }
+        parsed.push((stem, sections));
+    }
 
+    let absolute: HashSet<Vec<String>> = parsed
+        .iter()
+        .flat_map(|(_, sections)| sections)
+        .filter_map(
+            |section| match sf_paths::normalize_sf(&section.source_file) {
+                Some(SfPath::Absolute(segments)) => Some(segments),
+                _ => None,
+            },
+        )
+        .collect();
+    let absolute: Vec<Vec<String>> = absolute.into_iter().collect();
+    let root = sf_paths::infer_root(&absolute, &indexed);
+
+    for (stem, sections) in &parsed {
         // The set of symbols this single test touched.
-        let covered = covered_symbols(&repo, &sections, &path_to_syms);
+        let covered = covered_symbols(sections, root.as_deref(), &path_to_syms);
 
-        if is_failing {
+        if failing_set.contains(stem.as_str()) {
             covered_failing.insert(stem.clone());
             for sid in &covered {
                 *ef.entry(sid.clone()).or_insert(0) += 1;
@@ -203,7 +325,12 @@ pub fn op_localize(op: &Value) -> Value {
     };
 
     if let Err(e) = write_scores(&conn, &scored, &ef, &ep, f_total, p_total) {
-        return errored(format!("localize: failed writing suspicion scores: {e}"));
+        return db_failure(
+            format!("localize: failed writing suspicion scores: {e}"),
+            &e,
+            &lock_file,
+            &shown,
+        );
     }
 
     // Build the ranked suspect list (Ochiai desc, then Tarantula desc, then
@@ -260,8 +387,8 @@ pub fn op_localize(op: &Value) -> Value {
 
     // Full sorted suspect list to disk when the inline view is capped.
     let full = json!({
-        "repo_path": repo.display().to_string(),
-        "coverage_dir": coverage_dir.display().to_string(),
+        "repo_path": shown,
+        "coverage_dir": coverage_value,
         "failing_test_count": f_total,
         "passing_test_count": p_total,
         "scored_symbols": scored_count,
@@ -272,7 +399,7 @@ pub fn op_localize(op: &Value) -> Value {
         "skipped_files": skipped_files.clone(),
     });
     let data_path = if truncated {
-        write_localize_file(&repo, &full)
+        write_localize_file(&repo, &shown, &full)
     } else {
         None
     };
@@ -283,8 +410,8 @@ pub fn op_localize(op: &Value) -> Value {
         if truncated { format!(", top {limit} shown (full list at data_path)") } else { String::new() }
     );
     let data = json!({
-        "repo_path": repo.display().to_string(),
-        "coverage_dir": coverage_dir.display().to_string(),
+        "repo_path": shown,
+        "coverage_dir": coverage_value,
         "failing_test_count": f_total,
         "passing_test_count": p_total,
         "scored_symbols": scored_count,
@@ -300,7 +427,7 @@ pub fn op_localize(op: &Value) -> Value {
         summary,
         data,
         data_path,
-        Some(Meta::mutate(format!("coverage:{}", repo.display()))),
+        Some(Meta::mutate(format!("coverage:{shown}"))),
     )
 }
 
@@ -378,17 +505,27 @@ fn load_symbols(
     Ok((path_to_syms, detail))
 }
 
-/// The set of symbols one test's coverage touched: for every `SF:` section, map
-/// the source path to the stored repo-relative form and collect every symbol
-/// whose `[start_line, end_line]` contains at least one hit line.
+/// Every `files.path` the code graph indexed: what an `SF:` path must map onto.
+fn load_indexed_paths(conn: &Connection) -> rusqlite::Result<HashSet<String>> {
+    let mut stmt = conn.prepare("SELECT path FROM files")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    rows.collect()
+}
+
+/// The set of symbols one test's coverage touched: for every `SF:` section, map the source path
+/// to the stored repo-relative form ([`sf_paths::map_sf`] under the call's inferred `root`) and
+/// collect every symbol whose `[start_line, end_line]` contains at least one hit line. An `SF:`
+/// path is never opened.
 fn covered_symbols(
-    repo: &Path,
     sections: &[lcov::FileCoverage],
+    root: Option<&[String]>,
     path_to_syms: &HashMap<String, Vec<SymRange>>,
 ) -> HashSet<String> {
     let mut covered: HashSet<String> = HashSet::new();
     for section in sections {
-        let rel = normalize_rel(repo, &section.source_file);
+        let Some(rel) = sf_paths::map_sf(&section.source_file, root) else {
+            continue;
+        };
         let Some(syms) = path_to_syms.get(&rel) else {
             continue;
         };
@@ -421,7 +558,8 @@ fn range_hit(lines: &[u32], start: i64, end: i64) -> bool {
 // ── DB writes ──────────────────────────────────────────────────────────────────
 
 /// Reset every symbol's four suspicion columns to `NULL`, then set the freshly
-/// computed scores for each scored symbol, all in one transaction.
+/// computed scores for each scored symbol, all in one transaction: one lock and one journal for
+/// the whole write, and no half-written scores if a statement fails.
 fn write_scores(
     conn: &Connection,
     scored: &[String],
@@ -430,11 +568,12 @@ fn write_scores(
     f_total: i64,
     p_total: i64,
 ) -> rusqlite::Result<()> {
-    conn.execute_batch(
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(
         "UPDATE symbols SET suspicion_ef = NULL, suspicion_ep = NULL,
                             suspicion_ochiai = NULL, suspicion_tarantula = NULL",
     )?;
-    let mut stmt = conn.prepare(
+    let mut stmt = tx.prepare(
         "UPDATE symbols
             SET suspicion_ef = ?1, suspicion_ep = ?2,
                 suspicion_ochiai = ?3, suspicion_tarantula = ?4
@@ -447,7 +586,8 @@ fn write_scores(
         let tarantula = tarantula(ef_v, ep_v, f_total, p_total);
         stmt.execute(params![ef_v, ep_v, ochiai, tarantula, sid])?;
     }
-    Ok(())
+    drop(stmt);
+    tx.commit()
 }
 
 // ── Filesystem helpers ─────────────────────────────────────────────────────────
@@ -482,59 +622,50 @@ fn file_name(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// Normalize an LCOV `SF:` path to the stored repo-relative form: forward
-/// slashes, no leading `./`, absolute repo-root prefix stripped — mirrors
-/// `tool-code-graph`'s `normalize_rel`/`rel_path` so a lookup always
-/// agrees with what indexing wrote into `files.path`.
-///
-/// `repo` is already canonicalized by `resolve_repo`, so `file` is canonicalized
-/// here too before stripping — otherwise a `repo_path` that resolves through a
-/// symlink (e.g. macOS's `/tmp` -> `/private/tmp`) would never strip cleanly
-/// against `cargo llvm-cov`'s un-resolved absolute `SF:` path, silently matching
-/// zero symbols. Falls back to the literal path if the file no longer exists on
-/// this machine (e.g. moved since the coverage run).
-fn normalize_rel(repo: &Path, file: &str) -> String {
-    let mut f = file.replace('\\', "/");
-    while let Some(s) = f.strip_prefix("./") {
-        f = s.to_string();
-    }
-    let path = Path::new(&f);
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    rel_path(repo, &canonical)
-}
-
-fn rel_path(repo: &Path, file: &Path) -> String {
-    let rel = file.strip_prefix(repo).unwrap_or(file);
-    rel.components()
-        .map(|c| c.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
     format!("{:x}", h.finalize())
 }
 
-/// Persist the full localize payload under `.murmur/coverage/` and return its
-/// path, mirroring `tool-code-graph`'s `write_slice_file`/`write_impact_file`.
-fn write_localize_file(repo: &Path, full: &Value) -> Option<String> {
+/// Persist the full localize payload under `<repo>/.murmur/coverage/` and return its path as
+/// the call named the repository. `repo` is where the repository opens, `shown` how the call
+/// named it; the file is named after `shown`. `None` when it cannot be written.
+fn write_localize_file(repo: &Path, shown: &str, full: &Value) -> Option<String> {
     let dir = repo.join(db::STORE_DIR).join("coverage");
     std::fs::create_dir_all(&dir).ok()?;
-    let name = format!(
-        "localize-{}.json",
-        sha256_hex(repo.display().to_string().as_bytes())
-    );
-    let path = dir.join(name);
+    let name = format!("localize-{}.json", sha256_hex(shown.as_bytes()));
     let body = serde_json::to_string_pretty(full).ok()?;
-    std::fs::write(&path, body).ok()?;
-    Some(path.display().to_string())
+    std::fs::write(dir.join(&name), body).ok()?;
+    Some(display_join(shown, &format!(".murmur/coverage/{name}")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shown_trims_trailing_slashes_and_defaults_to_the_work_folder() {
+        assert_eq!(shown_repo(None), ".");
+        assert_eq!(shown_repo(Some("repo/")), "repo");
+        assert_eq!(shown_repo(Some("/srv/repo//")), "/srv/repo");
+        assert_eq!(shown_repo(Some("/")), "/");
+        assert_eq!(shown_repo(Some("./")), ".");
+    }
+
+    #[test]
+    fn display_join_names_paths_under_the_repository_as_the_call_did() {
+        let rel = ".murmur/code-graph.db";
+        assert_eq!(display_join(".", rel), rel);
+        assert_eq!(display_join("./", rel), rel);
+        assert_eq!(display_join("./.", rel), rel);
+        assert_eq!(display_join("repo", rel), "repo/.murmur/code-graph.db");
+        assert_eq!(
+            display_join("/srv/repo", rel),
+            "/srv/repo/.murmur/code-graph.db"
+        );
+        assert_eq!(display_join("/", rel), "/.murmur/code-graph.db");
+    }
 
     #[test]
     fn range_hit_basic() {
