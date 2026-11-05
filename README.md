@@ -248,6 +248,7 @@ serves level 3. Hooks, process drivers and native tools did not move.
 | `tool-report` | 0.7.0 |
 | `tool-request-input` | 0.7.0 |
 | `tool-tavily` | 0.8.0 |
+| `tool-test-report` | 0.6.0 |
 | `tool-write` | 0.2.0 |
 
 The `wit-sync` CI job verifies the mirror stays byte-identical to the murmur commit pinned by
