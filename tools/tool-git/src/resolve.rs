@@ -8,7 +8,7 @@
 //! `SQLITE_OMIT_WAL`, so a database in WAL mode cannot be read; tool-code-graph never sets a
 //! journal mode, so its databases are not in WAL mode.
 
-use murmur_host_roots::{locate, Located, Refusal};
+use murmur_host_roots::{locate, sqlite_immutable_uri, Located, Refusal};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::env::Git;
@@ -73,9 +73,9 @@ fn climbs(value: &str) -> bool {
 /// 2. Otherwise git places it: `git -C <repo> rev-parse --show-toplevel --absolute-git-dir
 ///    --show-prefix` gives the worktree `T`, its git folder `G` and `repo`'s place `P` below `T`,
 ///    and `git --git-dir=<G> --work-tree=<T> rev-parse --path-format=relative --show-toplevel`,
-///    run in the work folder, gives `T` relative to it. A result that does not climb (no leading
-///    `..`; `""` and `./` mean the work folder itself) opens `<T rel>/<P>.murmur/code-graph.db`
-///    in the work folder.
+///    run in the work folder, gives `T` relative to it. A result that does not climb (no `..`
+///    segment leaves the work folder; `""` and `./` mean the work folder itself) opens
+///    `<T rel>/<P>.murmur/code-graph.db` in the work folder.
 /// 3. Otherwise `<T>/<P>.murmur/code-graph.db` (or `<repo>/…` when git did not answer) through
 ///    the held host folder covering it, the longest winning.
 /// 4. Otherwise [`ResolveError::OutsideRoots`].
@@ -121,7 +121,7 @@ pub fn graph_db_path(git: &Git, repo: &str) -> Result<String, ResolveError> {
         ]);
         if rel.success {
             let rel = rel.stdout.trim_end_matches('/');
-            if !rel.starts_with("..") {
+            if !climbs(rel) {
                 let dir = if rel.is_empty() || rel == "." {
                     "."
                 } else {
@@ -153,7 +153,7 @@ pub fn resolve_symbol_location(
     if !path.exists() {
         return Err(ResolveError::NotIndexed);
     }
-    let uri = format!("file:{}?immutable=1", escape(&path.to_string_lossy()));
+    let uri = sqlite_immutable_uri(&path.to_string_lossy());
     let conn = Connection::open_with_flags(
         uri,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
@@ -178,39 +178,16 @@ pub fn resolve_symbol_location(
     .ok_or(ResolveError::NotFound)
 }
 
-/// `path` as the path part of an SQLite `file:` URI: `%`, `?` and `#` are percent-encoded
-/// (`%25`, `%3F`, `%23`), so a path holding them is neither cut short at a query or fragment nor
-/// decoded into a different path. Every other character is passed through.
-fn escape(path: &str) -> String {
-    let mut out = String::with_capacity(path.len());
-    for c in path.chars() {
-        match c {
-            '%' => out.push_str("%25"),
-            '?' => out.push_str("%3F"),
-            '#' => out.push_str("%23"),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn escape_percent_encodes_only_what_ends_or_decodes_a_uri_path() {
-        assert_eq!(escape(".murmur/code-graph.db"), ".murmur/code-graph.db");
-        assert_eq!(escape("murmur-host/a b/x.db"), "murmur-host/a b/x.db");
-        assert_eq!(escape("a%b?c#d"), "a%25b%3Fc%23d");
-    }
 
     #[test]
     fn climbing_is_lexical() {
         for v in ["..", "../x", "a/../..", "./../x", "a/b/../../../c"] {
             assert!(climbs(v), "{v}");
         }
-        for v in [".", "", "a", "a/..", "a/b/../c", "./a/./b"] {
+        for v in [".", "", "a", "a/..", "a/b/../c", "./a/./b", "..a", "..a/b"] {
             assert!(!climbs(v), "{v}");
         }
     }

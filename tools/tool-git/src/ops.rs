@@ -77,7 +77,7 @@ fn resolve_repo(g: &Git, op: &Value) -> String {
 
 // ── WORKING TREE operations ───────────────────────────────────────────────────
 
-pub(crate) fn op_status(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_status(g: &Git, op: &Value, log: &Log) -> Value {
     // Accept `path` as a legacy alias for `repo` — the original binary used `path` for
     // status, and existing test fixtures send `path`. If both are absent, auto-discover.
     let repo = if let Some(r) = op
@@ -154,7 +154,7 @@ pub(crate) fn op_status(g: &Git, op: &Value, log: &Log) -> Value {
     ok_with(message, json!({ "entries": entries }))
 }
 
-pub(crate) fn op_add(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_add(g: &Git, op: &Value, log: &Log) -> Value {
     let repo = resolve_repo(g, op);
 
     let paths: Vec<String> = match op.get("paths") {
@@ -193,7 +193,7 @@ pub(crate) fn op_add(g: &Git, op: &Value, log: &Log) -> Value {
     )
 }
 
-pub(crate) fn op_diff(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_diff(g: &Git, op: &Value, log: &Log) -> Value {
     let repo = resolve_repo(g, op);
 
     let staged = op.get("staged").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -228,7 +228,7 @@ pub(crate) fn op_diff(g: &Git, op: &Value, log: &Log) -> Value {
     ok_with("diff complete", json!({ "diff": out.stdout }))
 }
 
-pub(crate) fn op_restore(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_restore(g: &Git, op: &Value, log: &Log) -> Value {
     let repo = resolve_repo(g, op);
 
     let paths: Vec<String> = match op.get("dest_paths") {
@@ -276,7 +276,7 @@ pub(crate) fn op_restore(g: &Git, op: &Value, log: &Log) -> Value {
     )
 }
 
-pub(crate) fn op_stash(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_stash(g: &Git, op: &Value, log: &Log) -> Value {
     let repo = resolve_repo(g, op);
 
     match op.get("subcommand").and_then(|v| v.as_str()) {
@@ -408,7 +408,7 @@ fn parse_stash_branch(subject: &str) -> String {
 
 // ── HISTORY operations ────────────────────────────────────────────────────────
 
-pub(crate) fn op_log(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_log(g: &Git, op: &Value, log: &Log) -> Value {
     let repo = resolve_repo(g, op);
 
     let n = op.get("n").and_then(|v| v.as_u64()).unwrap_or(20);
@@ -481,7 +481,7 @@ pub(crate) fn op_log(g: &Git, op: &Value, log: &Log) -> Value {
     )
 }
 
-pub(crate) fn op_show(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_show(g: &Git, op: &Value, log: &Log) -> Value {
     let repo = resolve_repo(g, op);
 
     let ref_str = op
@@ -567,7 +567,7 @@ pub(crate) fn op_show(g: &Git, op: &Value, log: &Log) -> Value {
 /// `git blame` — is the whole point: an unrelated edit shifting lines above the
 /// symbol re-indexes into a new range and this still finds the symbol's own last
 /// real edit.
-pub(crate) fn op_symbol_history(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_symbol_history(g: &Git, op: &Value, log: &Log) -> Value {
     let repo = resolve_repo(g, op);
 
     let symbol_id = match op.get("symbol_id").and_then(|v| v.as_str()) {
@@ -715,7 +715,7 @@ pub(crate) fn op_symbol_history(g: &Git, op: &Value, log: &Log) -> Value {
 
 // ── COMMITS operations ────────────────────────────────────────────────────────
 
-pub(crate) fn op_commit(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_commit(g: &Git, op: &Value, log: &Log) -> Value {
     let repo = resolve_repo(g, op);
 
     let message = match op.get("message").and_then(|v| v.as_str()) {
@@ -771,7 +771,7 @@ pub(crate) fn op_commit(g: &Git, op: &Value, log: &Log) -> Value {
     )
 }
 
-pub(crate) fn op_cherry_pick(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_cherry_pick(g: &Git, op: &Value, log: &Log) -> Value {
     let repo = resolve_repo(g, op);
 
     let ref_str = match op.get("ref").and_then(|v| v.as_str()) {
@@ -822,7 +822,7 @@ pub(crate) fn op_cherry_pick(g: &Git, op: &Value, log: &Log) -> Value {
 
 // ── BRANCHES operations ───────────────────────────────────────────────────────
 
-pub(crate) fn op_branch(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_branch(g: &Git, op: &Value, log: &Log) -> Value {
     let repo = resolve_repo(g, op);
 
     match op.get("subcommand").and_then(|v| v.as_str()) {
@@ -959,7 +959,7 @@ fn branch_delete(g: &Git, repo: &str, op: &Value, log: &Log) -> Value {
     ok_with(format!("branch '{name}' deleted"), json!({ "name": name }))
 }
 
-pub(crate) fn op_checkout(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_checkout(g: &Git, op: &Value, log: &Log) -> Value {
     let repo = resolve_repo(g, op);
 
     let ref_str = match op.get("ref").and_then(|v| v.as_str()) {
@@ -1017,7 +1017,7 @@ pub(crate) fn op_checkout(g: &Git, op: &Value, log: &Log) -> Value {
     )
 }
 
-pub(crate) fn op_switch(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_switch(g: &Git, op: &Value, log: &Log) -> Value {
     let repo = resolve_repo(g, op);
 
     let branch = match op.get("branch").and_then(|v| v.as_str()) {
@@ -1076,7 +1076,7 @@ pub(crate) fn op_switch(g: &Git, op: &Value, log: &Log) -> Value {
 
 // ── RESET operations ──────────────────────────────────────────────────────────
 
-pub(crate) fn op_reset(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_reset(g: &Git, op: &Value, log: &Log) -> Value {
     let repo = resolve_repo(g, op);
 
     let mode = match op.get("mode").and_then(|v| v.as_str()) {
@@ -1119,7 +1119,7 @@ pub(crate) fn op_reset(g: &Git, op: &Value, log: &Log) -> Value {
 
 // ── REMOTE operations ────────────────────────────────────────────────────────
 
-pub(crate) fn op_fetch(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_fetch(g: &Git, op: &Value, log: &Log) -> Value {
     let repo = resolve_repo(g, op);
 
     let remote = op
@@ -1193,7 +1193,7 @@ fn parse_fetch_updated_refs(stderr: &str) -> Vec<String> {
     refs
 }
 
-pub(crate) fn op_pull(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_pull(g: &Git, op: &Value, log: &Log) -> Value {
     let repo = resolve_repo(g, op);
 
     let remote = op
@@ -1280,7 +1280,7 @@ pub(crate) fn op_pull(g: &Git, op: &Value, log: &Log) -> Value {
     )
 }
 
-pub(crate) fn op_push(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_push(g: &Git, op: &Value, log: &Log) -> Value {
     let repo = resolve_repo(g, op);
 
     let remote = op
@@ -1384,7 +1384,7 @@ fn parse_push_remote_ref(stdout: &str, fallback_branch: &str) -> String {
     }
 }
 
-pub(crate) fn op_clone(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_clone(g: &Git, op: &Value, log: &Log) -> Value {
     let url = match op.get("url").and_then(|v| v.as_str()) {
         Some(u) if !u.is_empty() => u.to_string(),
         _ => return fail_msg("missing required field: url"),
@@ -1457,7 +1457,7 @@ pub(crate) fn op_clone(g: &Git, op: &Value, log: &Log) -> Value {
     )
 }
 
-pub(crate) fn op_remote(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_remote(g: &Git, op: &Value, log: &Log) -> Value {
     let repo = resolve_repo(g, op);
 
     match op.get("subcommand").and_then(|v| v.as_str()) {
@@ -1598,7 +1598,7 @@ fn remote_remove(g: &Git, repo: &str, op: &Value, log: &Log) -> Value {
 
 // ── TAG operations ────────────────────────────────────────────────────────────
 
-pub(crate) fn op_tag(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_tag(g: &Git, op: &Value, log: &Log) -> Value {
     let repo = resolve_repo(g, op);
 
     match op.get("subcommand").and_then(|v| v.as_str()) {
@@ -1699,7 +1699,7 @@ fn tag_create(g: &Git, repo: &str, op: &Value, log: &Log) -> Value {
 
 // ── MERGE operations ──────────────────────────────────────────────────────────
 
-pub(crate) fn op_merge(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_merge(g: &Git, op: &Value, log: &Log) -> Value {
     let repo = resolve_repo(g, op);
 
     let branch = match op.get("branch").and_then(|v| v.as_str()) {
@@ -1782,7 +1782,7 @@ pub(crate) fn op_merge(g: &Git, op: &Value, log: &Log) -> Value {
 
 // ── WORKTREE operations ───────────────────────────────────────────────────────
 
-pub(crate) fn op_worktree(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_worktree(g: &Git, op: &Value, log: &Log) -> Value {
     let repo = resolve_repo(g, op);
 
     match op.get("subcommand").and_then(|v| v.as_str()) {
@@ -1940,7 +1940,7 @@ fn worktree_remove(g: &Git, repo: &str, op: &Value, log: &Log) -> Value {
 
 /// `create_worktree`: the operation `worktree` / `add` runs, under its older name. The op
 /// carries `dest` and `branch` at the top level, which `worktree_add` reads.
-pub(crate) fn op_create_worktree(g: &Git, op: &Value, log: &Log) -> Value {
+fn op_create_worktree(g: &Git, op: &Value, log: &Log) -> Value {
     let repo = resolve_repo(g, op);
     worktree_add(g, &repo, op, log)
 }

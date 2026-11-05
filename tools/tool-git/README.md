@@ -255,7 +255,7 @@ namespace, with the sanitized shell environment.
 
 | Need | Capsule grant |
 |---|---|
-| Run `git` | `git` in `capabilities.shell.allow`. Without it murmur cannot start git: at `scoped`, `status` returned `git status failed: failed to execute git: Permission denied (os error 13)`, as 0.6.0 did |
+| Run `git` | `git` in `capabilities.shell.allow`. Without it murmur refuses every git command the tool asks for, at `scoped` and at `sealed`, and `status` returns `tool-git: murmur refused to run git: capabilities.shell.allow: binary 'git' is not in capabilities.shell.allow` |
 | Read and write the repository | The repository inside the work folder; under `scoped` and `sealed` git reaches nothing outside it |
 | `fetch`, `pull`, `push`, `clone` with a remote that is a local path | `sh` in `capabilities.shell.allow`: git starts `git-upload-pack` and `git-receive-pack` through `/bin/sh`. Without it they fail with `cannot exec 'git-upload-pack '<remote>'': Permission denied`, at `scoped` and at `sealed`, as they did for 0.6.0 |
 | `fetch`, `pull`, `push`, `clone` over the network | The remote's host in `capabilities.network.allow`, and a `capabilities.shell.interpreter_runtime` grant for `git` naming the directory its remote helpers live in (`/usr/lib/git-core` on Debian and Ubuntu); without it `git` cannot start `git-remote-https` |

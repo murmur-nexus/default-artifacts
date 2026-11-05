@@ -11,6 +11,7 @@ license.workspace = true
 # murmur.yaml, so nothing publishes it.
 #
 # This crate is the one place those rules live: libs/murmur-file-tools (tool-read, tool-write,
-# tool-edit, tool-find) and tool-test-report both resolve through it.
+# tool-edit, tool-find), tool-test-report and tool-git all resolve through it, and open the
+# code-graph database through its SQLite URI.
 
 [dependencies]

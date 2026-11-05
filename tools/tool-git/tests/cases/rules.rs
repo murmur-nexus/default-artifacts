@@ -282,8 +282,10 @@ fn absolute_repos_in_the_work_folder_resolve_with_no_root_held() {
     let td = TestDir::new("rules");
     indexed_repo(&td.path().join("repo"));
     indexed_repo(&td.path().join("sub/deeper/repo"));
+    // A folder whose name begins with `..` is inside the work folder, not above it.
+    indexed_repo(&td.path().join("..dotted"));
     let env = env(td.path());
-    for repo in ["repo", "sub/deeper/repo"] {
+    for repo in ["repo", "sub/deeper/repo", "..dotted"] {
         let abs = td.path().join(repo);
         assert_resolved(&history(&env, Some(abs.to_str().unwrap())));
         // A subfolder of the repository names the database below it, as the native tool did.
