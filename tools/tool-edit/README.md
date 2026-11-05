@@ -5,7 +5,8 @@ Replaces text in a file in the work folder: one or more exact `{old, new}` repla
 WASM tool component (`runtime: tool`, `implementation: wasm`, world `tool`,
 exports `murmur:tool/run`). The model calls it `tool-edit`. Its file logic lives
 in the shared, unpublished `libs/murmur-file-tools` library, which
-`tool-read`, `tool-write`, `tool-edit` and `tool-find` all call.
+`tool-read`, `tool-write`, `tool-edit` and `tool-find` all call. The component
+links only the library's `edit` operation, none of the other three tools' code.
 
 ## Definition
 

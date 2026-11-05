@@ -8,7 +8,8 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-murmur-file-tools = { path = "../../libs/murmur-file-tools" }
+# Only this tool's operation: the component links none of the other three tools' code.
+murmur-file-tools = { path = "../../libs/murmur-file-tools", default-features = false, features = ["find"] }
 wit-bindgen.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

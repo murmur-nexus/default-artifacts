@@ -8,7 +8,7 @@ use crate::image::{has_image_name, image_header};
 use crate::resolve::{resolve_path, Resolved};
 use crate::{
     err, err_result, format_result_size, io_error_kind, ok_summary_only, ok_with, required_path,
-    HostRoot, Tool,
+    HostRoot, Tool, ToolOutcome,
 };
 
 // read limits. Every read, with or without a range, returns at most this many lines, this
@@ -22,11 +22,25 @@ pub(crate) const MAX_READ_BYTES: usize = 100 * 1024;
 // bytes, so the first line of a read always fits under `MAX_READ_BYTES`.
 pub(crate) const MAX_LINE_CHARS: usize = 2000;
 
+/// Run `tool-read` on a stdin-envelope string `{"data": <string-or-object>, ...}` and return
+/// the old-protocol result `Value`: the envelope and field checks every tool shares, then this
+/// module's handler. `roots` are the host folders the tool may open an absolute path in, in
+/// preopen order.
+pub fn run(raw: &str, roots: &[HostRoot]) -> Value {
+    crate::run_with(Tool::Read, handle, raw, roots)
+}
+
+/// What the `tool-read` component's `Guest::run` calls with `ToolInput.data`: the call rewrapped
+/// into the envelope [`run`] parses, and the result mapped onto a [`ToolOutcome`].
+pub fn dispatch(data: Option<&str>, roots: &[HostRoot]) -> ToolOutcome {
+    crate::dispatch_with(Tool::Read, handle, data, roots)
+}
+
 /// Read the file `path` names: the whole file when it fits every limit, else the lines from
 /// `start_line` up to `end_line` or the first limit reached, with a `truncated` note naming it.
 /// A PNG, JPEG, GIF or WebP file, known by its header whatever its name, is instead attached
 /// by [`read_image`]. An absolute `path` opens inside the host root covering it.
-pub(crate) fn read(op: &Value, roots: &[HostRoot]) -> Value {
+fn handle(op: &Value, roots: &[HostRoot]) -> Value {
     let path = match required_path(op, "path") {
         Ok(p) => p,
         Err(failure) => return failure,

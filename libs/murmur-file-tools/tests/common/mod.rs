@@ -1,6 +1,11 @@
 //! What the `mur_run_*` suites share: the real `mur` binary they launch, the build and pack of
 //! an artifact out of this workspace, and a loopback fake Chat Completions provider that scripts
-//! the model's tool calls and records every request body.
+//! the model's tool calls and records every request body. It also holds [`run`], which reaches
+//! each tool's entry point by its `Tool`, for `manifests`.
+
+// Each test binary compiles this module on its own and uses only part of it: `manifests` takes
+// `run`, the `mur_run_*` suites the rest. Every item is used by one.
+#![allow(dead_code)]
 
 use std::{
     fs,
@@ -14,9 +19,19 @@ use std::{
     time::Duration,
 };
 
-use murmur_file_tools::Tool;
+use murmur_file_tools::{edit, find, read, write, HostRoot, Tool};
 use serde_json::{json, Value};
 use tempfile::TempDir;
+
+/// `tool`'s `run`: the stdin envelope `raw` through the entry point of `tool`'s own module.
+pub fn run(tool: Tool, raw: &str, roots: &[HostRoot]) -> Value {
+    match tool {
+        Tool::Read => read::run(raw, roots),
+        Tool::Write => write::run(raw, roots),
+        Tool::Edit => edit::run(raw, roots),
+        Tool::Find => find::run(raw, roots),
+    }
+}
 
 /// The `mur` binary this test launches: `MUR_BIN` when set, otherwise the first executable
 /// `mur` on `PATH`. Panics when neither resolves.

@@ -3,11 +3,28 @@
 use serde_json::Value;
 
 use crate::resolve::{refuse_read_only, resolve_path};
-use crate::{err_result, fail_msg, io_error_kind, ok_summary_only, required_path, HostRoot, Tool};
+use crate::{
+    err_result, fail_msg, io_error_kind, ok_summary_only, required_path, HostRoot, Tool,
+    ToolOutcome,
+};
+
+/// Run `tool-write` on a stdin-envelope string `{"data": <string-or-object>, ...}` and return
+/// the old-protocol result `Value`: the envelope and field checks every tool shares, then this
+/// module's handler. `roots` are the host folders the tool may open an absolute path in, in
+/// preopen order.
+pub fn run(raw: &str, roots: &[HostRoot]) -> Value {
+    crate::run_with(Tool::Write, handle, raw, roots)
+}
+
+/// What the `tool-write` component's `Guest::run` calls with `ToolInput.data`: the call rewrapped
+/// into the envelope [`run`] parses, and the result mapped onto a [`ToolOutcome`].
+pub fn dispatch(data: Option<&str>, roots: &[HostRoot]) -> ToolOutcome {
+    crate::dispatch_with(Tool::Write, handle, data, roots)
+}
 
 /// Write `content` to the file `path` names, creating any missing parent directories. An
 /// absolute `path` opens inside the host root covering it, which must be `read-write`.
-pub(crate) fn write(op: &Value, roots: &[HostRoot]) -> Value {
+fn handle(op: &Value, roots: &[HostRoot]) -> Value {
     let path = match required_path(op, "path") {
         Ok(p) => p,
         Err(failure) => return failure,

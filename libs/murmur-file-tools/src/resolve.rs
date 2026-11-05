@@ -10,7 +10,8 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::{err, err_result, find::normalize_dir, HostRoot, RootAccess, Tool, HOST_ROOT_NAME};
+use crate::{err, err_result, lexical_segments, normalize_absolute, render_absolute};
+use crate::{HostRoot, RootAccess, Tool, HOST_ROOT_NAME};
 
 /// Where a path input opens, once [`resolve_path`] accepted it.
 #[derive(Debug, PartialEq, Eq)]
@@ -93,6 +94,16 @@ fn reserved_prefix(location: &str, value: &str, roots: &[HostRoot]) -> Option<Va
     ))
 }
 
+impl RootAccess {
+    /// The access as the operator's `host_paths` entry spells it.
+    const fn label(&self) -> &'static str {
+        match self {
+            RootAccess::Read => "read",
+            RootAccess::ReadWrite => "read-write",
+        }
+    }
+}
+
 /// The `absolute_path` refusal for an absolute `value` no held root covers.
 fn outside_every_root(location: &str, value: &str, tool: Tool, roots: &[HostRoot]) -> Value {
     let name = tool.name();
@@ -118,6 +129,7 @@ fn outside_every_root(location: &str, value: &str, tool: Tool, roots: &[HostRoot
 
 /// The refusal for an absolute `glob`, or `None` when it is relative. A glob is matched against
 /// the paths below `dir`, so a host folder is named in `dir`, never in `glob`.
+#[cfg(feature = "find")]
 pub(crate) fn reject_absolute_glob(glob: &str) -> Option<Value> {
     if !Path::new(glob).is_absolute() {
         return None;
@@ -134,6 +146,7 @@ pub(crate) fn reject_absolute_glob(glob: &str) -> Option<Value> {
 
 /// The `permission_denied` refusal for a write or edit of `value` under a `read` root, or
 /// `None`. Runs before the file or its parent folders are touched.
+#[cfg(any(feature = "write", feature = "edit"))]
 pub(crate) fn refuse_read_only(value: &str, resolved: &Resolved<'_>) -> Option<Value> {
     let root = resolved.root?;
     if root.access != RootAccess::Read {
@@ -158,28 +171,10 @@ fn file_name_suggestion(value: &str) -> String {
     }
 }
 
-/// The segments of absolute `value`, lexically normalised: `.` and empty segments dropped, each
-/// `..` popping one segment, and a `..` at `/` staying at `/`.
-pub(crate) fn normalize_absolute(value: &str) -> Vec<&str> {
-    lexical_segments(value).0
-}
-
-/// The segments of `value` with `.` and empty segments dropped and each `..` popping the segment
-/// before it, and whether some `..` found no segment left to pop.
-pub(crate) fn lexical_segments(value: &str) -> (Vec<&str>, bool) {
-    let mut segments: Vec<&str> = Vec::new();
-    let mut climbed_above = false;
-    for segment in value.split('/') {
-        match segment {
-            "" | "." => {}
-            ".." => climbed_above |= segments.pop().is_none(),
-            s => segments.push(s),
-        }
-    }
-    (segments, climbed_above)
-}
-
-/// `segments` as an absolute path: `/` when there are none.
-pub(crate) fn render_absolute(segments: &[&str]) -> String {
-    format!("/{}", segments.join("/"))
+/// `dir` with its `.` and empty segments dropped and each `..` applied to the segment
+/// before it, `/`-joined. `""` is the workdir root. `None` when a `..` has no segment left
+/// to pop, i.e. the value climbs above the workdir.
+pub(crate) fn normalize_dir(dir: &str) -> Option<String> {
+    let (segments, climbed_above) = lexical_segments(dir);
+    (!climbed_above).then(|| segments.join("/"))
 }

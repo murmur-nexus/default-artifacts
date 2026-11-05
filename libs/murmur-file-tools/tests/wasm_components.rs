@@ -11,7 +11,7 @@
 //! It also validates that each compiled artifact loads as a real component
 //! (`Component::from_file` is the validation gate — there is no `wasm-tools` CLI dependency
 //! here) and benchmarks a `tool-find` walk over a large synthetic tree against the identical
-//! host-native `murmur_file_tools::run` path, to prove no order-of-magnitude regression.
+//! host-native `murmur_file_tools::find::run` path, to prove no order-of-magnitude regression.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -288,13 +288,71 @@ fn dir_entries(dir: &Path) -> Vec<String> {
 /// A preopen workdir at `.test-scratch/wasm_<tag>_<pid>`, relative to the process CWD (the
 /// crate root, under `cargo test`). Relative rather than under `std::env::temp_dir()` because
 /// the host-native baseline in the benchmark below addresses the same tree through
-/// `murmur_file_tools::run` with no host root, which only accepts a workdir-relative value.
+/// `murmur_file_tools::find::run` with no host root, which only accepts a workdir-relative value.
 /// Gitignored; each test removes its own subtree.
 fn unique_workdir(tag: &str) -> PathBuf {
     let dir = PathBuf::from(".test-scratch").join(format!("wasm_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create workdir");
     dir
+}
+
+/// How many times `needle` occurs in `haystack`, as `grep -a -o <needle> | wc -l` counts.
+fn count(haystack: &[u8], needle: &str) -> usize {
+    let needle = needle.as_bytes();
+    let mut n = 0;
+    let mut at = 0;
+    while let Some(i) = haystack[at..]
+        .windows(needle.len())
+        .position(|window| window == needle)
+    {
+        n += 1;
+        at += i + needle.len();
+    }
+    n
+}
+
+/// Each component links only its own operation. `regex` and `walkdir` are named in a component
+/// only through the code that calls them, by their crate names in its symbol names and by their
+/// package names in its panic locations, and `tool-find` is the positive control. Each tool's
+/// operation is known by a message only that operation's module produces: the tool names
+/// themselves prove nothing, because the shared `Tool` descriptor puts all four in every
+/// component.
+#[test]
+fn each_component_links_only_its_own_operation() {
+    const FIND_ONLY: [&str; 5] = [
+        "regex_automata",
+        "regex_syntax",
+        "regex-automata",
+        "regex-syntax",
+        "walkdir",
+    ];
+    let own_message = |tool: Tool| match tool {
+        Tool::Read => "is named as an image but is not a PNG, JPEG, GIF or WebP file",
+        Tool::Write => "failed to create directories for ",
+        Tool::Edit => "edits must be an array of {old, new} objects",
+        Tool::Find => "context_lines must be between 0 and ",
+    };
+
+    for tool in Tool::ALL {
+        let bytes = std::fs::read(component_path(tool)).expect("read component");
+        for crate_name in FIND_ONLY {
+            let n = count(&bytes, crate_name);
+            if tool == Tool::Find {
+                assert!(n > 0, "{} names no {crate_name}", tool.name());
+            } else {
+                assert_eq!(n, 0, "{} names {crate_name} {n} times", tool.name());
+            }
+        }
+        for other in Tool::ALL {
+            let n = count(&bytes, own_message(other));
+            if other == tool {
+                assert!(n > 0, "{} lacks its own message", tool.name());
+            } else {
+                assert_eq!(n, 0, "{} holds {}'s message", tool.name(), other.name());
+            }
+        }
+    }
 }
 
 #[test]
@@ -1392,7 +1450,7 @@ fn find_benchmark_no_orders_of_magnitude_regression() {
 
     // Host-native baseline: the SAME logic, host-compiled, over the same tree. The dir is
     // workdir-relative like the wasm payload's — with no host root the tool refuses an absolute
-    // value — so both sides walk the identical tree (host `murmur_file_tools::run` takes the
+    // value — so both sides walk the identical tree (host `murmur_file_tools::find::run` takes the
     // stdin-envelope shape).
     let host_dir = tree.to_string_lossy().to_string();
     let envelope = serde_json::json!({
@@ -1402,7 +1460,7 @@ fn find_benchmark_no_orders_of_magnitude_regression() {
 
     // Warm both paths once, then time the walk only (instantiation excluded — that is the
     // fair "latency of the walk" comparison; instantiation overhead is reported separately).
-    let _ = murmur_file_tools::run(Tool::Find, &envelope, &[]);
+    let _ = murmur_file_tools::find::run(&envelope, &[]);
 
     // The sampled walks block on-thread; see the comment above the bound.
     let mut store = wasi_store(&eng, &workdir, true);
@@ -1419,7 +1477,7 @@ fn find_benchmark_no_orders_of_magnitude_regression() {
     let (mut wasm_walk_min, mut wasm_walk_max) = (Duration::MAX, Duration::ZERO);
     for _ in 0..SAMPLES {
         let t = Instant::now();
-        let host_out = murmur_file_tools::run(Tool::Find, &envelope, &[]);
+        let host_out = murmur_file_tools::find::run(&envelope, &[]);
         let host_walk = t.elapsed();
         assert_eq!(host_out["ok"], true, "host find must succeed: {host_out}");
         assert_eq!(host_out["matches"].as_array().map(|a| a.len()), Some(1));
