@@ -1,0 +1,2218 @@
+[
+  {
+    "calls": [
+      {
+        "args": {
+          "coverage_dir": "cov",
+          "failing_tests": [
+            "tests::test_add"
+          ],
+          "operation": "localize",
+          "repo_path": "repo"
+        },
+        "data": {
+          "coverage_dir": "cov",
+          "data_path": null,
+          "failing_test_count": 1,
+          "failing_test_stable_ids": [
+            {
+              "stable_id": "rust://fixture/tests#test_add(->())",
+              "test_name": "tests::test_add"
+            }
+          ],
+          "failing_tests_without_coverage": [],
+          "passing_test_count": 1,
+          "repo_path": "@SCRATCH@/repo",
+          "scored_symbols": 4,
+          "skipped_files": [],
+          "top_suspects": [
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "add",
+              "start_line": 5,
+              "suspicion_ochiai": 1.0,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/#add(->i64)"
+            },
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "test_add",
+              "start_line": 20,
+              "suspicion_ochiai": 1.0,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/tests#test_add(->())"
+            },
+            {
+              "ef": 0,
+              "ep": 1,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "sub",
+              "start_line": 10,
+              "suspicion_ochiai": 0.0,
+              "suspicion_tarantula": 0.0,
+              "symbol_id": "rust://fixture/#sub(->i64)"
+            },
+            {
+              "ef": 0,
+              "ep": 1,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "test_sub",
+              "start_line": 30,
+              "suspicion_ochiai": 0.0,
+              "suspicion_tarantula": 0.0,
+              "symbol_id": "rust://fixture/tests#test_sub(->())"
+            }
+          ],
+          "truncated": false
+        },
+        "data_path_file": null,
+        "db_after": {
+          "columns": [
+            "id",
+            "symbol_id",
+            "language",
+            "package",
+            "module",
+            "qualified_name",
+            "simple_name",
+            "signature",
+            "kind",
+            "file_id",
+            "start_line",
+            "end_line",
+            "doc_comment",
+            "visibility",
+            "attributes",
+            "suspicion_ef",
+            "suspicion_ep",
+            "suspicion_ochiai",
+            "suspicion_tarantula"
+          ],
+          "rows": [
+            [
+              "rust://fixture/#add(->i64)",
+              1,
+              0,
+              1.0,
+              1.0
+            ],
+            [
+              "rust://fixture/#sub(->i64)",
+              0,
+              1,
+              0.0,
+              0.0
+            ],
+            [
+              "rust://fixture/#unused(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_add(->())",
+              1,
+              0,
+              1.0,
+              1.0
+            ],
+            [
+              "rust://fixture/tests#test_sub(->())",
+              0,
+              1,
+              0.0,
+              0.0
+            ]
+          ]
+        },
+        "status": "passed",
+        "summary": "localize: 4 symbol(s) scored over 1 failing / 1 passing test(s)"
+      }
+    ],
+    "name": "scenario_01_happy_path_exact_scores"
+  },
+  {
+    "calls": [
+      {
+        "args": {
+          "coverage_dir": "cov",
+          "failing_tests": [
+            "tests::test_add"
+          ],
+          "operation": "localize",
+          "repo_path": "repo"
+        },
+        "data": {
+          "coverage_dir": "cov",
+          "data_path": null,
+          "failing_test_count": 1,
+          "failing_test_stable_ids": [
+            {
+              "stable_id": "rust://fixture/tests#test_add(->())",
+              "test_name": "tests::test_add"
+            }
+          ],
+          "failing_tests_without_coverage": [],
+          "passing_test_count": 1,
+          "repo_path": "@SCRATCH@/repo",
+          "scored_symbols": 1,
+          "skipped_files": [],
+          "top_suspects": [
+            {
+              "ef": 1,
+              "ep": 1,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "add",
+              "start_line": 5,
+              "suspicion_ochiai": 0.7071067811865475,
+              "suspicion_tarantula": 0.5,
+              "symbol_id": "rust://fixture/#add(->i64)"
+            }
+          ],
+          "truncated": false
+        },
+        "data_path_file": null,
+        "db_after": {
+          "columns": [
+            "id",
+            "symbol_id",
+            "language",
+            "package",
+            "module",
+            "qualified_name",
+            "simple_name",
+            "signature",
+            "kind",
+            "file_id",
+            "start_line",
+            "end_line",
+            "doc_comment",
+            "visibility",
+            "attributes",
+            "suspicion_ef",
+            "suspicion_ep",
+            "suspicion_ochiai",
+            "suspicion_tarantula"
+          ],
+          "rows": [
+            [
+              "rust://fixture/#add(->i64)",
+              1,
+              1,
+              0.7071067811865475,
+              0.5
+            ],
+            [
+              "rust://fixture/#sub(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/#unused(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_add(->())",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_sub(->())",
+              null,
+              null,
+              null,
+              null
+            ]
+          ]
+        },
+        "status": "passed",
+        "summary": "localize: 1 symbol(s) scored over 1 failing / 1 passing test(s)"
+      }
+    ],
+    "name": "scenario_03_shared_symbol_lower_suspicion"
+  },
+  {
+    "calls": [
+      {
+        "args": {
+          "coverage_dir": "cov1",
+          "failing_tests": [
+            "tests::test_add"
+          ],
+          "operation": "localize",
+          "repo_path": "repo"
+        },
+        "data": {
+          "coverage_dir": "cov1",
+          "data_path": null,
+          "failing_test_count": 1,
+          "failing_test_stable_ids": [
+            {
+              "stable_id": "rust://fixture/tests#test_add(->())",
+              "test_name": "tests::test_add"
+            }
+          ],
+          "failing_tests_without_coverage": [],
+          "passing_test_count": 0,
+          "repo_path": "@SCRATCH@/repo",
+          "scored_symbols": 1,
+          "skipped_files": [],
+          "top_suspects": [
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "add",
+              "start_line": 5,
+              "suspicion_ochiai": 1.0,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/#add(->i64)"
+            }
+          ],
+          "truncated": false
+        },
+        "data_path_file": null,
+        "db_after": {
+          "columns": [
+            "id",
+            "symbol_id",
+            "language",
+            "package",
+            "module",
+            "qualified_name",
+            "simple_name",
+            "signature",
+            "kind",
+            "file_id",
+            "start_line",
+            "end_line",
+            "doc_comment",
+            "visibility",
+            "attributes",
+            "suspicion_ef",
+            "suspicion_ep",
+            "suspicion_ochiai",
+            "suspicion_tarantula"
+          ],
+          "rows": [
+            [
+              "rust://fixture/#add(->i64)",
+              1,
+              0,
+              1.0,
+              1.0
+            ],
+            [
+              "rust://fixture/#sub(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/#unused(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_add(->())",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_sub(->())",
+              null,
+              null,
+              null,
+              null
+            ]
+          ]
+        },
+        "status": "passed",
+        "summary": "localize: 1 symbol(s) scored over 1 failing / 0 passing test(s)"
+      },
+      {
+        "args": {
+          "coverage_dir": "cov2",
+          "failing_tests": [
+            "tests::test_sub"
+          ],
+          "operation": "localize",
+          "repo_path": "repo"
+        },
+        "data": {
+          "coverage_dir": "cov2",
+          "data_path": null,
+          "failing_test_count": 1,
+          "failing_test_stable_ids": [
+            {
+              "stable_id": "rust://fixture/tests#test_sub(->())",
+              "test_name": "tests::test_sub"
+            }
+          ],
+          "failing_tests_without_coverage": [],
+          "passing_test_count": 0,
+          "repo_path": "@SCRATCH@/repo",
+          "scored_symbols": 1,
+          "skipped_files": [],
+          "top_suspects": [
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "sub",
+              "start_line": 10,
+              "suspicion_ochiai": 1.0,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/#sub(->i64)"
+            }
+          ],
+          "truncated": false
+        },
+        "data_path_file": null,
+        "db_after": {
+          "columns": [
+            "id",
+            "symbol_id",
+            "language",
+            "package",
+            "module",
+            "qualified_name",
+            "simple_name",
+            "signature",
+            "kind",
+            "file_id",
+            "start_line",
+            "end_line",
+            "doc_comment",
+            "visibility",
+            "attributes",
+            "suspicion_ef",
+            "suspicion_ep",
+            "suspicion_ochiai",
+            "suspicion_tarantula"
+          ],
+          "rows": [
+            [
+              "rust://fixture/#add(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/#sub(->i64)",
+              1,
+              0,
+              1.0,
+              1.0
+            ],
+            [
+              "rust://fixture/#unused(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_add(->())",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_sub(->())",
+              null,
+              null,
+              null,
+              null
+            ]
+          ]
+        },
+        "status": "passed",
+        "summary": "localize: 1 symbol(s) scored over 1 failing / 0 passing test(s)"
+      }
+    ],
+    "name": "scenario_05_reset_between_runs"
+  },
+  {
+    "calls": [
+      {
+        "args": {
+          "coverage_dir": "cov",
+          "failing_tests": [
+            "tests::test_add",
+            "tests::test_missing"
+          ],
+          "operation": "localize",
+          "repo_path": "repo"
+        },
+        "data": {
+          "coverage_dir": "cov",
+          "data_path": null,
+          "failing_test_count": 1,
+          "failing_test_stable_ids": [
+            {
+              "stable_id": "rust://fixture/tests#test_add(->())",
+              "test_name": "tests::test_add"
+            },
+            {
+              "stable_id": null,
+              "test_name": "tests::test_missing"
+            }
+          ],
+          "failing_tests_without_coverage": [
+            "tests::test_missing"
+          ],
+          "passing_test_count": 0,
+          "repo_path": "@SCRATCH@/repo",
+          "scored_symbols": 1,
+          "skipped_files": [],
+          "top_suspects": [
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "add",
+              "start_line": 5,
+              "suspicion_ochiai": 1.0,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/#add(->i64)"
+            }
+          ],
+          "truncated": false
+        },
+        "data_path_file": null,
+        "db_after": {
+          "columns": [
+            "id",
+            "symbol_id",
+            "language",
+            "package",
+            "module",
+            "qualified_name",
+            "simple_name",
+            "signature",
+            "kind",
+            "file_id",
+            "start_line",
+            "end_line",
+            "doc_comment",
+            "visibility",
+            "attributes",
+            "suspicion_ef",
+            "suspicion_ep",
+            "suspicion_ochiai",
+            "suspicion_tarantula"
+          ],
+          "rows": [
+            [
+              "rust://fixture/#add(->i64)",
+              1,
+              0,
+              1.0,
+              1.0
+            ],
+            [
+              "rust://fixture/#sub(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/#unused(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_add(->())",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_sub(->())",
+              null,
+              null,
+              null,
+              null
+            ]
+          ]
+        },
+        "status": "passed",
+        "summary": "localize: 1 symbol(s) scored over 1 failing / 0 passing test(s)"
+      }
+    ],
+    "name": "scenario_06_failing_without_coverage"
+  },
+  {
+    "calls": [
+      {
+        "args": {
+          "coverage_dir": "cov",
+          "failing_tests": [
+            "tests::test_add"
+          ],
+          "operation": "localize",
+          "repo_path": "repo"
+        },
+        "data": {
+          "coverage_dir": "cov",
+          "data_path": null,
+          "failing_test_count": 1,
+          "failing_test_stable_ids": [
+            {
+              "stable_id": "rust://fixture/tests#test_add(->())",
+              "test_name": "tests::test_add"
+            }
+          ],
+          "failing_tests_without_coverage": [],
+          "passing_test_count": 0,
+          "repo_path": "@SCRATCH@/repo",
+          "scored_symbols": 1,
+          "skipped_files": [
+            "tests::test_junk.info"
+          ],
+          "top_suspects": [
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "add",
+              "start_line": 5,
+              "suspicion_ochiai": 1.0,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/#add(->i64)"
+            }
+          ],
+          "truncated": false
+        },
+        "data_path_file": null,
+        "db_after": {
+          "columns": [
+            "id",
+            "symbol_id",
+            "language",
+            "package",
+            "module",
+            "qualified_name",
+            "simple_name",
+            "signature",
+            "kind",
+            "file_id",
+            "start_line",
+            "end_line",
+            "doc_comment",
+            "visibility",
+            "attributes",
+            "suspicion_ef",
+            "suspicion_ep",
+            "suspicion_ochiai",
+            "suspicion_tarantula"
+          ],
+          "rows": [
+            [
+              "rust://fixture/#add(->i64)",
+              1,
+              0,
+              1.0,
+              1.0
+            ],
+            [
+              "rust://fixture/#sub(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/#unused(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_add(->())",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_sub(->())",
+              null,
+              null,
+              null,
+              null
+            ]
+          ]
+        },
+        "status": "passed",
+        "summary": "localize: 1 symbol(s) scored over 1 failing / 0 passing test(s)"
+      }
+    ],
+    "name": "scenario_07_unparseable_skipped"
+  },
+  {
+    "calls": [
+      {
+        "args": {
+          "coverage_dir": "cov",
+          "failing_tests": [
+            "tests::test_add"
+          ],
+          "operation": "localize",
+          "repo_path": "repo"
+        },
+        "data": null,
+        "data_path_file": null,
+        "db_after": {
+          "columns": [
+            "id",
+            "symbol_id",
+            "language",
+            "package",
+            "module",
+            "qualified_name",
+            "simple_name",
+            "signature",
+            "kind",
+            "file_id",
+            "start_line",
+            "end_line",
+            "doc_comment",
+            "visibility",
+            "attributes",
+            "suspicion_ef",
+            "suspicion_ep",
+            "suspicion_ochiai",
+            "suspicion_tarantula"
+          ],
+          "rows": [
+            [
+              "rust://fixture/#add(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/#sub(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/#unused(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_add(->())",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_sub(->())",
+              null,
+              null,
+              null,
+              null
+            ]
+          ]
+        },
+        "status": "failed",
+        "summary": "localize: no failing-test coverage found — every failing test is absent from coverage_dir or unparseable (F == 0)"
+      }
+    ],
+    "name": "scenario_08_zero_failing_coverage_fails"
+  },
+  {
+    "calls": [
+      {
+        "args": {
+          "coverage_dir": "cov",
+          "failing_tests": [
+            "tests::test_add"
+          ],
+          "operation": "localize",
+          "repo_path": "repo"
+        },
+        "data": null,
+        "data_path_file": null,
+        "db_after": null,
+        "status": "failed",
+        "summary": "localize: code graph db not found at @SCRATCH@/repo/.murmur/code-graph.db — run tool-code-graph index_repository first"
+      }
+    ],
+    "name": "scenario_09_missing_db_fails"
+  },
+  {
+    "calls": [
+      {
+        "args": {
+          "coverage_dir": "missing-cov",
+          "failing_tests": [
+            "tests::test_add"
+          ],
+          "operation": "localize",
+          "repo_path": "repo"
+        },
+        "data": null,
+        "data_path_file": null,
+        "db_after": {
+          "columns": [
+            "id",
+            "symbol_id",
+            "language",
+            "package",
+            "module",
+            "qualified_name",
+            "simple_name",
+            "signature",
+            "kind",
+            "file_id",
+            "start_line",
+            "end_line",
+            "doc_comment",
+            "visibility",
+            "attributes"
+          ],
+          "rows": [
+            [
+              "rust://fixture/#add(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/#sub(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/#unused(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_add(->())",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_sub(->())",
+              null,
+              null,
+              null,
+              null
+            ]
+          ]
+        },
+        "status": "failed",
+        "summary": "localize: coverage_dir does not exist: missing-cov"
+      },
+      {
+        "args": {
+          "coverage_dir": "repo/not_a_dir.txt",
+          "failing_tests": [
+            "tests::test_add"
+          ],
+          "operation": "localize",
+          "repo_path": "repo"
+        },
+        "data": null,
+        "data_path_file": null,
+        "db_after": {
+          "columns": [
+            "id",
+            "symbol_id",
+            "language",
+            "package",
+            "module",
+            "qualified_name",
+            "simple_name",
+            "signature",
+            "kind",
+            "file_id",
+            "start_line",
+            "end_line",
+            "doc_comment",
+            "visibility",
+            "attributes"
+          ],
+          "rows": [
+            [
+              "rust://fixture/#add(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/#sub(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/#unused(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_add(->())",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_sub(->())",
+              null,
+              null,
+              null,
+              null
+            ]
+          ]
+        },
+        "status": "failed",
+        "summary": "localize: coverage_dir is not a directory: repo/not_a_dir.txt"
+      }
+    ],
+    "name": "scenario_10_coverage_dir_invalid"
+  },
+  {
+    "calls": [
+      {
+        "args": {
+          "coverage_dir": "cov",
+          "failing_tests": [
+            "t"
+          ]
+        },
+        "data": null,
+        "data_path_file": null,
+        "db_after": {
+          "columns": [
+            "id",
+            "symbol_id",
+            "language",
+            "package",
+            "module",
+            "qualified_name",
+            "simple_name",
+            "signature",
+            "kind",
+            "file_id",
+            "start_line",
+            "end_line",
+            "doc_comment",
+            "visibility",
+            "attributes"
+          ],
+          "rows": [
+            [
+              "rust://fixture/#add(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/#sub(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/#unused(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_add(->())",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_sub(->())",
+              null,
+              null,
+              null,
+              null
+            ]
+          ]
+        },
+        "status": "failed",
+        "summary": "missing required field 'operation'"
+      },
+      {
+        "args": {
+          "operation": "explode"
+        },
+        "data": null,
+        "data_path_file": null,
+        "db_after": {
+          "columns": [
+            "id",
+            "symbol_id",
+            "language",
+            "package",
+            "module",
+            "qualified_name",
+            "simple_name",
+            "signature",
+            "kind",
+            "file_id",
+            "start_line",
+            "end_line",
+            "doc_comment",
+            "visibility",
+            "attributes"
+          ],
+          "rows": [
+            [
+              "rust://fixture/#add(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/#sub(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/#unused(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_add(->())",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_sub(->())",
+              null,
+              null,
+              null,
+              null
+            ]
+          ]
+        },
+        "status": "failed",
+        "summary": "unknown operation: explode"
+      },
+      {
+        "args": {
+          "failing_tests": [
+            "tests::test_add"
+          ],
+          "operation": "localize",
+          "repo_path": "repo"
+        },
+        "data": null,
+        "data_path_file": null,
+        "db_after": {
+          "columns": [
+            "id",
+            "symbol_id",
+            "language",
+            "package",
+            "module",
+            "qualified_name",
+            "simple_name",
+            "signature",
+            "kind",
+            "file_id",
+            "start_line",
+            "end_line",
+            "doc_comment",
+            "visibility",
+            "attributes"
+          ],
+          "rows": [
+            [
+              "rust://fixture/#add(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/#sub(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/#unused(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_add(->())",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_sub(->())",
+              null,
+              null,
+              null,
+              null
+            ]
+          ]
+        },
+        "status": "failed",
+        "summary": "localize: missing required field 'coverage_dir'"
+      },
+      {
+        "args": {
+          "coverage_dir": "cov",
+          "failing_tests": [],
+          "operation": "localize",
+          "repo_path": "repo"
+        },
+        "data": null,
+        "data_path_file": null,
+        "db_after": {
+          "columns": [
+            "id",
+            "symbol_id",
+            "language",
+            "package",
+            "module",
+            "qualified_name",
+            "simple_name",
+            "signature",
+            "kind",
+            "file_id",
+            "start_line",
+            "end_line",
+            "doc_comment",
+            "visibility",
+            "attributes"
+          ],
+          "rows": [
+            [
+              "rust://fixture/#add(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/#sub(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/#unused(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_add(->())",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_sub(->())",
+              null,
+              null,
+              null,
+              null
+            ]
+          ]
+        },
+        "status": "failed",
+        "summary": "localize: missing or empty required field 'failing_tests' (array of test names)"
+      }
+    ],
+    "name": "scenario_11_malformed_input"
+  },
+  {
+    "calls": [
+      {
+        "args": {
+          "coverage_dir": "cov",
+          "failing_tests": [
+            "tests::test_add",
+            "tests::dupe"
+          ],
+          "operation": "localize",
+          "repo_path": "repo"
+        },
+        "data": {
+          "coverage_dir": "cov",
+          "data_path": null,
+          "failing_test_count": 2,
+          "failing_test_stable_ids": [
+            {
+              "stable_id": "rust://fixture/tests#test_add(->())",
+              "test_name": "tests::test_add"
+            },
+            {
+              "stable_id": null,
+              "test_name": "tests::dupe"
+            }
+          ],
+          "failing_tests_without_coverage": [],
+          "passing_test_count": 0,
+          "repo_path": "@SCRATCH@/repo",
+          "scored_symbols": 3,
+          "skipped_files": [],
+          "top_suspects": [
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "add",
+              "start_line": 5,
+              "suspicion_ochiai": 0.7071067811865475,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/#add(->i64)"
+            },
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "dupe",
+              "start_line": 50,
+              "suspicion_ochiai": 0.7071067811865475,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/tests#dupe(->())"
+            },
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "test_add",
+              "start_line": 20,
+              "suspicion_ochiai": 0.7071067811865475,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/tests#test_add(->())"
+            }
+          ],
+          "truncated": false
+        },
+        "data_path_file": null,
+        "db_after": {
+          "columns": [
+            "id",
+            "symbol_id",
+            "language",
+            "package",
+            "module",
+            "qualified_name",
+            "simple_name",
+            "signature",
+            "kind",
+            "file_id",
+            "start_line",
+            "end_line",
+            "doc_comment",
+            "visibility",
+            "attributes",
+            "suspicion_ef",
+            "suspicion_ep",
+            "suspicion_ochiai",
+            "suspicion_tarantula"
+          ],
+          "rows": [
+            [
+              "rust://fixture/#add(->i64)",
+              1,
+              0,
+              0.7071067811865475,
+              1.0
+            ],
+            [
+              "rust://fixture/#sub(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/#unused(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#dupe(->())",
+              1,
+              0,
+              0.7071067811865475,
+              1.0
+            ],
+            [
+              "rust://fixture/tests#dupe(i64->())",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_add(->())",
+              1,
+              0,
+              0.7071067811865475,
+              1.0
+            ],
+            [
+              "rust://fixture/tests#test_sub(->())",
+              null,
+              null,
+              null,
+              null
+            ]
+          ]
+        },
+        "status": "passed",
+        "summary": "localize: 3 symbol(s) scored over 2 failing / 0 passing test(s)"
+      }
+    ],
+    "name": "scenario_12_stable_id_resolution"
+  },
+  {
+    "calls": [
+      {
+        "args": {
+          "coverage_dir": "cov",
+          "failing_tests": [
+            "tests::test_add"
+          ],
+          "operation": "localize",
+          "repo_path": "repo"
+        },
+        "data": {
+          "coverage_dir": "cov",
+          "data_path": null,
+          "failing_test_count": 1,
+          "failing_test_stable_ids": [
+            {
+              "stable_id": "rust://fixture/tests#test_add(->())",
+              "test_name": "tests::test_add"
+            }
+          ],
+          "failing_tests_without_coverage": [],
+          "passing_test_count": 0,
+          "repo_path": "@SCRATCH@/repo",
+          "scored_symbols": 1,
+          "skipped_files": [],
+          "top_suspects": [
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "add",
+              "start_line": 5,
+              "suspicion_ochiai": 1.0,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/#add(->i64)"
+            }
+          ],
+          "truncated": false
+        },
+        "data_path_file": null,
+        "db_after": {
+          "columns": [
+            "id",
+            "symbol_id",
+            "language",
+            "package",
+            "module",
+            "qualified_name",
+            "simple_name",
+            "signature",
+            "kind",
+            "file_id",
+            "start_line",
+            "end_line",
+            "doc_comment",
+            "visibility",
+            "attributes",
+            "suspicion_ef",
+            "suspicion_ep",
+            "suspicion_ochiai",
+            "suspicion_tarantula"
+          ],
+          "rows": [
+            [
+              "rust://fixture/#add(->i64)",
+              1,
+              0,
+              1.0,
+              1.0
+            ],
+            [
+              "rust://fixture/#sub(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/#unused(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_add(->())",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_sub(->())",
+              null,
+              null,
+              null,
+              null
+            ]
+          ]
+        },
+        "status": "passed",
+        "summary": "localize: 1 symbol(s) scored over 1 failing / 0 passing test(s)"
+      }
+    ],
+    "name": "scenario_13_migration_adds_columns"
+  },
+  {
+    "calls": [
+      {
+        "args": {
+          "coverage_dir": "cov",
+          "failing_tests": [
+            "tests::t"
+          ],
+          "limit": 2,
+          "operation": "localize",
+          "repo_path": "repo"
+        },
+        "data": {
+          "coverage_dir": "cov",
+          "data_path": "@SCRATCH@/repo/.murmur/coverage/localize-3ad16bef9323fd8a8e81d9331cdcb10c0cb270716287752180f01c9d29287570.json",
+          "failing_test_count": 1,
+          "failing_test_stable_ids": [
+            {
+              "stable_id": null,
+              "test_name": "tests::t"
+            }
+          ],
+          "failing_tests_without_coverage": [],
+          "passing_test_count": 0,
+          "repo_path": "@SCRATCH@/repo",
+          "scored_symbols": 5,
+          "skipped_files": [],
+          "top_suspects": [
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "f0",
+              "start_line": 1,
+              "suspicion_ochiai": 1.0,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/#f0(->i64)"
+            },
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "f1",
+              "start_line": 11,
+              "suspicion_ochiai": 1.0,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/#f1(->i64)"
+            }
+          ],
+          "truncated": true
+        },
+        "data_path_file": {
+          "coverage_dir": "cov",
+          "failing_test_count": 1,
+          "failing_test_stable_ids": [
+            {
+              "stable_id": null,
+              "test_name": "tests::t"
+            }
+          ],
+          "failing_tests_without_coverage": [],
+          "passing_test_count": 0,
+          "repo_path": "@SCRATCH@/repo",
+          "scored_symbols": 5,
+          "skipped_files": [],
+          "top_suspects": [
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "f0",
+              "start_line": 1,
+              "suspicion_ochiai": 1.0,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/#f0(->i64)"
+            },
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "f1",
+              "start_line": 11,
+              "suspicion_ochiai": 1.0,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/#f1(->i64)"
+            },
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "f2",
+              "start_line": 21,
+              "suspicion_ochiai": 1.0,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/#f2(->i64)"
+            },
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "f3",
+              "start_line": 31,
+              "suspicion_ochiai": 1.0,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/#f3(->i64)"
+            },
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "f4",
+              "start_line": 41,
+              "suspicion_ochiai": 1.0,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/#f4(->i64)"
+            }
+          ],
+          "truncated": false
+        },
+        "db_after": {
+          "columns": [
+            "id",
+            "symbol_id",
+            "language",
+            "package",
+            "module",
+            "qualified_name",
+            "simple_name",
+            "signature",
+            "kind",
+            "file_id",
+            "start_line",
+            "end_line",
+            "doc_comment",
+            "visibility",
+            "attributes",
+            "suspicion_ef",
+            "suspicion_ep",
+            "suspicion_ochiai",
+            "suspicion_tarantula"
+          ],
+          "rows": [
+            [
+              "rust://fixture/#f0(->i64)",
+              1,
+              0,
+              1.0,
+              1.0
+            ],
+            [
+              "rust://fixture/#f1(->i64)",
+              1,
+              0,
+              1.0,
+              1.0
+            ],
+            [
+              "rust://fixture/#f2(->i64)",
+              1,
+              0,
+              1.0,
+              1.0
+            ],
+            [
+              "rust://fixture/#f3(->i64)",
+              1,
+              0,
+              1.0,
+              1.0
+            ],
+            [
+              "rust://fixture/#f4(->i64)",
+              1,
+              0,
+              1.0,
+              1.0
+            ]
+          ]
+        },
+        "status": "passed",
+        "summary": "localize: 5 symbol(s) scored over 1 failing / 0 passing test(s), top 2 shown (full list at data_path)"
+      }
+    ],
+    "name": "scenario_14_truncation_to_disk"
+  },
+  {
+    "calls": [
+      {
+        "args": {
+          "coverage_dir": "cov",
+          "failing_tests": [
+            "tests::test_add"
+          ],
+          "operation": "localize",
+          "repo_path": "repo"
+        },
+        "data": {
+          "coverage_dir": "cov",
+          "data_path": null,
+          "failing_test_count": 1,
+          "failing_test_stable_ids": [
+            {
+              "stable_id": "rust://fixture/tests#test_add(->())",
+              "test_name": "tests::test_add"
+            }
+          ],
+          "failing_tests_without_coverage": [],
+          "passing_test_count": 0,
+          "repo_path": "@SCRATCH@/repo",
+          "scored_symbols": 2,
+          "skipped_files": [],
+          "top_suspects": [
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "add",
+              "start_line": 5,
+              "suspicion_ochiai": 1.0,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/#add(->i64)"
+            },
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "test_add",
+              "start_line": 20,
+              "suspicion_ochiai": 1.0,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/tests#test_add(->())"
+            }
+          ],
+          "truncated": false
+        },
+        "data_path_file": null,
+        "db_after": {
+          "columns": [
+            "id",
+            "symbol_id",
+            "language",
+            "package",
+            "module",
+            "qualified_name",
+            "simple_name",
+            "signature",
+            "kind",
+            "file_id",
+            "start_line",
+            "end_line",
+            "doc_comment",
+            "visibility",
+            "attributes",
+            "suspicion_ef",
+            "suspicion_ep",
+            "suspicion_ochiai",
+            "suspicion_tarantula"
+          ],
+          "rows": [
+            [
+              "rust://fixture/#add(->i64)",
+              1,
+              0,
+              1.0,
+              1.0
+            ],
+            [
+              "rust://fixture/#sub(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/#unused(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_add(->())",
+              1,
+              0,
+              1.0,
+              1.0
+            ],
+            [
+              "rust://fixture/tests#test_sub(->())",
+              null,
+              null,
+              null,
+              null
+            ]
+          ]
+        },
+        "status": "passed",
+        "summary": "localize: 2 symbol(s) scored over 1 failing / 0 passing test(s)"
+      }
+    ],
+    "name": "scenario_15_no_passing_tests"
+  },
+  {
+    "calls": [
+      {
+        "args": {
+          "coverage_dir": "cov",
+          "failing_tests": [
+            "tests::test_add"
+          ],
+          "operation": "localize"
+        },
+        "data": {
+          "coverage_dir": "cov",
+          "data_path": null,
+          "failing_test_count": 1,
+          "failing_test_stable_ids": [
+            {
+              "stable_id": "rust://fixture/tests#test_add(->())",
+              "test_name": "tests::test_add"
+            }
+          ],
+          "failing_tests_without_coverage": [],
+          "passing_test_count": 1,
+          "repo_path": "@SCRATCH@",
+          "scored_symbols": 4,
+          "skipped_files": [],
+          "top_suspects": [
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "test_add",
+              "start_line": 20,
+              "suspicion_ochiai": 1.0,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/tests#test_add(->())"
+            },
+            {
+              "ef": 1,
+              "ep": 1,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "add",
+              "start_line": 5,
+              "suspicion_ochiai": 0.7071067811865475,
+              "suspicion_tarantula": 0.5,
+              "symbol_id": "rust://fixture/#add(->i64)"
+            },
+            {
+              "ef": 0,
+              "ep": 1,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "sub",
+              "start_line": 10,
+              "suspicion_ochiai": 0.0,
+              "suspicion_tarantula": 0.0,
+              "symbol_id": "rust://fixture/#sub(->i64)"
+            },
+            {
+              "ef": 0,
+              "ep": 1,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "test_sub",
+              "start_line": 30,
+              "suspicion_ochiai": 0.0,
+              "suspicion_tarantula": 0.0,
+              "symbol_id": "rust://fixture/tests#test_sub(->())"
+            }
+          ],
+          "truncated": false
+        },
+        "data_path_file": null,
+        "db_after": {
+          "columns": [
+            "id",
+            "symbol_id",
+            "language",
+            "package",
+            "module",
+            "qualified_name",
+            "simple_name",
+            "signature",
+            "kind",
+            "file_id",
+            "start_line",
+            "end_line",
+            "doc_comment",
+            "visibility",
+            "attributes",
+            "suspicion_ef",
+            "suspicion_ep",
+            "suspicion_ochiai",
+            "suspicion_tarantula"
+          ],
+          "rows": [
+            [
+              "rust://fixture/#add(->i64)",
+              1,
+              1,
+              0.7071067811865475,
+              0.5
+            ],
+            [
+              "rust://fixture/#sub(->i64)",
+              0,
+              1,
+              0.0,
+              0.0
+            ],
+            [
+              "rust://fixture/#unused(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_add(->())",
+              1,
+              0,
+              1.0,
+              1.0
+            ],
+            [
+              "rust://fixture/tests#test_sub(->())",
+              0,
+              1,
+              0.0,
+              0.0
+            ]
+          ]
+        },
+        "status": "passed",
+        "summary": "localize: 4 symbol(s) scored over 1 failing / 1 passing test(s)"
+      },
+      {
+        "args": {
+          "coverage_dir": "cov",
+          "failing_tests": [
+            "tests::test_add"
+          ],
+          "limit": 1,
+          "operation": "localize"
+        },
+        "data": {
+          "coverage_dir": "cov",
+          "data_path": "@SCRATCH@/.murmur/coverage/localize-ad3b511380ac2c1bdd27909b9c2fadfbda8b3bc8832d1888831092abd8228ab5.json",
+          "failing_test_count": 1,
+          "failing_test_stable_ids": [
+            {
+              "stable_id": "rust://fixture/tests#test_add(->())",
+              "test_name": "tests::test_add"
+            }
+          ],
+          "failing_tests_without_coverage": [],
+          "passing_test_count": 1,
+          "repo_path": "@SCRATCH@",
+          "scored_symbols": 4,
+          "skipped_files": [],
+          "top_suspects": [
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "test_add",
+              "start_line": 20,
+              "suspicion_ochiai": 1.0,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/tests#test_add(->())"
+            }
+          ],
+          "truncated": true
+        },
+        "data_path_file": {
+          "coverage_dir": "cov",
+          "failing_test_count": 1,
+          "failing_test_stable_ids": [
+            {
+              "stable_id": "rust://fixture/tests#test_add(->())",
+              "test_name": "tests::test_add"
+            }
+          ],
+          "failing_tests_without_coverage": [],
+          "passing_test_count": 1,
+          "repo_path": "@SCRATCH@",
+          "scored_symbols": 4,
+          "skipped_files": [],
+          "top_suspects": [
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "test_add",
+              "start_line": 20,
+              "suspicion_ochiai": 1.0,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/tests#test_add(->())"
+            },
+            {
+              "ef": 1,
+              "ep": 1,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "add",
+              "start_line": 5,
+              "suspicion_ochiai": 0.7071067811865475,
+              "suspicion_tarantula": 0.5,
+              "symbol_id": "rust://fixture/#add(->i64)"
+            },
+            {
+              "ef": 0,
+              "ep": 1,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "sub",
+              "start_line": 10,
+              "suspicion_ochiai": 0.0,
+              "suspicion_tarantula": 0.0,
+              "symbol_id": "rust://fixture/#sub(->i64)"
+            },
+            {
+              "ef": 0,
+              "ep": 1,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "test_sub",
+              "start_line": 30,
+              "suspicion_ochiai": 0.0,
+              "suspicion_tarantula": 0.0,
+              "symbol_id": "rust://fixture/tests#test_sub(->())"
+            }
+          ],
+          "truncated": false
+        },
+        "db_after": {
+          "columns": [
+            "id",
+            "symbol_id",
+            "language",
+            "package",
+            "module",
+            "qualified_name",
+            "simple_name",
+            "signature",
+            "kind",
+            "file_id",
+            "start_line",
+            "end_line",
+            "doc_comment",
+            "visibility",
+            "attributes",
+            "suspicion_ef",
+            "suspicion_ep",
+            "suspicion_ochiai",
+            "suspicion_tarantula"
+          ],
+          "rows": [
+            [
+              "rust://fixture/#add(->i64)",
+              1,
+              1,
+              0.7071067811865475,
+              0.5
+            ],
+            [
+              "rust://fixture/#sub(->i64)",
+              0,
+              1,
+              0.0,
+              0.0
+            ],
+            [
+              "rust://fixture/#unused(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_add(->())",
+              1,
+              0,
+              1.0,
+              1.0
+            ],
+            [
+              "rust://fixture/tests#test_sub(->())",
+              0,
+              1,
+              0.0,
+              0.0
+            ]
+          ]
+        },
+        "status": "passed",
+        "summary": "localize: 4 symbol(s) scored over 1 failing / 1 passing test(s), top 1 shown (full list at data_path)"
+      }
+    ],
+    "name": "repo_omitted_absolute_sf"
+  },
+  {
+    "calls": [
+      {
+        "args": {
+          "coverage_dir": "cov",
+          "failing_tests": [
+            "tests::test_add"
+          ],
+          "operation": "localize"
+        },
+        "data": {
+          "coverage_dir": "cov",
+          "data_path": null,
+          "failing_test_count": 1,
+          "failing_test_stable_ids": [
+            {
+              "stable_id": "rust://fixture/tests#test_add(->())",
+              "test_name": "tests::test_add"
+            }
+          ],
+          "failing_tests_without_coverage": [],
+          "passing_test_count": 1,
+          "repo_path": "@SCRATCH@",
+          "scored_symbols": 4,
+          "skipped_files": [],
+          "top_suspects": [
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "add",
+              "start_line": 5,
+              "suspicion_ochiai": 1.0,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/#add(->i64)"
+            },
+            {
+              "ef": 1,
+              "ep": 0,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "test_add",
+              "start_line": 20,
+              "suspicion_ochiai": 1.0,
+              "suspicion_tarantula": 1.0,
+              "symbol_id": "rust://fixture/tests#test_add(->())"
+            },
+            {
+              "ef": 0,
+              "ep": 1,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "sub",
+              "start_line": 10,
+              "suspicion_ochiai": 0.0,
+              "suspicion_tarantula": 0.0,
+              "symbol_id": "rust://fixture/#sub(->i64)"
+            },
+            {
+              "ef": 0,
+              "ep": 1,
+              "file": "src/lib.rs",
+              "kind": "function",
+              "qualified_name": "test_sub",
+              "start_line": 30,
+              "suspicion_ochiai": 0.0,
+              "suspicion_tarantula": 0.0,
+              "symbol_id": "rust://fixture/tests#test_sub(->())"
+            }
+          ],
+          "truncated": false
+        },
+        "data_path_file": null,
+        "db_after": {
+          "columns": [
+            "id",
+            "symbol_id",
+            "language",
+            "package",
+            "module",
+            "qualified_name",
+            "simple_name",
+            "signature",
+            "kind",
+            "file_id",
+            "start_line",
+            "end_line",
+            "doc_comment",
+            "visibility",
+            "attributes",
+            "suspicion_ef",
+            "suspicion_ep",
+            "suspicion_ochiai",
+            "suspicion_tarantula"
+          ],
+          "rows": [
+            [
+              "rust://fixture/#add(->i64)",
+              1,
+              0,
+              1.0,
+              1.0
+            ],
+            [
+              "rust://fixture/#sub(->i64)",
+              0,
+              1,
+              0.0,
+              0.0
+            ],
+            [
+              "rust://fixture/#unused(->i64)",
+              null,
+              null,
+              null,
+              null
+            ],
+            [
+              "rust://fixture/tests#test_add(->())",
+              1,
+              0,
+              1.0,
+              1.0
+            ],
+            [
+              "rust://fixture/tests#test_sub(->())",
+              0,
+              1,
+              0.0,
+              0.0
+            ]
+          ]
+        },
+        "status": "passed",
+        "summary": "localize: 4 symbol(s) scored over 1 failing / 1 passing test(s)"
+      }
+    ],
+    "name": "relative_sf"
+  }
+]

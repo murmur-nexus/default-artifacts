@@ -2,7 +2,8 @@
 # Install the pinned WASI C toolchain (wasi-sdk) and link it at <repo>/.wasi-sdk.
 #
 # wasm32-wasip2 artifacts that link C sources — today rusqlite's bundled SQLite, in
-# tool-test-report — compile them with wasi-sdk's clang against its wasi-libc sysroot.
+# tool-test-report and tool-code-coverage — compile them with wasi-sdk's clang against its
+# wasi-libc sysroot.
 # .cargo/config.toml points CC_wasm32_wasip2 / AR_wasm32_wasip2 at .wasi-sdk/bin, so once
 # this script has run, a plain `cargo build -p <name> --target wasm32-wasip2 --release`
 # finds them.

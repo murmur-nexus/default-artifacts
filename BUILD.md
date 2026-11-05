@@ -15,9 +15,9 @@ this page covers what is particular to this repository.
 | `mur` with the `index` subcommand | murmur at `MURMUR_REV` | `env:` in `.github/workflows/build.yml`; `ci.yml`'s `build-isolation` and `wit-sync` jobs read it through `./scripts/murmur-pin.sh` |
 
 wasi-sdk is the C compiler and wasi-libc sysroot for C sources compiled into a `wasm32-wasip2`
-component, currently rusqlite's bundled SQLite in `tool-test-report`; `.cargo/config.toml` points
-`CC_wasm32_wasip2` and `AR_wasm32_wasip2` at the `.wasi-sdk` link the script makes in the
-repository root. The script installs it once into
+component, currently rusqlite's bundled SQLite in `tool-test-report` and `tool-code-coverage`;
+`.cargo/config.toml` points `CC_wasm32_wasip2` and `AR_wasm32_wasip2` at the `.wasi-sdk` link the
+script makes in the repository root. The script installs it once into
 `${WASI_SDK_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/murmur-default-artifacts}`, shared by every
 checkout and worktree; set `WASI_SDK_CACHE` to put that ~630 MB elsewhere.
 
@@ -258,7 +258,7 @@ cargo test --workspace --locked
 CI runs both, formatting first. The workspace uses rustfmt's defaults (there is no `rustfmt.toml`);
 run `cargo fmt --all` before committing.
 
-Twelve suites are `#[ignore]`d because they need something the default run does not have. The ten
+Thirteen suites are `#[ignore]`d because they need something the default run does not have. The eleven
 that drive a real `mur` read it from `MUR_BIN`, else `PATH`, and fail rather than skip without one:
 
 ```bash
@@ -267,6 +267,7 @@ MUR_BIN=$MUR_BIN cargo test -p tool-tavily --test mur_run_gateway -- --ignored  
 MUR_BIN=$MUR_BIN cargo test -p tool-github --test mur_run_gateway -- --ignored       # 2 tests
 MUR_BIN=$MUR_BIN cargo test -p tool-create --test mur_manifest_shape -- --ignored    # 3 tests
 MUR_BIN=$MUR_BIN cargo test -p tool-test-report --test mur_run_stable_id -- --ignored  # 2 tests
+MUR_BIN=$MUR_BIN cargo test -p tool-code-coverage --test mur_run_localize -- --ignored  # 2 tests
 MUR_BIN=$MUR_BIN TOOL_BROWSER_TEST_CHROME=<chrome-headless-shell> cargo test -p tool-browser --test mur_run_browser -- --ignored  # 1 test; its mur must be WIT level 4
 MUR_BIN=$MUR_BIN cargo test -p tool-computer --test mur_run_computer -- --ignored    # 3 tests; needs Xvfb, xkbcomp, xmessage
 MUR_BIN=$MUR_BIN TOOL_GIT_NATIVE_ZIP=<tool-git-0.6.0 zip> cargo test -p tool-git --test mur_run_parity -- --ignored --nocapture  # 2 tests; its mur must be WIT level 4
@@ -283,6 +284,7 @@ TOOL_GIT_NATIVE_BIN=<native tool-git 0.6.0> cargo test -p tool-git --test parity
 | `mur_run_gateway` (tool-github) | the runtime attaches the GitHub token to the tool's requests and it appears nowhere in the session |
 | `mur_manifest_shape` | an unedited scaffold packs and publishes as the kind its author asked for |
 | `mur_run_stable_id` | under a real `mur run`, a code-graph database written into the work folder between two calls of one session gives the next call its `stable_id`, and one in a `read` host path resolves through an absolute `repo_path` with no lock file beside it |
+| `mur_run_localize` | under a real `mur run`, scores one call of a session writes into a work-folder code-graph database are reset and rewritten by the next, leaving no lock or journal file beside it, and an absolute `repo_path` in a `read-write` host path writes the scores into that host database |
 | `mur_run_computer` | in a `sealed` capsule the tool starts its display, clicks a real button, and both screenshots reach the trace as attachments; a `scoped` capsule is refused with `E-CAP-003`, and a `confirm`-listed click is held. Its `mur` must carry murmur `a9ea4726` |
 | `mur_run_computer_tool` (driver-anthropic) | in a `sealed` capsule a tool declaring `provider_tool: {kind: computer}` goes to `claude-sonnet-4-6` as `computer_20251124` with its beta header and to `claude-sonnet-5-5` as the toolset; Claude's click reaches the tool scaled to the display, a toolset batch runs in order, and the next request replays the calls in provider form. Without the block the tool stays a function. Its `mur` must carry murmur `a9ea4726` |
 | `mur_run_computer_tool` (driver-openai) | in a `sealed` capsule the same tool goes to `gpt-5.6-luna` as `{"type": "computer"}`, a `computer_call` runs as an ordered group answered by one `computer_call_output`, a flagged call nobody answers under `mur run --task` times out unrun, and a served capsule runs it only after a person's yes over the door and never after a no. Without the block the tool stays a function. Its `mur` must carry murmur `a9ea4726` |

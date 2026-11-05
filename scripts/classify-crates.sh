@@ -14,7 +14,7 @@
 #                    need host capabilities (subprocesses, a display) that a
 #                    wasm32-wasip2 guest does not have, or link C sources not
 #                    yet ported to wasm (tree-sitter).
-#                    Catches: tool-{code-graph,code-coverage,computer}.
+#                    Catches: tool-{code-graph,computer}.
 #
 #   internal-bin     A crate with no murmur.yaml (so: never published, absent from
 #                    list-artifacts.sh) whose Cargo.toml declares a `[[bin]]`. These

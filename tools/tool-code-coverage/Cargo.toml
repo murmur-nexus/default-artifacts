@@ -4,20 +4,41 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 
-[[bin]]
-name = "tool-code-coverage"
-path = "src/main.rs"
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
 
 [dependencies]
-serde.workspace = true
+# Parses the call's arguments and the LCOV-derived results, and builds the result envelope.
 serde_json.workspace = true
+# Writes the suspicion scores onto code-graph's per-project database. Its `bundled` feature
+# compiles SQLite's C sources into the component with the pinned wasi-sdk (wasi-sdk.toml), which
+# .cargo/config.toml names as the wasm32-wasip2 C compiler; no system SQLite is linked.
 rusqlite.workspace = true
+# Names the capped full-list file after the repository as the call named it.
 sha2.workspace = true
+# Binds the murmur:tool/run@0.2.0 export (world `tool`) in the wasm32 module.
+wit-bindgen.workspace = true
+# Where `repo_path` and `coverage_dir` open: in the work folder, or inside a host folder the
+# runtime preopened as `murmur-host…`.
+murmur-host-roots = { path = "../../libs/murmur-host-roots" }
+# `NativeOutcome`: the result envelope reduced to what murmur's native dispatch handed the
+# model, as the 0.5.0 tool's stdout was. Root items only: no file-tool feature.
+murmur-file-tools = { path = "../../libs/murmur-file-tools", default-features = false }
+
+# The WASI preopens and their descriptor flags, from which the component builds its host
+# roots. Only the component reads them; the host-testable core takes the roots as a value.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasip2 = "1.0.4"
 
 [dev-dependencies]
-# Used by the integration suite to hand-build a code-graph fixture db matching
-# tool-code-graph's documented schema (this tool cannot link that
-# binary-only crate as a library) and to reopen the db and inspect the four new
-# suspicion_* columns after a localize run.
-serde_json.workspace = true
+# tests/code_coverage_integration.rs and tests/wasm_component.rs instantiate the compiled
+# component in Wasmtime with the scratch work folder at `.` and host folders at
+# `murmur-host<path>`, as murmur opens them.
+wasmtime = "46"
+wasmtime-wasi = "46"
+# Builds code-graph fixture databases on the host in tool-code-graph's schema (without the four
+# suspicion columns, so the migration runs) and reads the scores back after each call.
 rusqlite.workspace = true
+# Parses the component's `data`, the recorded native fixture and its cases.
+serde_json.workspace = true

@@ -1,7 +1,7 @@
 name: tool-code-coverage
-version: 0.5.0
+version: 0.6.0
 runtime: tool
-implementation: native
+implementation: wasm
 description: |
   Spectrum-based fault localization (Ochiai / Tarantula) over a Rust repository
   already indexed by tool-code-graph. Input is a directory of per-test
@@ -23,8 +23,8 @@ description: |
   |          |                                               | failing_test_stable_ids, failing_tests_without_      |
   |          |                                               | coverage, skipped_files, data_path                   |
 
-  Defaults: limit=50 (clamped to [1,10000]); repo_path defaults to the current
-  working directory. The db at <repo_path>/.murmur/code-graph.db must already
+  Defaults: limit=50 (clamped to [1,10000]); repo_path defaults to the work
+  folder ('.'). The db at <repo_path>/.murmur/code-graph.db must already
   exist (run tool-code-graph index_repository first) — this tool never
   creates it. Ochiai = ef/sqrt(F*(ef+ep)) (0 when ef==0); Tarantula =
   (ef/F)/((ef/F)+(ep/P)) with the ep/P term 0 when P==0. Symbols no coverage
@@ -34,10 +34,14 @@ description: |
   unparseable .info is listed in skipped_files; both are non-fatal unless zero
   failing coverage remains (F==0), which fails. A failing test's own symbol
   trivially self-covers (ef>=1) — expected SBFL behavior, not filtered.
-  All responses: {ok:bool, message:string, status, summary, data, ...fields}.
+  Absolute LCOV SF: paths are matched to indexed files through the repository
+  prefix they share; relative SF: paths are relative to repo_path. The db must
+  use the default rollback journal (tool-code-graph's default); a WAL-mode db
+  cannot be opened.
+  Every result has status (passed|failed|error), summary and data.
 
 requires_files:
-  - bin/tool-code-coverage
+  - tool_code_coverage.wasm
 
 input_schema:
   type: object
@@ -49,10 +53,10 @@ input_schema:
       description: "Operation to perform. Only 'localize' is supported."
     repo_path:
       type: string
-      description: "Optional. Absolute path to the repository root containing .murmur/code-graph.db. Defaults to the current working directory. This tool never creates the db — it must already exist (run tool-code-graph index_repository first)."
+      description: "Optional. Path to the repository root containing .murmur/code-graph.db, relative to the work folder ('.' for the work folder itself, the default) or absolute inside a host folder the session opened read-write. This tool never creates the db — it must already exist (run tool-code-graph index_repository first)."
     coverage_dir:
       type: string
-      description: "Required. Directory of per-test LCOV `.info` files (one per test, e.g. produced by `cargo llvm-cov --lcov --output-path <dir>/<test>.info -- --exact <test>`). Each file's stem is its test name; files whose stem is not in failing_tests are treated as passing tests."
+      description: "Required. Directory of per-test LCOV `.info` files (one per test, e.g. produced by `cargo llvm-cov --lcov --output-path <dir>/<test>.info -- --exact <test>`). Relative to the work folder, or absolute inside a host folder the session opened. Each file's stem is its test name; files whose stem is not in failing_tests are treated as passing tests."
     failing_tests:
       type: array
       items:
@@ -68,11 +72,12 @@ input_schema:
 
 capabilities:
   filesystem:
-    # Documents what the tool works on; the runtime does not read this block. A
-    # native tool runs in the capsule's own sandbox under the capsule-wide
-    # capabilities, so on Linux every path below must be inside the session
-    # workdir. This tool reads the LCOV files under
-    # coverage_dir, reads+writes the code graph db under repo_path/.murmur, and
-    # writes its full-suspects payload under repo_path/.murmur/coverage.
+    # Documents what the tool works on. murmur reads a WASM tool's grants from
+    # the capsule's entry for it, not from this block. The tool needs the work
+    # folder, or a host_paths folder (read-write for repo_path), holding
+    # repo_path and coverage_dir: it reads the LCOV files under coverage_dir,
+    # reads and writes the code graph db under repo_path/.murmur, and writes
+    # its full-suspects payload under repo_path/.murmur/coverage. Copying this
+    # block onto the capsule entry narrows the tool to it.
     allow:
       - "."

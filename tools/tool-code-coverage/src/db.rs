@@ -11,26 +11,29 @@
 //! `index_repository` rather than creating a fresh (empty, and therefore wrong)
 //! database here.
 
-use std::path::{Path, PathBuf};
-
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 /// Directory (relative to a repo root) that holds the code-graph database and
 /// this tool's on-disk `data_path` payloads.
 pub const STORE_DIR: &str = ".murmur";
 pub const DB_FILE: &str = "code-graph.db";
 
-/// Absolute path to the code-graph database for `repo`.
-pub fn db_path(repo: &Path) -> PathBuf {
-    repo.join(STORE_DIR).join(DB_FILE)
-}
-
-/// Open an *existing* code-graph database read-write and ensure the four
-/// `suspicion_*` columns exist. The caller MUST have already verified the file
-/// exists (see [`db_path`]) — `Connection::open` would otherwise create an empty
-/// file, which this tool must never do.
-pub fn open(repo: &Path) -> rusqlite::Result<Connection> {
-    let conn = Connection::open(db_path(repo))?;
+/// Open an *existing* code-graph database read-write and ensure the four `suspicion_*` columns
+/// exist. `db_path` is the path the tool opens: in the work folder, or `murmur-host/…` inside a
+/// read-write host root, never a host path as written.
+///
+/// The flags are `READ_WRITE | NO_MUTEX`: no `CREATE`, so a missing file is an error and never an
+/// empty database, and no `URI`, so a path is never read as a URI. The journal and locking modes
+/// are SQLite's defaults, which on `wasm32-wasip2` are what the WASI build supports: the
+/// `unix-dotfile` VFS, which locks by creating a `<db>.lock` directory beside the database and
+/// removes it on unlock, and the rollback journal (`<db>-journal`, deleted on commit). The build
+/// omits WAL (`SQLITE_OMIT_WAL`), so a database left in WAL mode does not open (`file is not a
+/// database`).
+pub fn open(db_path: &str) -> rusqlite::Result<Connection> {
+    let conn = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
     migrate(&conn)?;
     Ok(conn)
 }

@@ -133,10 +133,10 @@ driver.
 Tool artifacts (`runtime: tool`) exposed to the agent as callable functions. `tool-corpus`,
 `tool-create`, `tool-read`, `tool-write`, `tool-edit`, `tool-find`, `tool-github`,
 `tool-registry-search`, `tool-report`, `tool-request-input`, `tool-tavily`, `tool-test-report`,
-`tool-browser` and `tool-git` are WASM components (`wasm32-wasip2`, exporting `murmur:tool/run`);
-the remaining three are native binaries: `tool-code-graph` and `tool-code-coverage` link C
-sources not yet ported to wasm32-wasip2 (tree-sitter, and the same bundled SQLite as
-`tool-code-graph`), and `tool-computer` runs an X server (see [BUILD.md](./BUILD.md)).
+`tool-browser`, `tool-git` and `tool-code-coverage` are WASM components (`wasm32-wasip2`,
+exporting `murmur:tool/run`); the remaining two are native binaries: `tool-code-graph` links C
+sources not yet ported to wasm32-wasip2 (tree-sitter), and `tool-computer` runs an X server (see
+[BUILD.md](./BUILD.md)).
 
 | Artifact | Location | Implementation | Description |
 |---|---|---|---|
@@ -152,9 +152,9 @@ sources not yet ported to wasm32-wasip2 (tree-sitter, and the same bundled SQLit
 | `tool-request-input` | `tools/tool-request-input/` | WASM | HITL pause gate — suspends the agent loop and waits for human input via `SendMessage` |
 | `tool-tavily` | `tools/tool-tavily/` | WASM | Web search through Tavily, returning a bounded plain-text result; the Tavily key is bound on the entry as `gateway.api_key` and attached by the runtime, never held by the tool, and every cost- and size-bearing lever is in the entry's `config:` block |
 | `tool-test-report` | `tools/tool-test-report/` | WASM | Parses raw test-runner output (cargo, pytest, go, jest) into a structured failure list; `input_path` and `repo_path` are relative to the work folder or absolute inside a host folder the session opened; see its [README](./tools/tool-test-report/README.md) |
+| `tool-code-coverage` | `tools/tool-code-coverage/` | WASM | Spectrum-based fault localization (Ochiai / Tarantula) over per-test LCOV reports, writing suspicion scores onto `tool-code-graph`'s database; `repo_path` and `coverage_dir` are relative to the work folder or absolute inside a host folder the session opened (read-write for `repo_path`); see its [README](./tools/tool-code-coverage/README.md) |
 | `tool-git` | `tools/tool-git/` | WASM | Git operations (clone, checkout, status, diff, commit, push, worktree, and more), each git command run through `murmur:process`, so it needs a `mur` at WIT level 4 or higher and `git` in `capabilities.shell.allow`; on-shell hooks and the `read_only` check judge every git command it runs; see its [README](./tools/tool-git/README.md) |
 | `tool-code-graph` | `tools/tool-code-graph/` | native | Indexes a Rust and/or Python repo into a SQLite symbol/edge graph; structured queries over stable symbol identities |
-| `tool-code-coverage` | `tools/tool-code-coverage/` | native | Spectrum-based fault localization (Ochiai / Tarantula) over per-test LCOV reports |
 | `tool-browser` | `tools/tool-browser/` | WASM | Drives a headless Chrome or Chromium on the capsule's host one action per call: opens a page, reads it as an accessibility tree with refs, clicks, types, presses, selects, waits and goes back with a summary of what changed, reads console errors and failed requests, and saves screenshots. Starts the browser as a session process through `murmur:process` and keeps it until `close` or the session's end, so it needs a `mur` at WIT level 4 or higher. Needs one of `chromium`, `chromium-browser`, `google-chrome` or `chrome` in `capabilities.shell.allow`, and on murmur's `scoped` and `sealed` tiers `chrome-headless-shell` under that name; see its [README](./tools/tool-browser/README.md) |
 | `tool-computer` | `tools/tool-computer/` | native | The capsule's own 1440x900 virtual display (Xvfb): screenshot, click, drag, scroll, type, keys, wait and zoom, one action per call, each returning the cursor and a PNG screenshot. Declares `provider_tool: {kind: computer}`, so it runs only in a `sealed` capsule on Linux and needs a `mur` from murmur `a9ea4726` or later; see its [README](./tools/tool-computer/README.md) |
 
@@ -251,6 +251,7 @@ serves level 3. Hooks, process drivers and native tools did not move.
 | `tool-request-input` | 0.7.0 |
 | `tool-tavily` | 0.8.0 |
 | `tool-test-report` | 0.6.0 |
+| `tool-code-coverage` | 0.6.0 |
 | `tool-write` | 0.2.0 |
 
 The `wit-sync` CI job verifies the mirror stays byte-identical to the murmur commit pinned by
