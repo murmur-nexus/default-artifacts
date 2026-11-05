@@ -98,7 +98,7 @@ artifacts:
     runtime: tool
 
   - name: murmur/driver-anthropic
-    version: "0.19.0"
+    version: "0.20.0"
     runtime: driver
 
   - name: murmur/hook-debug
@@ -109,7 +109,7 @@ artifacts:
         records: true          # hook-debug.jsonl goes in the records directory (§4.3a)
 
   - name: murmur/skill-create-manifest
-    version: "0.14.0"
+    version: "0.15.0"
     runtime: skill
 ```
 
@@ -356,7 +356,7 @@ so the driver never sees it.
 ```yaml
 artifacts:
   - name: murmur/driver-anthropic
-    version: "0.19.0"
+    version: "0.20.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
@@ -402,7 +402,7 @@ cannot.
 ```yaml
 artifacts:
   - name: murmur/driver-openai
-    version: "0.19.0"
+    version: "0.20.0"
     runtime: driver
     gateway:
       endpoint: https://api.openai.com/v1
@@ -504,7 +504,7 @@ artifacts:
     version: "0.4.0"
     runtime: tool
   - name: murmur/driver-anthropic
-    version: "0.19.0"
+    version: "0.20.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
@@ -550,7 +550,7 @@ artifacts:
     version: "0.4.0"
     runtime: tool
   - name: murmur/driver-anthropic
-    version: "0.19.0"
+    version: "0.20.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
@@ -598,7 +598,7 @@ artifacts:
     version: "0.4.0"
     runtime: tool
   - name: murmur/driver-anthropic
-    version: "0.19.0"
+    version: "0.20.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com

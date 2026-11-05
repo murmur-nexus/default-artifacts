@@ -4,23 +4,26 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 
-[[bin]]
-name = "tool-browser"
-path = "src/main.rs"
+[lib]
+crate-type = ["cdylib", "rlib"]
 
-# Every dependency below is already in Cargo.lock at the version named, so adding this crate adds
-# its own package entry and nothing else: a new or moved version would change every wasm
-# artifact's bytes. `tungstenite` and `tokio` are not locked, hence the hand-written WebSocket
-# client in src/ws.rs.
+# Every dependency below is already in Cargo.lock at the version named, so this crate adds no
+# package and moves no version: a new or moved version would change every wasm artifact's
+# bytes. The WebSocket client in src/ws.rs is hand-written for the same reason.
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+wit-bindgen.workspace = true
 sha1 = "0.10"
 base64 = "0.22"
-libc = "0.2"
-# The feature set `ureq` already locks rustls with: `ring`, never aws-lc-rs.
-rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
-webpki-roots = "0.26"
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasip2 = "1.0.4"
+
+# Host-target-only. wasmtime and wasmtime-wasi run the compiled wasm32-wasip2 component in
+# tests/common, with a test host for `murmur:process` that starts the real browser; tempfile
+# gives every suite its scratch folders. A `[dev-dependencies]` entry never reaches the cdylib.
 [dev-dependencies]
+wasmtime = "46"
+wasmtime-wasi = "46"
 tempfile = "3"

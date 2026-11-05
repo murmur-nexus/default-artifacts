@@ -1,17 +1,17 @@
 name: tool-browser
-version: 0.1.0
+version: 0.2.0
 runtime: tool
-implementation: native
+implementation: wasm
 description: |
-  Drives a headless Chrome or Chromium on this host, one action per call. The browser starts on the first call and stays for the session.
+  Drives a headless Chrome or Chromium, one action per call. The first call starts the browser; it stays until close or the session's end.
   open url (http, https, file, about:blank, or a work-folder path) returns the page as text: `page: <title> — <url>`, then an indented accessibility tree, one `- role "name" [states] [ref=eN]` per node. Pass a ref to act on that node.
   click/type/press/select/wait/back answer with what changed (`changed: +A -R lines`, then `+`/`-` lines) or the new page.
   snapshot (ref for one part), console and network (new errors and failed requests since the last look), screenshot (PNG; full_page or ref), close.
   Read the text first; take a screenshot only to check layout.
-  Needs chromium, chromium-browser, google-chrome or chrome in capabilities.shell.allow. Writes .tool-browser/<session>/ in the work folder.
+  Needs chromium, chromium-browser, google-chrome or chrome in capabilities.shell.allow. Writes .tool-browser/<id>/ in the work folder.
 
 requires_files:
-  - bin/tool-browser
+  - tool_browser.wasm
 
 input_schema:
   type: object
@@ -60,9 +60,9 @@ input_schema:
 
 capabilities:
   # Documentary: the runtime does not read this block. The capsule must grant any ONE of these
-  # in its own capabilities.shell.allow, because the sandbox refuses a program it does not list
-  # and the tool finds its grant through the manifest murmur stages for each shell.allow entry.
-  # The README lists the capabilities.resources values Chrome needs.
+  # in its own capabilities.shell.allow, because murmur:process refuses a program it does not
+  # list and the tool finds its grant through the manifest murmur stages for each shell.allow
+  # entry. The README lists the capabilities.resources values Chrome needs.
   shell:
     allow:
       - chromium

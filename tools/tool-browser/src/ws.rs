@@ -1,98 +1,21 @@
-//! A minimal RFC 6455 WebSocket client over `std::net::TcpStream`, with `wss://` through rustls.
+//! A minimal RFC 6455 WebSocket client over a [`Conn`], the per-call connection
+//! `murmur:process` opens to Chrome's DevTools port.
 //!
-//! One thread owns a [`WebSocket`] and calls [`WebSocket::poll`] in a loop: the socket has a short
-//! read timeout, and frames are parsed out of a buffer, so a timeout in the middle of a frame
-//! loses nothing and the same thread can write between reads. That is what lets a TLS stream,
-//! which cannot be split across threads, carry the DevTools connection too.
-
-use std::{
-    io::{self, Read, Write},
-    net::{TcpStream, ToSocketAddrs},
-    sync::Arc,
-    time::Duration,
-};
+//! Frames are parsed out of a buffer, so a read that stops in the middle of a frame loses
+//! nothing; every read waits at most the timeout its caller passes.
 
 use base64::Engine as _;
 use sha1::{Digest, Sha1};
 
+use crate::host::{Conn, ProcError};
+
 /// The largest message accepted, after reassembly. A full-page screenshot is the biggest thing
 /// DevTools sends.
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+/// The most bytes one read asks the host for.
+const READ_CHUNK: u32 = 1024 * 1024;
 
 const ACCEPT_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-
-/// A parsed `ws://` or `wss://` URL.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WsUrl {
-    pub tls: bool,
-    pub host: String,
-    pub port: u16,
-    /// Path and query, starting with `/`.
-    pub path: String,
-}
-
-impl WsUrl {
-    pub fn parse(url: &str) -> Result<Self, String> {
-        let (tls, rest) = if let Some(r) = strip_prefix_ci(url, "ws://") {
-            (false, r)
-        } else if let Some(r) = strip_prefix_ci(url, "wss://") {
-            (true, r)
-        } else {
-            return Err(format!("{url} is not a ws:// or wss:// URL"));
-        };
-        let (authority, path) = match rest.find('/') {
-            Some(i) => (&rest[..i], &rest[i..]),
-            None => (rest, "/"),
-        };
-        let authority = authority.rsplit('@').next().unwrap_or(authority);
-        let (host, port) = if let Some(stripped) = authority.strip_prefix('[') {
-            let end = stripped
-                .find(']')
-                .ok_or_else(|| format!("{url}: unclosed [ in host"))?;
-            let host = &stripped[..end];
-            let port = stripped[end + 1..].strip_prefix(':');
-            (host.to_string(), port)
-        } else {
-            match authority.rsplit_once(':') {
-                Some((h, p)) => (h.to_string(), Some(p)),
-                None => (authority.to_string(), None),
-            }
-        };
-        if host.is_empty() {
-            return Err(format!("{url} has no host"));
-        }
-        let port = match port {
-            Some(p) => p
-                .parse()
-                .map_err(|_| format!("{url} has an invalid port"))?,
-            None if tls => 443,
-            None => 80,
-        };
-        Ok(Self {
-            tls,
-            host,
-            port,
-            path: path.to_string(),
-        })
-    }
-
-    /// `host:port`, bracketing an IPv6 host.
-    pub fn authority(&self) -> String {
-        if self.host.contains(':') {
-            format!("[{}]:{}", self.host, self.port)
-        } else {
-            format!("{}:{}", self.host, self.port)
-        }
-    }
-}
-
-fn strip_prefix_ci<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
-    (text.len() >= prefix.len() && text[..prefix.len()].eq_ignore_ascii_case(prefix))
-        .then(|| &text[prefix.len()..])
-}
-
-trait Stream: Read + Write + Send {}
-impl<T: Read + Write + Send> Stream for T {}
 
 /// One complete message.
 #[derive(Debug, PartialEq, Eq)]
@@ -119,76 +42,48 @@ impl std::fmt::Display for WsError {
     }
 }
 
-pub struct WebSocket {
-    stream: Box<dyn Stream>,
+/// Random bytes for the handshake key and the frame masks.
+pub type Random<'a> = &'a dyn Fn(usize) -> Vec<u8>;
+
+pub struct WebSocket<'r> {
+    conn: Box<dyn Conn>,
     buf: Vec<u8>,
     /// The opcode and data of a fragmented message still arriving.
     partial: Option<(u8, Vec<u8>)>,
-    urandom: std::fs::File,
+    random: Random<'r>,
     closed: bool,
 }
 
-/// How long the client waits for the TCP connection and the upgrade response.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
-impl WebSocket {
-    /// Connect and complete the upgrade. Later reads time out after `poll_interval`.
-    pub fn connect(url: &WsUrl, poll_interval: Duration) -> Result<Self, String> {
-        let addrs: Vec<_> = (url.host.as_str(), url.port)
-            .to_socket_addrs()
-            .map_err(|e| format!("cannot resolve {}: {e}", url.host))?
-            .collect();
-        let mut last_err = format!("{} resolved to no address", url.host);
-        let mut tcp = None;
-        for addr in addrs {
-            match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
-                Ok(s) => {
-                    tcp = Some(s);
-                    break;
-                }
-                Err(e) => last_err = e.to_string(),
-            }
-        }
-        let tcp = tcp.ok_or(last_err)?;
-        tcp.set_nodelay(true).ok();
-        tcp.set_read_timeout(Some(CONNECT_TIMEOUT))
-            .map_err(|e| e.to_string())?;
-        let mut stream: Box<dyn Stream> = if url.tls {
-            Box::new(tls_stream(
-                &url.host,
-                tcp.try_clone().map_err(|e| e.to_string())?,
-            )?)
-        } else {
-            Box::new(tcp.try_clone().map_err(|e| e.to_string())?)
-        };
-        let urandom = std::fs::File::open("/dev/urandom")
-            .map_err(|e| format!("cannot open /dev/urandom: {e}"))?;
-        let mut key = [0u8; 16];
-        (&urandom)
-            .read_exact(&mut key)
-            .map_err(|e| format!("cannot read /dev/urandom: {e}"))?;
-        let key = base64::engine::general_purpose::STANDARD.encode(key);
+impl<'r> WebSocket<'r> {
+    /// Complete the upgrade on `conn` for `path` at `127.0.0.1:<port>`, waiting at most
+    /// `timeout_ms` for each read of the response.
+    pub fn handshake(
+        mut conn: Box<dyn Conn>,
+        port: u16,
+        path: &str,
+        random: Random<'r>,
+        timeout_ms: u32,
+    ) -> Result<Self, String> {
+        let key = base64::engine::general_purpose::STANDARD.encode(random(16));
         let request = format!(
-            "GET {} HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
-             Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n",
-            url.path,
-            url.authority()
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
         );
-        stream
-            .write_all(request.as_bytes())
-            .and_then(|_| stream.flush())
+        conn.write(request.as_bytes())
             .map_err(|e| format!("sending the WebSocket upgrade: {e}"))?;
-
         let mut buf = Vec::new();
-        let mut chunk = [0u8; 4096];
         let header_end = loop {
-            let n = stream
-                .read(&mut chunk)
-                .map_err(|e| format!("reading the WebSocket upgrade response: {e}"))?;
-            if n == 0 {
+            let chunk = match conn.read(64 * 1024, timeout_ms) {
+                Ok(c) => c,
+                Err(ProcError::TimedOut) => {
+                    return Err("no WebSocket upgrade response in time".into())
+                }
+                Err(e) => return Err(format!("reading the WebSocket upgrade response: {e}")),
+            };
+            if chunk.is_empty() {
                 return Err("the server closed the connection during the WebSocket upgrade".into());
             }
-            buf.extend_from_slice(&chunk[..n]);
+            buf.extend_from_slice(&chunk);
             if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
                 break i;
             }
@@ -213,13 +108,11 @@ impl WebSocket {
         if accept != accept_key(&key) {
             return Err("the WebSocket upgrade response has a wrong Sec-WebSocket-Accept".into());
         }
-        tcp.set_read_timeout(Some(poll_interval))
-            .map_err(|e| e.to_string())?;
         Ok(Self {
-            stream,
+            conn,
             buf: buf[header_end + 4..].to_vec(),
             partial: None,
-            urandom,
+            random,
             closed: false,
         })
     }
@@ -237,39 +130,34 @@ impl WebSocket {
     }
 
     fn send_frame(&mut self, opcode: u8, payload: &[u8]) -> Result<(), WsError> {
+        let bytes = (self.random)(4);
         let mut mask = [0u8; 4];
-        self.urandom
-            .read_exact(&mut mask)
-            .map_err(|e| WsError::Io(format!("reading /dev/urandom: {e}")))?;
+        mask.copy_from_slice(&bytes[..4]);
         let frame = encode_frame(opcode, payload, mask);
-        self.stream
-            .write_all(&frame)
-            .and_then(|_| self.stream.flush())
+        self.conn
+            .write(&frame)
             .map_err(|e| WsError::Io(e.to_string()))
     }
 
-    /// Read what is available, up to the socket's poll interval, and return the next complete
-    /// message if one has arrived. Pings are answered here.
-    pub fn poll(&mut self) -> Result<Option<Message>, WsError> {
+    /// The next complete message, reading for at most `timeout_ms` when none is buffered;
+    /// `None` when nothing complete arrived in time. Pings are answered here.
+    pub fn poll(&mut self, timeout_ms: u32) -> Result<Option<Message>, WsError> {
+        let mut waited = false;
         loop {
             if let Some(msg) = self.take_frame()? {
                 return Ok(Some(msg));
             }
-            let mut chunk = [0u8; 64 * 1024];
-            match self.stream.read(&mut chunk) {
-                Ok(0) => return Err(WsError::Closed),
-                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    return Ok(None)
-                }
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            // After the first read only take what is already there, so one poll never waits
+            // much past its timeout.
+            let wait = if waited { 1 } else { timeout_ms.max(1) };
+            match self.conn.read(READ_CHUNK, wait) {
+                Ok(chunk) if chunk.is_empty() => return Err(WsError::Closed),
+                Ok(chunk) => self.buf.extend_from_slice(&chunk),
+                Err(ProcError::TimedOut) if waited || self.buf.is_empty() => return Ok(None),
+                Err(ProcError::TimedOut) => {}
                 Err(e) => return Err(WsError::Io(e.to_string())),
             }
+            waited = true;
         }
     }
 
@@ -408,42 +296,167 @@ fn accept_key(key: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(sha.finalize())
 }
 
-fn tls_stream(
-    host: &str,
-    tcp: TcpStream,
-) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>, String> {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(|e| format!("TLS setup: {e}"))?
-    .with_root_certificates(roots)
-    .with_no_client_auth();
-    let name = rustls::pki_types::ServerName::try_from(host.to_string())
-        .map_err(|e| format!("{host} is not a valid TLS server name: {e}"))?;
-    let conn = rustls::ClientConnection::new(Arc::new(config), name)
-        .map_err(|e| format!("TLS setup: {e}"))?;
-    Ok(rustls::StreamOwned::new(conn, tcp))
-}
-
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+    };
+
+    /// A scripted peer: what the client wrote, and the chunks it reads in order (`None` is a
+    /// timeout).
+    #[derive(Clone, Default)]
+    pub(crate) struct FakeConn {
+        pub(crate) written: Arc<Mutex<Vec<u8>>>,
+        reads: Arc<Mutex<VecDeque<Option<Vec<u8>>>>>,
+    }
+
+    impl Conn for FakeConn {
+        fn read(&mut self, max: u32, _timeout_ms: u32) -> Result<Vec<u8>, ProcError> {
+            let mut reads = self.reads.lock().unwrap();
+            match reads.pop_front() {
+                None | Some(None) => Err(ProcError::TimedOut),
+                Some(Some(mut chunk)) => {
+                    if chunk.len() > max as usize {
+                        let rest = chunk.split_off(max as usize);
+                        reads.push_front(Some(rest));
+                    }
+                    Ok(chunk)
+                }
+            }
+        }
+        fn write(&mut self, bytes: &[u8]) -> Result<(), ProcError> {
+            self.written.lock().unwrap().extend_from_slice(bytes);
+            Ok(())
+        }
+    }
+
+    fn zeros(n: usize) -> Vec<u8> {
+        vec![0; n]
+    }
+
+    fn server_frame(fin: bool, opcode: u8, payload: &[u8]) -> Vec<u8> {
+        let mut f = vec![if fin { 0x80 } else { 0 } | opcode];
+        match payload.len() {
+            n if n < 126 => f.push(n as u8),
+            n if n <= u16::MAX as usize => {
+                f.push(126);
+                f.extend_from_slice(&(n as u16).to_be_bytes());
+            }
+            n => {
+                f.push(127);
+                f.extend_from_slice(&(n as u64).to_be_bytes());
+            }
+        }
+        f.extend_from_slice(payload);
+        f
+    }
+
+    /// A client that has completed its upgrade on `conn`, with `extra` already received.
+    pub(crate) fn upgraded(conn: &FakeConn, extra: &[u8]) -> WebSocket<'static> {
+        // The key from sixteen zero bytes is AAAAAAAAAAAAAAAAAAAAAA==.
+        let accept = accept_key("AAAAAAAAAAAAAAAAAAAAAA==");
+        let mut response =
+            format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\n\r\n")
+                .into_bytes();
+        response.extend_from_slice(extra);
+        conn.reads.lock().unwrap().push_back(Some(response));
+        WebSocket::handshake(
+            Box::new(conn.clone()),
+            9222,
+            "/devtools/browser/x",
+            &zeros,
+            1000,
+        )
+        .unwrap()
+    }
+
     #[test]
-    fn urls_parse() {
-        let u = WsUrl::parse("ws://127.0.0.1:9222/devtools/browser/abc").unwrap();
-        assert_eq!(
-            (u.tls, u.host.as_str(), u.port, u.path.as_str()),
-            (false, "127.0.0.1", 9222, "/devtools/browser/abc")
+    fn handshake_checks_the_accept_key_and_keeps_early_bytes() {
+        let conn = FakeConn::default();
+        let mut ws = upgraded(&conn, &server_frame(true, 1, b"early"));
+        let written = String::from_utf8(conn.written.lock().unwrap().clone()).unwrap();
+        assert!(written.starts_with("GET /devtools/browser/x HTTP/1.1\r\nHost: 127.0.0.1:9222\r\n"));
+        assert!(written.contains("Sec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\n"));
+        assert_eq!(ws.poll(10).unwrap(), Some(Message::Text("early".into())));
+        assert_eq!(ws.poll(10).unwrap(), None);
+
+        let bad = FakeConn::default();
+        bad.reads.lock().unwrap().push_back(Some(
+            b"HTTP/1.1 101 OK\r\nSec-WebSocket-Accept: nope\r\n\r\n".to_vec(),
+        ));
+        let e = WebSocket::handshake(Box::new(bad), 1, "/", &zeros, 10)
+            .err()
+            .unwrap();
+        assert!(e.contains("wrong Sec-WebSocket-Accept"), "{e}");
+        let refused = FakeConn::default();
+        refused
+            .reads
+            .lock()
+            .unwrap()
+            .push_back(Some(b"HTTP/1.1 404 Not Found\r\n\r\n".to_vec()));
+        let e = WebSocket::handshake(Box::new(refused), 1, "/", &zeros, 10)
+            .err()
+            .unwrap();
+        assert!(
+            e.contains("refused the WebSocket upgrade: HTTP/1.1 404"),
+            "{e}"
         );
-        let u = WsUrl::parse("wss://example.com").unwrap();
-        assert_eq!((u.tls, u.port, u.path.as_str()), (true, 443, "/"));
-        let u = WsUrl::parse("ws://[::1]:9/x").unwrap();
-        assert_eq!(u.authority(), "[::1]:9");
-        assert!(WsUrl::parse("http://x").is_err());
+    }
+
+    #[test]
+    fn messages_split_across_reads_and_fragments_reassemble() {
+        let conn = FakeConn::default();
+        let mut ws = upgraded(&conn, &[]);
+        let big = vec![b'x'; 70_000];
+        let frame = server_frame(true, 1, &big);
+        {
+            let mut reads = conn.reads.lock().unwrap();
+            reads.push_back(Some(frame[..10].to_vec()));
+            reads.push_back(None);
+            reads.push_back(Some(frame[10..].to_vec()));
+            reads.push_back(Some(server_frame(false, 1, b"ab")));
+            reads.push_back(Some(server_frame(true, 9, b"p")));
+            reads.push_back(Some(server_frame(true, 0, b"cd")));
+            reads.push_back(Some(server_frame(true, 8, &1000u16.to_be_bytes())));
+        }
+        // The timeout in the middle of a frame keeps the partial bytes.
+        assert_eq!(ws.poll(10).unwrap(), None);
+        assert_eq!(
+            ws.poll(10).unwrap(),
+            Some(Message::Text(String::from_utf8(big).unwrap()))
+        );
+        assert_eq!(ws.poll(10).unwrap(), Some(Message::Text("abcd".into())));
+        assert!(matches!(ws.poll(10), Err(WsError::Closed)));
+        // The client answered the ping and the close, masked.
+        let written = conn.written.lock().unwrap().clone();
+        let tail = &written[written.len() - 15..];
+        assert_eq!(tail[0], 0x8A, "pong");
+        assert_eq!(tail[1], 0x81);
+        assert_eq!(tail[7], 0x88, "close");
+    }
+
+    #[test]
+    fn client_frames_are_masked_text() {
+        let conn = FakeConn::default();
+        let mut ws = upgraded(&conn, &[]);
+        let before = conn.written.lock().unwrap().len();
+        ws.send_text("hi").unwrap();
+        let written = conn.written.lock().unwrap()[before..].to_vec();
+        assert_eq!(written, vec![0x81, 0x82, 0, 0, 0, 0, b'h', b'i']);
+    }
+
+    #[test]
+    fn a_peer_close_and_a_masked_server_frame_end_the_connection() {
+        let conn = FakeConn::default();
+        let mut ws = upgraded(&conn, &[]);
+        conn.reads.lock().unwrap().push_back(Some(Vec::new()));
+        assert!(matches!(ws.poll(10), Err(WsError::Closed)));
+        let conn = FakeConn::default();
+        let mut ws = upgraded(&conn, &[0x81, 0x81, 1, 2, 3, 4, 5]);
+        assert!(matches!(ws.poll(10), Err(WsError::Protocol(_))));
     }
 
     #[test]

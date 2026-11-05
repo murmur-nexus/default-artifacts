@@ -254,7 +254,7 @@ MUR_BIN=$MUR_BIN cargo test -p tool-corpus --test mur_run_state -- --ignored    
 MUR_BIN=$MUR_BIN cargo test -p tool-tavily --test mur_run_gateway -- --ignored       # 2 tests
 MUR_BIN=$MUR_BIN cargo test -p tool-github --test mur_run_gateway -- --ignored       # 2 tests
 MUR_BIN=$MUR_BIN cargo test -p tool-create --test mur_manifest_shape -- --ignored    # 3 tests
-MUR_BIN=$MUR_BIN cargo test -p tool-browser --test mur_run_browser -- --ignored      # 1 test
+MUR_BIN=$MUR_BIN TOOL_BROWSER_TEST_CHROME=<chrome-headless-shell> cargo test -p tool-browser --test mur_run_browser -- --ignored  # 1 test; its mur must be WIT level 4
 MUR_BIN=$MUR_BIN cargo test -p tool-computer --test mur_run_computer -- --ignored    # 3 tests; needs Xvfb, xkbcomp, xmessage
 MUR_BIN=$MUR_BIN cargo test -p driver-anthropic --test mur_run_computer_tool -- --ignored  # 3 tests
 MUR_BIN=$MUR_BIN cargo test -p driver-openai --test mur_run_computer_tool -- --ignored     # 4 tests
@@ -271,14 +271,16 @@ cargo test -p tool-create --test scaffolded_hook_tests -- --ignored  # needs a c
 | `mur_run_computer_tool` (driver-anthropic) | in a `sealed` capsule a tool declaring `provider_tool: {kind: computer}` goes to `claude-sonnet-4-6` as `computer_20251124` with its beta header and to `claude-sonnet-5-5` as the toolset; Claude's click reaches the tool scaled to the display, a toolset batch runs in order, and the next request replays the calls in provider form. Without the block the tool stays a function. Its `mur` must carry murmur `a9ea4726` |
 | `mur_run_computer_tool` (driver-openai) | in a `sealed` capsule the same tool goes to `gpt-5.6-luna` as `{"type": "computer"}`, a `computer_call` runs as an ordered group answered by one `computer_call_output`, a flagged call nobody answers under `mur run --task` times out unrun, and a served capsule runs it only after a person's yes over the door and never after a no. Without the block the tool stays a function. Its `mur` must carry murmur `a9ea4726` |
 | `scaffolded_hook_tests` | a freshly scaffolded hook reports `1 passed`, not `0 passed` |
-| `mur_run_browser` | a capsule granting a browser opens a work-folder page inside its containment and reads its console error through murmur's `<untrusted-content>` fence, and one without the grant gets the single no-grant line |
+| `mur_run_browser` | a capsule granting `chromium` opens a work-folder page on `scoped` and again on `sealed`, with Chrome a `murmur:process` session process. It reads the page's console error through murmur's `<untrusted-content>` fence, and its screenshot reaches the next model request as an image. The trace records `process_start` for `browser` and `process_exit` with `reason: session_end`, and nothing naming `.tool-browser/` runs after `mur run` exits. A capsule without the grant gets the single no-grant line. Its `mur` must report WIT level 4 or higher |
 
-`mur_run_browser` needs a browser that starts on the host's tier. murmur's Full and Sealed tiers
-stop full Chrome (see [tool-browser's README](./tools/tool-browser/README.md#which-browser-runs-on-which-tier)),
-so on such a host point `TOOL_BROWSER_TEST_CHROME` at a `chrome-headless-shell`. On a `mur` older
-than the workspace's `driver-openai` interface, set `TOOL_BROWSER_DRIVER_ZIP` to a released
-`driver-openai-<x.y.z>.mur.zip` built for it.
+`mur_run_browser` needs `TOOL_BROWSER_TEST_CHROME` set to a `chrome-headless-shell`, because murmur's
+`scoped` and `sealed` tiers stop full Chrome (see [tool-browser's README](./tools/tool-browser/README.md#which-browser-runs-on-which-tier)).
+The test links it as `chromium` in its own directory. It packs the workspace `driver-openai` and
+`tool-browser` with `scripts/package-artifact.sh`, so a level-4 `mur` needs neither a released
+driver zip nor a manifest with `vision:` stripped.
 
-The default run of `tool-browser` (its `browser` suite) needs Chrome or Chromium on Linux: one of
-`chromium`, `chromium-browser`, `google-chrome` or `chrome` on `PATH`, a Playwright Chromium under
-`~/.cache/ms-playwright`, or `TOOL_BROWSER_TEST_CHROME`. Without one it fails, naming what to install.
+The default run of `tool-browser` (its `browser` suite) runs the compiled component in Wasmtime,
+with a test host for `murmur:process` that starts the browser outside any capsule. It needs Chrome or
+Chromium on Linux: one of `chromium`, `chromium-browser`, `google-chrome` or `chrome` on `PATH`, a
+Playwright Chromium under `~/.cache/ms-playwright`, or `TOOL_BROWSER_TEST_CHROME`. Without one it
+fails, naming what to install. `TOOL_BROWSER_KEEP_LOGS=<dir>` copies each test's `browser.log` and `state.json` there.

@@ -2859,13 +2859,14 @@ name = "tool-browser"
 version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
- "libc",
- "rustls",
  "serde",
  "serde_json",
  "sha1",
  "tempfile",
- "webpki-roots 0.26.11",
+ "wasip2",
+ "wasmtime",
+ "wasmtime-wasi",
+ "wit-bindgen 0.59.0",
 ]
 
 [[package]]

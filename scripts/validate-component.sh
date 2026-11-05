@@ -19,9 +19,10 @@
 #   driver-*                           -> TOOL   category
 #   tool-{request-input,create,read,   -> TOOL   category (wasm32-wasip2 components
 #     write,edit,find,corpus,report,            that export murmur:tool/run)
-#     tavily,github,registry-search}
+#     tavily,github,registry-search,
+#     browser}
 #   tool-{git,git-validate,            -> SKIP   (native bin crates the workspace build
-#     browser,computer}                         may still leave a .wasm for; shipped as
+#     computer}                                 may still leave a .wasm for; shipped as
 #                                               native binaries, they export
 #                                               wasi:cli/run and are NOT murmur guest
 #                                               components)
@@ -39,7 +40,10 @@
 #         type-only murmur:hook/lifecycle instance those pull in.
 #   TOOL: export set == { murmur:tool/run@<tool-wit-version> };       murmur:* imports subset of
 #         { murmur:stream/events, murmur:task/task } (`murmur:%stream/events` as
-#         `wasm-tools component wit` prints it; the `%` escape is stripped first).
+#         `wasm-tools component wit` prints it; the `%` escape is stripped first), plus
+#         murmur:process/process for an artifact named `tool-*`: the `tool` world imports it,
+#         and murmur serves it only to an agent capsule's tool calls, so a driver that imports
+#         it fails.
 #   PROCESS-DRIVER: export set == { murmur:driver/process@<process-driver-wit-version> }; zero
 #         murmur:* imports. The runtime instantiates a process driver on an empty WASI context
 #         with no murmur host import at all, so any murmur:* import is a component that cannot
@@ -127,7 +131,7 @@ validate_one() {
 
   # ---- category resolution ---------------------------------------------------
   case "$name" in
-    tool-git|tool-git-validate|tool-browser|tool-computer)
+    tool-git|tool-git-validate|tool-computer)
       echo "skip: $base is a native command component (exports wasi:cli/run), not a murmur guest component — not validated"
       return 0
       ;;
@@ -141,7 +145,7 @@ validate_one() {
       expected_export="murmur:driver/process"
       expected_version="$process_driver_version"
       ;;
-    driver-*|tool-request-input|tool-create|tool-read|tool-write|tool-edit|tool-find|tool-corpus|tool-report|tool-tavily|tool-github|tool-registry-search)
+    driver-*|tool-request-input|tool-create|tool-read|tool-write|tool-edit|tool-find|tool-corpus|tool-report|tool-tavily|tool-github|tool-registry-search|tool-browser)
       category="tool"
       expected_export="murmur:tool/run"
       expected_version="$tool_version"
@@ -242,13 +246,23 @@ validate_one() {
       esac
     done <<< "$murmur_imports"
   else
-    # Tools/drivers may import only murmur:stream/events and/or murmur:task/task.
+    # Tools/drivers may import only murmur:stream/events and/or murmur:task/task; a tool
+    # (`tool-*`, never a `driver-*`) may also import murmur:process/process.
     while IFS= read -r i; do
       [ -n "$i" ] || continue
       case "$i" in
         murmur:stream/events|murmur:task/task) ;;
+        murmur:process/process)
+          case "$name" in
+            tool-*) ;;
+            *)
+              echo "FAIL: $base (tool): unexpected import '$i' — only a tool-* component may import murmur:process/process; murmur serves it to tool calls, never to a driver" >&2
+              fail=1
+              ;;
+          esac
+          ;;
         *)
-          echo "FAIL: $base (tool): unexpected import '$i' — tool/driver components may import only murmur:stream/events and/or murmur:task/task" >&2
+          echo "FAIL: $base (tool): unexpected import '$i' — tool/driver components may import only murmur:stream/events and/or murmur:task/task, and a tool-* component murmur:process/process" >&2
           fail=1
           ;;
       esac
@@ -263,7 +277,11 @@ validate_one() {
   n_wasi="$(printf '%s\n' "$imports" | grep -c '^wasi:' || true)"
   n_murmur="$(printf '%s\n' "$murmur_imports" | grep -c . || true)"
   echo "  export: $expected_export${expected_version:+@$expected_version} — OK"
-  echo "  imports: $n_wasi wasi:*, $n_murmur murmur:* — OK"
+  if [ "$n_murmur" -gt 0 ]; then
+    echo "  imports: $n_wasi wasi:*, $n_murmur murmur:* (${murmur_imports//$'\n'/, }) — OK"
+  else
+    echo "  imports: $n_wasi wasi:*, $n_murmur murmur:* — OK"
+  fi
   echo "PASS: $base"
   return 0
 }
