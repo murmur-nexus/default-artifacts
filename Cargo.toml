@@ -43,7 +43,6 @@ members = [
   "tools/tool-request-input",
   "tools/tool-tavily",
   "tools/tool-browser",
-  "tools/tool-git/validate",
 ]
 resolver = "2"
 

@@ -1,80 +1,225 @@
-//! Read-only resolution of a `tool-code-graph` `symbol_id` to its
-//! *current* file path and 1-based line range.
+//! Resolve a stable `symbol_id` to its current file and line range by reading
+//! tool-code-graph's `.murmur/code-graph.db` under the repository.
 //!
-//! This mirrors the read-only resolver pattern already duplicated in
-//! `tool-test-report` and `tool-code-coverage` (neither sibling
-//! crate exposes a `[lib]` target, so the query is copied, not shared). Two
-//! deliberate differences from those tools:
-//!   1. A missing `.murmur/code-graph.db` is a hard, named error
-//!      (`ResolveError::NotIndexed`), not a silent no-op — resolving the range is
-//!      `symbol_history`'s entire purpose, not an optional enrichment.
-//!   2. It resolves the location too (file + start/end line), not just the id.
-//!
-//! This tool NEVER writes to the db (read-only `OpenFlags`, and it errors rather
-//! than creating a db when one is absent) and NEVER recomputes a `symbol_id` — it
-//! reads code-graph's `symbols.symbol_id`/`start_line`/`end_line` verbatim, always
-//! from the freshly-indexed current row so a re-indexed (shifted) range is honored.
+//! The database is read and never written: it is opened read-only as the URI
+//! `file:<path>?immutable=1`. SQLite's WASI build locks with a `<db>.lock` dotfile (its
+//! `unix-dotfile` VFS): creating it fails in a read-only host folder and would otherwise appear in
+//! the project, and `immutable=1` reads without any lock or journal. SQLite is built for WASI with
+//! `SQLITE_OMIT_WAL`, so a database in WAL mode cannot be read; tool-code-graph never sets a
+//! journal mode, so its databases are not in WAL mode.
 
-use std::path::Path;
+use murmur_host_roots::{locate, Located, Refusal};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
-use rusqlite::{Connection, OpenFlags};
+use crate::env::Git;
 
-/// A resolved symbol location: current repo-relative file path (forward-slash
-/// separated) and 1-based inclusive line range from the `symbols` table.
+/// Where the database sits below a repository root.
+const GRAPH_DB: &str = ".murmur/code-graph.db";
+
+/// A symbol's current location as code-graph indexed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolLocation {
+    /// Repo-relative path of the file containing the symbol.
     pub file: String,
+    /// 1-based inclusive start line.
     pub start_line: i64,
+    /// 1-based inclusive end line.
     pub end_line: i64,
 }
 
-/// Why resolving a `symbol_id` against the code-graph db failed.
+/// Why a `symbol_id` could not be resolved to a location.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveError {
-    /// No `.murmur/code-graph.db` exists — the repo was never indexed.
+    /// No `.murmur/code-graph.db` under the repo root — the repo was never indexed.
     NotIndexed,
-    /// The db exists but holds no row for this `symbol_id`.
+    /// The database exists but holds no row for this `symbol_id`.
     NotFound,
-    /// An unexpected open/SQLite failure (corrupt or unreadable db, etc.).
+    /// The database lies neither in the work folder nor under a host folder the session opens
+    /// to the tool.
+    OutsideRoots,
+    /// A relative repo whose first segment is `murmur-host` while a host folder is held;
+    /// `suggestion` is the absolute repository path the caller most likely meant.
+    ReservedName { suggestion: String },
+    /// Opening or querying the database failed (corrupt file, WAL mode, schema mismatch, …).
     Internal(String),
 }
 
-/// Resolve `symbol_id` to its current `(file, start_line, end_line)` by joining
-/// `symbols` to `files` in `<repo>/.murmur/code-graph.db`, opened read-only.
+/// `<dir>/.murmur/code-graph.db`.
+fn db_under(dir: &str) -> String {
+    format!("{}/{GRAPH_DB}", dir.trim_end_matches('/'))
+}
+
+/// Whether the relative path `value` climbs above the folder it is relative to.
+fn climbs(value: &str) -> bool {
+    let mut depth = 0usize;
+    for segment in value.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => match depth.checked_sub(1) {
+                Some(d) => depth = d,
+                None => return true,
+            },
+            _ => depth += 1,
+        }
+    }
+    false
+}
+
+/// The path to open the database of the repository `repo` at — relative to the work folder, or a
+/// `murmur-host…` path — tried in this order:
 ///
-/// Reference query is `tool-code-graph`'s own `op_get_symbol`
-/// (`src/ops.rs`): `SELECT ... f.path, s.start_line, s.end_line FROM symbols s
-/// JOIN files f ON f.id = s.file_id WHERE s.symbol_id = ?1`.
-pub fn resolve_symbol_location(
-    repo: &str,
-    symbol_id: &str,
-) -> Result<SymbolLocation, ResolveError> {
-    let db = Path::new(repo).join(".murmur").join("code-graph.db");
-    if !db.exists() {
-        return Err(ResolveError::NotIndexed);
+/// 1. `repo` relative and not climbing out of the work folder: `<repo>/.murmur/code-graph.db` in
+///    the work folder.
+/// 2. Otherwise git places it: `git -C <repo> rev-parse --show-toplevel --absolute-git-dir
+///    --show-prefix` gives the worktree `T`, its git folder `G` and `repo`'s place `P` below `T`,
+///    and `git --git-dir=<G> --work-tree=<T> rev-parse --path-format=relative --show-toplevel`,
+///    run in the work folder, gives `T` relative to it. A result that does not climb (no leading
+///    `..`; `""` and `./` mean the work folder itself) opens `<T rel>/<P>.murmur/code-graph.db`
+///    in the work folder.
+/// 3. Otherwise `<T>/<P>.murmur/code-graph.db` (or `<repo>/…` when git did not answer) through
+///    the held host folder covering it, the longest winning.
+/// 4. Otherwise [`ResolveError::OutsideRoots`].
+pub fn graph_db_path(git: &Git, repo: &str) -> Result<String, ResolveError> {
+    let roots = git.env().roots();
+    let relative = |dir: &str| match locate(&db_under(dir), roots) {
+        Ok(Located::Relative(open)) => Ok(open),
+        Ok(Located::Host { open, .. }) => Ok(open),
+        Err(Refusal::ReservedName { suggestion }) => Err(ResolveError::ReservedName {
+            suggestion: suggestion
+                .strip_suffix(&format!("/{GRAPH_DB}"))
+                .unwrap_or(&suggestion)
+                .to_string(),
+        }),
+        Err(_) => Err(ResolveError::OutsideRoots),
+    };
+
+    if !repo.starts_with('/') && !climbs(repo) {
+        return relative(repo);
     }
 
+    let place = git.git(&[
+        "-C",
+        repo,
+        "rev-parse",
+        "--show-toplevel",
+        "--absolute-git-dir",
+        "--show-prefix",
+    ]);
+    let mut root = repo.to_string();
+    if place.success {
+        let mut lines = place.stdout.lines();
+        let (top, git_dir) = (lines.next().unwrap_or(""), lines.next().unwrap_or(""));
+        let prefix = lines.next().unwrap_or("");
+        let git_dir_arg = format!("--git-dir={git_dir}");
+        let work_tree_arg = format!("--work-tree={top}");
+        let rel = git.git(&[
+            &git_dir_arg,
+            &work_tree_arg,
+            "rev-parse",
+            "--path-format=relative",
+            "--show-toplevel",
+        ]);
+        if rel.success {
+            let rel = rel.stdout.trim_end_matches('/');
+            if !rel.starts_with("..") {
+                let dir = if rel.is_empty() || rel == "." {
+                    "."
+                } else {
+                    rel
+                };
+                return relative(&format!("{dir}/{prefix}"));
+            }
+        }
+        root = format!("{top}/{prefix}");
+    }
+
+    match locate(&db_under(&root), roots) {
+        Ok(Located::Host { open, .. }) => Ok(open),
+        _ => Err(ResolveError::OutsideRoots),
+    }
+}
+
+/// Look `symbol_id` up in the database at `open` (as [`graph_db_path`] returned it), read-only.
+///
+/// Query: `SELECT f.path, s.start_line, s.end_line FROM symbols s JOIN files f ON f.id =
+/// s.file_id WHERE s.symbol_id = ?1` — the `symbols.symbol_id` column is `UNIQUE`, so at most
+/// one row matches.
+pub fn resolve_symbol_location(
+    git: &Git,
+    open: &str,
+    symbol_id: &str,
+) -> Result<SymbolLocation, ResolveError> {
+    let path = git.env().fs_path(open);
+    if !path.exists() {
+        return Err(ResolveError::NotIndexed);
+    }
+    let uri = format!("file:{}?immutable=1", escape(&path.to_string_lossy()));
     let conn = Connection::open_with_flags(
-        &db,
+        uri,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
     )
     .map_err(|e| ResolveError::Internal(e.to_string()))?;
 
-    let row = conn.query_row(
-        "SELECT f.path, s.start_line, s.end_line
-           FROM symbols s JOIN files f ON f.id = s.file_id
-          WHERE s.symbol_id = ?1",
+    conn.query_row(
+        "SELECT f.path, s.start_line, s.end_line \
+         FROM symbols s JOIN files f ON f.id = s.file_id \
+         WHERE s.symbol_id = ?1",
         rusqlite::params![symbol_id],
-        |r| {
+        |row| {
             Ok(SymbolLocation {
-                file: r.get::<_, String>(0)?,
-                start_line: r.get::<_, i64>(1)?,
-                end_line: r.get::<_, i64>(2)?,
+                file: row.get(0)?,
+                start_line: row.get(1)?,
+                end_line: row.get(2)?,
             })
         },
-    );
+    )
+    .optional()
+    .map_err(|e| ResolveError::Internal(e.to_string()))?
+    .ok_or(ResolveError::NotFound)
+}
 
-    match row {
-        Ok(loc) => Ok(loc),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Err(ResolveError::NotFound),
-        Err(e) => Err(ResolveError::Internal(e.to_string())),
+/// `path` as the path part of an SQLite `file:` URI: `%`, `?` and `#` are percent-encoded
+/// (`%25`, `%3F`, `%23`), so a path holding them is neither cut short at a query or fragment nor
+/// decoded into a different path. Every other character is passed through.
+fn escape(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        match c {
+            '%' => out.push_str("%25"),
+            '?' => out.push_str("%3F"),
+            '#' => out.push_str("%23"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_percent_encodes_only_what_ends_or_decodes_a_uri_path() {
+        assert_eq!(escape(".murmur/code-graph.db"), ".murmur/code-graph.db");
+        assert_eq!(escape("murmur-host/a b/x.db"), "murmur-host/a b/x.db");
+        assert_eq!(escape("a%b?c#d"), "a%25b%3Fc%23d");
+    }
+
+    #[test]
+    fn climbing_is_lexical() {
+        for v in ["..", "../x", "a/../..", "./../x", "a/b/../../../c"] {
+            assert!(climbs(v), "{v}");
+        }
+        for v in [".", "", "a", "a/..", "a/b/../c", "./a/./b"] {
+            assert!(!climbs(v), "{v}");
+        }
+    }
+
+    #[test]
+    fn the_database_sits_under_the_dir() {
+        assert_eq!(db_under("repo"), "repo/.murmur/code-graph.db");
+        assert_eq!(db_under("repo/"), "repo/.murmur/code-graph.db");
+        assert_eq!(db_under("./"), "./.murmur/code-graph.db");
+        assert_eq!(db_under("/srv/r"), "/srv/r/.murmur/code-graph.db");
     }
 }

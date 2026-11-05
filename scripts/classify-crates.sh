@@ -14,13 +14,13 @@
 #                    need host capabilities (subprocesses, a display) that a
 #                    wasm32-wasip2 guest does not have, or link C sources not
 #                    yet ported to wasm (tree-sitter).
-#                    Catches: tool-{git,code-graph,code-coverage,computer}.
+#                    Catches: tool-{code-graph,code-coverage,computer}.
 #
 #   internal-bin     A crate with no murmur.yaml (so: never published, absent from
 #                    list-artifacts.sh) whose Cargo.toml declares a `[[bin]]`. These
 #                    are host-side helpers, built and run on the developer's
 #                    machine, never shipped as a component.
-#                    Catches: tool-git-validate.
+#                    Catches: no member today.
 #
 # The two included classes:
 #
@@ -39,8 +39,7 @@
 #
 # Output: one tab-separated `<class>\t<crate-name>\t<path>` row per member, in
 # `[workspace] members` order. The crate name is read from Cargo.toml, not
-# inferred from the path — `tools/tool-git/validate` is the crate
-# `tool-git-validate`.
+# inferred from the path, because the two need not match.
 #
 # Usage:   scripts/classify-crates.sh
 # Exit:    0 — every member classified

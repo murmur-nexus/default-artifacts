@@ -535,7 +535,7 @@ description: "Coding agent with shell, git operations, and file editing"
 
 artifacts:
   - name: murmur/tool-git
-    version: "0.6.0"
+    version: "0.7.0"
     runtime: tool
   - name: murmur/tool-read
     version: "0.4.0"
@@ -560,7 +560,7 @@ capabilities:
   shell:
     allow:
       - bash
-      - git                    # tool-git runs git itself
+      - git                    # tool-git runs git through murmur:process
   network:
     allow:
       - https://github.com
@@ -682,7 +682,7 @@ name its `artifacts:` entry uses. For live discovery, use `mur search <keyword>`
 | `murmur/tool-create` | tool | Scaffolds a new tool or hook artifact directory with `murmur.yaml`, a stub implementation and a README, under `tools/<name>/` in the capsule workdir. |
 | `murmur/tool-edit` | tool | Replaces text in a file: `path` and `edits`, a list of exact `{old, new}` replacements applied in order, each matching once, all or nothing. Its `path` is a declared write destination, so `filesystem.read_only` refuses an edit under a read-only entry. Prefer over shell-based file editing. |
 | `murmur/tool-find` | tool | Searches file contents for a regex: `pattern`, optional `dir`, `glob`, `recursive`, `context_lines`; stops at 200 matches with a `capped` note. Declares that it writes nothing. |
-| `murmur/tool-git` | tool | Native binary. Structured git interface: status, add, diff, commit, branch, checkout, fetch, pull, push, clone, worktree, and more. Needs `git` in `capabilities.shell.allow`; `fetch`, `pull`, `push` and `clone` also need the remote's host in `capabilities.network.allow` and a `capabilities.shell.interpreter_runtime` grant for `git` naming its remote-helper directory. Prefer over granting `bash` for git work. |
+| `murmur/tool-git` | tool | WASM component. Structured git interface: status, add, diff, commit, branch, checkout, fetch, pull, push, clone, worktree, and more. Runs each git command through `murmur:process`, so it needs a `mur` at WIT level 4 or higher, and on-shell hooks and `filesystem.read_only` judge every git command it runs. Needs `git` in `capabilities.shell.allow`; `fetch`, `pull`, `push` and `clone` also need `sh` there for a remote that is a local path, or, over the network, the remote's host in `capabilities.network.allow` and a `capabilities.shell.interpreter_runtime` grant for `git` naming its remote-helper directory. Prefer over granting `bash` for git work. |
 | `murmur/tool-github` | tool | Pushes a local commit range to one pinned GitHub repo so the remote branch lands on the identical SHA (a `git clone --depth 1` works), fetches a branch back, and opens, inspects, lists and merges pull requests. Needs `gateway: {endpoint: https://api.github.com, api_key: ${GITHUB_TOKEN}}` on its entry and a `config:` block with `config_version: 1` and `repo: owner/name`; the runtime attaches the token, and without the gateway every call returns `gateway_missing`. Merging needs `allow_merge: true` and `merge_methods` in `config:`. |
 | `murmur/tool-read` | tool | Reads a file: `path`, optional `start_line`/`end_line`; at most 2000 lines and 100 KB, with a `truncated` note naming the `start_line` that continues it. Shows a PNG, JPEG, GIF or WebP file to the model as an image. Declares that it writes nothing, so it reads under `filesystem.read_only`. |
 | `murmur/tool-registry-search` | tool | WASM component. Searches a Murmur artifact index for artifacts matching a keyword; each result is a full `<scope>/<name>` with every published version, newest first. It fetches the index over `wasi:http`, so every request and redirect is checked against `capabilities.network.allow`: the default index, on the latest default-artifacts release, needs `https://github.com` and `https://release-assets.githubusercontent.com` there, and a `capabilities.network.allow` on its entry narrows it further. An absolute `index` path opens only inside a host folder the session opened. |
@@ -702,7 +702,7 @@ narrow them and warns `W-SEC-008`.
 ```yaml
 artifacts:
   - name: murmur/tool-git
-    version: "0.6.0"
+    version: "0.7.0"
     runtime: tool
   - name: murmur/hook-debug
     version: "0.10.0"

@@ -4,17 +4,40 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 
-[[bin]]
-name = "tool-git"
-path = "src/main.rs"
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
 
 [dependencies]
-serde.workspace = true
 serde_json.workspace = true
+# Reads tool-code-graph's `.murmur/code-graph.db` for `symbol_history`. Its `bundled` feature
+# compiles SQLite's C sources into the component with the pinned wasi-sdk (wasi-sdk.toml), which
+# .cargo/config.toml names as the wasm32-wasip2 C compiler; no system SQLite is linked.
 rusqlite.workspace = true
+# Binds the murmur:tool/run@0.2.0 export and the murmur:process/process@0.1.0 import (world
+# `tool`) in the wasm32 module.
+wit-bindgen.workspace = true
+# Where the database, a `clone` destination and `log_path` open: in the work folder, or inside a
+# host folder the runtime preopened as `murmur-host…`.
+murmur-host-roots = { path = "../../libs/murmur-host-roots" }
+# `NativeOutcome`: the result envelope reduced to what murmur's native dispatch handed the
+# model, as the 0.6.0 tool's stdout was. Root items only: no file-tool feature.
+murmur-file-tools = { path = "../../libs/murmur-file-tools", default-features = false }
 
+# The WASI preopens and their descriptor flags, from which the component builds its host roots.
+# Only the component reads them; the host-testable core takes the roots from its `GitEnv`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasip2 = "1.0.4"
+
+# rusqlite builds code-graph fixture databases in tool-code-graph's schema. A
+# `[dev-dependencies]` entry never reaches the cdylib.
 [dev-dependencies]
-# Used by the symbol_history integration suite to hand-build a code-graph
-# fixture db matching tool-code-graph's documented schema (this tool
-# cannot link that binary-only crate as a library).
 rusqlite.workspace = true
+serde_json.workspace = true
+
+# wasmtime and wasmtime-wasi run the compiled wasm32-wasip2 component in tests/common, with a test
+# host for `murmur:process` `run` that spawns the real git. Host-only: they do not build for
+# wasm32, and every suite that uses them is `#![cfg(unix)]`.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+wasmtime = "46"
+wasmtime-wasi = "46"

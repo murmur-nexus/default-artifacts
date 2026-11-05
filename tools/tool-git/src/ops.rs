@@ -1,124 +1,56 @@
-use std::{
-    collections::HashMap,
-    fs,
-    io::{Read, Write},
-    process::Command,
-};
+//! The operation handlers, as the native 0.6.0 tool ran them.
+//!
+//! Each handler reads its inputs from the call's arguments, runs git through [`Git::git`] — one
+//! `murmur:process` `run` per command — and builds the result envelope from git's output. git
+//! sees `repo`, `dest`, `dest_paths`, `paths` and `path` exactly as the call gave them, and runs
+//! in the work folder, so a relative value is relative to it.
+
+use std::collections::HashMap;
 
 use serde_json::{json, Value};
 
-mod resolve;
+use crate::env::{log_write, Git, Log};
+use crate::out::{err, err_result, fail_msg, ok_simple, ok_with, strip_fatal};
+use crate::paths;
+use crate::resolve;
 
-// ── Error kind constants ──────────────────────────────────────────────────────
-
-mod err {
-    pub const NOTHING_TO_STASH: &str = "nothing_to_stash";
-    pub const NOTHING_TO_COMMIT: &str = "nothing_to_commit";
-    pub const NOT_FOUND: &str = "not_found";
-    pub const CONFLICT: &str = "conflict";
-    pub const ALREADY_EXISTS: &str = "already_exists";
-    pub const NOT_MERGED: &str = "not_merged";
-    pub const DIRTY_WORKING_TREE: &str = "dirty_working_tree";
-    // ── Remote operation error kinds ──────────────────────────────────────────
-    pub const REMOTE_NOT_FOUND: &str = "remote_not_found";
-    pub const NO_TRACKING_BRANCH: &str = "no_tracking_branch";
-    pub const NON_FAST_FORWARD: &str = "non_fast_forward";
-    pub const NO_UPSTREAM: &str = "no_upstream";
-    pub const DEST_EXISTS: &str = "dest_exists";
-    pub const CLONE_FAILED: &str = "clone_failed";
-    // ── Slice 4 error kinds ───────────────────────────────────────────────────
-    pub const FF_ONLY_FAILED: &str = "ff_only_failed";
-    pub const BRANCH_CONFLICT: &str = "branch_conflict";
-    pub const DIRTY: &str = "dirty";
-    // ── symbol_history error kinds ────────────────────────────────────────────
-    // Distinct from NOT_FOUND: the repo was never indexed at all (no
-    // .murmur/code-graph.db), so no symbol id could ever resolve. The remedy is
-    // to run index_repository (tool-code-graph), not to fix the id.
-    pub const NOT_INDEXED: &str = "not_indexed";
-}
-
-// ── Binary entry point ────────────────────────────────────────────────────────
-
-fn main() {
-    let mut raw = String::new();
-    if std::io::stdin().read_to_string(&mut raw).is_err() {
-        eprintln!("fatal: failed to read stdin");
-        std::process::exit(1);
-    }
-    let result = run(&raw);
-    let json = serde_json::to_string(&result)
-        .unwrap_or_else(|_| r#"{"ok":false,"message":"failed to serialize output"}"#.to_string());
-    println!("{json}");
-}
-
-fn run(raw: &str) -> Value {
-    if raw.trim().is_empty() {
-        return fail_msg("missing input on stdin");
-    }
-
-    let envelope: Value = match serde_json::from_str(raw) {
-        Ok(e) => e,
-        Err(e) => return fail_msg(format!("invalid stdin JSON: {e}")),
-    };
-
-    let data_value = match envelope.get("data") {
-        None | Some(Value::Null) => return fail_msg("missing data field"),
-        Some(v) => v.clone(),
-    };
-
-    let log_path = envelope
-        .get("log_path")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    let log = log_path.as_deref();
-
-    // data may be a JSON-encoded string (double-encoded) or a JSON object directly
-    let op: Value = match &data_value {
-        Value::String(s) => match serde_json::from_str(s) {
-            Ok(v) => v,
-            Err(e) => return fail_msg(format!("invalid data JSON string: {e}")),
-        },
-        Value::Object(_) => data_value.clone(),
-        _ => return fail_msg("data must be a JSON string or object"),
-    };
-
+/// Run the operation `op` names.
+pub(crate) fn dispatch(g: &Git, op: &Value, log: &Log) -> Value {
     let operation = op.get("operation").and_then(|v| v.as_str()).unwrap_or("");
 
     match operation {
         // ── WORKING TREE ──────────────────────────────────────────────────────
-        "status" => op_status(&op, log),
-        "add" => op_add(&op, log),
-        "diff" => op_diff(&op, log),
-        "restore" => op_restore(&op, log),
-        "stash" => op_stash(&op, log),
+        "status" => op_status(g, op, log),
+        "add" => op_add(g, op, log),
+        "diff" => op_diff(g, op, log),
+        "restore" => op_restore(g, op, log),
+        "stash" => op_stash(g, op, log),
         // ── HISTORY ──────────────────────────────────────────────────────────
-        "log" => op_log(&op, log),
-        "show" => op_show(&op, log),
+        "log" => op_log(g, op, log),
+        "show" => op_show(g, op, log),
         // ── SYMBOL HISTORY ────────────────────────────────────────────────────
-        "symbol_history" => op_symbol_history(&op, log),
+        "symbol_history" => op_symbol_history(g, op, log),
         // ── COMMITS ──────────────────────────────────────────────────────────
-        "commit" => op_commit(&op, log),
-        "cherry_pick" => op_cherry_pick(&op, log),
+        "commit" => op_commit(g, op, log),
+        "cherry_pick" => op_cherry_pick(g, op, log),
         // ── BRANCHES ─────────────────────────────────────────────────────────
-        "branch" => op_branch(&op, log),
-        "checkout" => op_checkout(&op, log),
-        "switch" => op_switch(&op, log),
+        "branch" => op_branch(g, op, log),
+        "checkout" => op_checkout(g, op, log),
+        "switch" => op_switch(g, op, log),
         // ── RESET ────────────────────────────────────────────────────────────
-        "reset" => op_reset(&op, log),
+        "reset" => op_reset(g, op, log),
         // ── REMOTE ───────────────────────────────────────────────────────────
-        "fetch" => op_fetch(&op, log),
-        "pull" => op_pull(&op, log),
-        "push" => op_push(&op, log),
-        "clone" => op_clone(&op, log),
-        "remote" => op_remote(&op, log),
+        "fetch" => op_fetch(g, op, log),
+        "pull" => op_pull(g, op, log),
+        "push" => op_push(g, op, log),
+        "clone" => op_clone(g, op, log),
+        "remote" => op_remote(g, op, log),
         // ── TAGS / MERGE / WORKTREES ──────────────────────────────────────────
-        "tag" => op_tag(&op, log),
-        "merge" => op_merge(&op, log),
-        "worktree" => op_worktree(&op, log),
-        // ── BACKWARD-COMPAT ALIASES ───────────────────────────────────────────
-        // create_worktree predates the worktree/add operation; kept so existing capsules
-        // and tests that call it continue to work without modification.
-        "create_worktree" => op_create_worktree(&op, log),
+        "tag" => op_tag(g, op, log),
+        "merge" => op_merge(g, op, log),
+        "worktree" => op_worktree(g, op, log),
+        // create_worktree predates the worktree/add operation and takes the same inputs.
+        "create_worktree" => op_create_worktree(g, op, log),
         // list_files is deliberately not an operation; use `status` instead.
         other => fail_msg(format!("unknown operation: {other}")),
     }
@@ -127,53 +59,25 @@ fn run(raw: &str) -> Value {
 // ── Repo root resolution ──────────────────────────────────────────────────────
 
 /// Resolve the git repository root using a three-step fallback chain:
-///   1. Explicit `repo` field in the operation — used directly.
-///   2. Auto-discover via `git rev-parse --show-toplevel` from the binary's CWD.
-///   3. Last resort: `"."` (the binary's CWD).
-///
-/// Validates against `MURMUR_FILESYSTEM_ALLOW` when that env var is set.
-fn resolve_repo(op: &Value) -> Result<String, String> {
-    let resolved = if let Some(r) = op.get("repo").and_then(|v| v.as_str()) {
+///   1. Explicit `repo` field in the operation — used verbatim.
+///   2. Auto-discover via `git rev-parse --show-toplevel`, run in the work folder.
+///   3. Last resort: `"."` (the work folder).
+fn resolve_repo(g: &Git, op: &Value) -> String {
+    if let Some(r) = op.get("repo").and_then(|v| v.as_str()) {
         r.to_string()
     } else {
-        let discovered = Command::new("git")
-            .args(["rev-parse", "--show-toplevel"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|s| !s.is_empty());
-        discovered.unwrap_or_else(|| ".".to_string())
-    };
-
-    if let Ok(allow_env) = std::env::var("MURMUR_FILESYSTEM_ALLOW") {
-        let allowed: Vec<&str> = allow_env.split(':').filter(|s| !s.is_empty()).collect();
-        if !allowed.is_empty() {
-            let canonical = std::fs::canonicalize(&resolved)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| resolved.clone());
-            let permitted = allowed.iter().any(|prefix| {
-                let canon_prefix = std::fs::canonicalize(prefix)
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| prefix.to_string());
-                canonical.starts_with(&canon_prefix)
-            });
-            if !permitted {
-                return Err(format!(
-                    "repo path '{}' is not within any allowed filesystem path. \
-                     Add the path to capabilities.filesystem.allow in the manifest.",
-                    resolved
-                ));
-            }
-        }
+        let discovered = g.git(&["rev-parse", "--show-toplevel"]);
+        Some(discovered)
+            .filter(|o| o.success)
+            .map(|o| o.stdout.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| ".".to_string())
     }
-
-    Ok(resolved)
 }
 
 // ── WORKING TREE operations ───────────────────────────────────────────────────
 
-fn op_status(op: &Value, log: Option<&str>) -> Value {
+pub(crate) fn op_status(g: &Git, op: &Value, log: &Log) -> Value {
     // Accept `path` as a legacy alias for `repo` — the original binary used `path` for
     // status, and existing test fixtures send `path`. If both are absent, auto-discover.
     let repo = if let Some(r) = op
@@ -181,37 +85,14 @@ fn op_status(op: &Value, log: Option<&str>) -> Value {
         .or_else(|| op.get("path"))
         .and_then(|v| v.as_str())
     {
-        if let Ok(allow_env) = std::env::var("MURMUR_FILESYSTEM_ALLOW") {
-            let allowed: Vec<&str> = allow_env.split(':').filter(|s| !s.is_empty()).collect();
-            if !allowed.is_empty() {
-                let canonical = std::fs::canonicalize(r)
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| r.to_string());
-                let permitted = allowed.iter().any(|prefix| {
-                    let cp = std::fs::canonicalize(prefix)
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_else(|_| prefix.to_string());
-                    canonical.starts_with(&cp)
-                });
-                if !permitted {
-                    return fail_msg(format!(
-                        "repo path '{r}' is not within any allowed filesystem path. \
-                         Add the path to capabilities.filesystem.allow in the manifest."
-                    ));
-                }
-            }
-        }
         r.to_string()
     } else {
-        match resolve_repo(op) {
-            Ok(r) => r,
-            Err(e) => return fail_msg(e),
-        }
+        resolve_repo(g, op)
     };
 
     log_write(log, &format!("status: repo={repo:?}\n"));
 
-    let out = git(&["-C", &repo, "status", "--porcelain=v1"]);
+    let out = g.git(&["-C", &repo, "status", "--porcelain=v1"]);
     log_write(
         log,
         &format!("stdout: {}\nstderr: {}\n", out.stdout, out.stderr),
@@ -273,11 +154,8 @@ fn op_status(op: &Value, log: Option<&str>) -> Value {
     ok_with(message, json!({ "entries": entries }))
 }
 
-fn op_add(op: &Value, log: Option<&str>) -> Value {
-    let repo = match resolve_repo(op) {
-        Ok(r) => r,
-        Err(e) => return fail_msg(e),
-    };
+pub(crate) fn op_add(g: &Git, op: &Value, log: &Log) -> Value {
+    let repo = resolve_repo(g, op);
 
     let paths: Vec<String> = match op.get("paths") {
         Some(Value::Array(arr)) => arr
@@ -297,7 +175,7 @@ fn op_add(op: &Value, log: Option<&str>) -> Value {
     let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
     args.extend_from_slice(&path_refs);
 
-    let out = git(&args);
+    let out = g.git(&args);
     if !out.success {
         return fail_msg(format!(
             "git add failed: {}",
@@ -315,11 +193,8 @@ fn op_add(op: &Value, log: Option<&str>) -> Value {
     )
 }
 
-fn op_diff(op: &Value, log: Option<&str>) -> Value {
-    let repo = match resolve_repo(op) {
-        Ok(r) => r,
-        Err(e) => return fail_msg(e),
-    };
+pub(crate) fn op_diff(g: &Git, op: &Value, log: &Log) -> Value {
+    let repo = resolve_repo(g, op);
 
     let staged = op.get("staged").and_then(|v| v.as_bool()).unwrap_or(false);
     let path = op.get("path").and_then(|v| v.as_str());
@@ -338,7 +213,7 @@ fn op_diff(op: &Value, log: Option<&str>) -> Value {
         args.push(p);
     }
 
-    let out = git(&args);
+    let out = g.git(&args);
     if !out.success {
         return fail_msg(format!(
             "git diff failed: {}",
@@ -353,11 +228,8 @@ fn op_diff(op: &Value, log: Option<&str>) -> Value {
     ok_with("diff complete", json!({ "diff": out.stdout }))
 }
 
-fn op_restore(op: &Value, log: Option<&str>) -> Value {
-    let repo = match resolve_repo(op) {
-        Ok(r) => r,
-        Err(e) => return fail_msg(e),
-    };
+pub(crate) fn op_restore(g: &Git, op: &Value, log: &Log) -> Value {
+    let repo = resolve_repo(g, op);
 
     let paths: Vec<String> = match op.get("dest_paths") {
         Some(Value::Array(arr)) => arr
@@ -386,7 +258,7 @@ fn op_restore(op: &Value, log: Option<&str>) -> Value {
     let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
     args.extend_from_slice(&path_refs);
 
-    let out = git(&args);
+    let out = g.git(&args);
     if !out.success {
         return fail_msg(format!(
             "git restore failed: {}",
@@ -404,16 +276,13 @@ fn op_restore(op: &Value, log: Option<&str>) -> Value {
     )
 }
 
-fn op_stash(op: &Value, log: Option<&str>) -> Value {
-    let repo = match resolve_repo(op) {
-        Ok(r) => r,
-        Err(e) => return fail_msg(e),
-    };
+pub(crate) fn op_stash(g: &Git, op: &Value, log: &Log) -> Value {
+    let repo = resolve_repo(g, op);
 
     match op.get("subcommand").and_then(|v| v.as_str()) {
-        Some("push") => stash_push(&repo, op, log),
-        Some("pop") => stash_pop(&repo, op, log),
-        Some("list") => stash_list(&repo, log),
+        Some("push") => stash_push(g, &repo, op, log),
+        Some("pop") => stash_pop(g, &repo, op, log),
+        Some("list") => stash_list(g, &repo, log),
         Some(other) => fail_msg(format!(
             "unknown stash subcommand: {other}; expected push|pop|list"
         )),
@@ -421,7 +290,7 @@ fn op_stash(op: &Value, log: Option<&str>) -> Value {
     }
 }
 
-fn stash_push(repo: &str, op: &Value, log: Option<&str>) -> Value {
+fn stash_push(g: &Git, repo: &str, op: &Value, log: &Log) -> Value {
     let message = op.get("message").and_then(|v| v.as_str());
 
     let mut args: Vec<&str> = vec!["-C", repo, "stash", "push"];
@@ -435,7 +304,7 @@ fn stash_push(repo: &str, op: &Value, log: Option<&str>) -> Value {
         &format!("stash push: repo={repo:?} message={message:?}\n"),
     );
 
-    let out = git(&args);
+    let out = g.git(&args);
 
     // "No local changes to save" appears on stdout or stderr depending on git version;
     // check both. Git may exit 1 in this case, so we check before the success guard.
@@ -463,13 +332,13 @@ fn stash_push(repo: &str, op: &Value, log: Option<&str>) -> Value {
     ok_with("stash pushed", json!({ "stash_ref": "stash@{0}" }))
 }
 
-fn stash_pop(repo: &str, op: &Value, log: Option<&str>) -> Value {
+fn stash_pop(g: &Git, repo: &str, op: &Value, log: &Log) -> Value {
     let index = op.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
     let stash_ref = format!("stash@{{{index}}}");
 
     log_write(log, &format!("stash pop: repo={repo:?} index={index}\n"));
 
-    let out = git(&["-C", repo, "stash", "pop", &stash_ref]);
+    let out = g.git(&["-C", repo, "stash", "pop", &stash_ref]);
     if !out.success {
         return fail_msg(format!(
             "git stash pop failed: {}",
@@ -484,11 +353,11 @@ fn stash_pop(repo: &str, op: &Value, log: Option<&str>) -> Value {
     ok_simple("stash popped")
 }
 
-fn stash_list(repo: &str, log: Option<&str>) -> Value {
+fn stash_list(g: &Git, repo: &str, log: &Log) -> Value {
     log_write(log, &format!("stash list: repo={repo:?}\n"));
 
     // %gd = reflog selector (stash@{N}), %gs = reflog subject (WIP on branch: ...)
-    let out = git(&["-C", repo, "stash", "list", "--format=%gd|%gs"]);
+    let out = g.git(&["-C", repo, "stash", "list", "--format=%gd|%gs"]);
     if !out.success {
         return fail_msg(format!(
             "git stash list failed: {}",
@@ -539,11 +408,8 @@ fn parse_stash_branch(subject: &str) -> String {
 
 // ── HISTORY operations ────────────────────────────────────────────────────────
 
-fn op_log(op: &Value, log: Option<&str>) -> Value {
-    let repo = match resolve_repo(op) {
-        Ok(r) => r,
-        Err(e) => return fail_msg(e),
-    };
+pub(crate) fn op_log(g: &Git, op: &Value, log: &Log) -> Value {
+    let repo = resolve_repo(g, op);
 
     let n = op.get("n").and_then(|v| v.as_u64()).unwrap_or(20);
     let author = op.get("author").and_then(|v| v.as_str()).map(String::from);
@@ -576,7 +442,7 @@ fn op_log(op: &Value, log: Option<&str>) -> Value {
 
     log_write(log, &format!("log: repo={repo:?} n={n}\n"));
 
-    let out = git(&args);
+    let out = g.git(&args);
     if !out.success {
         return fail_msg(format!(
             "git log failed: {}",
@@ -615,11 +481,8 @@ fn op_log(op: &Value, log: Option<&str>) -> Value {
     )
 }
 
-fn op_show(op: &Value, log: Option<&str>) -> Value {
-    let repo = match resolve_repo(op) {
-        Ok(r) => r,
-        Err(e) => return fail_msg(e),
-    };
+pub(crate) fn op_show(g: &Git, op: &Value, log: &Log) -> Value {
+    let repo = resolve_repo(g, op);
 
     let ref_str = op
         .get("ref")
@@ -630,7 +493,7 @@ fn op_show(op: &Value, log: Option<&str>) -> Value {
     log_write(log, &format!("show: repo={repo:?} ref={ref_str:?}\n"));
 
     // 1. Commit metadata — two separate calls per spec.
-    let meta_out = git(&[
+    let meta_out = g.git(&[
         "-C",
         &repo,
         "show",
@@ -678,7 +541,7 @@ fn op_show(op: &Value, log: Option<&str>) -> Value {
     };
 
     // 2. Full patch output.
-    let diff_out = git(&["-C", &repo, "show", "--stat", "-p", &ref_str]);
+    let diff_out = g.git(&["-C", &repo, "show", "--stat", "-p", &ref_str]);
     let diff = if diff_out.success {
         diff_out.stdout
     } else {
@@ -697,18 +560,15 @@ fn op_show(op: &Value, log: Option<&str>) -> Value {
 /// caller ever tracking a line number by hand.
 ///
 /// Resolves `symbol_id` against `tool-code-graph`'s indexed `symbols`
-/// table (via [`resolve::resolve_symbol_location`]) to get the symbol's *current*
+/// table (via [`resolve::graph_db_path`] and [`resolve::resolve_symbol_location`]) to get the symbol's *current*
 /// file path and 1-based line range, then runs `git log -L<start>,<end>:<file>`
 /// and returns the most recent `n` commits (default 1) that touched any line in
 /// that range. Keeping the query symbol-identity-based — not line-based like raw
 /// `git blame` — is the whole point: an unrelated edit shifting lines above the
 /// symbol re-indexes into a new range and this still finds the symbol's own last
 /// real edit.
-fn op_symbol_history(op: &Value, log: Option<&str>) -> Value {
-    let repo = match resolve_repo(op) {
-        Ok(r) => r,
-        Err(e) => return fail_msg(e),
-    };
+pub(crate) fn op_symbol_history(g: &Git, op: &Value, log: &Log) -> Value {
+    let repo = resolve_repo(g, op);
 
     let symbol_id = match op.get("symbol_id").and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() => s.to_string(),
@@ -728,8 +588,28 @@ fn op_symbol_history(op: &Value, log: Option<&str>) -> Value {
         &format!("symbol_history: repo={repo:?} symbol_id={symbol_id:?} n={n}\n"),
     );
 
-    let loc = match resolve::resolve_symbol_location(&repo, &symbol_id) {
+    let located = resolve::graph_db_path(g, &repo)
+        .and_then(|open| resolve::resolve_symbol_location(g, &open, &symbol_id));
+    let loc = match located {
         Ok(loc) => loc,
+        Err(resolve::ResolveError::OutsideRoots) => {
+            return err_result(
+                err::OUTSIDE_ROOTS,
+                format!(
+                    "symbol_history: cannot read {repo}/.murmur/code-graph.db: it is outside \
+                     the work folder and every host folder this session opens to tool-git"
+                ),
+            );
+        }
+        Err(resolve::ResolveError::ReservedName { suggestion }) => {
+            return err_result(
+                err::RESERVED_NAME,
+                format!(
+                    "symbol_history: 'repo' starts with murmur-host, where this tool's host \
+                     folders are opened; name the host path absolutely: '{suggestion}'"
+                ),
+            );
+        }
         Err(resolve::ResolveError::NotIndexed) => {
             return err_result(
                 err::NOT_INDEXED,
@@ -756,7 +636,7 @@ fn op_symbol_history(op: &Value, log: Option<&str>) -> Value {
     // symbol resolved fine, it just isn't committed. It is also distinct from a
     // stale index (scenario 8) — there the file IS in HEAD, so this guard passes
     // and the real "file ... has only N lines" error surfaces below.
-    let in_head = git(&["-C", &repo, "cat-file", "-e", &format!("HEAD:{}", loc.file)]);
+    let in_head = g.git(&["-C", &repo, "cat-file", "-e", &format!("HEAD:{}", loc.file)]);
     if !in_head.success {
         return ok_with(
             format!("0 commit(s) for {symbol_id}"),
@@ -774,7 +654,7 @@ fn op_symbol_history(op: &Value, log: Option<&str>) -> Value {
     // git log -L<start>,<end>:<file> — the -L range is against the file's state in
     // HEAD, exactly the range code-graph just indexed.
     let range = format!("-L{},{}:{}", loc.start_line, loc.end_line, loc.file);
-    let out = git(&[
+    let out = g.git(&[
         "-C",
         &repo,
         "log",
@@ -835,11 +715,8 @@ fn op_symbol_history(op: &Value, log: Option<&str>) -> Value {
 
 // ── COMMITS operations ────────────────────────────────────────────────────────
 
-fn op_commit(op: &Value, log: Option<&str>) -> Value {
-    let repo = match resolve_repo(op) {
-        Ok(r) => r,
-        Err(e) => return fail_msg(e),
-    };
+pub(crate) fn op_commit(g: &Git, op: &Value, log: &Log) -> Value {
+    let repo = resolve_repo(g, op);
 
     let message = match op.get("message").and_then(|v| v.as_str()) {
         Some(m) if !m.is_empty() => m.to_string(),
@@ -861,7 +738,7 @@ fn op_commit(op: &Value, log: Option<&str>) -> Value {
         args.push("--allow-empty");
     }
 
-    let out = git(&args);
+    let out = g.git(&args);
 
     if !out.success {
         let combined = format!("{}\n{}", out.stdout, out.stderr);
@@ -881,11 +758,11 @@ fn op_commit(op: &Value, log: Option<&str>) -> Value {
         ));
     }
 
-    let head = git(&["-C", &repo, "rev-parse", "HEAD"]);
+    let head = g.git(&["-C", &repo, "rev-parse", "HEAD"]);
     let hash = head.stdout.trim().to_string();
-    let short_head = git(&["-C", &repo, "rev-parse", "--short", "HEAD"]);
+    let short_head = g.git(&["-C", &repo, "rev-parse", "--short", "HEAD"]);
     let short_hash = short_head.stdout.trim().to_string();
-    let log_out = git(&["-C", &repo, "log", "-1", "--format=%s", "HEAD"]);
+    let log_out = g.git(&["-C", &repo, "log", "-1", "--format=%s", "HEAD"]);
     let subject = log_out.stdout.trim().to_string();
 
     ok_with(
@@ -894,11 +771,8 @@ fn op_commit(op: &Value, log: Option<&str>) -> Value {
     )
 }
 
-fn op_cherry_pick(op: &Value, log: Option<&str>) -> Value {
-    let repo = match resolve_repo(op) {
-        Ok(r) => r,
-        Err(e) => return fail_msg(e),
-    };
+pub(crate) fn op_cherry_pick(g: &Git, op: &Value, log: &Log) -> Value {
+    let repo = resolve_repo(g, op);
 
     let ref_str = match op.get("ref").and_then(|v| v.as_str()) {
         Some(r) if !r.is_empty() => r.to_string(),
@@ -910,7 +784,7 @@ fn op_cherry_pick(op: &Value, log: Option<&str>) -> Value {
         &format!("cherry_pick: repo={repo:?} ref={ref_str:?}\n"),
     );
 
-    let out = git(&["-C", &repo, "cherry-pick", &ref_str]);
+    let out = g.git(&["-C", &repo, "cherry-pick", &ref_str]);
 
     if !out.success {
         let combined = format!("{}\n{}", out.stdout, out.stderr);
@@ -933,11 +807,11 @@ fn op_cherry_pick(op: &Value, log: Option<&str>) -> Value {
         ));
     }
 
-    let head = git(&["-C", &repo, "rev-parse", "HEAD"]);
+    let head = g.git(&["-C", &repo, "rev-parse", "HEAD"]);
     let hash = head.stdout.trim().to_string();
-    let short_head = git(&["-C", &repo, "rev-parse", "--short", "HEAD"]);
+    let short_head = g.git(&["-C", &repo, "rev-parse", "--short", "HEAD"]);
     let short_hash = short_head.stdout.trim().to_string();
-    let log_out = git(&["-C", &repo, "log", "-1", "--format=%s", "HEAD"]);
+    let log_out = g.git(&["-C", &repo, "log", "-1", "--format=%s", "HEAD"]);
     let subject = log_out.stdout.trim().to_string();
 
     ok_with(
@@ -948,16 +822,13 @@ fn op_cherry_pick(op: &Value, log: Option<&str>) -> Value {
 
 // ── BRANCHES operations ───────────────────────────────────────────────────────
 
-fn op_branch(op: &Value, log: Option<&str>) -> Value {
-    let repo = match resolve_repo(op) {
-        Ok(r) => r,
-        Err(e) => return fail_msg(e),
-    };
+pub(crate) fn op_branch(g: &Git, op: &Value, log: &Log) -> Value {
+    let repo = resolve_repo(g, op);
 
     match op.get("subcommand").and_then(|v| v.as_str()) {
-        Some("list") => branch_list(&repo, log),
-        Some("create") => branch_create(&repo, op, log),
-        Some("delete") => branch_delete(&repo, op, log),
+        Some("list") => branch_list(g, &repo, log),
+        Some("create") => branch_create(g, &repo, op, log),
+        Some("delete") => branch_delete(g, &repo, op, log),
         Some(other) => fail_msg(format!(
             "unknown branch subcommand: {other}; expected list|create|delete"
         )),
@@ -965,10 +836,10 @@ fn op_branch(op: &Value, log: Option<&str>) -> Value {
     }
 }
 
-fn branch_list(repo: &str, log: Option<&str>) -> Value {
+fn branch_list(g: &Git, repo: &str, log: &Log) -> Value {
     log_write(log, &format!("branch list: repo={repo:?}\n"));
 
-    let out = git(&[
+    let out = g.git(&[
         "-C",
         repo,
         "branch",
@@ -1011,7 +882,7 @@ fn branch_list(repo: &str, log: Option<&str>) -> Value {
     )
 }
 
-fn branch_create(repo: &str, op: &Value, log: Option<&str>) -> Value {
+fn branch_create(g: &Git, repo: &str, op: &Value, log: &Log) -> Value {
     let name = match op.get("name").and_then(|v| v.as_str()) {
         Some(n) if !n.is_empty() => n.to_string(),
         _ => return fail_msg("missing required field: name"),
@@ -1028,7 +899,7 @@ fn branch_create(repo: &str, op: &Value, log: Option<&str>) -> Value {
         args.push(f);
     }
 
-    let out = git(&args);
+    let out = g.git(&args);
     if !out.success {
         let combined = format!("{}\n{}", out.stdout, out.stderr);
         if combined.contains("already exists") {
@@ -1050,7 +921,7 @@ fn branch_create(repo: &str, op: &Value, log: Option<&str>) -> Value {
     ok_with(format!("branch '{name}' created"), json!({ "name": name }))
 }
 
-fn branch_delete(repo: &str, op: &Value, log: Option<&str>) -> Value {
+fn branch_delete(g: &Git, repo: &str, op: &Value, log: &Log) -> Value {
     let name = match op.get("name").and_then(|v| v.as_str()) {
         Some(n) if !n.is_empty() => n.to_string(),
         _ => return fail_msg("missing required field: name"),
@@ -1063,7 +934,7 @@ fn branch_delete(repo: &str, op: &Value, log: Option<&str>) -> Value {
     );
 
     let flag = if force { "-D" } else { "-d" };
-    let out = git(&["-C", repo, "branch", flag, &name]);
+    let out = g.git(&["-C", repo, "branch", flag, &name]);
     if !out.success {
         let combined = format!("{}\n{}", out.stdout, out.stderr);
         if combined.contains("not found") {
@@ -1088,11 +959,8 @@ fn branch_delete(repo: &str, op: &Value, log: Option<&str>) -> Value {
     ok_with(format!("branch '{name}' deleted"), json!({ "name": name }))
 }
 
-fn op_checkout(op: &Value, log: Option<&str>) -> Value {
-    let repo = match resolve_repo(op) {
-        Ok(r) => r,
-        Err(e) => return fail_msg(e),
-    };
+pub(crate) fn op_checkout(g: &Git, op: &Value, log: &Log) -> Value {
+    let repo = resolve_repo(g, op);
 
     let ref_str = match op.get("ref").and_then(|v| v.as_str()) {
         Some(r) if !r.is_empty() => r.to_string(),
@@ -1111,7 +979,7 @@ fn op_checkout(op: &Value, log: Option<&str>) -> Value {
     }
     args.push(&ref_str);
 
-    let out = git(&args);
+    let out = g.git(&args);
     if !out.success {
         let combined = format!("{}\n{}", out.stdout, out.stderr);
         if combined.contains("Your local changes") || combined.contains("would be overwritten") {
@@ -1139,7 +1007,7 @@ fn op_checkout(op: &Value, log: Option<&str>) -> Value {
         ));
     }
 
-    let branch_out = git(&["-C", &repo, "branch", "--show-current"]);
+    let branch_out = g.git(&["-C", &repo, "branch", "--show-current"]);
     let branch = branch_out.stdout.trim().to_string();
     let detached = branch.is_empty();
 
@@ -1149,11 +1017,8 @@ fn op_checkout(op: &Value, log: Option<&str>) -> Value {
     )
 }
 
-fn op_switch(op: &Value, log: Option<&str>) -> Value {
-    let repo = match resolve_repo(op) {
-        Ok(r) => r,
-        Err(e) => return fail_msg(e),
-    };
+pub(crate) fn op_switch(g: &Git, op: &Value, log: &Log) -> Value {
+    let repo = resolve_repo(g, op);
 
     let branch = match op.get("branch").and_then(|v| v.as_str()) {
         Some(b) if !b.is_empty() => b.to_string(),
@@ -1172,7 +1037,7 @@ fn op_switch(op: &Value, log: Option<&str>) -> Value {
     }
     args.push(&branch);
 
-    let out = git(&args);
+    let out = g.git(&args);
     if !out.success {
         let combined = format!("{}\n{}", out.stdout, out.stderr);
         if combined.contains("Your local changes") || combined.contains("would be overwritten") {
@@ -1200,7 +1065,7 @@ fn op_switch(op: &Value, log: Option<&str>) -> Value {
         ));
     }
 
-    let branch_out = git(&["-C", &repo, "branch", "--show-current"]);
+    let branch_out = g.git(&["-C", &repo, "branch", "--show-current"]);
     let current = branch_out.stdout.trim().to_string();
 
     ok_with(
@@ -1211,11 +1076,8 @@ fn op_switch(op: &Value, log: Option<&str>) -> Value {
 
 // ── RESET operations ──────────────────────────────────────────────────────────
 
-fn op_reset(op: &Value, log: Option<&str>) -> Value {
-    let repo = match resolve_repo(op) {
-        Ok(r) => r,
-        Err(e) => return fail_msg(e),
-    };
+pub(crate) fn op_reset(g: &Git, op: &Value, log: &Log) -> Value {
+    let repo = resolve_repo(g, op);
 
     let mode = match op.get("mode").and_then(|v| v.as_str()) {
         Some(m @ ("soft" | "mixed" | "hard")) => m.to_string(),
@@ -1234,7 +1096,7 @@ fn op_reset(op: &Value, log: Option<&str>) -> Value {
         &format!("reset: repo={repo:?} mode={mode} ref={ref_str:?}\n"),
     );
 
-    let out = git(&["-C", &repo, "reset", &mode_flag, &ref_str]);
+    let out = g.git(&["-C", &repo, "reset", &mode_flag, &ref_str]);
     if !out.success {
         return fail_msg(format!(
             "git reset failed: {}",
@@ -1246,7 +1108,7 @@ fn op_reset(op: &Value, log: Option<&str>) -> Value {
         ));
     }
 
-    let head = git(&["-C", &repo, "rev-parse", "HEAD"]);
+    let head = g.git(&["-C", &repo, "rev-parse", "HEAD"]);
     let resolved = head.stdout.trim().to_string();
 
     ok_with(
@@ -1257,11 +1119,8 @@ fn op_reset(op: &Value, log: Option<&str>) -> Value {
 
 // ── REMOTE operations ────────────────────────────────────────────────────────
 
-fn op_fetch(op: &Value, log: Option<&str>) -> Value {
-    let repo = match resolve_repo(op) {
-        Ok(r) => r,
-        Err(e) => return fail_msg(e),
-    };
+pub(crate) fn op_fetch(g: &Git, op: &Value, log: &Log) -> Value {
+    let repo = resolve_repo(g, op);
 
     let remote = op
         .get("remote")
@@ -1279,7 +1138,7 @@ fn op_fetch(op: &Value, log: Option<&str>) -> Value {
         args.push(b);
     }
 
-    let out = git(&args);
+    let out = g.git(&args);
 
     if !out.success {
         let combined = format!("{}\n{}", out.stdout, out.stderr);
@@ -1334,11 +1193,8 @@ fn parse_fetch_updated_refs(stderr: &str) -> Vec<String> {
     refs
 }
 
-fn op_pull(op: &Value, log: Option<&str>) -> Value {
-    let repo = match resolve_repo(op) {
-        Ok(r) => r,
-        Err(e) => return fail_msg(e),
-    };
+pub(crate) fn op_pull(g: &Git, op: &Value, log: &Log) -> Value {
+    let repo = resolve_repo(g, op);
 
     let remote = op
         .get("remote")
@@ -1361,7 +1217,7 @@ fn op_pull(op: &Value, log: Option<&str>) -> Value {
         args.push(b);
     }
 
-    let out = git(&args);
+    let out = g.git(&args);
 
     if !out.success {
         let combined = format!("{}\n{}", out.stdout, out.stderr);
@@ -1396,7 +1252,7 @@ fn op_pull(op: &Value, log: Option<&str>) -> Value {
     let commits_pulled = if combined.contains("Already up to date") {
         0i64
     } else {
-        let log_out = git(&["-C", &repo, "log", "ORIG_HEAD..HEAD", "--oneline"]);
+        let log_out = g.git(&["-C", &repo, "log", "ORIG_HEAD..HEAD", "--oneline"]);
         if log_out.success {
             log_out.stdout.lines().filter(|l| !l.is_empty()).count() as i64
         } else {
@@ -1407,7 +1263,7 @@ fn op_pull(op: &Value, log: Option<&str>) -> Value {
     let result_branch = if let Some(b) = branch {
         b.to_string()
     } else {
-        git(&["-C", &repo, "branch", "--show-current"])
+        g.git(&["-C", &repo, "branch", "--show-current"])
             .stdout
             .trim()
             .to_string()
@@ -1424,11 +1280,8 @@ fn op_pull(op: &Value, log: Option<&str>) -> Value {
     )
 }
 
-fn op_push(op: &Value, log: Option<&str>) -> Value {
-    let repo = match resolve_repo(op) {
-        Ok(r) => r,
-        Err(e) => return fail_msg(e),
-    };
+pub(crate) fn op_push(g: &Git, op: &Value, log: &Log) -> Value {
+    let repo = resolve_repo(g, op);
 
     let remote = op
         .get("remote")
@@ -1460,7 +1313,7 @@ fn op_push(op: &Value, log: Option<&str>) -> Value {
         args.push(b);
     }
 
-    let out = git(&args);
+    let out = g.git(&args);
 
     if !out.success {
         let combined = format!("{}\n{}", out.stdout, out.stderr);
@@ -1489,7 +1342,7 @@ fn op_push(op: &Value, log: Option<&str>) -> Value {
     let push_branch = if let Some(b) = branch {
         b.to_string()
     } else {
-        git(&["-C", &repo, "branch", "--show-current"])
+        g.git(&["-C", &repo, "branch", "--show-current"])
             .stdout
             .trim()
             .to_string()
@@ -1531,7 +1384,7 @@ fn parse_push_remote_ref(stdout: &str, fallback_branch: &str) -> String {
     }
 }
 
-fn op_clone(op: &Value, log: Option<&str>) -> Value {
+pub(crate) fn op_clone(g: &Git, op: &Value, log: &Log) -> Value {
     let url = match op.get("url").and_then(|v| v.as_str()) {
         Some(u) if !u.is_empty() => u.to_string(),
         _ => return fail_msg("missing required field: url"),
@@ -1548,7 +1401,7 @@ fn op_clone(op: &Value, log: Option<&str>) -> Value {
         &format!("clone: url={url:?} dest={dest:?} branch={branch:?} depth={depth:?}\n"),
     );
 
-    if std::path::Path::new(&dest).exists() {
+    if paths::dest_exists(g, &dest) {
         return err_result(
             err::DEST_EXISTS,
             format!("destination '{dest}' already exists"),
@@ -1568,9 +1421,20 @@ fn op_clone(op: &Value, log: Option<&str>) -> Value {
     args.push(&url);
     args.push(&dest);
 
-    let out = git(&args);
+    let out = g.git(&args);
 
     if !out.success {
+        // An absolute `dest` no held host folder covers skips the check above; git's own check
+        // refuses a non-empty folder there with the same answer.
+        if out
+            .stderr
+            .contains("already exists and is not an empty directory")
+        {
+            return err_result(
+                err::DEST_EXISTS,
+                format!("destination '{dest}' already exists"),
+            );
+        }
         return err_result(
             err::CLONE_FAILED,
             format!(
@@ -1584,7 +1448,7 @@ fn op_clone(op: &Value, log: Option<&str>) -> Value {
         );
     }
 
-    let head_out = git(&["-C", &dest, "symbolic-ref", "--short", "HEAD"]);
+    let head_out = g.git(&["-C", &dest, "symbolic-ref", "--short", "HEAD"]);
     let default_branch = head_out.stdout.trim().to_string();
 
     ok_with(
@@ -1593,16 +1457,13 @@ fn op_clone(op: &Value, log: Option<&str>) -> Value {
     )
 }
 
-fn op_remote(op: &Value, log: Option<&str>) -> Value {
-    let repo = match resolve_repo(op) {
-        Ok(r) => r,
-        Err(e) => return fail_msg(e),
-    };
+pub(crate) fn op_remote(g: &Git, op: &Value, log: &Log) -> Value {
+    let repo = resolve_repo(g, op);
 
     match op.get("subcommand").and_then(|v| v.as_str()) {
-        Some("list") => remote_list(&repo, log),
-        Some("add") => remote_add(&repo, op, log),
-        Some("remove") => remote_remove(&repo, op, log),
+        Some("list") => remote_list(g, &repo, log),
+        Some("add") => remote_add(g, &repo, op, log),
+        Some("remove") => remote_remove(g, &repo, op, log),
         Some(other) => fail_msg(format!(
             "unknown remote subcommand: {other}; expected list|add|remove"
         )),
@@ -1610,12 +1471,12 @@ fn op_remote(op: &Value, log: Option<&str>) -> Value {
     }
 }
 
-fn remote_list(repo: &str, log: Option<&str>) -> Value {
+fn remote_list(g: &Git, repo: &str, log: &Log) -> Value {
     log_write(log, &format!("remote list: repo={repo:?}\n"));
 
     // `git remote -v` emits two lines per remote: one for fetch, one for push.
     // Format: "<name>\t<url> (fetch|push)"
-    let out = git(&["-C", repo, "remote", "-v"]);
+    let out = g.git(&["-C", repo, "remote", "-v"]);
     if !out.success {
         return fail_msg(format!(
             "git remote -v failed: {}",
@@ -1665,7 +1526,7 @@ fn remote_list(repo: &str, log: Option<&str>) -> Value {
     )
 }
 
-fn remote_add(repo: &str, op: &Value, log: Option<&str>) -> Value {
+fn remote_add(g: &Git, repo: &str, op: &Value, log: &Log) -> Value {
     let name = match op.get("name").and_then(|v| v.as_str()) {
         Some(n) if !n.is_empty() => n.to_string(),
         _ => return fail_msg("missing required field: name"),
@@ -1680,7 +1541,7 @@ fn remote_add(repo: &str, op: &Value, log: Option<&str>) -> Value {
         &format!("remote add: repo={repo:?} name={name:?} url={url:?}\n"),
     );
 
-    let out = git(&["-C", repo, "remote", "add", &name, &url]);
+    let out = g.git(&["-C", repo, "remote", "add", &name, &url]);
     if !out.success {
         let combined = format!("{}\n{}", out.stdout, out.stderr);
         if combined.contains("already exists") {
@@ -1705,7 +1566,7 @@ fn remote_add(repo: &str, op: &Value, log: Option<&str>) -> Value {
     )
 }
 
-fn remote_remove(repo: &str, op: &Value, log: Option<&str>) -> Value {
+fn remote_remove(g: &Git, repo: &str, op: &Value, log: &Log) -> Value {
     let name = match op.get("name").and_then(|v| v.as_str()) {
         Some(n) if !n.is_empty() => n.to_string(),
         _ => return fail_msg("missing required field: name"),
@@ -1716,7 +1577,7 @@ fn remote_remove(repo: &str, op: &Value, log: Option<&str>) -> Value {
         &format!("remote remove: repo={repo:?} name={name:?}\n"),
     );
 
-    let out = git(&["-C", repo, "remote", "remove", &name]);
+    let out = g.git(&["-C", repo, "remote", "remove", &name]);
     if !out.success {
         let combined = format!("{}\n{}", out.stdout, out.stderr);
         if combined.contains("No such remote") || combined.contains("does not exist") {
@@ -1737,15 +1598,12 @@ fn remote_remove(repo: &str, op: &Value, log: Option<&str>) -> Value {
 
 // ── TAG operations ────────────────────────────────────────────────────────────
 
-fn op_tag(op: &Value, log: Option<&str>) -> Value {
-    let repo = match resolve_repo(op) {
-        Ok(r) => r,
-        Err(e) => return fail_msg(e),
-    };
+pub(crate) fn op_tag(g: &Git, op: &Value, log: &Log) -> Value {
+    let repo = resolve_repo(g, op);
 
     match op.get("subcommand").and_then(|v| v.as_str()) {
-        Some("list") => tag_list(&repo, log),
-        Some("create") => tag_create(&repo, op, log),
+        Some("list") => tag_list(g, &repo, log),
+        Some("create") => tag_create(g, &repo, op, log),
         Some(other) => fail_msg(format!(
             "unknown tag subcommand: {other}; expected list|create"
         )),
@@ -1753,10 +1611,10 @@ fn op_tag(op: &Value, log: Option<&str>) -> Value {
     }
 }
 
-fn tag_list(repo: &str, log: Option<&str>) -> Value {
+fn tag_list(g: &Git, repo: &str, log: &Log) -> Value {
     log_write(log, &format!("tag list: repo={repo:?}\n"));
 
-    let out = git(&[
+    let out = g.git(&[
         "-C",
         repo,
         "tag",
@@ -1787,7 +1645,7 @@ fn tag_list(repo: &str, log: Option<&str>) -> Value {
     ok_with(format!("{} tag(s)", tags.len()), json!({ "tags": tags }))
 }
 
-fn tag_create(repo: &str, op: &Value, log: Option<&str>) -> Value {
+fn tag_create(g: &Git, repo: &str, op: &Value, log: &Log) -> Value {
     let name = match op.get("name").and_then(|v| v.as_str()) {
         Some(n) if !n.is_empty() => n.to_string(),
         _ => return fail_msg("missing required field: name"),
@@ -1813,7 +1671,7 @@ fn tag_create(repo: &str, op: &Value, log: Option<&str>) -> Value {
     args.push(&name);
     args.push(&ref_str);
 
-    let out = git(&args);
+    let out = g.git(&args);
     if !out.success {
         let combined = format!("{}\n{}", out.stdout, out.stderr);
         if combined.contains("already exists") {
@@ -1830,7 +1688,7 @@ fn tag_create(repo: &str, op: &Value, log: Option<&str>) -> Value {
     }
 
     // Resolve the short hash the tag points to
-    let rev_out = git(&["-C", repo, "rev-parse", "--short", &name]);
+    let rev_out = g.git(&["-C", repo, "rev-parse", "--short", &name]);
     let resolved_ref = rev_out.stdout.trim().to_string();
 
     ok_with(
@@ -1841,11 +1699,8 @@ fn tag_create(repo: &str, op: &Value, log: Option<&str>) -> Value {
 
 // ── MERGE operations ──────────────────────────────────────────────────────────
 
-fn op_merge(op: &Value, log: Option<&str>) -> Value {
-    let repo = match resolve_repo(op) {
-        Ok(r) => r,
-        Err(e) => return fail_msg(e),
-    };
+pub(crate) fn op_merge(g: &Git, op: &Value, log: &Log) -> Value {
+    let repo = resolve_repo(g, op);
 
     let branch = match op.get("branch").and_then(|v| v.as_str()) {
         Some(b) if !b.is_empty() => b.to_string(),
@@ -1860,7 +1715,7 @@ fn op_merge(op: &Value, log: Option<&str>) -> Value {
     );
 
     // Record HEAD before merge to detect whether a new commit was created.
-    let head_before = git(&["-C", &repo, "rev-parse", "HEAD"]);
+    let head_before = g.git(&["-C", &repo, "rev-parse", "HEAD"]);
     let head_before_hash = head_before.stdout.trim().to_string();
 
     let mut args: Vec<&str> = vec!["-C", &repo, "merge"];
@@ -1876,7 +1731,7 @@ fn op_merge(op: &Value, log: Option<&str>) -> Value {
     }
     args.push(&branch);
 
-    let out = git(&args);
+    let out = g.git(&args);
     let combined = format!("{}\n{}", out.stdout, out.stderr);
 
     if !out.success {
@@ -1909,7 +1764,7 @@ fn op_merge(op: &Value, log: Option<&str>) -> Value {
     }
 
     let fast_forward = combined.contains("Fast-forward");
-    let head_after = git(&["-C", &repo, "rev-parse", "HEAD"]);
+    let head_after = g.git(&["-C", &repo, "rev-parse", "HEAD"]);
     let head_after_hash = head_after.stdout.trim().to_string();
 
     // merged_commit is null for fast-forwards (no new merge commit) or no-ops.
@@ -1927,16 +1782,13 @@ fn op_merge(op: &Value, log: Option<&str>) -> Value {
 
 // ── WORKTREE operations ───────────────────────────────────────────────────────
 
-fn op_worktree(op: &Value, log: Option<&str>) -> Value {
-    let repo = match resolve_repo(op) {
-        Ok(r) => r,
-        Err(e) => return fail_msg(e),
-    };
+pub(crate) fn op_worktree(g: &Git, op: &Value, log: &Log) -> Value {
+    let repo = resolve_repo(g, op);
 
     match op.get("subcommand").and_then(|v| v.as_str()) {
-        Some("add") => worktree_add(&repo, op, log),
-        Some("list") => worktree_list(&repo, log),
-        Some("remove") => worktree_remove(&repo, op, log),
+        Some("add") => worktree_add(g, &repo, op, log),
+        Some("list") => worktree_list(g, &repo, log),
+        Some("remove") => worktree_remove(g, &repo, op, log),
         Some(other) => fail_msg(format!(
             "unknown worktree subcommand: {other}; expected add|list|remove"
         )),
@@ -1944,7 +1796,7 @@ fn op_worktree(op: &Value, log: Option<&str>) -> Value {
     }
 }
 
-fn worktree_add(repo: &str, op: &Value, log: Option<&str>) -> Value {
+fn worktree_add(g: &Git, repo: &str, op: &Value, log: &Log) -> Value {
     let dest = match op.get("dest").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => p.to_string(),
         _ => return fail_msg("missing required field: dest"),
@@ -1959,7 +1811,7 @@ fn worktree_add(repo: &str, op: &Value, log: Option<&str>) -> Value {
         &format!("worktree add: repo={repo:?} dest={dest:?} branch={branch:?}\n"),
     );
 
-    let out = git(&["-C", repo, "worktree", "add", &dest, &branch]);
+    let out = g.git(&["-C", repo, "worktree", "add", &dest, &branch]);
     if !out.success {
         let combined = format!("{}\n{}", out.stdout, out.stderr);
         if combined.contains("is already checked out")
@@ -1980,10 +1832,10 @@ fn worktree_add(repo: &str, op: &Value, log: Option<&str>) -> Value {
     )
 }
 
-fn worktree_list(repo: &str, log: Option<&str>) -> Value {
+fn worktree_list(g: &Git, repo: &str, log: &Log) -> Value {
     log_write(log, &format!("worktree list: repo={repo:?}\n"));
 
-    let out = git(&["-C", repo, "worktree", "list", "--porcelain"]);
+    let out = g.git(&["-C", repo, "worktree", "list", "--porcelain"]);
     if !out.success {
         return fail_msg(format!(
             "git worktree list failed: {}",
@@ -2042,7 +1894,7 @@ fn worktree_list(repo: &str, log: Option<&str>) -> Value {
     )
 }
 
-fn worktree_remove(repo: &str, op: &Value, log: Option<&str>) -> Value {
+fn worktree_remove(g: &Git, repo: &str, op: &Value, log: &Log) -> Value {
     let dest = match op.get("dest").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => p.to_string(),
         _ => return fail_msg("missing required field: dest"),
@@ -2060,7 +1912,7 @@ fn worktree_remove(repo: &str, op: &Value, log: Option<&str>) -> Value {
     }
     args.push(&dest);
 
-    let out = git(&args);
+    let out = g.git(&args);
     if !out.success {
         let combined = format!("{}\n{}", out.stdout, out.stderr);
         if combined.contains("is not a worktree") || combined.contains("not a working tree") {
@@ -2086,251 +1938,9 @@ fn worktree_remove(repo: &str, op: &Value, log: Option<&str>) -> Value {
     ok_with(format!("worktree removed: {dest}"), json!({ "path": dest }))
 }
 
-// ── BACKWARD-COMPAT operations ────────────────────────────────────────────────
-
-/// Backward-compatible alias for `worktree / add`. Retained so existing capsule
-/// calls and the original integration test suite keep working without modification.
-/// The op must carry `dest` and `branch` at the top level, which `worktree_add` reads.
-fn op_create_worktree(op: &Value, log: Option<&str>) -> Value {
-    let repo = match resolve_repo(op) {
-        Ok(r) => r,
-        Err(e) => return fail_msg(e),
-    };
-    worktree_add(&repo, op, log)
-}
-
-// ── Low-level git runner ──────────────────────────────────────────────────────
-
-struct GitOut {
-    success: bool,
-    stdout: String,
-    stderr: String,
-}
-
-fn git(args: &[&str]) -> GitOut {
-    match Command::new("git").args(args).output() {
-        Err(e) => {
-            let msg = if e.kind() == std::io::ErrorKind::NotFound {
-                "git not found in PATH".to_string()
-            } else {
-                format!("failed to execute git: {e}")
-            };
-            GitOut {
-                success: false,
-                stdout: String::new(),
-                stderr: msg,
-            }
-        }
-        Ok(output) => GitOut {
-            success: output.status.success(),
-            stdout: String::from_utf8_lossy(&output.stdout)
-                .trim_end_matches('\n')
-                .to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr)
-                .trim_end_matches('\n')
-                .to_string(),
-        },
-    }
-}
-
-// ── Output constructors ───────────────────────────────────────────────────────
-//
-// Each constructor emits both:
-//   • the new protocol  (ok, message, error_kind)  — consumed by direct callers and tests
-//   • the old capsule-runtime protocol (status, summary, data)  — consumed by
-//     dispatch_native_tool in capsule-runtime, which reads status/data/summary to build
-//     the tool result text sent to the model.
-
-/// Merge `extra` (a JSON object) with the base ok envelope and return the combined Value.
-/// `extra` is also stored under `"data"` so the capsule runtime can extract it.
-fn ok_with(message: impl Into<String>, extra: Value) -> Value {
-    let msg = message.into();
-    let data = extra.clone();
-    let mut obj = json!({
-        "ok": true,
-        "message": &msg,
-        "status": "passed",
-        "summary": &msg,
-        "data": data,
-        "data_path": null,
-        "metadata": null,
-    });
-    // Also flatten extra fields at the top level for new-protocol callers.
-    if let Value::Object(map) = extra {
-        for (k, v) in map {
-            obj[k] = v;
-        }
-    }
-    obj
-}
-
-fn ok_simple(message: impl Into<String>) -> Value {
-    let msg = message.into();
-    json!({
-        "ok": true,
-        "message": &msg,
-        "status": "passed",
-        "summary": &msg,
-        "data": null,
-        "data_path": null,
-        "metadata": null,
-    })
-}
-
-fn fail_msg(message: impl Into<String>) -> Value {
-    let msg = message.into();
-    json!({
-        "ok": false,
-        "message": &msg,
-        "status": "error",
-        "summary": &msg,
-        "data": null,
-        "data_path": null,
-        "metadata": null,
-    })
-}
-
-fn err_result(error_kind: &str, message: impl Into<String>) -> Value {
-    let msg = message.into();
-    json!({
-        "ok": false,
-        "error_kind": error_kind,
-        "message": &msg,
-        "status": "error",
-        "summary": &msg,
-        "data": null,
-        "data_path": null,
-        "metadata": null,
-    })
-}
-
-// ── Utilities ─────────────────────────────────────────────────────────────────
-
-fn strip_fatal(s: &str) -> String {
-    s.lines()
-        .last()
-        .unwrap_or(s)
-        .trim_start_matches("fatal: ")
-        .to_string()
-}
-
-fn log_write(log: Option<&str>, message: &str) {
-    let Some(path) = log else { return };
-    if path.is_empty() {
-        return;
-    }
-    let mut file = match fs::OpenOptions::new().create(true).append(true).open(path) {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-    let _ = file.write_all(message.as_bytes());
-}
-
-// ── Unit tests ────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fail_msg_returns_ok_false() {
-        let out = fail_msg("something went wrong");
-        assert_eq!(out["ok"], false);
-        assert_eq!(out["message"], "something went wrong");
-    }
-
-    #[test]
-    fn err_result_includes_error_kind() {
-        let out = err_result(err::NOTHING_TO_STASH, "clean tree");
-        assert_eq!(out["ok"], false);
-        assert_eq!(out["error_kind"], err::NOTHING_TO_STASH);
-        assert_eq!(out["message"], "clean tree");
-    }
-
-    #[test]
-    fn err_constants_are_distinct() {
-        let kinds = [
-            err::NOTHING_TO_STASH,
-            err::NOTHING_TO_COMMIT,
-            err::NOT_FOUND,
-            err::CONFLICT,
-            err::ALREADY_EXISTS,
-            err::NOT_MERGED,
-            err::DIRTY_WORKING_TREE,
-            err::REMOTE_NOT_FOUND,
-            err::NO_TRACKING_BRANCH,
-            err::NON_FAST_FORWARD,
-            err::NO_UPSTREAM,
-            err::DEST_EXISTS,
-            err::CLONE_FAILED,
-            err::FF_ONLY_FAILED,
-            err::BRANCH_CONFLICT,
-            err::DIRTY,
-        ];
-        for (i, a) in kinds.iter().enumerate() {
-            for (j, b) in kinds.iter().enumerate() {
-                if i != j {
-                    assert_ne!(a, b, "error kind constants must be unique");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn ok_with_merges_extra_fields() {
-        let out = ok_with("done", json!({ "entries": [] }));
-        assert_eq!(out["ok"], true);
-        assert_eq!(out["message"], "done");
-        assert!(out["entries"].is_array());
-    }
-
-    #[test]
-    fn strip_fatal_removes_prefix() {
-        assert_eq!(
-            strip_fatal("fatal: not a git repository"),
-            "not a git repository"
-        );
-        assert_eq!(strip_fatal("error: branch exists"), "error: branch exists");
-        assert_eq!(strip_fatal(""), "");
-    }
-
-    #[test]
-    fn run_returns_error_for_empty_stdin() {
-        let out = run("");
-        assert_eq!(out["ok"], false);
-        assert!(out["message"].as_str().unwrap().contains("missing input"));
-    }
-
-    #[test]
-    fn run_returns_error_for_unknown_operation() {
-        let input = r#"{"data":{"operation":"bogus_op_xyz"}}"#;
-        let out = run(input);
-        assert_eq!(out["ok"], false);
-        assert!(out["message"]
-            .as_str()
-            .unwrap()
-            .contains("unknown operation"));
-    }
-
-    #[test]
-    fn run_handles_double_encoded_data() {
-        let inner = r#"{"operation":"unknown_double_enc_op"}"#;
-        let envelope = format!(
-            r#"{{"data":"{}","log_path":null}}"#,
-            inner.replace('"', "\\\"")
-        );
-        let out = run(&envelope);
-        assert_eq!(out["ok"], false);
-        assert!(out["message"]
-            .as_str()
-            .unwrap()
-            .contains("unknown operation"));
-    }
-
-    #[test]
-    fn parse_stash_branch_extracts_branch() {
-        assert_eq!(parse_stash_branch("WIP on main: abc123 fix"), "main");
-        assert_eq!(parse_stash_branch("On feature/foo: saved"), "feature/foo");
-        assert_eq!(parse_stash_branch("unknown format"), "");
-    }
+/// `create_worktree`: the operation `worktree` / `add` runs, under its older name. The op
+/// carries `dest` and `branch` at the top level, which `worktree_add` reads.
+pub(crate) fn op_create_worktree(g: &Git, op: &Value, log: &Log) -> Value {
+    let repo = resolve_repo(g, op);
+    worktree_add(g, &repo, op, log)
 }

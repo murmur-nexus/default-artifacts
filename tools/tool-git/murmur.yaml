@@ -1,7 +1,7 @@
 name: tool-git
-version: 0.6.0
+version: 0.7.0
 runtime: tool
-implementation: native
+implementation: wasm
 description: |
   Structured git interface for Murmur capsules. Returns typed JSON for all
   operations. The capsule must list `git` in `capabilities.shell.allow`. Use `bash`
@@ -34,14 +34,15 @@ description: |
   | worktree    | add/list/remove  | repo, dest?, branch?, force?       | path / worktrees:[]              |
 
   All responses: {ok:bool, message:string, error_kind?:string, ...fields}
-  repo: absolute path to repo root. Resolved automatically if omitted.
+  repo: path to the repo root, relative to the work folder or absolute.
+  Auto-discovered from the work folder if omitted.
   create_worktree: alias for worktree/add; takes the same repo, dest, branch.
   dest and dest_paths are this tool's declared write destinations. A capsule
   granting capabilities.filesystem.read_only has their values checked against
   that grant before the call is dispatched.
 
 requires_files:
-  - bin/tool-git
+  - tool_git.wasm
 
 input_schema:
   type: object
@@ -81,7 +82,7 @@ input_schema:
     # context whose write target depends on the operation; do not invent one here.
     repo:
       type: string
-      description: "Absolute path to the git repository root. Auto-discovered from CWD if omitted."
+      description: "Path to the git repository root, relative to the work folder or absolute. Auto-discovered from the work folder if omitted."
     subcommand:
       type: string
       description: "Required for multi-subcommand operations — branch (list|create|delete), stash (push|pop|list), remote (list|add|remove), tag (list|create), worktree (add|list|remove). See tool description for per-subcommand fields."
@@ -130,10 +131,9 @@ input_schema:
   required:
     - operation
 
-# allowed_flags and denied_flags declare the tool's input contract.
-# The runtime does not currently enforce these at the WASI layer.
-# Enforcement is implemented in the tool binary — see resolve_repo() in
-# src/main.rs for implementation details.
+# allowed_flags and denied_flags declare the tool's input contract. The runtime does
+# not enforce them: the handlers in src/ops.rs build every git argument list
+# themselves, so no denied flag is ever passed.
 denied_flags:
   - "--interactive"
   - "-i"
@@ -220,15 +220,8 @@ allowed_flags:
 
 capabilities:
   # The capsule must grant `git` in its own capabilities.shell.allow: the tool
-  # runs git, and the sandbox refuses any program the capsule does not list.
+  # runs every git command through murmur:process, which refuses a program the
+  # capsule does not list.
   shell:
     allow:
       - git
-  filesystem:
-    # Documents what the tool works on; the runtime does not read this block. A
-    # native tool runs in the capsule's own sandbox under the capsule-wide
-    # capabilities, so on Linux the repository must be inside the session
-    # workdir. The tool also checks `repo` against MURMUR_FILESYSTEM_ALLOW when
-    # that variable is set (see src/main.rs: resolve_repo).
-    allow:
-      - "."   # resolved at runtime to the capsule workdir; real paths are task-provided

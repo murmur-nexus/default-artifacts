@@ -1,0 +1,922 @@
+{
+  "recorded_from": "native tool-git 0.6.0, built from default-artifacts 95e17e1",
+  "results": [
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "status",
+          "--porcelain=v1"
+        ]
+      ],
+      "data": {
+        "entries": [
+          {
+            "path": "README.md",
+            "status": "modified",
+            "status_code": " M"
+          },
+          {
+            "path": "NEW.md",
+            "status": "untracked",
+            "status_code": "??"
+          }
+        ]
+      },
+      "status": "passed",
+      "step": "status",
+      "summary": "2 changed file(s)"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "fetch",
+          "origin"
+        ]
+      ],
+      "data": {
+        "remote": "origin",
+        "updated_refs": [
+          "origin/main"
+        ]
+      },
+      "status": "passed",
+      "step": "fetch",
+      "summary": "1 ref(s) updated"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "pull",
+          "origin"
+        ],
+        [
+          "-C",
+          "repo",
+          "log",
+          "ORIG_HEAD..HEAD",
+          "--oneline"
+        ],
+        [
+          "-C",
+          "repo",
+          "branch",
+          "--show-current"
+        ]
+      ],
+      "data": {
+        "branch": "main",
+        "commits_pulled": 1,
+        "fast_forward": true,
+        "remote": "origin"
+      },
+      "status": "passed",
+      "step": "pull",
+      "summary": "pulled from origin"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "diff"
+        ]
+      ],
+      "data": {
+        "diff": "diff --git a/README.md b/README.md\nindex <H1>..<H2> 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n hello\n+changed"
+      },
+      "status": "passed",
+      "step": "diff",
+      "summary": "diff complete"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "add",
+          "--",
+          "NEW.md"
+        ]
+      ],
+      "data": {
+        "staged": [
+          "NEW.md"
+        ]
+      },
+      "status": "passed",
+      "step": "add",
+      "summary": "staged 1 path(s)"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "diff",
+          "--staged"
+        ]
+      ],
+      "data": {
+        "diff": "diff --git a/NEW.md b/NEW.md\nnew file mode 100644\nindex <H3>..<H4>\n--- /dev/null\n+++ b/NEW.md\n@@ -0,0 +1 @@\n+new"
+      },
+      "status": "passed",
+      "step": "diff staged",
+      "summary": "diff complete"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "restore",
+          "--",
+          "README.md"
+        ]
+      ],
+      "data": {
+        "restored": [
+          "README.md"
+        ]
+      },
+      "status": "passed",
+      "step": "restore",
+      "summary": "restored 1 path(s)"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "stash",
+          "push",
+          "-m",
+          "wip"
+        ]
+      ],
+      "data": {
+        "stash_ref": "stash@{0}"
+      },
+      "status": "passed",
+      "step": "stash push",
+      "summary": "stash pushed"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "stash",
+          "list",
+          "--format=%gd|%gs"
+        ]
+      ],
+      "data": {
+        "entries": [
+          {
+            "branch": "main",
+            "index": 0,
+            "message": "On main: wip"
+          }
+        ]
+      },
+      "status": "passed",
+      "step": "stash list",
+      "summary": "1 stash entry/entries"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "stash",
+          "pop",
+          "stash@{0}"
+        ]
+      ],
+      "data": null,
+      "status": "passed",
+      "step": "stash pop",
+      "summary": "stash popped"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "log",
+          "-n",
+          "5",
+          "--format=%H|%h|%an|%aI|%s"
+        ]
+      ],
+      "data": {
+        "commits": [
+          {
+            "author": "Test",
+            "date_iso": "<DATE>",
+            "hash": "<C1>",
+            "short_hash": "<C1:7>",
+            "subject": "upstream change"
+          },
+          {
+            "author": "Test",
+            "date_iso": "<DATE>",
+            "hash": "<C2>",
+            "short_hash": "<C2:7>",
+            "subject": "initial"
+          }
+        ]
+      },
+      "status": "passed",
+      "step": "log",
+      "summary": "2 commit(s)"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "show",
+          "--no-patch",
+          "--format=%H|%an|%aI|%s|%b",
+          "HEAD"
+        ],
+        [
+          "-C",
+          "repo",
+          "show",
+          "--stat",
+          "-p",
+          "HEAD"
+        ]
+      ],
+      "data": {
+        "commit": {
+          "author": "Test",
+          "body": "",
+          "date_iso": "<DATE>",
+          "hash": "<C1>",
+          "subject": "upstream change"
+        },
+        "diff": "commit <C1>\nAuthor: Test <test@example.com>\nDate:   Thu Jan 1 00:00:06 2026 +0000\n\n    upstream change\n---\n UPSTREAM.md | 1 +\n 1 file changed, 1 insertion(+)\n\ndiff --git a/UPSTREAM.md b/UPSTREAM.md\nnew file mode 100644\nindex <H3>..<H5>\n--- /dev/null\n+++ b/UPSTREAM.md\n@@ -0,0 +1 @@\n+upstream"
+      },
+      "status": "passed",
+      "step": "show",
+      "summary": "show HEAD"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "cat-file",
+          "-e",
+          "HEAD:src/lib.rs"
+        ],
+        [
+          "-C",
+          "repo",
+          "log",
+          "-n",
+          "1",
+          "--format=%H|%h|%an|%aI|%s",
+          "-L1,4:src/lib.rs"
+        ]
+      ],
+      "data": {
+        "commits": [
+          {
+            "author": "Test",
+            "date_iso": "<DATE>",
+            "hash": "<C2>",
+            "short_hash": "<C2:7>",
+            "subject": "initial"
+          }
+        ],
+        "end_line": 4,
+        "file": "src/lib.rs",
+        "start_line": 1,
+        "symbol_id": "rust://fixture/#sym(->())"
+      },
+      "status": "passed",
+      "step": "symbol_history",
+      "summary": "1 commit(s) for rust://fixture/#sym(->())"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "add",
+          "--",
+          "NEW.md"
+        ]
+      ],
+      "data": {
+        "staged": [
+          "NEW.md"
+        ]
+      },
+      "status": "passed",
+      "step": "add again",
+      "summary": "staged 1 path(s)"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "commit",
+          "-m",
+          "add new"
+        ],
+        [
+          "-C",
+          "repo",
+          "rev-parse",
+          "HEAD"
+        ],
+        [
+          "-C",
+          "repo",
+          "rev-parse",
+          "--short",
+          "HEAD"
+        ],
+        [
+          "-C",
+          "repo",
+          "log",
+          "-1",
+          "--format=%s",
+          "HEAD"
+        ]
+      ],
+      "data": {
+        "hash": "<C3>",
+        "short_hash": "<C3:7>",
+        "subject": "add new"
+      },
+      "status": "passed",
+      "step": "commit",
+      "summary": "commit created"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "commit",
+          "-m",
+          "again"
+        ]
+      ],
+      "data": null,
+      "status": "error",
+      "step": "commit nothing",
+      "summary": "nothing to commit; use allow_empty=true to create an empty commit"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "cherry-pick",
+          "topic"
+        ],
+        [
+          "-C",
+          "repo",
+          "rev-parse",
+          "HEAD"
+        ],
+        [
+          "-C",
+          "repo",
+          "rev-parse",
+          "--short",
+          "HEAD"
+        ],
+        [
+          "-C",
+          "repo",
+          "log",
+          "-1",
+          "--format=%s",
+          "HEAD"
+        ]
+      ],
+      "data": {
+        "hash": "<C4>",
+        "short_hash": "<C4:7>",
+        "subject": "topic change"
+      },
+      "status": "passed",
+      "step": "cherry_pick",
+      "summary": "cherry-picked topic"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "branch",
+          "-vv",
+          "--format=%(refname:short)|%(HEAD)|%(upstream:short)"
+        ]
+      ],
+      "data": {
+        "branches": [
+          {
+            "current": false,
+            "name": "conflict",
+            "upstream": null
+          },
+          {
+            "current": false,
+            "name": "feature",
+            "upstream": null
+          },
+          {
+            "current": true,
+            "name": "main",
+            "upstream": "origin/main"
+          },
+          {
+            "current": false,
+            "name": "side",
+            "upstream": null
+          },
+          {
+            "current": false,
+            "name": "topic",
+            "upstream": null
+          }
+        ]
+      },
+      "status": "passed",
+      "step": "branch list",
+      "summary": "5 branch(es)"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "branch",
+          "made"
+        ]
+      ],
+      "data": {
+        "name": "made"
+      },
+      "status": "passed",
+      "step": "branch create",
+      "summary": "branch 'made' created"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "branch",
+          "-d",
+          "made"
+        ]
+      ],
+      "data": {
+        "name": "made"
+      },
+      "status": "passed",
+      "step": "branch delete",
+      "summary": "branch 'made' deleted"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "checkout",
+          "feature"
+        ],
+        [
+          "-C",
+          "repo",
+          "branch",
+          "--show-current"
+        ]
+      ],
+      "data": {
+        "branch": "feature",
+        "detached": false
+      },
+      "status": "passed",
+      "step": "checkout",
+      "summary": "checked out feature"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "switch",
+          "main"
+        ],
+        [
+          "-C",
+          "repo",
+          "branch",
+          "--show-current"
+        ]
+      ],
+      "data": {
+        "branch": "main"
+      },
+      "status": "passed",
+      "step": "switch",
+      "summary": "switched to main"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "reset",
+          "--mixed",
+          "HEAD"
+        ],
+        [
+          "-C",
+          "repo",
+          "rev-parse",
+          "HEAD"
+        ]
+      ],
+      "data": {
+        "ref": "<C4>"
+      },
+      "status": "passed",
+      "step": "reset",
+      "summary": "reset mixed to HEAD"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "push",
+          "--porcelain",
+          "origin"
+        ],
+        [
+          "-C",
+          "repo",
+          "branch",
+          "--show-current"
+        ]
+      ],
+      "data": {
+        "branch": "main",
+        "remote": "origin",
+        "remote_ref": "refs/heads/main"
+      },
+      "status": "passed",
+      "step": "push",
+      "summary": "pushed to origin/main"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "push",
+          "--porcelain",
+          "origin",
+          "side"
+        ]
+      ],
+      "data": null,
+      "status": "error",
+      "step": "push rejected",
+      "summary": "push rejected: remote has commits not in local; use force=true to override"
+    },
+    {
+      "argv": [
+        [
+          "clone",
+          "remote.git",
+          "clone"
+        ],
+        [
+          "-C",
+          "clone",
+          "symbolic-ref",
+          "--short",
+          "HEAD"
+        ]
+      ],
+      "data": {
+        "default_branch": "main",
+        "dest": "clone"
+      },
+      "status": "passed",
+      "step": "clone",
+      "summary": "cloned to clone"
+    },
+    {
+      "argv": [],
+      "data": null,
+      "status": "error",
+      "step": "clone existing",
+      "summary": "destination 'clone' already exists"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "remote",
+          "-v"
+        ]
+      ],
+      "data": {
+        "remotes": [
+          {
+            "fetch_url": "../remote.git",
+            "name": "origin",
+            "push_url": "../remote.git"
+          }
+        ]
+      },
+      "status": "passed",
+      "step": "remote list",
+      "summary": "1 remote(s)"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "remote",
+          "add",
+          "mirror",
+          "../remote.git"
+        ]
+      ],
+      "data": {
+        "name": "mirror",
+        "url": "../remote.git"
+      },
+      "status": "passed",
+      "step": "remote add",
+      "summary": "remote 'mirror' added"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "remote",
+          "remove",
+          "mirror"
+        ]
+      ],
+      "data": {
+        "name": "mirror"
+      },
+      "status": "passed",
+      "step": "remote remove",
+      "summary": "remote 'mirror' removed"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "tag",
+          "-a",
+          "-m",
+          "release v1",
+          "v1",
+          "HEAD"
+        ],
+        [
+          "-C",
+          "repo",
+          "rev-parse",
+          "--short",
+          "v1"
+        ]
+      ],
+      "data": {
+        "name": "v1",
+        "ref": "<H6>"
+      },
+      "status": "passed",
+      "step": "tag create",
+      "summary": "tag 'v1' created"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "tag",
+          "-l",
+          "--format=%(refname:short)|%(objectname:short)"
+        ]
+      ],
+      "data": {
+        "tags": [
+          {
+            "name": "v1",
+            "ref": "<H6>"
+          }
+        ]
+      },
+      "status": "passed",
+      "step": "tag list",
+      "summary": "1 tag(s)"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "rev-parse",
+          "HEAD"
+        ],
+        [
+          "-C",
+          "repo",
+          "merge",
+          "-m",
+          "merge feature",
+          "feature"
+        ],
+        [
+          "-C",
+          "repo",
+          "rev-parse",
+          "HEAD"
+        ]
+      ],
+      "data": {
+        "fast_forward": false,
+        "merged_commit": "<C5>"
+      },
+      "status": "passed",
+      "step": "merge",
+      "summary": "merged 'feature'"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "rev-parse",
+          "HEAD"
+        ],
+        [
+          "-C",
+          "repo",
+          "merge",
+          "--no-edit",
+          "conflict"
+        ]
+      ],
+      "data": null,
+      "status": "error",
+      "step": "merge conflict",
+      "summary": "merge conflict: resolve conflicts and commit, or run git merge --abort"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "reset",
+          "--hard",
+          "HEAD"
+        ],
+        [
+          "-C",
+          "repo",
+          "rev-parse",
+          "HEAD"
+        ]
+      ],
+      "data": {
+        "ref": "<C5>"
+      },
+      "status": "passed",
+      "step": "reset hard",
+      "summary": "reset hard to HEAD"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "worktree",
+          "add",
+          "wt",
+          "topic"
+        ]
+      ],
+      "data": {
+        "branch": "topic",
+        "path": "wt"
+      },
+      "status": "passed",
+      "step": "worktree add",
+      "summary": "worktree created at wt on branch topic"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "worktree",
+          "list",
+          "--porcelain"
+        ]
+      ],
+      "data": {
+        "worktrees": [
+          {
+            "bare": false,
+            "branch": "main",
+            "head": "<C5>",
+            "path": "<WORK>/repo"
+          },
+          {
+            "bare": false,
+            "branch": "topic",
+            "head": "<C6>",
+            "path": "<WORK>/repo/wt"
+          }
+        ]
+      },
+      "status": "passed",
+      "step": "worktree list",
+      "summary": "2 worktree(s)"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "worktree",
+          "remove",
+          "wt"
+        ]
+      ],
+      "data": {
+        "path": "wt"
+      },
+      "status": "passed",
+      "step": "worktree remove",
+      "summary": "worktree removed: wt"
+    },
+    {
+      "argv": [
+        [
+          "-C",
+          "repo",
+          "worktree",
+          "add",
+          "wt2",
+          "side"
+        ]
+      ],
+      "data": {
+        "branch": "side",
+        "path": "wt2"
+      },
+      "status": "passed",
+      "step": "create_worktree",
+      "summary": "worktree created at wt2 on branch side"
+    },
+    {
+      "argv": [],
+      "data": null,
+      "status": "error",
+      "step": "missing field",
+      "summary": "missing required field: message"
+    },
+    {
+      "argv": [],
+      "data": null,
+      "status": "error",
+      "step": "unknown operation",
+      "summary": "unknown operation: bogus"
+    }
+  ]
+}

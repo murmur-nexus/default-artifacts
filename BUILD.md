@@ -45,8 +45,10 @@ from its `name:` or a name with a `murmur-` prefix.
 | native | `implementation: native` | `bin/<name>`, one zip per platform | `./scripts/build-native.sh` (all) / `cargo build --release -p <name>` (one) |
 | skill | `runtime: skill` | `skill.md` | nothing to compile |
 
-A tool is native only when a `wasm32-wasip2` guest cannot do its job — spawning `git`, a display,
-or C sources not yet ported to wasm (tree-sitter). C sources are no reason on their own: rusqlite's
+A tool is native only when a `wasm32-wasip2` guest cannot do its job — a display, or C sources not
+yet ported to wasm (tree-sitter). Running a program is no reason on its own: a WASM tool runs one
+through `murmur:process`, under `capabilities.shell.allow`, as `tool-git` runs `git` and
+`tool-browser` runs Chrome. C sources are no reason on their own either: rusqlite's
 bundled SQLite compiles into a component with the pinned wasi-sdk (see Prerequisites). A WASM tool
 reaches the network through `wasi:http`, under `capabilities.network.allow`, so network access never
 makes a tool native. A tool that calls a third-party API stays wasm: the credential gateway serves
@@ -72,7 +74,7 @@ A tool crate that drops its feature does not compile: its module is absent from 
 
 ```bash
 cargo build -p tool-read --target wasm32-wasip2 --release     # wasm
-cargo build --release -p tool-git                              # native
+cargo build --release -p tool-code-graph                       # native
 ./scripts/validate-component.sh target/wasm32-wasip2/release/tool_read.wasm
 ./scripts/package-artifact.sh tools/tool-read release/         # → release/tool-read-0.4.0.mur.zip
 ./scripts/local-install.sh tool-read /path/to/capsule-folder
@@ -256,7 +258,7 @@ cargo test --workspace --locked
 CI runs both, formatting first. The workspace uses rustfmt's defaults (there is no `rustfmt.toml`);
 run `cargo fmt --all` before committing.
 
-Ten suites are `#[ignore]`d because they need something the default run does not have. The nine
+Twelve suites are `#[ignore]`d because they need something the default run does not have. The ten
 that drive a real `mur` read it from `MUR_BIN`, else `PATH`, and fail rather than skip without one:
 
 ```bash
@@ -267,9 +269,11 @@ MUR_BIN=$MUR_BIN cargo test -p tool-create --test mur_manifest_shape -- --ignore
 MUR_BIN=$MUR_BIN cargo test -p tool-test-report --test mur_run_stable_id -- --ignored  # 2 tests
 MUR_BIN=$MUR_BIN TOOL_BROWSER_TEST_CHROME=<chrome-headless-shell> cargo test -p tool-browser --test mur_run_browser -- --ignored  # 1 test; its mur must be WIT level 4
 MUR_BIN=$MUR_BIN cargo test -p tool-computer --test mur_run_computer -- --ignored    # 3 tests; needs Xvfb, xkbcomp, xmessage
+MUR_BIN=$MUR_BIN TOOL_GIT_NATIVE_ZIP=<tool-git-0.6.0 zip> cargo test -p tool-git --test mur_run_parity -- --ignored --nocapture  # 2 tests; its mur must be WIT level 4
 MUR_BIN=$MUR_BIN cargo test -p driver-anthropic --test mur_run_computer_tool -- --ignored  # 3 tests
 MUR_BIN=$MUR_BIN cargo test -p driver-openai --test mur_run_computer_tool -- --ignored     # 4 tests
 cargo test -p tool-create --test scaffolded_hook_tests -- --ignored  # needs a cargo registry
+TOOL_GIT_NATIVE_BIN=<native tool-git 0.6.0> cargo test -p tool-git --test parity record_native -- --ignored  # rewrites a fixture
 ```
 
 | Suite | Proves |
@@ -283,6 +287,8 @@ cargo test -p tool-create --test scaffolded_hook_tests -- --ignored  # needs a c
 | `mur_run_computer_tool` (driver-anthropic) | in a `sealed` capsule a tool declaring `provider_tool: {kind: computer}` goes to `claude-sonnet-4-6` as `computer_20251124` with its beta header and to `claude-sonnet-5-5` as the toolset; Claude's click reaches the tool scaled to the display, a toolset batch runs in order, and the next request replays the calls in provider form. Without the block the tool stays a function. Its `mur` must carry murmur `a9ea4726` |
 | `mur_run_computer_tool` (driver-openai) | in a `sealed` capsule the same tool goes to `gpt-5.6-luna` as `{"type": "computer"}`, a `computer_call` runs as an ordered group answered by one `computer_call_output`, a flagged call nobody answers under `mur run --task` times out unrun, and a served capsule runs it only after a person's yes over the door and never after a no. Without the block the tool stays a function. Its `mur` must carry murmur `a9ea4726` |
 | `scaffolded_hook_tests` | a freshly scaffolded hook reports `1 passed`, not `0 passed` |
+| `mur_run_parity` | every tool-git operation, scripted over a fixture work folder, gives the same results as WASM and as the native 0.6.0 build (`TOOL_GIT_NATIVE_ZIP`) at `scoped` and at `sealed`, and the same as the recorded native fixture; the WASM run's trace holds one `process_start`/`process_exit` pair per git command. A `hook-command-guard` rule refuses `push` with `force: true` for the WASM build only, and a `read_only` grant refuses what the README says. Its `mur` must report WIT level 4 or higher |
+| `record_native` | re-records `tools/tool-git/tests/fixtures/native-0.6.0-results.json` from the native 0.6.0 binary (`TOOL_GIT_NATIVE_BIN`); recipe in that folder's `README.md` |
 | `mur_run_browser` | a capsule granting `chromium` opens a work-folder page on `scoped` and again on `sealed`, with Chrome a `murmur:process` session process. It reads the page's console error through murmur's `<untrusted-content>` fence, and its screenshot reaches the next model request as an image. The trace records `process_start` for `browser` and `process_exit` with `reason: session_end`, and nothing naming `.tool-browser/` runs after `mur run` exits. A capsule without the grant gets the single no-grant line. Its `mur` must report WIT level 4 or higher |
 
 `mur_run_browser` needs `TOOL_BROWSER_TEST_CHROME` set to a `chrome-headless-shell`, because murmur's
