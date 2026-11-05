@@ -20,7 +20,8 @@
 #   tool-{request-input,create,read,   -> TOOL   category (wasm32-wasip2 components
 #     write,edit,find,corpus,report,            that export murmur:tool/run)
 #     tavily,github,registry-search,
-#     test-report,browser,git,code-coverage}
+#     test-report,browser,git,
+#     code-coverage,code-graph}
 #   tool-computer                      -> SKIP   (a native bin crate the workspace build
 #                                               may still leave a .wasm for; shipped as a
 #                                               native binary, it exports wasi:cli/run and
@@ -144,7 +145,7 @@ validate_one() {
       expected_export="murmur:driver/process"
       expected_version="$process_driver_version"
       ;;
-    driver-*|tool-request-input|tool-create|tool-read|tool-write|tool-edit|tool-find|tool-corpus|tool-report|tool-tavily|tool-github|tool-registry-search|tool-test-report|tool-browser|tool-git|tool-code-coverage)
+    driver-*|tool-request-input|tool-create|tool-read|tool-write|tool-edit|tool-find|tool-corpus|tool-report|tool-tavily|tool-github|tool-registry-search|tool-test-report|tool-browser|tool-git|tool-code-coverage|tool-code-graph)
       category="tool"
       expected_export="murmur:tool/run"
       expected_version="$tool_version"

@@ -1,7 +1,7 @@
 name: tool-code-graph
-version: 0.6.0
+version: 0.7.0
 runtime: tool
-implementation: native
+implementation: wasm
 description: |
   Indexes a Rust and/or Python repository into a SQLite-backed symbol/edge graph
   and answers structured queries over it. Symbols are addressed by a stable
@@ -37,7 +37,13 @@ description: |
   Defaults: limit=20, max_depth=3 (slice / impact_analysis) / 6 (explain_path),
   max_nodes=50 (slice / impact_analysis), direction="callees" (use "callers" to
   walk the reverse call graph).
-  All responses: {ok:bool, message:string, status, summary, data, ...fields}.
+  Every result has status (passed|failed|error), summary and data.
+  repo_path is relative to the work folder ('.', the default, is the work folder
+  itself) or absolute inside a host folder the session opened; index_repository
+  needs it writable. Reported paths name the repository as the call wrote it.
+  A file under no Cargo.toml [package] or Python project name takes the last
+  segment of repo_path as its package, or crate (Rust) / package (Python) when
+  repo_path is '.'.
   find_symbol returns an empty match list (not an error) when nothing matches;
   explain_path reports "no path found within depth N" as a passed result;
   impact_analysis returns an empty (passed) result when the line range overlaps
@@ -51,7 +57,7 @@ description: |
   never definite at Level 1 — no type inference).
 
 requires_files:
-  - bin/tool-code-graph
+  - tool_code_graph.wasm
 
 input_schema:
   type: object
@@ -68,7 +74,7 @@ input_schema:
       description: "Operation to perform."
     repo_path:
       type: string
-      description: "Absolute path to the repository root. Required for every operation. Defaults to the current working directory if omitted."
+      description: "Path to the repository root, relative to the work folder ('.' for the work folder itself, the default) or absolute inside a host folder the session opened. index_repository needs it writable."
     query:
       type: string
       description: "Required for find_symbol. FTS5 search string matched (prefix, ranked) against qualified_name and doc_comment."
@@ -98,7 +104,7 @@ input_schema:
       description: "Required for explain_path. Target symbol_id."
     file:
       type: string
-      description: "Required for impact_analysis. Repo-relative path (leading ./ and absolute repo prefixes are normalized away) of the edited file."
+      description: "Required for impact_analysis. The edited file, repo-relative ('\\' becomes '/', a leading ./ is dropped). An absolute file loses an absolute repo_path prefix; under a relative repo_path it matches the longest indexed path it ends with, whole segments only."
     start_line:
       type: integer
       description: "Required for impact_analysis. 1-based first line of the edited range; symbols overlapping [start_line, end_line] are the impact roots."
@@ -111,9 +117,10 @@ input_schema:
 capabilities:
   filesystem:
     # Documents what the tool works on; the runtime does not read this block. A
-    # native tool runs in the capsule's own sandbox under the capsule-wide
-    # capabilities, so on Linux every path below must be inside the session
-    # workdir. This tool reads Rust sources under
-    # repo_path and writes its graph db + slice payloads under repo_path/.murmur.
+    # WASM tool's grants come only from its entry in the capsule's artifacts:;
+    # copy this block onto that entry to narrow the tool to the work folder. The
+    # tool reads Rust and Python sources under repo_path and writes its graph db
+    # and slice/impact payloads under repo_path/.murmur, so the work folder (or
+    # a host folder) holding repo_path must be read-write for index_repository.
     allow:
       - "."

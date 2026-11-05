@@ -2,21 +2,31 @@
 //!
 //! The database lives at `<repo>/.murmur/code-graph.db`. The schema carries an
 //! explicit `language` column on both `files` and `symbols` so additional
-//! languages are additive later rather than a breaking change — MVP writes only
-//! `"rust"`.
+//! languages are additive later rather than a breaking change.
+//!
+//! `repo` is always a path the component may open: relative to the work folder, or a
+//! `murmur-host/…` path. SQLite's WASI build locks with the `unix-dotfile` VFS — every lock,
+//! reads included, creates the directory `code-graph.db.lock` beside the database and removes
+//! it on unlock — uses a rollback journal (`code-graph.db-journal`, deleted on commit), and is
+//! compiled with `SQLITE_OMIT_WAL`, so a database in WAL mode cannot be opened.
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 /// Directory (relative to a repo root) that holds the code-graph database and
 /// any on-disk slice payloads referenced by `data_path`.
 pub const STORE_DIR: &str = ".murmur";
 pub const DB_FILE: &str = "code-graph.db";
 
-/// Absolute path to the code-graph database for `repo`.
+/// Path to the code-graph database for `repo`.
 pub fn db_path(repo: &Path) -> PathBuf {
     repo.join(STORE_DIR).join(DB_FILE)
+}
+
+/// The dotfile lock SQLite's WASI build holds beside the database while it reads or writes.
+pub fn lock_path(repo: &Path) -> PathBuf {
+    repo.join(STORE_DIR).join(format!("{DB_FILE}.lock"))
 }
 
 /// Open (creating if needed) the database for `repo` and ensure the schema
@@ -28,8 +38,67 @@ pub fn open(repo: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(db_path(repo))?;
     // Foreign keys must be enabled per-connection for ON DELETE CASCADE to fire.
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    tune(&conn)?;
     init_schema(&conn)?;
     Ok(conn)
+}
+
+/// Per-connection settings for SQLite's WASI build. Neither changes the database file.
+///
+/// - `temp_store = MEMORY` keeps temporary storage — statement journals, sorts and temp tables —
+///   in memory. A statement journal over 64 KiB (an `UPDATE` across a large repository's edges)
+///   otherwise spills to a delete-on-close temp file, and opening one on WASI calls `fchmod`,
+///   which the WASI build of SQLite lacks: the component traps (`uninitialized element`).
+/// - `cache_size = -65536` lets the page cache grow to 64 MiB (it fills only as pages are read;
+///   murmur gives a WASM tool 512 MiB by default). With the default 2 MiB, re-resolving every
+///   edge of a large graph evicts and re-reads pages throughout, and each re-read is a WASI host
+///   call: a no-op re-index of the default-artifacts tree took 3.8× the native time, and 1.0×
+///   with the larger cache.
+fn tune(conn: &Connection) -> rusqlite::Result<()> {
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
+    conn.pragma_update(None, "cache_size", -65536)
+}
+
+/// Open the existing database for `repo` read-only, for a repository in a host folder opened
+/// read-only: the URI `file:<db>?immutable=1` with `SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_URI`,
+/// which reads without the dotfile lock (it cannot be created there) or a journal. Nothing is
+/// created and nothing migrated: a missing database, or one whose schema predates the current
+/// columns, is an error naming the reason.
+pub fn open_immutable(repo: &Path) -> Result<Connection, String> {
+    let path = db_path(repo);
+    let conn = Connection::open_with_flags(
+        murmur_host_roots::sqlite_immutable_uri(&path.to_string_lossy()),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(|e| e.to_string())?;
+    tune(&conn).map_err(|e| e.to_string())?;
+    let mut current = table_exists(&conn, "symbols_fts").map_err(|e| e.to_string())?;
+    for (table, col) in [
+        ("files", "content_hash"),
+        ("symbols", "visibility"),
+        ("symbols", "attributes"),
+        ("edges", "confidence"),
+        ("edges", "call_style"),
+    ] {
+        current = current && column_exists(&conn, table, col).map_err(|e| e.to_string())?;
+    }
+    if !current {
+        return Err(
+            "it lacks this tool's current schema and needs a migration, which a folder opened \
+             read-only does not allow; run index_repository where the folder is read-write"
+                .to_string(),
+        );
+    }
+    Ok(conn)
+}
+
+fn table_exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name = ?1",
+        [name],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
 }
 
 /// The exact shipped schema. Kept as one string so the build summary can quote

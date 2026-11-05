@@ -75,10 +75,10 @@ jobs:
 
       # Pinned WASI C toolchain (wasi-sdk.toml) beside wasm-tools: the wasm32-wasip2 C
       # compiler that .cargo/config.toml names, for C sources compiled into a component
-      # (the bundled SQLite of tool-test-report and tool-code-coverage). The tests below
-      # build those components, so it is installed before them. Cached by the pin's hash;
-      # build-wasm.sh would install it on demand anyway, but the ~190 MB download should
-      # not repeat on every push.
+      # (the bundled SQLite of tool-test-report, tool-code-coverage and tool-code-graph, and
+      # the latter's tree-sitter). The tests below build those components, so it is installed
+      # before them. Cached by the pin's hash; build-wasm.sh would install it on demand anyway,
+      # but the ~190 MB download should not repeat on every push.
       - uses: actions/cache@v4
         with:
           path: ~/.cache/murmur-default-artifacts
@@ -91,9 +91,9 @@ jobs:
 
       # Native tools (`implementation: native` in their murmur.yaml) are excluded:
       # they are host binaries, not components. Their C dependencies that are not
-      # yet ported (tree-sitter, and the SQLite of the tools not yet ported) do not
-      # build for wasm32-wasip2; the bundled SQLite of tool-test-report and
-      # tool-code-coverage does, with the pinned wasi-sdk installed above.
+      # yet ported do not build for wasm32-wasip2; the bundled SQLite of
+      # tool-test-report, tool-code-coverage and tool-code-graph, and the latter's
+      # tree-sitter, do, with the pinned wasi-sdk installed above.
       #
       # The script derives that exclusion set from the manifests rather than
       # repeating it here, so "build everything that targets wasm" has one
@@ -272,8 +272,8 @@ jobs:
             murmur
 
       # Pinned WASI C toolchain (wasi-sdk.toml), as in build-and-test: the release
-      # build this check reruns compiles the bundled SQLite of tool-test-report and
-      # tool-code-coverage with it.
+      # build this check reruns compiles the bundled SQLite of tool-test-report,
+      # tool-code-coverage and tool-code-graph, and tool-code-graph's tree-sitter, with it.
       - uses: actions/cache@v4
         with:
           path: ~/.cache/murmur-default-artifacts

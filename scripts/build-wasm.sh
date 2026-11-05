@@ -24,14 +24,14 @@
 #
 # Native tools are excluded because they are host binaries, not components:
 # they need host capabilities (spawning `git`, raw sockets and a native TLS
-# stack) that a wasm32-wasip2 guest does not have, or link C sources whose
-# wasm port has not been done yet (tree-sitter, and the SQLite of the tools not
-# yet ported). Attempting one anyway fails deep inside a C build with an error
-# naming the C compiler rather than the real mistake. scripts/build-native.sh
-# builds them instead.
+# stack) that a wasm32-wasip2 guest does not have, or a display. Attempting one
+# anyway fails deep inside a build with an error naming the C compiler or a
+# missing host API rather than the real mistake. scripts/build-native.sh builds
+# them instead.
 #
 # C sources that are compiled for wasm32-wasip2 (rusqlite's bundled SQLite, in
-# tool-test-report and tool-code-coverage) need the pinned wasi-sdk (wasi-sdk.toml), and this script
+# tool-test-report, tool-code-coverage and tool-code-graph, and tree-sitter with
+# its grammars, in tool-code-graph) need the pinned wasi-sdk (wasi-sdk.toml), and this script
 # installs it itself through scripts/wasi-sdk.sh before its first cargo
 # invocation. The release workflow (build.yml) calls this script and is not
 # edited for a toolchain, so the script provisions its own; with the toolchain

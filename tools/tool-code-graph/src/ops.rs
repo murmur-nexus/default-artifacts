@@ -9,7 +9,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use murmur_host_roots::HostRoot;
+use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -17,6 +18,7 @@ use crate::db;
 use crate::out::{errored, failed, passed, Meta};
 use crate::parse;
 use crate::parse_python;
+use crate::repo::{self, Repo};
 
 // ── Input helpers ─────────────────────────────────────────────────────────────
 
@@ -42,39 +44,56 @@ fn req_i64(op: &Value, key: &str, operation: &str) -> Result<i64, Value> {
     })
 }
 
-/// Resolve and validate `repo_path`; defaults to the current directory. Returns
-/// a `failed` envelope if the path is missing, not found, or not a directory.
-fn resolve_repo(op: &Value, operation: &str) -> Result<PathBuf, Value> {
-    let raw = str_field(op, "repo_path")
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .ok_or_else(|| failed(format!("{operation}: could not determine repo_path")))?;
-    if !raw.exists() {
-        return Err(failed(format!(
-            "{operation}: repo_path does not exist: {}",
-            raw.display()
-        )));
-    }
-    if !raw.is_dir() {
-        return Err(failed(format!(
-            "{operation}: repo_path is not a directory: {}",
-            raw.display()
-        )));
-    }
-    Ok(raw.canonicalize().unwrap_or(raw))
-}
-
-fn open_db(repo: &Path, operation: &str) -> Result<Connection, Value> {
-    db::open(repo).map_err(|e| errored(format!("{operation}: failed to open code graph db: {e}")))
+/// Open the repository's graph database. In a writable folder it opens read-write exactly as
+/// the native tool did, creating `.murmur/`, the schema and any migration; in a host folder
+/// opened read-only it opens immutable and read-only ([`db::open_immutable`]). Errors are the
+/// native `errored("{operation}: failed to open code graph db: {e}")`.
+///
+/// SQLite's WASI build locks with a `code-graph.db.lock` directory. A call cut off mid-write
+/// leaves it behind, and every later call then finds the database busy; that error names the
+/// directory to remove.
+fn open_db(repo: &Repo, operation: &str) -> Result<Connection, Value> {
+    let opened = if repo.writable() {
+        db::open(&repo.open).map_err(|e| {
+            let mut reason = e.to_string();
+            if e.sqlite_error_code() == Some(ErrorCode::DatabaseBusy)
+                && db::lock_path(&repo.open).exists()
+            {
+                reason.push_str(&format!(
+                    "; a previous call may have been cut off mid-write: if no other call is \
+                     using the graph, the directory {} can be removed",
+                    repo.shown_join(&format!("{}/{}.lock", db::STORE_DIR, db::DB_FILE))
+                ));
+            }
+            reason
+        })
+    } else if !db::db_path(&repo.open).exists() {
+        Err(format!(
+            "{} does not exist, and a folder opened read-only cannot hold a new one; run \
+             index_repository where the folder is read-write",
+            repo.shown_join(&format!("{}/{}", db::STORE_DIR, db::DB_FILE))
+        ))
+    } else {
+        db::open_immutable(&repo.open)
+    };
+    opened.map_err(|reason| {
+        errored(format!(
+            "{operation}: failed to open code graph db: {}",
+            repo.as_written(&reason)
+        ))
+    })
 }
 
 // ── op: index_repository ──────────────────────────────────────────────────────
 
-pub fn op_index_repository(op: &Value) -> Value {
-    let repo = match resolve_repo(op, "index_repository") {
+pub fn op_index_repository(op: &Value, roots: &[HostRoot]) -> Value {
+    let repo = match repo::resolve_repo(op, "index_repository", roots) {
         Ok(r) => r,
         Err(e) => return e,
     };
+    if let Some(refusal) = repo::read_only_refusal(&repo) {
+        return refusal;
+    }
     let mut conn = match open_db(&repo, "index_repository") {
         Ok(c) => c,
         Err(e) => return e,
@@ -90,7 +109,7 @@ pub fn op_index_repository(op: &Value) -> Value {
                 stats.total_edges
             );
             let data = json!({
-                "repo_path": repo.display().to_string(),
+                "repo_path": repo.shown,
                 "changed_files": stats.changed,
                 "unchanged_files": stats.unchanged,
                 "removed_files": stats.removed,
@@ -101,9 +120,9 @@ pub fn op_index_repository(op: &Value) -> Value {
             // repeat is flagged redundant; a reindex that touched the graph is a
             // mutate that clears any prior read of this repo.
             let meta = if stats.changed == 0 && stats.removed == 0 {
-                Meta::read(format!("repo:{}", repo.display()))
+                Meta::read(format!("repo:{}", repo.shown))
             } else {
-                Meta::mutate(format!("repo:{}", repo.display()))
+                Meta::mutate(format!("repo:{}", repo.shown))
             };
             passed(summary, data, None, Some(meta))
         }
@@ -119,7 +138,9 @@ struct IndexStats {
     total_edges: i64,
 }
 
-fn index_repo(conn: &mut Connection, repo: &Path) -> Result<IndexStats, String> {
+fn index_repo(conn: &mut Connection, repo: &Repo) -> Result<IndexStats, String> {
+    let fallback = repo.fallback.as_deref();
+    let repo = repo.open.as_path();
     let files = collect_source_files(repo);
     let mut on_disk: Vec<String> = Vec::new();
     let mut changed = 0usize;
@@ -168,10 +189,10 @@ fn index_repo(conn: &mut Connection, repo: &Path) -> Result<IndexStats, String> 
 
         let source = String::from_utf8_lossy(&bytes).into_owned();
         let parsed = if is_python {
-            let (package, module) = python_package_and_module(repo, file, &mut py_cache);
+            let (package, module) = python_package_and_module(repo, fallback, file, &mut py_cache);
             parse_python::parse_file(&source, &package, &module)
         } else {
-            let (package, module) = package_and_module(repo, file, &mut rust_cache);
+            let (package, module) = package_and_module(repo, fallback, file, &mut rust_cache);
             parse::parse_file(&source, &package, &module)
         };
         insert_parsed(&tx, file_id, &parsed).map_err(|e| e.to_string())?;
@@ -292,8 +313,8 @@ fn delete_missing_files(conn: &Connection, on_disk: &[String]) -> rusqlite::Resu
 
 // ── op: find_symbol ───────────────────────────────────────────────────────────
 
-pub fn op_find_symbol(op: &Value) -> Value {
-    let repo = match resolve_repo(op, "find_symbol") {
+pub fn op_find_symbol(op: &Value, roots: &[HostRoot]) -> Value {
+    let repo = match repo::resolve_repo(op, "find_symbol", roots) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -313,7 +334,7 @@ pub fn op_find_symbol(op: &Value) -> Value {
             "find_symbol: 0 matches",
             json!({ "query": query, "count": 0, "matches": [] }),
             None,
-            Some(Meta::read(format!("find:{}:{}", repo.display(), query))),
+            Some(Meta::read(format!("find:{}:{}", repo.shown, query))),
         );
     };
 
@@ -353,7 +374,7 @@ pub fn op_find_symbol(op: &Value) -> Value {
         format!("find_symbol: {} match(es) for '{}'", matches.len(), query),
         json!({ "query": query, "count": matches.len(), "matches": matches }),
         None,
-        Some(Meta::read(format!("find:{}:{}", repo.display(), query))),
+        Some(Meta::read(format!("find:{}:{}", repo.shown, query))),
     )
 }
 
@@ -375,8 +396,8 @@ fn fts_match_expr(query: &str) -> Option<String> {
 
 // ── op: get_symbol ────────────────────────────────────────────────────────────
 
-pub fn op_get_symbol(op: &Value) -> Value {
-    let repo = match resolve_repo(op, "get_symbol") {
+pub fn op_get_symbol(op: &Value, roots: &[HostRoot]) -> Value {
+    let repo = match repo::resolve_repo(op, "get_symbol", roots) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -458,8 +479,8 @@ fn neighbor_names(
 
 // ── op: slice_symbol ──────────────────────────────────────────────────────────
 
-pub fn op_slice_symbol(op: &Value) -> Value {
-    let repo = match resolve_repo(op, "slice_symbol") {
+pub fn op_slice_symbol(op: &Value, roots: &[HostRoot]) -> Value {
+    let repo = match repo::resolve_repo(op, "slice_symbol", roots) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -623,20 +644,28 @@ pub fn op_slice_symbol(op: &Value) -> Value {
     passed(summary, inline, data_path, Some(Meta::read(symbol_id)))
 }
 
-fn write_slice_file(repo: &Path, symbol_id: &str, full: &Value) -> Option<String> {
-    let dir = repo.join(db::STORE_DIR).join("slices");
-    std::fs::create_dir_all(&dir).ok()?;
+/// Write the full slice to `<repo>/.murmur/slices/slice-<sha256(symbol_id)>.json` and return
+/// that path as the call names the repository; `None` when it cannot be written (a read-only
+/// folder).
+fn write_slice_file(repo: &Repo, symbol_id: &str, full: &Value) -> Option<String> {
     let name = format!("slice-{}.json", sha256_hex(symbol_id.as_bytes()));
-    let path = dir.join(name);
+    write_payload(repo, "slices", &name, full)
+}
+
+/// Write `full` as pretty JSON to `<repo>/.murmur/<dir>/<name>`, returning `<shown>/.murmur/
+/// <dir>/<name>` (`.murmur/<dir>/<name>` for `.`; the absolute host path for a host value).
+fn write_payload(repo: &Repo, dir: &str, name: &str, full: &Value) -> Option<String> {
+    let path = repo.open.join(db::STORE_DIR).join(dir);
+    std::fs::create_dir_all(&path).ok()?;
     let body = serde_json::to_string_pretty(full).ok()?;
-    std::fs::write(&path, body).ok()?;
-    Some(path.display().to_string())
+    std::fs::write(path.join(name), body).ok()?;
+    Some(repo.shown_join(&format!("{}/{dir}/{name}", db::STORE_DIR)))
 }
 
 // ── op: explain_path ──────────────────────────────────────────────────────────
 
-pub fn op_explain_path(op: &Value) -> Value {
-    let repo = match resolve_repo(op, "explain_path") {
+pub fn op_explain_path(op: &Value, roots: &[HostRoot]) -> Value {
+    let repo = match repo::resolve_repo(op, "explain_path", roots) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -752,8 +781,8 @@ const PERSISTENCE_VOCAB: [&str; 9] = [
 /// flagged. Best-effort and incomplete by design.
 const ROUTE_MARKERS: [&str; 6] = ["get(", "post(", "put(", "delete(", "patch(", "route("];
 
-pub fn op_impact_analysis(op: &Value) -> Value {
-    let repo = match resolve_repo(op, "impact_analysis") {
+pub fn op_impact_analysis(op: &Value, roots: &[HostRoot]) -> Value {
+    let repo = match repo::resolve_repo(op, "impact_analysis", roots) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -781,7 +810,7 @@ pub fn op_impact_analysis(op: &Value) -> Value {
         Err(e) => return e,
     };
 
-    let rel = normalize_rel(&repo, &file);
+    let rel = repo::reduce_impact_file(&file, &repo.shown, || indexed_paths(&conn));
     let resource = format!("impact:{rel}:{start_line}-{end_line}");
 
     // The file must be present in the index. A never-indexed / misspelled path is
@@ -1095,31 +1124,22 @@ fn attr_has_marker(attrs: &str, marker: &str) -> bool {
     false
 }
 
-/// Normalize a caller-supplied `file` to the stored repo-relative form: forward
-/// slashes, no leading `./`, and any absolute repo prefix stripped. Delegates
-/// the actual repo-relative join to `rel_path` — the same function indexing
-/// uses to populate `files.path` — so a lookup here always agrees with what
-/// was stored, instead of risking drift between two independent
-/// normalizations of the same path.
-fn normalize_rel(repo: &Path, file: &str) -> String {
-    let mut f = file.replace('\\', "/");
-    while let Some(s) = f.strip_prefix("./") {
-        f = s.to_string();
-    }
-    rel_path(repo, Path::new(&f))
+/// Every indexed `files.path`, for [`repo::reduce_impact_file`]'s suffix rule.
+fn indexed_paths(conn: &Connection) -> Vec<String> {
+    let Ok(mut stmt) = conn.prepare("SELECT path FROM files") else {
+        return Vec::new();
+    };
+    stmt.query_map([], |r| r.get::<_, String>(0))
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
 }
 
 /// Persist the full impact payload under `.murmur/impacts/` and return its path,
 /// mirroring `write_slice_file`.
-fn write_impact_file(repo: &Path, rel: &str, start: i64, end: i64, full: &Value) -> Option<String> {
-    let dir = repo.join(db::STORE_DIR).join("impacts");
-    std::fs::create_dir_all(&dir).ok()?;
+fn write_impact_file(repo: &Repo, rel: &str, start: i64, end: i64, full: &Value) -> Option<String> {
     let key = format!("{rel}:{start}-{end}");
     let name = format!("impact-{}.json", sha256_hex(key.as_bytes()));
-    let path = dir.join(name);
-    let body = serde_json::to_string_pretty(full).ok()?;
-    std::fs::write(&path, body).ok()?;
-    Some(path.display().to_string())
+    write_payload(repo, "impacts", &name, full)
 }
 
 // ── Filesystem / crate-layout helpers ─────────────────────────────────────────
@@ -1186,22 +1206,25 @@ fn is_skipped_dir(name: &str) -> bool {
 /// Determine the crate package name and module path for `file`.
 ///
 /// - package: `name` from the nearest ancestor `Cargo.toml` that has a
-///   `[package]` section; falls back to the repo directory name.
+///   `[package]` section; falls back to `fallback` ([`repo::fallback_name`]),
+///   else `crate`.
 /// - module: path from the crate's `src/` to the file, with `lib.rs`/`main.rs`/
 ///   `mod.rs` collapsing to their parent module; `""` at the crate root.
 fn package_and_module(
     repo: &Path,
+    fallback: Option<&str>,
     file: &Path,
     cache: &mut HashMap<PathBuf, (String, PathBuf)>,
 ) -> (String, String) {
     let dir = file.parent().unwrap_or(repo).to_path_buf();
-    let (package, crate_root) = nearest_crate(repo, &dir, cache);
+    let (package, crate_root) = nearest_crate(repo, fallback, &dir, cache);
     let module = module_path(&crate_root, file);
     (package, module)
 }
 
 fn nearest_crate(
     repo: &Path,
+    fallback: Option<&str>,
     start: &Path,
     cache: &mut HashMap<PathBuf, (String, PathBuf)>,
 ) -> (String, PathBuf) {
@@ -1229,12 +1252,7 @@ fn nearest_crate(
             }
         }
     }
-    let fallback = (
-        repo.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "crate".into()),
-        repo.to_path_buf(),
-    );
+    let fallback = (fallback.unwrap_or("crate").to_string(), repo.to_path_buf());
     cache.insert(start.to_path_buf(), fallback.clone());
     fallback
 }
@@ -1301,24 +1319,26 @@ fn module_path(crate_root: &Path, file: &Path) -> String {
 ///
 /// - package: the name declared by the nearest ancestor `pyproject.toml`,
 ///   `setup.py`, or `setup.cfg` (sniffed in that order at each directory,
-///   walking up); falls back to the repo directory name, exactly as the Rust
-///   `nearest_crate` fallback does.
+///   walking up); falls back to `fallback` ([`repo::fallback_name`]), else
+///   `package`, as the Rust `nearest_crate` fallback does.
 /// - module: the dotted path from that package root to the file, with a leading
 ///   `src/` dropped, `__init__.py` collapsing to its parent module, and the
 ///   `.py` suffix stripped; `""` at the package root.
 fn python_package_and_module(
     repo: &Path,
+    fallback: Option<&str>,
     file: &Path,
     cache: &mut HashMap<PathBuf, (String, PathBuf)>,
 ) -> (String, String) {
     let dir = file.parent().unwrap_or(repo).to_path_buf();
-    let (package, root) = python_nearest_package(repo, &dir, cache);
+    let (package, root) = python_nearest_package(repo, fallback, &dir, cache);
     let module = python_module_path(&root, file);
     (package, module)
 }
 
 fn python_nearest_package(
     repo: &Path,
+    fallback: Option<&str>,
     start: &Path,
     cache: &mut HashMap<PathBuf, (String, PathBuf)>,
 ) -> (String, PathBuf) {
@@ -1344,9 +1364,7 @@ fn python_nearest_package(
         }
     }
     let fallback = (
-        repo.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "package".into()),
+        fallback.unwrap_or("package").to_string(),
         repo.to_path_buf(),
     );
     cache.insert(start.to_path_buf(), fallback.clone());
@@ -1486,4 +1504,88 @@ fn python_module_path(root: &Path, file: &Path) -> String {
         comps.pop();
     }
     comps.join(".")
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    /// A scratch repository under the crate's git-ignored `.test-scratch/`, addressed by a path
+    /// relative to the test's working directory (the crate root), as a relative `repo_path`
+    /// opens in the work folder. Removed on drop.
+    struct Scratch(String);
+
+    impl Scratch {
+        fn new(tag: &str) -> Scratch {
+            let rel = format!(".test-scratch/ops-{tag}-{}", std::process::id());
+            let _ = std::fs::remove_dir_all(&rel);
+            std::fs::create_dir_all(format!("{rel}/src")).unwrap();
+            std::fs::write(
+                format!("{rel}/Cargo.toml"),
+                "[package]\nname = \"meta_crate\"\nversion = \"0.1.0\"\n",
+            )
+            .unwrap();
+            std::fs::write(
+                format!("{rel}/src/lib.rs"),
+                "pub fn a() -> i64 {\n    b()\n}\n\npub fn b() -> i64 {\n    1\n}\n",
+            )
+            .unwrap();
+            Scratch(rel)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_noop_reindex_declares_a_read_and_a_change_a_mutate() {
+        let repo = Scratch::new("meta-index");
+        let op = json!({"operation": "index_repository", "repo_path": repo.0});
+        let first = op_index_repository(&op, &[]);
+        assert_eq!(first["status"], "passed", "{first}");
+        assert_eq!(first["metadata"]["state_effect"], "mutate");
+        assert_eq!(first["metadata"]["resource_id"], format!("repo:{}", repo.0));
+        let again = op_index_repository(&op, &[]);
+        assert_eq!(again["data"]["changed_files"], 0);
+        assert_eq!(again["metadata"]["state_effect"], "read");
+        assert_eq!(again["metadata"]["resource_id"], format!("repo:{}", repo.0));
+    }
+
+    #[test]
+    fn symbol_operations_declare_the_symbol_id_as_the_resource() {
+        let repo = Scratch::new("meta-symbol");
+        let index = op_index_repository(
+            &json!({"operation": "index_repository", "repo_path": repo.0}),
+            &[],
+        );
+        assert_eq!(index["status"], "passed", "{index}");
+        let id = "rust://meta_crate/#a(->i64)";
+        for out in [
+            op_get_symbol(
+                &json!({"operation": "get_symbol", "repo_path": repo.0, "symbol_id": id}),
+                &[],
+            ),
+            op_slice_symbol(
+                &json!({"operation": "slice_symbol", "repo_path": repo.0, "symbol_id": id}),
+                &[],
+            ),
+        ] {
+            assert_eq!(out["status"], "passed", "{out}");
+            assert_eq!(out["metadata"]["resource_id"], id);
+            assert_eq!(out["metadata"]["state_effect"], "read");
+        }
+        let find = op_find_symbol(
+            &json!({"operation": "find_symbol", "repo_path": format!("{}/", repo.0), "query": "a"}),
+            &[],
+        );
+        assert_eq!(
+            find["metadata"]["resource_id"],
+            format!("find:{}:a", repo.0)
+        );
+    }
 }
