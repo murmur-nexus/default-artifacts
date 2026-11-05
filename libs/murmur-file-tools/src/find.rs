@@ -8,10 +8,10 @@ use regex::Regex;
 use serde_json::{json, Value};
 use walkdir::WalkDir;
 
-use crate::resolve::{lexical_segments, reject_absolute_glob, resolve_path};
+use crate::resolve::{normalize_dir, reject_absolute_glob, resolve_path};
 use crate::{
     err, err_result, fail_msg, format_result_size, io_error_kind, ok_with, HostRoot, Tool,
-    HOST_ROOT_NAME,
+    ToolOutcome, HOST_ROOT_NAME,
 };
 
 // find limits. A search stops at the first one it reaches and still succeeds, returning the
@@ -27,8 +27,22 @@ const FIND_MAX_BYTES: u64 = 32 * 1024 * 1024;
 // starts re-transmitting whole files, defeating the bounded-read intent.
 pub(crate) const MAX_CONTEXT_LINES: i64 = 20;
 
+/// Run `tool-find` on a stdin-envelope string `{"data": <string-or-object>, ...}` and return
+/// the old-protocol result `Value`: the envelope and field checks every tool shares, then this
+/// module's handler. `roots` are the host folders the tool may open an absolute path in, in
+/// preopen order.
+pub fn run(raw: &str, roots: &[HostRoot]) -> Value {
+    crate::run_with(Tool::Find, handle, raw, roots)
+}
+
+/// What the `tool-find` component's `Guest::run` calls with `ToolInput.data`: the call rewrapped
+/// into the envelope [`run`] parses, and the result mapped onto a [`ToolOutcome`].
+pub fn dispatch(data: Option<&str>, roots: &[HostRoot]) -> ToolOutcome {
+    crate::dispatch_with(Tool::Find, handle, data, roots)
+}
+
 /// Search with the production limits.
-pub(crate) fn find(op: &Value, roots: &[HostRoot]) -> Value {
+fn handle(op: &Value, roots: &[HostRoot]) -> Value {
     find_with_limits(op, Limits::PRODUCTION, roots)
 }
 
@@ -281,8 +295,8 @@ pub(crate) fn find_with_limits(op: &Value, limits: Limits, roots: &[HostRoot]) -
     }
 }
 
-/// Room left under the result ceiling for the `metadata.state_effect` that [`crate::run`] attaches
-/// to a successful result after the handler returns.
+/// Room left under the result ceiling for the `metadata.state_effect` that `crate::run_with`
+/// attaches to a successful result after the handler returns.
 const METADATA_RESERVE: usize = 64;
 
 /// The serialized size of a `find` result with no matches, at its largest: the
@@ -443,14 +457,6 @@ fn relative_path(root: &Path, file: &Path) -> String {
     } else {
         relative
     }
-}
-
-/// `dir` with its `.` and empty segments dropped and each `..` applied to the segment
-/// before it, `/`-joined. `""` is the workdir root. `None` when a `..` has no segment left
-/// to pop, i.e. the value climbs above the workdir.
-pub(crate) fn normalize_dir(dir: &str) -> Option<String> {
-    let (segments, climbed_above) = lexical_segments(dir);
-    (!climbed_above).then(|| segments.join("/"))
 }
 
 /// An anchored regex for `glob`. `**/` matches zero or more whole segments, a trailing `**`

@@ -1,9 +1,10 @@
 //! `tool-edit`, packaged as a `wasm32-wasip2` component exporting `murmur:tool/run` (world
 //! `tool`).
 //!
-//! The file logic lives in the shared `murmur-file-tools` library (`libs/murmur-file-tools`).
-//! This crate only binds its own WIT world, gathers the host roots from its WASI preopens, and
-//! maps `murmur_file_tools::dispatch`'s outcome for `Tool::Edit` onto the WIT `ToolResult`.
+//! The file logic lives in the shared `murmur-file-tools` library (`libs/murmur-file-tools`),
+//! built with only its `edit` feature, so the component links this tool's operation and none of
+//! the other three. This crate only binds its own WIT world, gathers the host roots from its WASI
+//! preopens, and maps `murmur_file_tools::edit::dispatch`'s outcome onto the WIT `ToolResult`.
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_tool {
@@ -14,7 +15,7 @@ mod wasm_tool {
     });
 
     use exports::murmur::tool::run::{Attachment, Guest, Status, ToolInput, ToolResult};
-    use murmur_file_tools::{dispatch, HostRoot, OutcomeStatus, Tool, ToolOutcome};
+    use murmur_file_tools::{edit, HostRoot, OutcomeStatus, ToolOutcome};
     use wasip2::filesystem::{preopens, types::DescriptorFlags};
 
     struct Component;
@@ -44,7 +45,7 @@ mod wasm_tool {
                 truncated,
                 state_effect,
                 attachments,
-            } = dispatch(Tool::Edit, input.data.as_deref(), &roots);
+            } = edit::dispatch(input.data.as_deref(), &roots);
             ToolResult {
                 status: match status {
                     OutcomeStatus::Passed => Status::Passed,

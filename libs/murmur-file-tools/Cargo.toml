@@ -6,18 +6,32 @@ license.workspace = true
 
 # Internal-only shared library: the file logic of tool-read, tool-write, tool-edit and
 # tool-find, the four flat file tools. Each of those crates is a thin wasm32-wasip2 component
-# that binds its own WIT world and calls `dispatch` with its `Tool` variant; every limit,
-# message and filesystem call lives here once. NOT an artifact: it has no murmur.yaml, so
-# nothing publishes it.
+# that binds its own WIT world and calls its tool module's `dispatch`; every limit, message and
+# filesystem call lives here once. NOT an artifact: it has no murmur.yaml, so nothing publishes
+# it.
+#
+# Each tool's operation is a feature, and so are the dependencies only it uses: `find` brings
+# regex and walkdir, `read` the image-header parser. A tool crate sets `default-features =
+# false` and enables only its own feature, so a per-artifact build of its component links only
+# its own operation. The defaults enable all four, so `cargo test` covers every tool. A build of
+# several tool crates in one cargo invocation unifies their features, which is why
+# scripts/build-wasm.sh builds one artifact per invocation.
 
 [lib]
 name = "murmur_file_tools"
 path = "src/lib.rs"
 
+[features]
+default = ["read", "write", "edit", "find"]
+read = []
+write = []
+edit = []
+find = ["dep:regex", "dep:walkdir"]
+
 [dependencies]
 serde_json.workspace = true
-regex = "1"
-walkdir = "2"
+regex = { version = "1", optional = true }
+walkdir = { version = "2", optional = true }
 
 # Host-target-only test dependencies; a `[dev-dependencies]` entry is never linked into the
 # wasm32-wasip2 components built from the tool crates. wasmtime and wasmtime-wasi instantiate

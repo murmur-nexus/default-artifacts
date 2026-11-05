@@ -1,4 +1,5 @@
-//! Host unit tests for every tool, each call made through [`run`] with a flat input.
+//! Host unit tests for every tool, each call made through its module's `run` or `dispatch`, by
+//! way of [`run`] and [`dispatch`] here, with a flat input.
 
 use std::fs;
 
@@ -6,10 +7,11 @@ use serde_json::{json, Value};
 
 use crate::edit::occurrences;
 use crate::find::{
-    cap_note, find_result, find_with_limits, glob_to_regex, normalize_dir, CapReason, Limits,
+    cap_note, find_result, find_with_limits, glob_to_regex, CapReason, Limits,
     FIND_RESULT_SIZE_LIMIT, MAX_CONTEXT_LINES,
 };
 use crate::read::{MAX_READ_BYTES, MAX_READ_LINES};
+use crate::resolve::normalize_dir;
 use crate::*;
 
 // Fixture root for every test that drives a tool, relative to the process CWD (the crate root,
@@ -26,6 +28,27 @@ fn scratch(tag: &str) -> std::path::PathBuf {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("failed to create scratch dir");
     dir
+}
+
+/// `tool`'s `run`: the stdin envelope `raw` through the entry point of `tool`'s own module.
+fn run(tool: Tool, raw: &str, roots: &[HostRoot]) -> Value {
+    match tool {
+        Tool::Read => read::run(raw, roots),
+        Tool::Write => write::run(raw, roots),
+        Tool::Edit => edit::run(raw, roots),
+        Tool::Find => find::run(raw, roots),
+    }
+}
+
+/// `tool`'s `dispatch`: a component's `ToolInput.data` through the entry point of `tool`'s own
+/// module.
+fn dispatch(tool: Tool, data: Option<&str>, roots: &[HostRoot]) -> ToolOutcome {
+    match tool {
+        Tool::Read => read::dispatch(data, roots),
+        Tool::Write => write::dispatch(data, roots),
+        Tool::Edit => edit::dispatch(data, roots),
+        Tool::Find => find::dispatch(data, roots),
+    }
 }
 
 /// `tool` run on the call `data`, through the stdin envelope.
@@ -1024,7 +1047,7 @@ fn from_preopen_accepts_exactly_the_host_root_names() {
 
 #[test]
 fn absolute_values_normalise_lexically() {
-    use crate::resolve::{normalize_absolute, render_absolute};
+    use crate::{normalize_absolute, render_absolute};
     for (value, expected) in [
         ("/", "/"),
         ("/a/b", "/a/b"),

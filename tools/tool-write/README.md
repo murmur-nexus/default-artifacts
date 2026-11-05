@@ -5,7 +5,8 @@ Creates or replaces a file in the work folder, with any missing parent directori
 WASM tool component (`runtime: tool`, `implementation: wasm`, world `tool`,
 exports `murmur:tool/run`). The model calls it `tool-write`. Its file logic lives
 in the shared, unpublished `libs/murmur-file-tools` library, which
-`tool-read`, `tool-write`, `tool-edit` and `tool-find` all call.
+`tool-read`, `tool-write`, `tool-edit` and `tool-find` all call. The component
+links only the library's `write` operation, none of the other three tools' code.
 
 ## Definition
 

@@ -8,13 +8,13 @@ Every artifact here is published under scope `murmur`: the artifact in `tools/to
 `murmur/tool-read`, which is how a capsule's `artifacts:` names it and how it installs:
 
 ```bash
-mur install -g murmur/tool-read@0.3.0
+mur install -g murmur/tool-read@0.4.0
 ```
 
 ```yaml
 artifacts:
   - name: murmur/tool-read
-    version: "0.3.0"
+    version: "0.4.0"
 ```
 
 Installing by scoped name needs `mur` 0.7.0 or later. `mur` v0.6.0 and earlier have no

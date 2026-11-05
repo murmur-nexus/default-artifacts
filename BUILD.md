@@ -45,13 +45,25 @@ API stays wasm: the credential gateway serves wasm stores alone.
 and are never published. `./scripts/classify-crates.sh` classifies every workspace member from its
 own manifest, and is what excludes native and internal crates from the wasm build.
 
+A shared crate whose artifacts each need only part of it puts each part behind a cargo feature, so
+an artifact compiles only what it calls. `libs/murmur-file-tools` has one feature per file tool,
+`read`, `write`, `edit` and `find`, all on by default so its own tests cover every tool. Each tool
+crate turns the defaults off and enables only its own feature:
+
+```toml
+murmur-file-tools = { path = "../../libs/murmur-file-tools", default-features = false, features = ["find"] }
+```
+
+`regex` and `walkdir` link only into `tool-find`, and the image-header code only into `tool-read`.
+A tool crate that drops its feature does not compile: its module is absent from the library.
+
 ## Build one artifact
 
 ```bash
 cargo build -p tool-read --target wasm32-wasip2 --release     # wasm
 cargo build --release -p tool-git                              # native
 ./scripts/validate-component.sh target/wasm32-wasip2/release/tool_read.wasm
-./scripts/package-artifact.sh tools/tool-read release/         # → release/tool-read-0.3.0.mur.zip
+./scripts/package-artifact.sh tools/tool-read release/         # → release/tool-read-0.4.0.mur.zip
 ./scripts/local-install.sh tool-read /path/to/capsule-folder
 ```
 

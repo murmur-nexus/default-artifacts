@@ -4,16 +4,30 @@ use serde_json::Value;
 
 use crate::resolve::{refuse_read_only, resolve_path};
 use crate::{
-    err, err_result, fail_msg, io_error_kind, ok_summary_only, reject_unknown_fields,
-    required_path, HostRoot, Tool, EDIT_PAIR_FIELDS,
+    err, err_result, fail_msg, io_error_kind, ok_summary_only, quoted, required_path, HostRoot,
+    Tool, ToolOutcome, EDIT_PAIR_FIELDS,
 };
+
+/// Run `tool-edit` on a stdin-envelope string `{"data": <string-or-object>, ...}` and return
+/// the old-protocol result `Value`: the envelope and field checks every tool shares, then this
+/// module's handler. `roots` are the host folders the tool may open an absolute path in, in
+/// preopen order.
+pub fn run(raw: &str, roots: &[HostRoot]) -> Value {
+    crate::run_with(Tool::Edit, handle, raw, roots)
+}
+
+/// What the `tool-edit` component's `Guest::run` calls with `ToolInput.data`: the call rewrapped
+/// into the envelope [`run`] parses, and the result mapped onto a [`ToolOutcome`].
+pub fn dispatch(data: Option<&str>, roots: &[HostRoot]) -> ToolOutcome {
+    crate::dispatch_with(Tool::Edit, handle, data, roots)
+}
 
 /// Apply `edits` to one file, all or nothing. Every input is validated before the file is
 /// read; the file is then read once, each `{old, new}` pair is applied in order to the
 /// result of the one before, and the file is written once, only after every pair matched
 /// exactly once. A failing pair is named `edit N of M`, counted from 1. An absolute `path` opens
 /// inside the host root covering it, which must be `read-write`.
-pub(crate) fn edit(op: &Value, roots: &[HostRoot]) -> Value {
+fn handle(op: &Value, roots: &[HostRoot]) -> Value {
     let path = match required_path(op, "path") {
         Ok(p) => p,
         Err(failure) => return failure,
@@ -107,6 +121,36 @@ fn edit_pairs(op: &Value) -> Result<Vec<(String, String)>, Value> {
         pairs.push((old, new));
     }
     Ok(pairs)
+}
+
+/// The `unknown_field` refusal for an object holding a key outside `accepted`, or `None`.
+/// `place` names where the keys were found (`edit 2 of 3`) and `subject` what takes the
+/// accepted keys (`an edit`): `unknown field "x" in <place>: <subject> takes <accepted>`. A
+/// non-object holds no keys and is left to the caller.
+fn reject_unknown_fields(
+    object: &Value,
+    place: &str,
+    subject: &str,
+    accepted: &[&str],
+) -> Option<Value> {
+    let mut unknown: Vec<&str> = object
+        .as_object()?
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !accepted.contains(key))
+        .collect();
+    if unknown.is_empty() {
+        return None;
+    }
+    unknown.sort_unstable();
+    Some(err_result(
+        err::UNKNOWN_FIELD,
+        format!(
+            "unknown field {} in {place}: {subject} takes {}",
+            quoted(&unknown),
+            accepted.join(", ")
+        ),
+    ))
 }
 
 /// How many times `needle` occurs in `text`, overlapping occurrences included: every char
