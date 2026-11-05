@@ -15,13 +15,20 @@
 //! Each manifest is parsed the way murmur parses it: `serde_norway`, then `serde_json::to_value`.
 //! That conversion sorts object keys, so the order checks read the YAML mapping itself.
 
-mod common;
-
 use std::{fs, path::PathBuf};
 
-use common::run;
-use murmur_file_tools::{Tool, EDIT_PAIR_FIELDS};
+use murmur_file_tools::{edit, find, read, write, HostRoot, Tool, EDIT_PAIR_FIELDS};
 use serde_json::{json, Value};
+
+/// `tool`'s `run`: the stdin envelope `raw` through the entry point of `tool`'s own module.
+fn run(tool: Tool, raw: &str, roots: &[HostRoot]) -> Value {
+    match tool {
+        Tool::Read => read::run(raw, roots),
+        Tool::Write => write::run(raw, roots),
+        Tool::Edit => edit::run(raw, roots),
+        Tool::Find => find::run(raw, roots),
+    }
+}
 
 /// Tool-input keys naming a file, copied from murmur's `TOOL_PATH_KEYS`
 /// (`crates/capsule-runtime/src/protected_paths.rs`).
