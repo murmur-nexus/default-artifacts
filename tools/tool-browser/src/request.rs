@@ -102,19 +102,6 @@ pub fn params_from_data(raw: &str) -> Result<Value, String> {
     params_from_value(data)
 }
 
-/// The `data` field of an `{"data": …}` envelope, as [`params_from_data`] reads it.
-pub fn params_from_envelope(raw: &str) -> Result<Value, String> {
-    if raw.trim().is_empty() {
-        return Err("tool-browser: missing input".into());
-    }
-    let envelope: Value =
-        serde_json::from_str(raw).map_err(|e| format!("tool-browser: invalid input JSON: {e}"))?;
-    match envelope.get("data") {
-        None | Some(Value::Null) => Err("tool-browser: missing data field".into()),
-        Some(v) => params_from_value(v.clone()),
-    }
-}
-
 fn params_from_value(data: Value) -> Result<Value, String> {
     match data {
         Value::String(s) => serde_json::from_str(&s)
@@ -496,12 +483,8 @@ mod tests {
     }
 
     #[test]
-    fn envelope_takes_object_or_encoded_string() {
-        let a = params_from_envelope(r#"{"data":{"action":"snapshot"}}"#).unwrap();
-        let b = params_from_envelope(r#"{"data":"{\"action\":\"snapshot\"}"}"#).unwrap();
-        assert_eq!(a, b);
-        assert!(params_from_envelope("").is_err());
-        assert!(params_from_envelope(r#"{"data":3}"#).is_err());
+    fn data_takes_object_or_encoded_string() {
+        let a = json!({"action": "snapshot"});
         assert_eq!(params_from_data(r#"{"action":"snapshot"}"#).unwrap(), a);
         assert_eq!(
             params_from_data(r#""{\"action\":\"snapshot\"}""#).unwrap(),

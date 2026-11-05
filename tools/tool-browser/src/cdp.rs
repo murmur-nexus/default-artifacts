@@ -80,6 +80,11 @@ impl<'a> Cdp<'a> {
         self.clock
     }
 
+    /// Whether the call's time is up: every command then answers [`OUT_OF_TIME`] unsent.
+    pub fn out_of_time(&self) -> bool {
+        self.clock.now_ms() >= self.deadline_ms
+    }
+
     /// A browser-level command.
     pub fn browser(&mut self, method: &str, params: Value) -> Result<Value, String> {
         self.command(None, method, params, COMMAND_TIMEOUT_MS)
@@ -115,6 +120,9 @@ impl<'a> Cdp<'a> {
         params: Value,
         timeout_ms: u64,
     ) -> Result<Value, String> {
+        if self.out_of_time() {
+            return Err(OUT_OF_TIME.into());
+        }
         let id = self.send(session, method, params)?;
         let until = self.clock.now_ms() + timeout_ms;
         loop {

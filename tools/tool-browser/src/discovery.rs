@@ -63,8 +63,8 @@ pub fn not_installed_line(granted: &[&str]) -> String {
 }
 
 /// murmur's `failed` text for a program that is not on `PATH`: the spawn's `io::Error`, which
-/// `crate::shell::spawn_contained` passes on unchanged (`ContainedSpawnError::Exec(
-/// ShellExecError::Failed(error.to_string()))`), so `No such file or directory (os error 2)`.
+/// murmur's `spawn_contained` (`crates/capsule-runtime/src/shell.rs`) passes on unchanged, so
+/// `No such file or directory (os error 2)`.
 pub fn is_not_found(failed_text: &str) -> bool {
     failed_text.contains("No such file or directory") || failed_text.contains("(os error 2)")
 }

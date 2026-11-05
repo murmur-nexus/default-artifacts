@@ -209,6 +209,18 @@ needs one has to detect the refusal itself and say so.
 [`hook-memory`](./hooks/hook-memory/) calls all three of
 `murmur:conversation/read`, `murmur:runtime/tokens` and `murmur:task-io/read`.
 
+### WIT level 4
+
+`wit/guest/` also holds `murmur:process@0.1.0`, from murmur `6750b5f9` on `main` (murmur
+`f9d4a1f8`, #390, added it), and `world tool` imports it. It lets a tool start programs that live
+for the whole session and connect to their loopback ports. A `mur` serves it from WIT level 4 on,
+and no murmur release does yet: v0.9.0, the newest tag, serves level 3.
+
+A component's level follows the interfaces it actually imports and exports, not the world it was
+built from. `tool-browser` 0.2.0 is the only artifact here that imports `murmur:process`, so it
+is the only one that needs level 4; an older `mur` refuses it with `E-WIT-LEVEL-001`. Every other
+WASM tool and driver still fits level 3.
+
 ### WIT level 3
 
 `wit/guest/` is at WIT level 3: `murmur:tool@0.2.0`, whose `tool-result` carries an `attachments`

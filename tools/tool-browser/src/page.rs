@@ -7,7 +7,7 @@ use base64::Engine as _;
 use serde_json::{json, Value};
 
 use crate::{
-    cdp::Cdp,
+    cdp::{Cdp, OUT_OF_TIME},
     request::{self, Action, OpenTarget, Request, WAIT_DEFAULT_MS},
     snapshot::{self, AxTree, Refs, DIFF_MAX_LINES},
     state::{DocumentState, SavedSnapshot, StateDir},
@@ -427,6 +427,9 @@ impl<'a> Page<'a> {
                 if found {
                     return Ok(());
                 }
+                if self.cdp.out_of_time() {
+                    return Err(OUT_OF_TIME.into());
+                }
                 if self.cdp.clock().now_ms() >= deadline {
                     return Err(format!(
                         "wait: \"{}\" did not appear within {timeout} ms",
@@ -445,6 +448,9 @@ impl<'a> Page<'a> {
                     .is_ok()
                 {
                     return Ok(());
+                }
+                if self.cdp.out_of_time() {
+                    return Err(OUT_OF_TIME.into());
                 }
                 if self.cdp.clock().now_ms() >= deadline {
                     return Err(format!("wait: e{r} had no box within {timeout} ms"));
@@ -467,7 +473,7 @@ impl<'a> Page<'a> {
         self.cdp
             .page("Page.navigateToHistoryEntry", json!({"entryId": entry_id}))?;
         let deadline = self.cdp.clock().now_ms() + LOAD_WAIT_MS;
-        while self.cdp.clock().now_ms() < deadline {
+        while self.cdp.clock().now_ms() < deadline && !self.cdp.out_of_time() {
             let moved = self
                 .cdp
                 .page("Page.getNavigationHistory", json!({}))
@@ -659,6 +665,46 @@ mod tests {
         assert_eq!(host_of("http://[::1]:3000/").as_deref(), Some("::1"));
         assert!(
             is_loopback("127.0.0.1") && is_loopback("localhost") && !is_loopback("example.com")
+        );
+    }
+
+    #[test]
+    fn wait_stops_sending_once_the_call_is_out_of_time() {
+        let conn = crate::ws::tests::FakeConn::default();
+        let ws = crate::ws::tests::upgraded(&conn, b"");
+        let handshake = conn.written.lock().unwrap().len();
+        // The clock moves only when slept on, so a loop that neither sleeps nor stops would
+        // never return here.
+        let clock = crate::state::tests::FakeClock::default();
+        clock.now.set(90_000);
+        let mut cdp = Cdp::new(ws, &clock, 90_000, crate::state::PageLog::default());
+        cdp.ev.page_session = Some("S".into());
+        let work = Path::new(".");
+        let mut page = Page::new(
+            cdp,
+            "T".into(),
+            &DocumentState::default(),
+            work,
+            PathBuf::from("/w"),
+            StateDir::new(work, "0011"),
+            0,
+            Vec::new(),
+        );
+        for input in [
+            json!({"action": "wait", "text": "later", "ms": 60000}),
+            json!({"action": "wait", "ms": 60000}),
+        ] {
+            let req = request::parse_request(&input).unwrap();
+            assert_eq!(
+                page.run(&req).map(|o| o.data),
+                Err(OUT_OF_TIME.into()),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            conn.written.lock().unwrap().len(),
+            handshake,
+            "no DevTools frame is sent after the call's end"
         );
     }
 

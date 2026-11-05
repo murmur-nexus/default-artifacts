@@ -297,7 +297,7 @@ fn accept_key(key: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use std::{
@@ -308,8 +308,8 @@ mod tests {
     /// A scripted peer: what the client wrote, and the chunks it reads in order (`None` is a
     /// timeout).
     #[derive(Clone, Default)]
-    struct FakeConn {
-        written: Arc<Mutex<Vec<u8>>>,
+    pub(crate) struct FakeConn {
+        pub(crate) written: Arc<Mutex<Vec<u8>>>,
         reads: Arc<Mutex<VecDeque<Option<Vec<u8>>>>>,
     }
 
@@ -354,7 +354,8 @@ mod tests {
         f
     }
 
-    fn upgraded(conn: &FakeConn, extra: &[u8]) -> WebSocket<'static> {
+    /// A client that has completed its upgrade on `conn`, with `extra` already received.
+    pub(crate) fn upgraded(conn: &FakeConn, extra: &[u8]) -> WebSocket<'static> {
         // The key from sixteen zero bytes is AAAAAAAAAAAAAAAAAAAAAA==.
         let accept = accept_key("AAAAAAAAAAAAAAAAAAAAAA==");
         let mut response =

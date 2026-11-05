@@ -16,10 +16,6 @@ pub const DEVTOOLS_WAIT_MS: u64 = 20_000;
 pub const BLANK_PAGE: &str = "blank.html";
 pub const BLANK_HTML: &str = "<!doctype html><title></title>";
 
-/// Flags that keep Chrome's GPU process from dying inside murmur's containment; see the README's
-/// grants table. Each is on every launch, inside a capsule or not.
-pub const CAPSULE_FLAGS: &[&str] = &[];
-
 /// Chrome's arguments, every path relative to the work folder. `sandbox_off` adds
 /// `--no-sandbox`, for the second attempt after Chrome could not start its own sandbox.
 pub fn browser_args(state_rel: &str, sandbox_off: bool) -> Vec<String> {
@@ -45,7 +41,6 @@ pub fn browser_args(state_rel: &str, sandbox_off: bool) -> Vec<String> {
         ]
         .map(str::to_string),
     );
-    args.extend(CAPSULE_FLAGS.iter().map(|f| f.to_string()));
     if sandbox_off {
         args.push("--no-sandbox".into());
     }
@@ -111,15 +106,18 @@ pub fn exit_line(name: &str, code: i32, stderr: &str) -> String {
     if singleton {
         line.push_str(SINGLETON_HINT);
     }
-    let lower = stderr.to_ascii_lowercase();
-    let memory_text = [
-        "out of memory",
-        "cannot allocate memory",
-        "address space",
-        "oom",
-    ]
-    .iter()
-    .any(|s| lower.contains(s));
+    let memory_text = stderr.lines().any(|l| {
+        let l = l.to_ascii_lowercase();
+        // Chrome logs "Failed to adjust OOM score of renderer" on every contained start; that
+        // line says nothing about memory.
+        ["out of memory", "cannot allocate memory", "address space"]
+            .iter()
+            .any(|s| l.contains(s))
+            || (l
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .any(|w| w == "oom")
+                && !l.contains("oom score"))
+    });
     if memory_text || (code >= 128 && !singleton) {
         line.push_str(MEMORY_HINT);
     }
@@ -224,9 +222,6 @@ mod tests {
             "--disable-dev-shm-usage",
         ];
         assert_eq!(&on[..expected_head.len()], expected_head);
-        for flag in CAPSULE_FLAGS {
-            assert!(on.iter().any(|a| a == flag), "{flag} is on every launch");
-        }
         assert_eq!(
             on.last().unwrap(),
             ".tool-browser/0123456789abcdef/blank.html"
@@ -301,6 +296,15 @@ mod tests {
         );
         let line = exit_line("chrome", 1, "mmap failed: Cannot allocate memory");
         assert!(line.contains("85899345920 (80 GiB)"), "{line}");
+        let line = exit_line(
+            "chrome",
+            5,
+            "[1:1:FATAL:partition_alloc.cc] OOM: out of address space",
+        );
+        assert!(line.ends_with(MEMORY_HINT), "{line}");
+        let oom_score = "[1:1:ERROR:content/browser/zygote_host/zygote_host_impl_linux.cc:279] Failed to adjust OOM score of renderer with pid 9: Permission denied (13)\n[1:1:FATAL:x.cc] zoom room bloom\n";
+        let line = exit_line("chromium", 1, oom_score);
+        assert!(!line.contains("memory_bytes"), "{line}");
         assert_eq!(
             exit_line("chrome", 1, ""),
             "tool-browser: chrome exited with 1 while starting: (nothing on stderr)"
