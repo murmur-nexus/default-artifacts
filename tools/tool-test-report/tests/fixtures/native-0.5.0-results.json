@@ -1,0 +1,341 @@
+[
+  {
+    "name": "cargo_test-explicit",
+    "args": {
+      "operation": "parse",
+      "input_path": "cargo_test.txt",
+      "format": "cargo_test"
+    },
+    "status": "failed",
+    "summary": "3 passed, 2 failed",
+    "data": {
+      "data_path": null,
+      "failed": 2,
+      "failures": [
+        {
+          "exception": "panic",
+          "file": "src/lib.rs",
+          "line": 42,
+          "message": "assertion `left == right` failed\n  left: 4\n  right: 5",
+          "stable_id": null,
+          "test_name": "tests::test_add_wrong"
+        },
+        {
+          "exception": "panic",
+          "file": "src/math.rs",
+          "line": 17,
+          "message": "attempt to divide by zero",
+          "stable_id": null,
+          "test_name": "math::tests::test_divide"
+        }
+      ],
+      "format_used": "cargo_test",
+      "passed": 3,
+      "total": 5,
+      "truncated": false
+    }
+  },
+  {
+    "name": "cargo_test-auto",
+    "args": {
+      "operation": "parse",
+      "input_path": "cargo_test.txt",
+      "format": "auto"
+    },
+    "status": "failed",
+    "summary": "3 passed, 2 failed",
+    "data": {
+      "data_path": null,
+      "failed": 2,
+      "failures": [
+        {
+          "exception": "panic",
+          "file": "src/lib.rs",
+          "line": 42,
+          "message": "assertion `left == right` failed\n  left: 4\n  right: 5",
+          "stable_id": null,
+          "test_name": "tests::test_add_wrong"
+        },
+        {
+          "exception": "panic",
+          "file": "src/math.rs",
+          "line": 17,
+          "message": "attempt to divide by zero",
+          "stable_id": null,
+          "test_name": "math::tests::test_divide"
+        }
+      ],
+      "format_used": "cargo_test",
+      "passed": 3,
+      "total": 5,
+      "truncated": false
+    }
+  },
+  {
+    "name": "pytest-explicit",
+    "args": {
+      "operation": "parse",
+      "input_path": "pytest.txt",
+      "format": "pytest"
+    },
+    "status": "failed",
+    "summary": "3 passed, 2 failed",
+    "data": {
+      "data_path": null,
+      "failed": 2,
+      "failures": [
+        {
+          "exception": "AssertionError",
+          "file": "test_math.py",
+          "line": 10,
+          "message": "assert 3 == 4\n+  where 3 = add(1, 2)",
+          "stable_id": null,
+          "test_name": "test_math.py::test_add"
+        },
+        {
+          "exception": "ValueError",
+          "file": "test_math.py",
+          "line": 15,
+          "message": "ValueError: kaboom",
+          "stable_id": null,
+          "test_name": "test_math.py::test_boom"
+        }
+      ],
+      "format_used": "pytest",
+      "passed": 3,
+      "total": 5,
+      "truncated": false
+    }
+  },
+  {
+    "name": "pytest-auto",
+    "args": {
+      "operation": "parse",
+      "input_path": "pytest.txt",
+      "format": "auto"
+    },
+    "status": "failed",
+    "summary": "3 passed, 2 failed",
+    "data": {
+      "data_path": null,
+      "failed": 2,
+      "failures": [
+        {
+          "exception": "AssertionError",
+          "file": "test_math.py",
+          "line": 10,
+          "message": "assert 3 == 4\n+  where 3 = add(1, 2)",
+          "stable_id": null,
+          "test_name": "test_math.py::test_add"
+        },
+        {
+          "exception": "ValueError",
+          "file": "test_math.py",
+          "line": 15,
+          "message": "ValueError: kaboom",
+          "stable_id": null,
+          "test_name": "test_math.py::test_boom"
+        }
+      ],
+      "format_used": "pytest",
+      "passed": 3,
+      "total": 5,
+      "truncated": false
+    }
+  },
+  {
+    "name": "go_test-explicit",
+    "args": {
+      "operation": "parse",
+      "input_path": "go_test.txt",
+      "format": "go_test"
+    },
+    "status": "failed",
+    "summary": "1 passed, 2 failed",
+    "data": {
+      "data_path": null,
+      "failed": 2,
+      "failures": [
+        {
+          "exception": "test_failure",
+          "file": "sub_test.go",
+          "line": 12,
+          "message": "expected 4, got 3",
+          "stable_id": null,
+          "test_name": "TestSubtractWrong"
+        },
+        {
+          "exception": "panic",
+          "file": "/home/user/proj/pkg/panic_test.go",
+          "line": 20,
+          "message": "boom: something went wrong",
+          "stable_id": null,
+          "test_name": "TestPanics"
+        }
+      ],
+      "format_used": "go_test",
+      "passed": 1,
+      "total": 3,
+      "truncated": false
+    }
+  },
+  {
+    "name": "go_test-auto",
+    "args": {
+      "operation": "parse",
+      "input_path": "go_test.txt",
+      "format": "auto"
+    },
+    "status": "failed",
+    "summary": "1 passed, 2 failed",
+    "data": {
+      "data_path": null,
+      "failed": 2,
+      "failures": [
+        {
+          "exception": "test_failure",
+          "file": "sub_test.go",
+          "line": 12,
+          "message": "expected 4, got 3",
+          "stable_id": null,
+          "test_name": "TestSubtractWrong"
+        },
+        {
+          "exception": "panic",
+          "file": "/home/user/proj/pkg/panic_test.go",
+          "line": 20,
+          "message": "boom: something went wrong",
+          "stable_id": null,
+          "test_name": "TestPanics"
+        }
+      ],
+      "format_used": "go_test",
+      "passed": 1,
+      "total": 3,
+      "truncated": false
+    }
+  },
+  {
+    "name": "jest-explicit",
+    "args": {
+      "operation": "parse",
+      "input_path": "jest.txt",
+      "format": "jest"
+    },
+    "status": "failed",
+    "summary": "2 passed, 2 failed",
+    "data": {
+      "data_path": null,
+      "failed": 2,
+      "failures": [
+        {
+          "exception": "AssertionError",
+          "file": "src/math.test.js",
+          "line": 10,
+          "message": "expect(received).toBe(expected) // Object.is equality\nExpected: 1\nReceived: 2",
+          "stable_id": null,
+          "test_name": "math › subtracts numbers"
+        },
+        {
+          "exception": "TypeError",
+          "file": "src/math.test.js",
+          "line": 15,
+          "message": "TypeError: Cannot read properties of undefined (reading 'value')",
+          "stable_id": null,
+          "test_name": "math › throws on bad input"
+        }
+      ],
+      "format_used": "jest",
+      "passed": 2,
+      "total": 4,
+      "truncated": false
+    }
+  },
+  {
+    "name": "jest-auto",
+    "args": {
+      "operation": "parse",
+      "input_path": "jest.txt",
+      "format": "auto"
+    },
+    "status": "failed",
+    "summary": "2 passed, 2 failed",
+    "data": {
+      "data_path": null,
+      "failed": 2,
+      "failures": [
+        {
+          "exception": "AssertionError",
+          "file": "src/math.test.js",
+          "line": 10,
+          "message": "expect(received).toBe(expected) // Object.is equality\nExpected: 1\nReceived: 2",
+          "stable_id": null,
+          "test_name": "math › subtracts numbers"
+        },
+        {
+          "exception": "TypeError",
+          "file": "src/math.test.js",
+          "line": 15,
+          "message": "TypeError: Cannot read properties of undefined (reading 'value')",
+          "stable_id": null,
+          "test_name": "math › throws on bad input"
+        }
+      ],
+      "format_used": "jest",
+      "passed": 2,
+      "total": 4,
+      "truncated": false
+    }
+  },
+  {
+    "name": "prose-auto",
+    "args": {
+      "operation": "parse",
+      "input_path": "not-a-test-run.txt",
+      "format": "auto"
+    },
+    "status": "failed",
+    "summary": "could not auto-detect test format from input; pass 'format' explicitly as one of: cargo_test, pytest, go_test, jest",
+    "data": null
+  },
+  {
+    "name": "format-junit",
+    "args": {
+      "operation": "parse",
+      "input_path": "cargo_test.txt",
+      "format": "junit"
+    },
+    "status": "failed",
+    "summary": "unknown format 'junit'; expected one of: auto, cargo_test, pytest, go_test, jest",
+    "data": null
+  },
+  {
+    "name": "no-input-path",
+    "args": {
+      "operation": "parse"
+    },
+    "status": "failed",
+    "summary": "missing required field 'input_path'",
+    "data": null
+  },
+  {
+    "name": "operation-explode",
+    "args": {
+      "operation": "explode",
+      "input_path": "cargo_test.txt"
+    },
+    "status": "failed",
+    "summary": "unknown operation: explode",
+    "data": null
+  },
+  {
+    "name": "missing-file",
+    "args": {
+      "operation": "parse",
+      "input_path": "missing.txt"
+    },
+    "status": "failed",
+    "summary": "could not read input_path 'missing.txt': No such file or directory (os error 2)",
+    "data": null
+  }
+]

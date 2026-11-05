@@ -3,7 +3,8 @@
 # a release packs it.
 #
 # The artifact's directory and kind come from scripts/list-artifacts.sh. A wasm
-# artifact is built for wasm32-wasip2 and validated, a native tool is built for the
+# artifact is built for wasm32-wasip2 (after scripts/wasi-sdk.sh installs the pinned
+# C toolchain) and validated, a native tool is built for the
 # host with `cargo build --release -p <name>`, and a skill compiles nothing; then
 # scripts/package-artifact.sh packs it with `mur build`, and `mur install ./<zip>`
 # installs it into the capsule.
@@ -59,13 +60,15 @@ trap 'rm -rf "$OUT"' EXIT
 case "$KIND" in
   wasm)
     echo "→ [1/4] cargo build $NAME ($VERSION) — wasm32-wasip2"
+    # The pinned wasi-sdk that .cargo/config.toml names as the wasm32-wasip2 C compiler,
+    # for an artifact that compiles C sources (bundled SQLite) into its component.
+    bash "$SCRIPT_DIR/wasi-sdk.sh" >/dev/null
     ( cd "$REPO_ROOT" && cargo build -p "$NAME" --target wasm32-wasip2 --release )
     "$REPO_ROOT/scripts/validate-component.sh" "$REPO_ROOT/target/wasm32-wasip2/release/${NAME//-/_}.wasm"
     ;;
   native)
-    # A native tool compiled with --target wasm32-wasip2 fails in its C dependencies
-    # (libsqlite3-sys can't find stdio.h — there is no wasi libc sysroot here), so it
-    # builds for the host, as build.yml's native job does.
+    # A native tool is a host binary, not a component, so it builds for the host, as
+    # build.yml's native job does.
     echo "→ [1/4] cargo build $NAME ($VERSION) — native, host"
     ( cd "$REPO_ROOT" && cargo build --release -p "$NAME" )
     ;;

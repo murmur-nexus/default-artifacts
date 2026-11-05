@@ -23,16 +23,25 @@
 # fails on a member it cannot classify.
 #
 # Native tools are excluded because they are host binaries, not components:
-# they link C sources (bundled SQLite, tree-sitter) or need host capabilities
-# (spawning `git`, raw sockets and a native TLS stack) that a wasm32-wasip2 guest
-# does not have. Attempting one anyway fails deep inside a C build with an error
+# they need host capabilities (spawning `git`, raw sockets and a native TLS
+# stack) that a wasm32-wasip2 guest does not have, or link C sources whose
+# wasm port has not been done yet (tree-sitter, and the SQLite of the tools not
+# yet ported). Attempting one anyway fails deep inside a C build with an error
 # naming the C compiler rather than the real mistake. scripts/build-native.sh
 # builds them instead.
+#
+# C sources that are compiled for wasm32-wasip2 (rusqlite's bundled SQLite, in
+# tool-test-report) need the pinned wasi-sdk (wasi-sdk.toml), and this script
+# installs it itself through scripts/wasi-sdk.sh before its first cargo
+# invocation. The release workflow (build.yml) calls this script and is not
+# edited for a toolchain, so the script provisions its own; with the toolchain
+# already in the cache, that costs nothing.
 #
 # Usage:   scripts/build-wasm.sh [<extra cargo args>...]
 #          Extra arguments are appended to every cargo invocation (e.g. --locked).
 # Exit:    0 — build succeeded
-#          1 — a workspace member could not be classified, or cargo failed
+#          1 — a workspace member could not be classified, wasi-sdk could not be
+#              installed, or cargo failed
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,6 +70,8 @@ n_artifacts="$(printf '%s' "$artifacts" | grep -c . || true)"
 echo "Building $((n_libs + n_artifacts)) crates for wasm32-wasip2: $n_libs internal libs in one cargo invocation, then $n_artifacts artifacts one invocation each."
 
 cd "$REPO_ROOT"
+
+bash "$SCRIPT_DIR/wasi-sdk.sh" >/dev/null
 
 if [ -n "$libs" ]; then
     lib_args=""

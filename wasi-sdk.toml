@@ -1,0 +1,10 @@
+# The WASI C toolchain that compiles C sources (rusqlite's bundled SQLite) for wasm32-wasip2.
+# scripts/wasi-sdk.sh installs it; check-version-drift.sh hashes this file into every wasm
+# artifact that links libsqlite3-sys. Moving it changes those artifacts' bytes: bump them.
+version = "34.0"
+tag = "wasi-sdk-34"
+
+[sha256]
+x86_64-linux = "b761e3a0721dbae9c09a0059e5fdb2bf917d1b4a8a7b430fb3b5aafb0984b2c4"
+arm64-linux = "f7e243dff54d60bcc576e94d6166b69f410f2500ae4a9ceef34315be10e77971"
+arm64-macos = "9c59398106b417f8f14913380fdf0097a8cc0ff4af9eb3ce0065a859e88d49e9"

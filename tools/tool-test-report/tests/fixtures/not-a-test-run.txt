@@ -1,0 +1,7 @@
+Release notes, draft two.
+
+This week the team moved the build onto the new runners and rewrote the
+section of the handbook that explains how a reviewer signs off on a change.
+Nothing here is the output of a test runner: there is no tally, no banner and
+no failure marker, so a parser asked to guess the format should give up and
+ask for one instead.

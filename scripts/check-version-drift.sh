@@ -34,8 +34,11 @@
 #   workspace       `[workspace.package]` and any `[profile.*]`, the
 #                   `[workspace.dependencies]` entries this crate declares (a
 #                   feature list is not in the lockfile), its own resolved
-#                   third-party versions walked out of Cargo.lock, and
-#                   rust-toolchain.toml. Narrowed to the one artifact on
+#                   third-party versions walked out of Cargo.lock,
+#                   rust-toolchain.toml, and — for a wasm artifact whose
+#                   resolved closure holds a crate that compiles C sources
+#                   (WASM_C_CRATES: libsqlite3-sys) — wasi-sdk.toml, the C
+#                   toolchain that compiles them into the component. Narrowed to the one artifact on
 #                   purpose: adding an unrelated crate to the workspace changes
 #                   neither its dependencies nor its bytes. A crate's version
 #                   does change its bytes — rustc hashes it into every symbol —
@@ -183,7 +186,7 @@ def show(ref, path):
 # every ref.
 # --------------------------------------------------------------------------
 MANIFEST_PATH = re.compile(r"^(drivers|hooks|tools|skills)/[^/]+/murmur\.yaml$")
-TOP_LEVEL = re.compile(r"""^(name|version):\s*["']?([^"'#\s]+)""")
+TOP_LEVEL = re.compile(r"""^(name|version|implementation):\s*["']?([^"'#\s]+)""")
 
 
 def read_artifacts(ref):
@@ -355,6 +358,7 @@ def workspace_state(ref):
         "packages": packages,
         "by_name": by_name,
         "toolchain": show(ref, "rust-toolchain.toml") or "",
+        "wasi_sdk": show(ref, "wasi-sdk.toml") or "",
     }
     _workspace_cache[ref] = state
     return state
@@ -383,12 +387,20 @@ def locked_closure(state, crate):
     return external
 
 
-def workspace_inputs(ref, crate, declared, inherits_version):
+# Third-party crates that compile C sources into a wasm32-wasip2 component with the
+# pinned wasi-sdk (wasi-sdk.toml). A wasm artifact whose resolved closure holds one
+# of these takes wasi-sdk.toml as a build input. A later port that brings another C
+# crate into a component adds it here (e.g. tree-sitter's, for tool-code-graph).
+WASM_C_CRATES = ("libsqlite3-sys",)
+
+
+def workspace_inputs(ref, crate, declared, inherits_version, is_wasm):
     """The workspace inputs that reach this one artifact: the shared manifest
     settings, `[workspace.package] version` when one of its crates inherits it,
     the `[workspace.dependencies]` entries it actually declares (their feature
-    lists are not in the lockfile), its resolved third-party versions, and the
-    toolchain that compiles it."""
+    lists are not in the lockfile), its resolved third-party versions, the
+    toolchain that compiles it, and, for a wasm artifact compiling C sources
+    (WASM_C_CRATES), the wasi-sdk pin that compiles them."""
     state = workspace_state(ref)
     parts = [state["shared"]]
     if inherits_version:
@@ -401,6 +413,8 @@ def workspace_inputs(ref, crate, declared, inherits_version):
         "\n".join(f"{n} {v}" for n, v in sorted(closure)) if closure is not None else "<unlocked>"
     )
     parts.append(state["toolchain"])
+    if is_wasm and closure and any(n in WASM_C_CRATES for n, _v in closure):
+        parts.append(state["wasi_sdk"])
     return parts
 
 
@@ -460,6 +474,7 @@ def fingerprint(ref, artifact):
                 artifact["name"],
                 declared_workspace_deps(all_entries),
                 inherits_workspace_version(all_entries),
+                artifact.get("implementation", "wasm") == "wasm",
             )
         )
         digests["workspace"] = hashlib.sha256(joined.encode()).hexdigest()

@@ -1,7 +1,6 @@
-//! The test-runner output parsers used by this tool now live in the shared
-//! `murmur-test-parse` crate, so the WASM `hook-regression-verifier` can
-//! reuse the exact same parsing logic without pulling in this tool's native-only
-//! `rusqlite` dependency (which does not cross-compile to `wasm32-wasip2`).
+//! The test-runner output parsers used by this tool live in the shared
+//! `murmur-test-parse` crate, so `hook-regression-verifier` reuses the exact
+//! same parsing logic without pulling in this tool's `rusqlite` dependency.
 //!
 //! This module is a thin re-export that keeps every existing `crate::parse::…`
 //! path (in `ops.rs` and `resolve.rs`) working unchanged. There is deliberately

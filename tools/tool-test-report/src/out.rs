@@ -1,16 +1,13 @@
 //! Output-envelope constructors.
 //!
-//! Every response is a single JSON object emitting BOTH protocols in one object,
-//! mirroring `tool-git` and `tool-code-graph`:
+//! Every response is the single JSON object the native 0.5.0 tool printed, kept so
+//! its messages and shape stay exactly as they were:
 //!   • the tool's own shape: `{ok, message, ...op fields}`
 //!   • the capsule-runtime shape: `{status, summary, data, data_path, metadata}`
-//!     — `status`/`summary`/`data` are what `dispatch_native_tool` reads today.
 //!
-//! `metadata` is emitted as an object with `resource_id`/`state_effect` keys per
-//! the convention. NOTE: for native tools, `dispatch_native_tool` in the `murmur`
-//! repo currently hardcodes `data_path`/`metadata` to empty, so those two fields
-//! do not yet reach the live agent path — a documented, pre-existing gap, not
-//! introduced here.
+//! Only `status`, `summary` and `data` reach the model: `NativeOutcome::of`
+//! reduces the envelope to them the way murmur's native dispatch did, and the
+//! component returns nothing else.
 
 use serde_json::{json, Value};
 
