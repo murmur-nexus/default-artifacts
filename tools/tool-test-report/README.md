@@ -80,6 +80,8 @@ capabilities:
 
 0.5.0 was a native binary; 0.6.0 is a WASM component. What changed for a capsule:
 
+- It needs murmur v0.9.0 or later: it exports `murmur:tool/run@0.2.0` and finds host folders
+  through the `murmur-host` preopens, which both arrived in v0.9.0. On an older `mur`, keep 0.5.0.
 - One zip serves every platform; there are no per-platform zips.
 - An absolute `input_path` or `repo_path` opens only inside a host folder the session opened.
   Relative paths open in the work folder, and `repo_path: "."` names the work folder.
@@ -97,7 +99,7 @@ SQLite is compiled into the component from rusqlite's bundled C sources by the p
 ./scripts/wasi-sdk.sh                                              # from the repo root, once
 cargo build -p tool-test-report --target wasm32-wasip2 --release
 ./scripts/validate-component.sh target/wasm32-wasip2/release/tool_test_report.wasm
-cargo test -p tool-test-report                                     # behaviour, native parity, S6/S7, against the component
+cargo test -p tool-test-report                                     # behaviour, native 0.5.0 parity, stable_id and host paths, against the component
 MUR_BIN=$(command -v mur) cargo test -p tool-test-report --test mur_run_stable_id -- --ignored
 ./scripts/package-artifact.sh tools/tool-test-report release/      # → release/tool-test-report-0.6.0.mur.zip
 ```

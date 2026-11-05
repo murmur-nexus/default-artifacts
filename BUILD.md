@@ -11,7 +11,7 @@ this page covers what is particular to this repository.
 |---|---|---|
 | Rust | the `channel` in `rust-toolchain.toml`, with `wasm32-wasip2` | `rustup` reads the file at every cargo call; never `rustup target add` by hand |
 | `wasm-tools` | `1.247.0` | the `Install wasm-tools` steps in `.github/workflows/` |
-| wasi-sdk | 34.0 | wasi-sdk.toml; installed by ./scripts/wasi-sdk.sh (build-wasm.sh and local-install.sh run it; ci.yml caches it) |
+| wasi-sdk | `34.0` | `wasi-sdk.toml`; installed by `./scripts/wasi-sdk.sh` (`build-wasm.sh` and `local-install.sh` run it; `ci.yml` caches it) |
 | `mur` with the `index` subcommand | murmur at `MURMUR_REV` | `env:` in `.github/workflows/build.yml`; `ci.yml`'s `build-isolation` and `wit-sync` jobs read it through `./scripts/murmur-pin.sh` |
 
 wasi-sdk is the C compiler and wasi-libc sysroot for C sources compiled into a `wasm32-wasip2`
