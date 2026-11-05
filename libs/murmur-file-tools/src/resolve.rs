@@ -10,7 +10,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::{err, err_result, lexical_segments, normalize_absolute, render_absolute};
+use crate::{err, err_result, lexical_segments, open_in_host_root};
 use crate::{HostRoot, RootAccess, Tool, HOST_ROOT_NAME};
 
 /// Where a path input opens, once [`resolve_path`] accepted it.
@@ -47,27 +47,11 @@ pub(crate) fn resolve_path<'a>(
         });
     }
 
-    let segments = normalize_absolute(value);
-    let normalized = render_absolute(&segments);
-    let mut covering: Option<&HostRoot> = None;
-    for root in roots {
-        let covers = Path::new(&normalized).starts_with(&root.path);
-        if covers && covering.is_none_or(|best| root.path.len() > best.path.len()) {
-            covering = Some(root);
-        }
-    }
-    match covering {
-        Some(root) => {
-            let mut open = HOST_ROOT_NAME.to_string();
-            for segment in &segments {
-                open.push('/');
-                open.push_str(segment);
-            }
-            Ok(Resolved {
-                open,
-                root: Some(root),
-            })
-        }
+    match open_in_host_root(value, roots) {
+        Some((open, root)) => Ok(Resolved {
+            open,
+            root: Some(root),
+        }),
         None => Err(outside_every_root(location, value, tool, roots)),
     }
 }

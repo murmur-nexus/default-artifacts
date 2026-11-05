@@ -3,10 +3,11 @@
 //! [`run`] takes its I/O as parameters — a transport for an `http(s)://` index and the host
 //! roots for an absolute path — so it runs unchanged natively under `cargo test` and inside the
 //! component. The object it returns is the one the native 0.5.0 binary printed, `error_kind` and
-//! the top-level mirror of `data` included; [`crate::outcome_of`] keeps what the runtime keeps.
+//! the top-level mirror of `data` included; [`crate::call`] keeps what the runtime keeps.
 
 use std::collections::BTreeSet;
 
+use murmur_file_tools::HostRoot;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -80,10 +81,9 @@ struct SearchParams {
 /// Runs one search for the envelope `raw`, `{"data": <object or JSON-encoded object>}`.
 ///
 /// An `http://`/`https://` index is fetched through `http`; a file index opens relative to the
-/// current directory, or, when absolute, through the covering root among `host_roots` (the
-/// `murmur-host…` preopen names). Returns the result object: `status`, `summary`, `data`, and
+/// current directory, or, when absolute, through the covering root among `host_roots`. Returns the result object: `status`, `summary`, `data`, and
 /// on failure `error_kind` beside them.
-pub fn run(raw: &str, http: &mut dyn Http, host_roots: &[String]) -> Value {
+pub fn run(raw: &str, http: &mut dyn Http, host_roots: &[HostRoot]) -> Value {
     if raw.trim().is_empty() {
         return fail_msg("missing input on stdin");
     }
@@ -163,7 +163,7 @@ pub fn run(raw: &str, http: &mut dyn Http, host_roots: &[String]) -> Value {
 /// Reads the index at `source`: a URL when it starts with `http://` or `https://`, otherwise a
 /// file path, resolved against the current directory when relative and through a host root when
 /// absolute. This is how `mur search --index` reads its value.
-fn load_index(source: &str, http: &mut dyn Http, host_roots: &[String]) -> Result<Index, Value> {
+fn load_index(source: &str, http: &mut dyn Http, host_roots: &[HostRoot]) -> Result<Index, Value> {
     let bytes = if source.starts_with("http://") || source.starts_with("https://") {
         fetch(source, http)?
     } else {

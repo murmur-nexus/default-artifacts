@@ -19,7 +19,10 @@
 //! [`HostRoot`]s it builds with [`HostRoot::from_preopen`] from its WASI preopens. A relative path
 //! opens in the work folder; an absolute one opens only inside one of those roots.
 //!
-//! The crate root holds the [`Tool`] descriptor, the host roots and the outcome types. What one
+//! The crate root holds the [`Tool`] descriptor, the host roots and the outcome types, and,
+//! compiled with no tool feature, the pieces a tool outside this crate reuses: [`envelope`] and
+//! [`NativeOutcome`], the native-tool envelope and output mapping, and [`open_in_host_root`],
+//! where an absolute path opens. What one
 //! call runs through whichever tool it is — the envelope, the outcome mapping, the error kinds,
 //! the output constructors and the helpers the tools share — lives in the `call` module, and the
 //! resolution of one path input in the `resolve` module. Both are compiled only with at least
@@ -64,6 +67,10 @@ mod test_png;
 mod tests;
 #[cfg(feature = "write")]
 pub mod write;
+
+use std::path::Path;
+
+use serde_json::{json, Value};
 
 // ── The tools ───────────────────────────────────────────────────────────────────
 
@@ -186,6 +193,35 @@ pub(crate) fn render_absolute(segments: &[&str]) -> String {
     format!("/{}", segments.join("/"))
 }
 
+/// Where the absolute path `value` opens, and the root it opens through, or `None` when no root
+/// among `roots` covers it.
+///
+/// `value` is normalised lexically (`.` and empty segments dropped, each `..` popping one
+/// segment and never climbing above `/`) and compared component by component with each root's
+/// path, so `/a/b` covers `/a/b/c` and not `/a/bc`; the longest covering root wins. The open path
+/// is `murmur-host` followed by the normalised segments, which wasi-libc resolves through the
+/// longest preopen name it begins with. A caller holds `value` absolute: a relative value never
+/// opens through a host root. Compiled with no tool feature, so a tool outside this crate links
+/// it alone.
+pub fn open_in_host_root<'a>(value: &str, roots: &'a [HostRoot]) -> Option<(String, &'a HostRoot)> {
+    let segments = normalize_absolute(value);
+    let normalized = render_absolute(&segments);
+    let mut covering: Option<&HostRoot> = None;
+    for root in roots {
+        let covers = Path::new(&normalized).starts_with(&root.path);
+        if covers && covering.is_none_or(|best| root.path.len() > best.path.len()) {
+            covering = Some(root);
+        }
+    }
+    let root = covering?;
+    let mut open = HOST_ROOT_NAME.to_string();
+    for segment in &segments {
+        open.push('/');
+        open.push_str(segment);
+    }
+    Some((open, root))
+}
+
 /// The keys an element of `tool-edit`'s `edits` accepts, in the order its `input_schema` lists
 /// them.
 #[cfg(feature = "edit")]
@@ -227,4 +263,62 @@ pub enum OutcomeStatus {
     Passed,
     Failed,
     Error,
+}
+
+// ── Shared with tools outside this crate ────────────────────────────────────────
+
+/// `ToolInput.data` as the stdin envelope a native tool read: `{"data": <value>}`, where the
+/// value is `data` parsed as JSON, or `data` itself as a JSON string when it does not parse; an
+/// absent `data` is `{}`, an envelope with no `data` key.
+pub fn envelope(data: Option<&str>) -> String {
+    match data {
+        Some(d) => {
+            let data_val =
+                serde_json::from_str::<Value>(d).unwrap_or_else(|_| Value::String(d.to_string()));
+            json!({ "data": data_val }).to_string()
+        }
+        None => "{}".to_string(),
+    }
+}
+
+/// The fields the host's native dispatch (crates/capsule-runtime `dispatch_native_tool`) kept of
+/// a tool's output object, and nothing else of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeOutcome {
+    /// `"status"`: `passed`, `failed`, and anything else, a missing one included, `error`.
+    pub status: OutcomeStatus,
+    /// `"summary"` when it is a string.
+    pub summary: Option<String>,
+    /// `"data"`: a string verbatim, else a non-null value as compact JSON, else `None`.
+    pub data: Option<String>,
+}
+
+impl NativeOutcome {
+    /// The fields of `result`, a tool's output object, as the native dispatch read them.
+    pub fn of(result: &Value) -> NativeOutcome {
+        let status = match result.get("status").and_then(Value::as_str) {
+            Some("passed") => OutcomeStatus::Passed,
+            Some("failed") => OutcomeStatus::Failed,
+            _ => OutcomeStatus::Error,
+        };
+        let summary = result
+            .get("summary")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let data = result
+            .get("data")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                result
+                    .get("data")
+                    .filter(|d| !d.is_null())
+                    .map(|d| d.to_string())
+            });
+        NativeOutcome {
+            status,
+            summary,
+            data,
+        }
+    }
 }

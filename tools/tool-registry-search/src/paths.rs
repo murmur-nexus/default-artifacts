@@ -2,39 +2,25 @@
 //!
 //! murmur opens the work folder (or the entry's `capabilities.filesystem.scope`) at `.`, and each
 //! host folder the session lends at `murmur-host` followed by its absolute host path — `murmur-host`
-//! alone under `mur run --unconfined`. wasi-libc resolves a path through the longest preopen name
-//! it begins with, so `/a/b/c` inside the root `murmur-host/a/b` is opened as
-//! `murmur-host/a/b/c`. A `murmur-host…` path no root covers falls through to the work folder,
-//! and so does an absolute path opened as written, so every absolute value is checked against the
-//! held roots before anything is opened.
+//! alone under `mur run --unconfined`. Which root covers an absolute path, and the path that opens
+//! it, is `murmur_file_tools::open_in_host_root`, the resolver the file tools use; this module
+//! adds only the refusal an index read gives.
 
+use murmur_file_tools::{open_in_host_root, HostRoot};
 use serde_json::Value;
 
 use crate::search::{err, err_result};
 
-/// The preopen name every host root starts with.
-pub const HOST_ROOT_NAME: &str = "murmur-host";
-
 /// The path to hand `std::fs` for `source`, the `index` value as written.
 ///
-/// A relative value is returned unchanged. An absolute one is normalised lexically (`.` dropped,
-/// `..` popping a segment and never climbing above `/`) and opened as `murmur-host` followed by
-/// it, when some root among `host_roots` covers it whole-component; `murmur-host` alone covers
-/// every path. With no root held, or none covering, it is an `io_error` naming `source`.
-pub fn open_path(source: &str, host_roots: &[String]) -> Result<String, Value> {
+/// A relative value is returned unchanged. An absolute one opens through the root among `roots`
+/// that covers it ([`open_in_host_root`]). With no root held, or none covering, it is an
+/// `io_error` naming `source`.
+pub fn open_path(source: &str, roots: &[HostRoot]) -> Result<String, Value> {
     if !source.starts_with('/') {
         return Ok(source.to_string());
     }
-
-    let segments = normalize(source);
-    let roots: Vec<Vec<&str>> = host_roots.iter().filter_map(|n| root_segments(n)).collect();
-    let covered = roots.iter().any(|root| segments.starts_with(root));
-    if covered {
-        let mut open = HOST_ROOT_NAME.to_string();
-        for segment in &segments {
-            open.push('/');
-            open.push_str(segment);
-        }
+    if let Some((open, _)) = open_in_host_root(source, roots) {
         return Ok(open);
     }
 
@@ -46,7 +32,7 @@ pub fn open_path(source: &str, host_roots: &[String]) -> Result<String, Value> {
     } else {
         let listed = roots
             .iter()
-            .map(|root| format!("/{}", root.join("/")))
+            .map(|root| root.path.as_str())
             .collect::<Vec<_>>()
             .join(", ");
         format!(
@@ -57,40 +43,16 @@ pub fn open_path(source: &str, host_roots: &[String]) -> Result<String, Value> {
     Err(err_result(err::IO_ERROR, message))
 }
 
-/// The normalised segments of the host path the preopen `name` opens, or `None` when `name` is
-/// not a host root: `murmur-host` gives no segments (the whole host), `murmur-host/a/b` gives
-/// `["a", "b"]`, and `murmur-hostile` is not a root.
-fn root_segments(name: &str) -> Option<Vec<&str>> {
-    let rest = if name == HOST_ROOT_NAME {
-        ""
-    } else {
-        name.strip_prefix(HOST_ROOT_NAME)?.strip_prefix('/')?
-    };
-    Some(normalize(rest))
-}
-
-/// The segments of `path` with `.` and empty segments dropped and each `..` popping the segment
-/// before it, a `..` at the top staying there.
-fn normalize(path: &str) -> Vec<&str> {
-    let mut segments = Vec::new();
-    for segment in path.split('/') {
-        match segment {
-            "" | "." => {}
-            ".." => {
-                segments.pop();
-            }
-            s => segments.push(s),
-        }
-    }
-    segments
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn roots(names: &[&str]) -> Vec<String> {
-        names.iter().map(|n| n.to_string()).collect()
+    /// The host roots the preopens `names` give, as the component lists them.
+    fn roots(names: &[&str]) -> Vec<HostRoot> {
+        names
+            .iter()
+            .filter_map(|name| HostRoot::from_preopen(name, false))
+            .collect()
     }
 
     fn refusal(source: &str, held: &[&str]) -> String {

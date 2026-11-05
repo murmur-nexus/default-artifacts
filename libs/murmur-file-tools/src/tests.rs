@@ -586,6 +586,50 @@ fn a_null_field_counts_as_absent() {
 // ── dispatch: what a component hands the WIT `ToolResult` ──────────────────────────
 
 #[test]
+fn native_outcome_reads_status_summary_and_data_as_the_native_dispatch_did() {
+    let cases = [
+        (
+            json!({"status": "passed", "summary": "s", "data": {"a": 1}}),
+            OutcomeStatus::Passed,
+            Some("s"),
+            Some(r#"{"a":1}"#),
+        ),
+        (
+            json!({"status": "failed", "data": "text"}),
+            OutcomeStatus::Failed,
+            None,
+            Some("text"),
+        ),
+        (
+            json!({"status": "error", "summary": "m", "data": null, "error_kind": "io_error"}),
+            OutcomeStatus::Error,
+            Some("m"),
+            None,
+        ),
+        (
+            json!({"status": "weird", "summary": 3, "data": [1]}),
+            OutcomeStatus::Error,
+            None,
+            Some("[1]"),
+        ),
+        (json!({}), OutcomeStatus::Error, None, None),
+    ];
+    for (result, status, summary, data) in cases {
+        let outcome = NativeOutcome::of(&result);
+        assert_eq!(outcome.status, status, "{result}");
+        assert_eq!(outcome.summary.as_deref(), summary, "{result}");
+        assert_eq!(outcome.data.as_deref(), data, "{result}");
+    }
+}
+
+#[test]
+fn envelope_wraps_data_parsed_or_as_a_string() {
+    assert_eq!(envelope(None), "{}");
+    assert_eq!(envelope(Some(r#"{"a":1}"#)), r#"{"data":{"a":1}}"#);
+    assert_eq!(envelope(Some("{nope")), r#"{"data":"{nope"}"#);
+}
+
+#[test]
 fn dispatch_maps_status_data_truncated_and_state_effect() {
     let dir = scratch("dispatch");
     let small = dir.join("small.txt");

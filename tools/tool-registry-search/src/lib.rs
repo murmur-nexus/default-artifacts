@@ -13,70 +13,18 @@ pub mod fetch;
 pub mod paths;
 pub mod search;
 
-use serde_json::{json, Value};
+use murmur_file_tools::{envelope, HostRoot, NativeOutcome};
 
 use crate::fetch::Http;
 
-/// How one call ended, as the runtime reads a tool's `status`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutcomeStatus {
-    Passed,
-    Failed,
-    Error,
-}
-
-/// What one call hands the runtime: the fields of `ToolResult` this tool fills. The rest are
-/// fixed — no `data_path`, never `truncated`, no `metadata`, no attachments.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Outcome {
-    pub status: OutcomeStatus,
-    pub summary: Option<String>,
-    /// Compact JSON of the result object's `data`, or `None` when it is null.
-    pub data: Option<String>,
-}
-
-/// Runs one call on `ToolInput.data`.
+/// Runs one call on `ToolInput.data` and keeps what the runtime kept of a native tool's output.
 ///
-/// `data` is parsed as JSON, falling back to the text itself as a string, and wrapped as
-/// `{"data": …}`; no `data` at all is `{}`, which fails as `missing data field`. The result
-/// object [`search::run`] returns is then mapped by [`outcome_of`].
-pub fn call(data: Option<&str>, http: &mut dyn Http, host_roots: &[String]) -> Outcome {
-    let raw = match data {
-        Some(d) => {
-            let value =
-                serde_json::from_str::<Value>(d).unwrap_or_else(|_| Value::String(d.to_string()));
-            json!({ "data": value }).to_string()
-        }
-        None => "{}".to_string(),
-    };
-    outcome_of(&search::run(&raw, http, host_roots))
-}
-
-/// The [`Outcome`] the runtime built from a native tool's output object, field for field:
-/// `status` from `"status"` (`passed`, `failed`, anything else `error`), `summary` from
-/// `"summary"`, and `data` the string `"data"` as is, else the compact JSON of a non-null
-/// `"data"`, else `None`. `error_kind`, `message`, `ok` and the top-level mirror of `data` are
-/// dropped here, as the runtime dropped them.
-pub fn outcome_of(result: &Value) -> Outcome {
-    let status = match result.get("status").and_then(Value::as_str) {
-        Some("passed") => OutcomeStatus::Passed,
-        Some("failed") => OutcomeStatus::Failed,
-        _ => OutcomeStatus::Error,
-    };
-    let summary = result
-        .get("summary")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let data = match result.get("data") {
-        Some(Value::String(text)) => Some(text.clone()),
-        Some(Value::Null) | None => None,
-        Some(other) => Some(other.to_string()),
-    };
-    Outcome {
-        status,
-        summary,
-        data,
-    }
+/// `data` is rewrapped as the `{"data": …}` envelope by [`envelope`], the object [`search::run`]
+/// returns is read by [`NativeOutcome::of`], and `error_kind`, `message`, `ok` and the top-level
+/// mirror of `data` are dropped with it. The other `ToolResult` fields are fixed: no
+/// `data_path`, never `truncated`, no `metadata`, no attachments.
+pub fn call(data: Option<&str>, http: &mut dyn Http, host_roots: &[HostRoot]) -> NativeOutcome {
+    NativeOutcome::of(&search::run(&envelope(data), http, host_roots))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -88,6 +36,7 @@ mod wasm_tool {
     });
 
     use exports::murmur::tool::run::{Guest, Status, ToolInput, ToolResult};
+    use murmur_file_tools::{HostRoot, NativeOutcome, OutcomeStatus};
     use wasip2::filesystem::preopens;
     use wasip2::http::types::{
         ErrorCode, Fields, FutureIncomingResponse, IncomingResponse, Method, OutgoingRequest,
@@ -95,36 +44,40 @@ mod wasm_tool {
     };
     use wasip2::io::streams::StreamError;
 
+    use crate::call;
     use crate::fetch::{is_followed_redirect, Http, HttpFailure, HttpReply, HTTP_TIMEOUT};
-    use crate::paths::HOST_ROOT_NAME;
     use crate::search::MAX_INDEX_BYTES;
-    use crate::{call, OutcomeStatus};
 
     struct Component;
 
-    /// The names of the host roots murmur opened for this call, in preopen order. Each
-    /// descriptor is dropped here, so none outlives the call.
-    fn host_roots() -> Vec<String> {
+    /// The host folders murmur opened for this call, in preopen order. The tool only reads, so
+    /// every root is taken as read-only. Each descriptor is dropped here, so none outlives the
+    /// call.
+    fn host_roots() -> Vec<HostRoot> {
         preopens::get_directories()
             .into_iter()
             .filter_map(|(descriptor, name)| {
                 drop(descriptor);
-                name.starts_with(HOST_ROOT_NAME).then_some(name)
+                HostRoot::from_preopen(&name, false)
             })
             .collect()
     }
 
     impl Guest for Component {
         fn run(input: ToolInput) -> ToolResult {
-            let outcome = call(input.data.as_deref(), &mut WasiHttp, &host_roots());
+            let NativeOutcome {
+                status,
+                summary,
+                data,
+            } = call(input.data.as_deref(), &mut WasiHttp, &host_roots());
             ToolResult {
-                status: match outcome.status {
+                status: match status {
                     OutcomeStatus::Passed => Status::Passed,
                     OutcomeStatus::Failed => Status::Failed,
                     OutcomeStatus::Error => Status::Error,
                 },
-                summary: outcome.summary,
-                data: outcome.data,
+                summary,
+                data,
                 data_path: None,
                 truncated: false,
                 metadata: Vec::new(),
@@ -269,6 +222,8 @@ mod wasm_tool {
 mod tests {
     use super::*;
     use crate::fetch::{HttpFailure, HttpReply};
+    use murmur_file_tools::OutcomeStatus;
+    use serde_json::Value;
 
     struct NoNetwork;
 
@@ -278,7 +233,7 @@ mod tests {
         }
     }
 
-    fn call_with(data: Option<&str>) -> Outcome {
+    fn call_with(data: Option<&str>) -> NativeOutcome {
         call(data, &mut NoNetwork, &[])
     }
 
@@ -329,42 +284,5 @@ mod tests {
             .unwrap()
             .starts_with("failed to read no/such/i.json: "));
         assert_eq!(outcome.data, None);
-    }
-
-    #[test]
-    fn outcome_of_maps_like_the_runtime_mapped_native_output() {
-        let cases = [
-            (
-                json!({"status": "passed", "summary": "s", "data": {"a": 1}}),
-                OutcomeStatus::Passed,
-                Some("s"),
-                Some(r#"{"a":1}"#),
-            ),
-            (
-                json!({"status": "failed", "data": "text"}),
-                OutcomeStatus::Failed,
-                None,
-                Some("text"),
-            ),
-            (
-                json!({"status": "error", "summary": "m", "data": null, "error_kind": "io_error"}),
-                OutcomeStatus::Error,
-                Some("m"),
-                None,
-            ),
-            (
-                json!({"status": "weird", "summary": 3, "data": [1]}),
-                OutcomeStatus::Error,
-                None,
-                Some("[1]"),
-            ),
-            (json!({}), OutcomeStatus::Error, None, None),
-        ];
-        for (result, status, summary, data) in cases {
-            let outcome = outcome_of(&result);
-            assert_eq!(outcome.status, status, "{result}");
-            assert_eq!(outcome.summary.as_deref(), summary, "{result}");
-            assert_eq!(outcome.data.as_deref(), data, "{result}");
-        }
     }
 }
