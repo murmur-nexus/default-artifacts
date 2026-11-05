@@ -1,25 +1,48 @@
-//! The built `tool-registry-search` binary, driven the way the runtime drives a native tool:
-//! the `{"data": …}` envelope on stdin, one JSON line on stdout, and a chosen working directory.
+//! The compiled `tool-registry-search` **wasm32-wasip2 component**, driven through Wasmtime with
+//! `wasi:http` linked, the way the runtime drives it: `ToolInput.data` in, `ToolResult` out, the
+//! test's chosen directory preopened at `.`, and `murmur-host<dir>` preopens standing for host
+//! folders the session opened.
 //!
-//! HTTP is served by `std`-only loopback stubs. The `https_*` tests reach github.com and are
-//! `#[ignore]`d; `cargo test -p tool-registry-search --test search_index -- --ignored https_`
-//! runs them.
+//! Every assertion reads what reaches the model — `status`, `summary` and the parsed `data` —
+//! never `error_kind`, which stays inside the tool; the unit tests of `search`, `fetch` and
+//! `paths` assert kinds where they are made.
+//!
+//! HTTP is served by `std`-only loopback stubs. Wasmtime's `wasi:http` admits every request, so
+//! the network allow-list is proved under a real `mur run` in `tests/mur_run_network.rs`. The
+//! `https_*` tests reach github.com and are `#[ignore]`d;
+//! `cargo test -p tool-registry-search --test search_index -- --ignored https_` runs them.
 
 use std::{
     fs,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
+    sync::{Once, OnceLock},
     thread,
     time::{Duration, Instant},
 };
 
 use serde_json::{json, Value};
 use tempfile::TempDir;
+use wasmtime::component::{Component, Linker, ResourceTable};
+use wasmtime::{Config, Engine, Store};
+use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi_http::p2::{WasiHttpCtxView, WasiHttpView};
+use wasmtime_wasi_http::WasiHttpCtx;
+
+mod bindings {
+    wasmtime::component::bindgen!({
+        world: "tool",
+        path: "../../wit/guest",
+    });
+}
+use bindings::exports::murmur::tool::run::{Status, ToolInput};
+use bindings::Tool;
 
 const FIXTURE: &str = "tests/fixtures/artifacts-index.json";
 const SCHEMA_1_FIXTURE: &str = "tests/fixtures/artifacts-index-schema1.json";
+const NATIVE_RESULTS: &str = "tests/fixtures/native-0.5.0-results.json";
 const SCHEMA_1_HINT: &str = "`mur index <dir> --repo <owner>/<repo> --release <tag>`";
 const MAX_INDEX_BYTES: usize = 16 * 1024 * 1024;
 
@@ -41,44 +64,167 @@ fn crate_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Runs the tool with `data` as the envelope's `data`, in `cwd`, and returns its output line.
-fn tool_in(cwd: &Path, data: Value) -> Value {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tool-registry-search"))
-        .current_dir(cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawning tool-registry-search");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(
-            json!({ "data": data, "log_path": null })
-                .to_string()
-                .as_bytes(),
-        )
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(output.status.success(), "tool exited {}", output.status);
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    serde_json::from_str(stdout.trim())
-        .unwrap_or_else(|e| panic!("tool printed non-JSON ({e}): {stdout}"))
+// ── the Wasmtime harness ─────────────────────────────────────────────────────
+
+struct HostState {
+    table: ResourceTable,
+    wasi: WasiCtx,
+    http: WasiHttpCtx,
 }
 
-fn tool(data: Value) -> Value {
+impl WasiView for HostState {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
+    }
+}
+
+impl WasiHttpView for HostState {
+    fn http(&mut self) -> WasiHttpCtxView<'_> {
+        WasiHttpCtxView {
+            ctx: &mut self.http,
+            table: &mut self.table,
+            hooks: Default::default(),
+        }
+    }
+}
+
+static BUILD: Once = Once::new();
+
+/// Path to the compiled component, building it once per test process. `cargo test --workspace`
+/// (CI) runs before the separate wasm build step, so the test cannot assume it exists.
+fn component_path() -> PathBuf {
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate_dir().join("../../target"));
+    let wasm = target.join("wasm32-wasip2/release/tool_registry_search.wasm");
+
+    BUILD.call_once(|| {
+        let status = Command::new(env!("CARGO"))
+            .args([
+                "build",
+                "-p",
+                "tool-registry-search",
+                "--target",
+                "wasm32-wasip2",
+                "--release",
+            ])
+            .current_dir(crate_dir().join("../.."))
+            .status()
+            .expect("failed to spawn `cargo build` for the wasm component");
+        assert!(status.success(), "cargo build of the wasm component failed");
+    });
+
+    assert!(
+        wasm.exists(),
+        "compiled component not found at {}",
+        wasm.display()
+    );
+    wasm
+}
+
+fn engine_and_component() -> &'static (Engine, Component) {
+    static LOADED: OnceLock<(Engine, Component)> = OnceLock::new();
+    LOADED.get_or_init(|| {
+        let mut config = Config::new();
+        config.wasm_component_model(true);
+        let engine = Engine::new(&config).expect("engine");
+        let component = Component::from_file(&engine, component_path()).expect("load component");
+        (engine, component)
+    })
+}
+
+/// What reaches the model from one call: the runtime fences `summary` and `data` and passes
+/// `status` on; `data` is parsed here.
+#[derive(Debug)]
+struct Seen {
+    status: &'static str,
+    summary: String,
+    data: Option<Value>,
+}
+
+impl std::fmt::Display for Seen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} | {} | {:?}", self.status, self.summary, self.data)
+    }
+}
+
+/// Runs the component once on `data` (sent as `ToolInput.data`, compact JSON), with `cwd`
+/// preopened at `.` and each of `host_roots` preopened read-only as `murmur-host<dir>`.
+fn tool_with(cwd: &Path, host_roots: &[&Path], data: &Value) -> Seen {
+    let (engine, component) = engine_and_component();
+    let mut linker: Linker<HostState> = Linker::new(engine);
+    wasmtime_wasi::p2::add_to_linker_sync(&mut linker).expect("add wasi to linker");
+    wasmtime_wasi_http::p2::add_only_http_to_linker_sync(&mut linker).expect("add wasi:http");
+
+    let mut builder = WasiCtxBuilder::new();
+    builder
+        .preopened_dir(cwd, ".", DirPerms::all(), FilePerms::all())
+        .expect("preopen the work folder");
+    for root in host_roots {
+        let name = format!("murmur-host{}", root.display());
+        builder
+            .preopened_dir(root, &name, DirPerms::READ, FilePerms::READ)
+            .expect("preopen a host root");
+    }
+    let mut store = Store::new(
+        engine,
+        HostState {
+            table: ResourceTable::new(),
+            wasi: builder.build(),
+            http: WasiHttpCtx::new(),
+        },
+    );
+    let tool = Tool::instantiate(&mut store, component, &linker).expect("instantiate");
+    let input = ToolInput {
+        data: Some(data.to_string()),
+        log_path: None,
+    };
+    let result = tool
+        .murmur_tool_run()
+        .call_run(&mut store, &input)
+        .expect("call run");
+
+    assert!(result.attachments.is_empty(), "this tool attaches nothing");
+    assert!(result.metadata.is_empty(), "this tool sets no metadata");
+    assert_eq!(result.data_path, None);
+    assert!(!result.truncated);
+    Seen {
+        status: match result.status {
+            Status::Passed => "passed",
+            Status::Failed => "failed",
+            Status::Error => "error",
+        },
+        summary: result.summary.expect("every result carries a summary"),
+        data: result.data.map(|d| {
+            serde_json::from_str(&d).unwrap_or_else(|e| panic!("data not JSON ({e}): {d}"))
+        }),
+    }
+}
+
+fn tool_in(cwd: &Path, data: Value) -> Seen {
+    tool_with(cwd, &[], &data)
+}
+
+fn tool(data: Value) -> Seen {
     tool_in(&crate_dir(), data)
+}
+
+/// A passed search's `data`.
+fn passed(out: &Seen) -> &Value {
+    assert_eq!(out.status, "passed", "{out}");
+    out.data.as_ref().expect("a passed search carries data")
 }
 
 fn search_fixture(query: &str) -> Value {
     let out = tool(json!({ "query": query, "index": FIXTURE }));
-    assert_eq!(out["ok"], true, "{out}");
-    out
+    passed(&out).clone()
 }
 
-fn result_names(out: &Value) -> Vec<String> {
-    out["results"]
+fn result_names(data: &Value) -> Vec<String> {
+    data["results"]
         .as_array()
         .unwrap()
         .iter()
@@ -86,15 +232,12 @@ fn result_names(out: &Value) -> Vec<String> {
         .collect()
 }
 
-fn message(out: &Value) -> &str {
-    out["message"].as_str().unwrap()
-}
-
-fn assert_error(out: &Value, kind: &str, needles: &[&str]) {
-    assert_eq!(out["ok"], false, "{out}");
-    assert_eq!(out["error_kind"], kind, "{out}");
+/// A failure: `error`, no `data`, and a summary holding every needle.
+fn assert_error(out: &Seen, needles: &[&str]) {
+    assert_eq!(out.status, "error", "{out}");
+    assert_eq!(out.data, None, "{out}");
     for needle in needles {
-        assert!(message(out).contains(needle), "{needle:?} not in {out}");
+        assert!(out.summary.contains(needle), "{needle:?} not in {out}");
     }
 }
 
@@ -114,19 +257,20 @@ fn assert_no_forbidden_keys(value: &Value) {
     }
 }
 
-fn the_acceptance_result(out: &Value) {
-    assert_eq!(out["ok"], true, "{out}");
-    assert_eq!(out["scope"], "murmur");
-    assert_eq!(out["count"], 1);
-    assert_eq!(out["results"][0]["name"], "murmur/tool-editor");
+fn the_acceptance_result(out: &Seen) {
+    let data = passed(out);
+    assert_eq!(out.summary, "1 result(s)");
+    assert_eq!(data["scope"], "murmur");
+    assert_eq!(data["count"], 1);
+    assert_eq!(data["results"][0]["name"], "murmur/tool-editor");
     assert_eq!(
-        out["results"][0]["versions"],
+        data["results"][0]["versions"],
         json!([
             {"version": "0.7.0", "release": "v0.26.0", "built_at_level": 1, "platforms": ["any"]},
             {"version": "0.6.0", "release": "v0.25.0", "built_at_level": 1, "platforms": ["any"]},
         ])
     );
-    assert_no_forbidden_keys(out);
+    assert_no_forbidden_keys(data);
 }
 
 // ── loopback HTTP stub ───────────────────────────────────────────────────────
@@ -173,21 +317,24 @@ fn http_response(status: &str, extra_headers: &str, body: &[u8]) -> Vec<u8> {
 
 #[test]
 fn acceptance_tool_editor_lists_every_version_newest_first() {
-    let out = search_fixture("tool-editor");
+    let out = tool(json!({ "query": "tool-editor", "index": FIXTURE }));
     the_acceptance_result(&out);
-    assert_eq!(out["index"], FIXTURE);
-    assert_eq!(out["data"]["results"], out["results"]);
-    assert_eq!(message(&out), "1 result(s) for 'tool-editor'");
+    let data = out.data.unwrap();
+    assert_eq!(data["index"], FIXTURE);
+    // Only `data` reaches the model: nothing of the native top-level mirror is inside it.
+    for key in ["ok", "message", "status", "summary", "data", "error_kind"] {
+        assert!(data.get(key).is_none(), "data carries {key:?}: {data}");
+    }
 }
 
 // ── 2. platforms ─────────────────────────────────────────────────────────────
 
 #[test]
 fn native_tool_lists_each_payload_platform() {
-    let out = search_fixture("tool-git");
-    assert_eq!(out["results"][0]["name"], "murmur/tool-git");
+    let data = search_fixture("tool-git");
+    assert_eq!(data["results"][0]["name"], "murmur/tool-git");
     assert_eq!(
-        out["results"][0]["versions"],
+        data["results"][0]["versions"],
         json!([{"version": "0.2.0", "release": "v0.25.0", "built_at_level": 1,
                 "platforms": ["darwin-aarch64", "linux-x86_64"]}])
     );
@@ -195,10 +342,10 @@ fn native_tool_lists_each_payload_platform() {
 
 #[test]
 fn skill_payload_is_platform_independent() {
-    let out = search_fixture("skill-create-manifest");
-    assert_eq!(out["results"][0]["name"], "murmur/skill-create-manifest");
+    let data = search_fixture("skill-create-manifest");
+    assert_eq!(data["results"][0]["name"], "murmur/skill-create-manifest");
     assert_eq!(
-        out["results"][0]["versions"][0]["platforms"],
+        data["results"][0]["versions"][0]["platforms"],
         json!(["any"])
     );
 }
@@ -208,49 +355,58 @@ fn skill_payload_is_platform_independent() {
 #[test]
 fn full_bare_and_upper_case_names_rank_the_artifact_first() {
     for query in ["murmur/tool-editor", "tool-editor", "TOOL-EDITOR"] {
-        let out = search_fixture(query);
-        assert_eq!(result_names(&out)[0], "murmur/tool-editor", "query {query}");
+        let data = search_fixture(query);
+        assert_eq!(
+            result_names(&data)[0],
+            "murmur/tool-editor",
+            "query {query}"
+        );
     }
 }
 
 #[test]
 fn limit_caps_the_results() {
     let out = tool(json!({ "query": "tool", "index": FIXTURE, "limit": 1 }));
-    assert_eq!(out["count"], 1, "{out}");
-    assert_eq!(out["results"].as_array().unwrap().len(), 1);
+    let data = passed(&out);
+    assert_eq!(data["count"], 1, "{out}");
+    assert_eq!(data["results"].as_array().unwrap().len(), 1);
+    assert_eq!(out.summary, "1 result(s)");
 }
 
 #[test]
 fn description_only_match_is_returned() {
     // "messages" is in driver-anthropic's description, and in no name or tag.
-    let out = search_fixture("Messages");
-    assert_eq!(result_names(&out), ["murmur/driver-anthropic"]);
+    let data = search_fixture("Messages");
+    assert_eq!(result_names(&data), ["murmur/driver-anthropic"]);
 }
 
 #[test]
 fn tag_only_match_is_returned() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("artifacts-index.json");
     let index = json!({"schema_version": 2, "scope": "acme", "artifacts": [
         {"name": "tool-a", "runtime": "tool", "description": "Does a.", "tags": ["zebra"],
          "versions": [{"version": "0.1.0", "release": "v1", "interfaces": [],
                        "assets": [{"file": "tool-a-0.1.0.mur.zip", "sha256": "00"}]}]},
         {"name": "tool-b", "runtime": "tool", "tags": [], "versions": []},
     ]});
-    fs::write(&path, index.to_string()).unwrap();
-    let out = tool(json!({ "query": "zebra", "index": path }));
-    assert_eq!(result_names(&out), ["acme/tool-a"], "{out}");
+    fs::write(dir.path().join("artifacts-index.json"), index.to_string()).unwrap();
+    let out = tool_in(
+        dir.path(),
+        json!({ "query": "zebra", "index": "artifacts-index.json" }),
+    );
+    let data = passed(&out);
+    assert_eq!(result_names(data), ["acme/tool-a"], "{out}");
     assert_eq!(
-        out["results"][0]["versions"][0]["built_at_level"],
+        data["results"][0]["versions"][0]["built_at_level"],
         Value::Null
     );
 }
 
 #[test]
-fn no_match_is_ok_with_zero_results() {
-    let out = search_fixture("zzz");
-    assert_eq!(out["count"], 0);
-    assert_eq!(message(&out), "no results for 'zzz'");
+fn no_match_is_passed_with_zero_results() {
+    let out = tool(json!({ "query": "zzz", "index": FIXTURE }));
+    assert_eq!(passed(&out)["count"], 0);
+    assert_eq!(out.summary, "0 result(s)");
 }
 
 // ── 4. schema refusals ───────────────────────────────────────────────────────
@@ -260,18 +416,21 @@ fn schema_1_index_is_refused_with_the_regeneration_command() {
     let out = tool(json!({ "query": "git", "index": SCHEMA_1_FIXTURE }));
     assert_error(
         &out,
-        "schema_error",
         &[SCHEMA_1_FIXTURE, "schema 1", "schema 2", SCHEMA_1_HINT],
     );
 }
 
-/// Writes the fixture's text with `from` replaced by `to` into a temp dir, returning its path.
-fn edited_fixture(dir: &TempDir, fixture: &str, from: &str, to: &str) -> PathBuf {
+/// Writes the fixture's text with `from` replaced by `to` into `dir` as `artifacts-index.json`;
+/// the call then runs with `dir` as its work folder and names the file relatively.
+fn edited_fixture(dir: &TempDir, fixture: &str, from: &str, to: &str) -> &'static str {
     let text = fs::read_to_string(crate_dir().join(fixture)).unwrap();
     assert!(text.contains(from), "{fixture} has no {from:?}");
-    let path = dir.path().join("artifacts-index.json");
-    fs::write(&path, text.replacen(from, to, 1)).unwrap();
-    path
+    fs::write(
+        dir.path().join("artifacts-index.json"),
+        text.replacen(from, to, 1),
+    )
+    .unwrap();
+    "artifacts-index.json"
 }
 
 #[test]
@@ -283,17 +442,8 @@ fn integer_schema_1_index_is_refused_the_same_way() {
         r#""schema_version": "1""#,
         r#""schema_version": 1"#,
     );
-    let out = tool(json!({ "query": "git", "index": path }));
-    assert_error(
-        &out,
-        "schema_error",
-        &[
-            path.to_str().unwrap(),
-            "schema 1",
-            "schema 2",
-            SCHEMA_1_HINT,
-        ],
-    );
+    let out = tool_in(dir.path(), json!({ "query": "git", "index": path }));
+    assert_error(&out, &[path, "schema 1", "schema 2", SCHEMA_1_HINT]);
 }
 
 #[test]
@@ -305,16 +455,16 @@ fn other_schema_version_is_refused_naming_schema_2() {
         r#""schema_version": 2"#,
         r#""schema_version": 3"#,
     );
-    let out = tool(json!({ "query": "git", "index": path }));
-    assert_error(&out, "schema_error", &["schema_version 3", "schema 2"]);
+    let out = tool_in(dir.path(), json!({ "query": "git", "index": path }));
+    assert_error(&out, &["schema_version 3", "schema 2"]);
 }
 
 #[test]
 fn missing_schema_version_is_refused() {
     let dir = TempDir::new().unwrap();
     let path = edited_fixture(&dir, FIXTURE, r#""schema_version": 2,"#, "");
-    let out = tool(json!({ "query": "git", "index": path }));
-    assert_error(&out, "schema_error", &["no schema_version", "schema 2"]);
+    let out = tool_in(dir.path(), json!({ "query": "git", "index": path }));
+    assert_error(&out, &["no schema_version", "schema 2"]);
 }
 
 // ── 5. malformed ─────────────────────────────────────────────────────────────
@@ -333,12 +483,11 @@ fn malformed_indexes_are_parse_errors_naming_the_source() {
         ),
     ];
     for (file, text) in cases {
-        let path = dir.path().join(file);
-        fs::write(&path, text).unwrap();
-        let out = tool(json!({ "query": "x", "index": path }));
-        assert_error(&out, "parse_error", &[path.to_str().unwrap()]);
+        fs::write(dir.path().join(file), text).unwrap();
+        let out = tool_in(dir.path(), json!({ "query": "x", "index": file }));
+        assert_error(&out, &["failed to parse the artifact index from", file]);
         if file == "no-versions.json" {
-            assert!(message(&out).contains("versions"), "{out}");
+            assert!(out.summary.contains("versions"), "{out}");
         }
     }
 }
@@ -348,22 +497,13 @@ fn malformed_indexes_are_parse_errors_naming_the_source() {
 #[test]
 fn registry_input_is_refused_naming_index() {
     let out = tool(json!({ "query": "x", "registry": "local" }));
-    assert_eq!(out["ok"], false);
-    assert!(
-        message(&out).contains("'registry' input was removed"),
-        "{out}"
-    );
-    assert!(message(&out).contains("'index'"), "{out}");
+    assert_error(&out, &["'registry' input was removed", "'index'"]);
 }
 
 #[test]
 fn local_index_is_refused_naming_mur_search() {
     let out = tool(json!({ "query": "editor", "index": "local" }));
-    assert_eq!(out["ok"], false);
-    assert!(
-        message(&out).contains("mur search editor --index local"),
-        "{out}"
-    );
+    assert_error(&out, &["mur search editor --index local"]);
 }
 
 #[test]
@@ -371,6 +511,14 @@ fn double_encoded_data_reads_the_fixture() {
     let inner = json!({ "query": "tool-editor", "index": FIXTURE }).to_string();
     let out = tool(Value::String(inner));
     the_acceptance_result(&out);
+}
+
+#[test]
+fn missing_data_and_missing_query_are_refused() {
+    let out = tool(json!({}));
+    assert_error(&out, &["invalid search parameters: ", "query"]);
+    let out = tool(json!({ "query": "" }));
+    assert_error(&out, &["query must not be empty"]);
 }
 
 // ── 7. paths ─────────────────────────────────────────────────────────────────
@@ -386,28 +534,80 @@ fn relative_path_resolves_against_the_working_directory() {
     ));
     // The same relative path from another directory names no file.
     let out = tool(json!({ "query": "tool-editor", "index": "sub/index.json" }));
-    assert_error(&out, "io_error", &["sub/index.json"]);
+    assert_error(&out, &["failed to read sub/index.json: "]);
 }
 
 #[test]
-fn absolute_path_is_read() {
-    let path = crate_dir().join(FIXTURE);
-    let out = tool_in(
-        &std::env::temp_dir(),
-        json!({ "query": "tool-editor", "index": path }),
+fn absolute_path_is_read_under_a_held_root() {
+    let fixtures = fs::canonicalize(crate_dir().join("tests/fixtures")).unwrap();
+    let path = fixtures.join("artifacts-index.json");
+    let work = TempDir::new().unwrap();
+    let out = tool_with(
+        work.path(),
+        &[&fixtures],
+        &json!({ "query": "tool-editor", "index": path }),
     );
     the_acceptance_result(&out);
-    assert_eq!(out["index"], path.to_str().unwrap());
+    assert_eq!(out.data.unwrap()["index"], path.to_str().unwrap());
+
+    // Lexical `.` and `..` resolve before the root is matched.
+    let dotted = format!("{}/./sub/../artifacts-index.json", fixtures.display());
+    let out = tool_with(
+        work.path(),
+        &[&fixtures],
+        &json!({ "query": "tool-editor", "index": dotted }),
+    );
+    the_acceptance_result(&out);
 }
 
 #[test]
-fn missing_file_is_an_io_error_naming_the_path() {
-    let out = tool(json!({ "query": "x", "index": "no/such/artifacts-index.json" }));
+fn absolute_path_is_refused_with_no_root() {
+    let path = fs::canonicalize(crate_dir().join(FIXTURE)).unwrap();
+    let path = path.to_str().unwrap();
+    let out = tool(json!({ "query": "tool-editor", "index": path }));
     assert_error(
         &out,
-        "io_error",
-        &["failed to read no/such/artifacts-index.json"],
+        &[
+            &format!("failed to read {path}: "),
+            "opens no host folder",
+            "a relative path opens in the work folder",
+        ],
     );
+}
+
+#[test]
+fn absolute_path_is_refused_outside_every_root() {
+    let path = fs::canonicalize(crate_dir().join(FIXTURE)).unwrap();
+    let other = TempDir::new().unwrap();
+    let other_root = fs::canonicalize(other.path()).unwrap();
+    let out = tool_with(
+        &crate_dir(),
+        &[&other_root],
+        &json!({ "query": "tool-editor", "index": path }),
+    );
+    assert_error(
+        &out,
+        &[
+            &format!("failed to read {}: ", path.display()),
+            "outside every host folder",
+            other_root.to_str().unwrap(),
+            "a relative path opens in the work folder",
+        ],
+    );
+    // A `..` that climbs out of the root lexically is refused, never opened.
+    let climbing = format!("{}/../../etc/passwd", other_root.display());
+    let out = tool_with(
+        &crate_dir(),
+        &[&other_root],
+        &json!({ "query": "x", "index": climbing }),
+    );
+    assert_error(&out, &["outside every host folder"]);
+}
+
+#[test]
+fn missing_file_is_refused_naming_the_path() {
+    let out = tool(json!({ "query": "x", "index": "no/such/artifacts-index.json" }));
+    assert_error(&out, &["failed to read no/such/artifacts-index.json"]);
 }
 
 // ── 8. loopback HTTP ─────────────────────────────────────────────────────────
@@ -425,23 +625,50 @@ fn http_redirect_is_followed() {
     let url = format!("{base}/latest");
     let out = tool(json!({ "query": "tool-editor", "index": url }));
     the_acceptance_result(&out);
-    assert_eq!(out["index"], url);
+    assert_eq!(out.data.unwrap()["index"], url);
+}
+
+/// `/r<N>` redirects to `/r<N+1>`, so `/r0` needs a sixth redirect to reach `/r6`, and `/r1`
+/// reaches it in exactly five.
+fn redirect_chain(path: &str) -> Vec<u8> {
+    match path.strip_prefix("/r").and_then(|n| n.parse::<u32>().ok()) {
+        Some(6) => {
+            let body = fs::read(crate_dir().join(FIXTURE)).unwrap();
+            http_response("200 OK", "", &body)
+        }
+        Some(n) => http_response("302 Found", &format!("Location: /r{}\r\n", n + 1), b""),
+        None => http_response("404 Not Found", "", b""),
+    }
 }
 
 #[test]
-fn http_404_is_a_fetch_error() {
+fn five_redirects_are_followed_and_a_sixth_is_refused() {
+    let base = serve(redirect_chain);
+    the_acceptance_result(&tool(
+        json!({ "query": "tool-editor", "index": format!("{base}/r1") }),
+    ));
+    let url = format!("{base}/r0");
+    let out = tool(json!({ "query": "tool-editor", "index": url }));
+    assert_error(
+        &out,
+        &[&format!("failed to fetch {url}: more than 5 redirects")],
+    );
+}
+
+#[test]
+fn http_404_is_refused() {
     let base = serve(|_| http_response("404 Not Found", "", b"not here"));
     let url = format!("{base}/artifacts-index.json");
     let out = tool(json!({ "query": "x", "index": url }));
-    assert_error(&out, "fetch_error", &["HTTP 404", &url]);
+    assert_error(&out, &[&format!("HTTP 404 fetching {url}")]);
 }
 
 #[test]
-fn oversized_body_is_a_fetch_error() {
+fn oversized_body_is_refused() {
     let base = serve(|_| http_response("200 OK", "", &vec![b' '; MAX_INDEX_BYTES + 1]));
     let url = format!("{base}/artifacts-index.json");
     let out = tool(json!({ "query": "x", "index": url }));
-    assert_error(&out, "fetch_error", &[&url, "more than 16 MiB"]);
+    assert_error(&out, &[&url, "more than 16 MiB"]);
 }
 
 #[test]
@@ -449,13 +676,26 @@ fn non_json_body_is_a_parse_error() {
     let base = serve(|_| http_response("200 OK", "", b"<html>hello</html>"));
     let url = format!("{base}/artifacts-index.json");
     let out = tool(json!({ "query": "x", "index": url }));
-    assert_error(&out, "parse_error", &[&url]);
+    assert_error(&out, &["failed to parse the artifact index from", &url]);
 }
 
-// ── 9. the TLS backend ───────────────────────────────────────────────────────
+#[test]
+fn a_refused_connection_names_the_url() {
+    // Bind and drop: nothing listens on the port afterwards.
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let url = format!("http://127.0.0.1:{port}/artifacts-index.json");
+    let out = tool(json!({ "query": "x", "index": url }));
+    assert_error(&out, &[&format!("failed to fetch {url}: ")]);
+}
 
-/// An `https://` index makes the tool open a TLS session: the first bytes on the wire are a
-/// handshake record. A build without a TLS backend sends nothing.
+// ── 9. TLS ───────────────────────────────────────────────────────────────────
+
+/// An `https://` index makes the guest send `Scheme::Https`, so the host's `wasi:http` opens a
+/// TLS session: the first bytes on the wire are a handshake record.
 #[test]
 fn https_index_starts_a_tls_handshake() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -493,11 +733,49 @@ fn https_index_starts_a_tls_handshake() {
         first.starts_with(&[0x16, 0x03]),
         "expected a TLS handshake record, got {first:02x?}; tool said {out}"
     );
-    assert_error(&out, "fetch_error", &[&url]);
-    assert!(!message(&out).contains("no TLS backend"), "{out}");
+    assert_error(&out, &[&format!("failed to fetch {url}: ")]);
 }
 
-// ── 10. real HTTPS ───────────────────────────────────────────────────────────
+// ── 10. the native 0.5.0 build's answers ─────────────────────────────────────
+
+/// `summary` with a trailing ` (os error N)` cut: WASI numbers errno differently from the host
+/// the native build ran on.
+fn without_os_error(summary: &str) -> &str {
+    match summary.rfind(" (os error ") {
+        Some(at) if summary.ends_with(')') => &summary[..at],
+        _ => summary,
+    }
+}
+
+#[test]
+fn native_0_5_0_results() {
+    let recorded: Vec<Value> =
+        serde_json::from_str(&fs::read_to_string(crate_dir().join(NATIVE_RESULTS)).unwrap())
+            .unwrap();
+    assert_eq!(recorded.len(), 14, "the recorded case list");
+    for case in &recorded {
+        let out = tool(case["input"].clone());
+        let what = &case["input"];
+        assert_eq!(out.status, case["status"], "status for {what}");
+        let want = case["summary"].as_str().unwrap();
+        if what["index"] == "no/such/artifacts-index.json" {
+            assert_eq!(
+                without_os_error(&out.summary),
+                without_os_error(want),
+                "summary for {what}"
+            );
+        } else {
+            assert_eq!(out.summary, want, "summary for {what}");
+        }
+        let want_data = match &case["data"] {
+            Value::Null => None,
+            data => Some(data.clone()),
+        };
+        assert_eq!(out.data, want_data, "data for {what}");
+    }
+}
+
+// ── 11. real HTTPS ───────────────────────────────────────────────────────────
 
 const V0_24_0_RAW_URL: &str =
     "https://raw.githubusercontent.com/murmur-nexus/default-artifacts/v0.24.0/artifacts-index.json";
@@ -508,7 +786,6 @@ fn https_schema_1_index_on_github_is_read_and_refused() {
     let out = tool(json!({ "query": "git", "index": V0_24_0_RAW_URL }));
     assert_error(
         &out,
-        "schema_error",
         &[V0_24_0_RAW_URL, "schema 1", "schema 2", SCHEMA_1_HINT],
     );
 }
@@ -517,14 +794,62 @@ fn https_schema_1_index_on_github_is_read_and_refused() {
 #[ignore = "needs network: fetches from github.com"]
 fn https_default_index_is_fetched() {
     let out = tool(json!({ "query": "git" }));
-    if out["ok"] == true {
-        assert_eq!(out["scope"], "murmur", "{out}");
-        assert_no_forbidden_keys(&out);
-    } else {
-        // Until a release publishes artifacts-index.json, the latest-release URL is a 404.
-        assert_error(&out, "fetch_error", &["HTTP 404"]);
-        for word in ["TLS", "certificate", "backend"] {
-            assert!(!message(&out).contains(word), "{out}");
-        }
+    let data = passed(&out);
+    assert_eq!(data["scope"], "murmur", "{out}");
+    assert_eq!(
+        data["index"],
+        "https://github.com/murmur-nexus/default-artifacts/releases/latest/download/artifacts-index.json"
+    );
+    assert_no_forbidden_keys(data);
+}
+
+/// The component against the native 0.5.0 build, in one sitting, on the published index:
+/// `NATIVE_0_5_0_BIN` names that build (see `tests/fixtures/README.md` for how it is made).
+/// Prints one table row per query.
+#[test]
+#[ignore = "needs network and the native 0.5.0 build in NATIVE_0_5_0_BIN"]
+fn https_default_index_matches_the_native_0_5_0_build() {
+    let native = std::env::var_os("NATIVE_0_5_0_BIN")
+        .map(PathBuf::from)
+        .expect("set NATIVE_0_5_0_BIN to the native 0.5.0 build");
+    for query in ["tool", "git", "driver", "murmur/tool-registry-search"] {
+        let input = json!({ "query": query });
+        let out = tool(input.clone());
+
+        let mut child = Command::new(&native)
+            .current_dir(crate_dir())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawning the native build");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                json!({ "data": input, "log_path": null })
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let printed: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let native_data = match &printed["data"] {
+            Value::Null => None,
+            data => Some(data.clone()),
+        };
+
+        let count = |data: &Option<Value>| data.as_ref().map(|d| d["count"].clone());
+        let equal = out.status == printed["status"]
+            && out.summary == printed["summary"]
+            && out.data == native_data;
+        println!(
+            "| {query} | {} | {} | {} |",
+            count(&native_data).unwrap_or(Value::Null),
+            count(&out.data).unwrap_or(Value::Null),
+            if equal { "yes" } else { "no" }
+        );
+        assert_eq!(out.status, "passed", "{out}");
+        assert!(equal, "{query}: component {out} vs native {printed}");
     }
 }

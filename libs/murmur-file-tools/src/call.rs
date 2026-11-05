@@ -8,7 +8,7 @@
 
 use serde_json::{json, Value};
 
-use crate::{HostRoot, OutcomeAttachment, OutcomeStatus, Tool, ToolOutcome};
+use crate::{envelope, HostRoot, NativeOutcome, OutcomeAttachment, Tool, ToolOutcome};
 
 // ── Error kind constants ────────────────────────────────────────────────────────
 
@@ -128,12 +128,10 @@ pub(crate) fn run_with(
 /// What a component's `Guest::run` calls with `ToolInput.data`, through its tool module's
 /// `dispatch`: [`run_with`] for `tool` and its handler `handle`, mapped onto a [`ToolOutcome`].
 ///
-/// The host places the tool-call arguments in `data`. They are rewrapped into the
+/// The host places the tool-call arguments in `data`. They are rewrapped by [`envelope`] into the
 /// `{"data": ...}` envelope [`run_with`] parses — a value that is not JSON travels on as a
-/// string, so [`run_with`] reports it — and an absent `data` becomes an envelope with no `data`
-/// key. The result is mapped as the host's native dispatch mapped a tool's stdout
-/// (crates/capsule-runtime `dispatch_native_tool`): `data` is the result's `data` field, a
-/// string used verbatim, else a non-null value re-serialized, else `None`. `attachments` is the
+/// string, so [`run_with`] reports it. `status`, `summary` and `data` are the result's
+/// [`NativeOutcome`], as the host's native dispatch mapped a tool's stdout. `attachments` is the
 /// result's top-level `attachments` array: each `{"media_type", "path"}` entry holding both as
 /// strings, in order, and empty when the result has none. `roots` are passed on to [`run_with`].
 pub(crate) fn dispatch_with(
@@ -142,41 +140,18 @@ pub(crate) fn dispatch_with(
     data: Option<&str>,
     roots: &[HostRoot],
 ) -> ToolOutcome {
-    let raw = match data {
-        Some(d) => {
-            let data_val =
-                serde_json::from_str::<Value>(d).unwrap_or_else(|_| Value::String(d.to_string()));
-            json!({ "data": data_val }).to_string()
-        }
-        None => "{}".to_string(),
-    };
+    let result = run_with(tool, handle, &envelope(data), roots);
 
-    let result = run_with(tool, handle, &raw, roots);
-
-    let status = match result.get("status").and_then(Value::as_str) {
-        Some("passed") => OutcomeStatus::Passed,
-        Some("failed") => OutcomeStatus::Failed,
-        _ => OutcomeStatus::Error,
-    };
-    let summary = result
-        .get("summary")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let NativeOutcome {
+        status,
+        summary,
+        data,
+    } = NativeOutcome::of(&result);
     let state_effect = result
         .get("metadata")
         .and_then(|m| m.get("state_effect"))
         .and_then(Value::as_str)
         .map(|_| tool.state_effect());
-    let data = result
-        .get("data")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| {
-            result
-                .get("data")
-                .filter(|d| !d.is_null())
-                .map(|d| d.to_string())
-        });
     let truncated = result
         .get("data")
         .is_some_and(|d| d.get("capped").is_some() || d.get("truncated").is_some());

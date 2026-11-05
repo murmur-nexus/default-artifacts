@@ -132,8 +132,8 @@ driver.
 
 Tool artifacts (`runtime: tool`) exposed to the agent as callable functions. `tool-corpus`,
 `tool-create`, `tool-read`, `tool-write`, `tool-edit`, `tool-find`, `tool-github`,
-`tool-report`, `tool-request-input`, and `tool-tavily` are WASM components (`wasm32-wasip2`, exporting `murmur:tool/run`); the
-remaining seven are native binaries: their C dependencies (SQLite, tree-sitter, TLS) do not
+`tool-registry-search`, `tool-report`, `tool-request-input`, and `tool-tavily` are WASM components (`wasm32-wasip2`, exporting `murmur:tool/run`); the
+remaining six are native binaries: their C dependencies (SQLite, tree-sitter) do not
 cross-compile to wasm32-wasip2, or they run a host program a WASM guest cannot, such as `git`, a
 browser or an X server (see [BUILD.md](./BUILD.md)).
 
@@ -147,13 +147,13 @@ browser or an X server (see [BUILD.md](./BUILD.md)).
 | `tool-find` | `tools/tool-find/` | WASM | Searches file contents for a regex: `pattern`, optional `dir`, `glob`, `recursive`, `context_lines`. `dir` is relative to the work folder or absolute inside a host folder the session opened. Stops at 200 matches, 5000 files walked, 32 MiB read or a 500 KB result, returning what it found with a `capped` note. Declares `murmur-destinations: []`; see its [README](./tools/tool-find/README.md) |
 | `tool-github` | `tools/tool-github/` | WASM | Pushes a local commit range to one operator-pinned GitHub repo so the remote branch lands on the identical SHA, fetches a branch back, and opens, inspects, lists and merges pull requests on that repo; the GitHub token is bound on the entry as `gateway.api_key` and attached by the runtime, never held by the tool |
 | `tool-report` | `tools/tool-report/` | WASM | The capsule states its own conclusion (`report`, `progress`) into `state/reports/<session_id>.json`, one file per session named by `MURMUR_SESSION_ID`, keeping at most 64 and never the caller's own or one written in the last 7 days; requires a `capabilities.state` grant, and takes an optional `config:` block closing the deliverable-kind and note-stage vocabularies |
+| `tool-registry-search` | `tools/tool-registry-search/` | WASM | Searches a Murmur artifact index for artifacts, listing every published version of each `scope/name`. Fetches the index over `wasi:http`, so the capsule's `capabilities.network.allow` must list `https://github.com` and `https://release-assets.githubusercontent.com` for the default index; see its [README](./tools/tool-registry-search/README.md) |
 | `tool-request-input` | `tools/tool-request-input/` | WASM | HITL pause gate — suspends the agent loop and waits for human input via `SendMessage` |
 | `tool-tavily` | `tools/tool-tavily/` | WASM | Web search through Tavily, returning a bounded plain-text result; the Tavily key is bound on the entry as `gateway.api_key` and attached by the runtime, never held by the tool, and every cost- and size-bearing lever is in the entry's `config:` block |
 | `tool-git` | `tools/tool-git/` | native | Git operations (clone, checkout, status, diff, commit, push, worktree, and more) |
 | `tool-code-graph` | `tools/tool-code-graph/` | native | Indexes a Rust and/or Python repo into a SQLite symbol/edge graph; structured queries over stable symbol identities |
 | `tool-code-coverage` | `tools/tool-code-coverage/` | native | Spectrum-based fault localization (Ochiai / Tarantula) over per-test LCOV reports |
 | `tool-test-report` | `tools/tool-test-report/` | native | Parses raw test-runner output (cargo, pytest, go, jest) into a structured failure list |
-| `tool-registry-search` | `tools/tool-registry-search/` | native | Searches a Murmur artifact index for artifacts, listing every published version of each `scope/name` |
 | `tool-browser` | `tools/tool-browser/` | native | Drives the host's headless Chrome or Chromium one action per call: opens a page, reads it as an accessibility tree with refs, clicks, types, presses, selects, waits and goes back with a summary of what changed, reads console errors and failed requests, and saves screenshots. Needs one of `chromium`, `chromium-browser`, `google-chrome` or `chrome` in `capabilities.shell.allow`, and on murmur's Full and Sealed tiers `chrome-headless-shell` under that name; see its [README](./tools/tool-browser/README.md) |
 | `tool-computer` | `tools/tool-computer/` | native | The capsule's own 1440x900 virtual display (Xvfb): screenshot, click, drag, scroll, type, keys, wait and zoom, one action per call, each returning the cursor and a PNG screenshot. Declares `provider_tool: {kind: computer}`, so it runs only in a `sealed` capsule on Linux and needs a `mur` from murmur `a9ea4726` or later; see its [README](./tools/tool-computer/README.md) |
 

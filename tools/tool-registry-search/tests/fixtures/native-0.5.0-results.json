@@ -1,0 +1,490 @@
+[
+  {
+    "input": {
+      "query": "tool-editor",
+      "index": "tests/fixtures/artifacts-index.json"
+    },
+    "status": "passed",
+    "summary": "1 result(s)",
+    "data": {
+      "count": 1,
+      "index": "tests/fixtures/artifacts-index.json",
+      "results": [
+        {
+          "description": "Structured file editing interface for Murmur capsules.",
+          "name": "murmur/tool-editor",
+          "runtime": "tool",
+          "tags": [
+            "tool",
+            "editor"
+          ],
+          "versions": [
+            {
+              "built_at_level": 1,
+              "platforms": [
+                "any"
+              ],
+              "release": "v0.26.0",
+              "version": "0.7.0"
+            },
+            {
+              "built_at_level": 1,
+              "platforms": [
+                "any"
+              ],
+              "release": "v0.25.0",
+              "version": "0.6.0"
+            }
+          ]
+        }
+      ],
+      "scope": "murmur"
+    }
+  },
+  {
+    "input": {
+      "query": "murmur/tool-editor",
+      "index": "tests/fixtures/artifacts-index.json"
+    },
+    "status": "passed",
+    "summary": "1 result(s)",
+    "data": {
+      "count": 1,
+      "index": "tests/fixtures/artifacts-index.json",
+      "results": [
+        {
+          "description": "Structured file editing interface for Murmur capsules.",
+          "name": "murmur/tool-editor",
+          "runtime": "tool",
+          "tags": [
+            "tool",
+            "editor"
+          ],
+          "versions": [
+            {
+              "built_at_level": 1,
+              "platforms": [
+                "any"
+              ],
+              "release": "v0.26.0",
+              "version": "0.7.0"
+            },
+            {
+              "built_at_level": 1,
+              "platforms": [
+                "any"
+              ],
+              "release": "v0.25.0",
+              "version": "0.6.0"
+            }
+          ]
+        }
+      ],
+      "scope": "murmur"
+    }
+  },
+  {
+    "input": {
+      "query": "TOOL-EDITOR",
+      "index": "tests/fixtures/artifacts-index.json"
+    },
+    "status": "passed",
+    "summary": "1 result(s)",
+    "data": {
+      "count": 1,
+      "index": "tests/fixtures/artifacts-index.json",
+      "results": [
+        {
+          "description": "Structured file editing interface for Murmur capsules.",
+          "name": "murmur/tool-editor",
+          "runtime": "tool",
+          "tags": [
+            "tool",
+            "editor"
+          ],
+          "versions": [
+            {
+              "built_at_level": 1,
+              "platforms": [
+                "any"
+              ],
+              "release": "v0.26.0",
+              "version": "0.7.0"
+            },
+            {
+              "built_at_level": 1,
+              "platforms": [
+                "any"
+              ],
+              "release": "v0.25.0",
+              "version": "0.6.0"
+            }
+          ]
+        }
+      ],
+      "scope": "murmur"
+    }
+  },
+  {
+    "input": {
+      "query": "tool",
+      "index": "tests/fixtures/artifacts-index.json"
+    },
+    "status": "passed",
+    "summary": "2 result(s)",
+    "data": {
+      "count": 2,
+      "index": "tests/fixtures/artifacts-index.json",
+      "results": [
+        {
+          "description": "Structured file editing interface for Murmur capsules.",
+          "name": "murmur/tool-editor",
+          "runtime": "tool",
+          "tags": [
+            "tool",
+            "editor"
+          ],
+          "versions": [
+            {
+              "built_at_level": 1,
+              "platforms": [
+                "any"
+              ],
+              "release": "v0.26.0",
+              "version": "0.7.0"
+            },
+            {
+              "built_at_level": 1,
+              "platforms": [
+                "any"
+              ],
+              "release": "v0.25.0",
+              "version": "0.6.0"
+            }
+          ]
+        },
+        {
+          "description": "Structured git interface for Murmur capsules.",
+          "name": "murmur/tool-git",
+          "runtime": "tool",
+          "tags": [
+            "tool",
+            "git"
+          ],
+          "versions": [
+            {
+              "built_at_level": 1,
+              "platforms": [
+                "darwin-aarch64",
+                "linux-x86_64"
+              ],
+              "release": "v0.25.0",
+              "version": "0.2.0"
+            }
+          ]
+        }
+      ],
+      "scope": "murmur"
+    }
+  },
+  {
+    "input": {
+      "query": "tool",
+      "index": "tests/fixtures/artifacts-index.json",
+      "limit": 1
+    },
+    "status": "passed",
+    "summary": "1 result(s)",
+    "data": {
+      "count": 1,
+      "index": "tests/fixtures/artifacts-index.json",
+      "results": [
+        {
+          "description": "Structured file editing interface for Murmur capsules.",
+          "name": "murmur/tool-editor",
+          "runtime": "tool",
+          "tags": [
+            "tool",
+            "editor"
+          ],
+          "versions": [
+            {
+              "built_at_level": 1,
+              "platforms": [
+                "any"
+              ],
+              "release": "v0.26.0",
+              "version": "0.7.0"
+            },
+            {
+              "built_at_level": 1,
+              "platforms": [
+                "any"
+              ],
+              "release": "v0.25.0",
+              "version": "0.6.0"
+            }
+          ]
+        }
+      ],
+      "scope": "murmur"
+    }
+  },
+  {
+    "input": {
+      "query": "Messages",
+      "index": "tests/fixtures/artifacts-index.json"
+    },
+    "status": "passed",
+    "summary": "1 result(s)",
+    "data": {
+      "count": 1,
+      "index": "tests/fixtures/artifacts-index.json",
+      "results": [
+        {
+          "description": "Anthropic Messages API inference driver for Murmur agent capsules.",
+          "name": "murmur/driver-anthropic",
+          "runtime": "driver",
+          "tags": [
+            "driver",
+            "inference",
+            "anthropic"
+          ],
+          "versions": [
+            {
+              "built_at_level": 1,
+              "platforms": [
+                "any"
+              ],
+              "release": "v0.25.0",
+              "version": "0.10.0"
+            }
+          ]
+        }
+      ],
+      "scope": "murmur"
+    }
+  },
+  {
+    "input": {
+      "query": "tool-git",
+      "index": "tests/fixtures/artifacts-index.json"
+    },
+    "status": "passed",
+    "summary": "1 result(s)",
+    "data": {
+      "count": 1,
+      "index": "tests/fixtures/artifacts-index.json",
+      "results": [
+        {
+          "description": "Structured git interface for Murmur capsules.",
+          "name": "murmur/tool-git",
+          "runtime": "tool",
+          "tags": [
+            "tool",
+            "git"
+          ],
+          "versions": [
+            {
+              "built_at_level": 1,
+              "platforms": [
+                "darwin-aarch64",
+                "linux-x86_64"
+              ],
+              "release": "v0.25.0",
+              "version": "0.2.0"
+            }
+          ]
+        }
+      ],
+      "scope": "murmur"
+    }
+  },
+  {
+    "input": {
+      "query": "skill-create-manifest",
+      "index": "tests/fixtures/artifacts-index.json"
+    },
+    "status": "passed",
+    "summary": "1 result(s)",
+    "data": {
+      "count": 1,
+      "index": "tests/fixtures/artifacts-index.json",
+      "results": [
+        {
+          "description": "Skill artifact: complete knowledge for generating valid murmur manifest files",
+          "name": "murmur/skill-create-manifest",
+          "runtime": "skill",
+          "tags": [
+            "skill",
+            "create",
+            "manifest"
+          ],
+          "versions": [
+            {
+              "built_at_level": 1,
+              "platforms": [
+                "any"
+              ],
+              "release": "v0.25.0",
+              "version": "0.1.0"
+            }
+          ]
+        }
+      ],
+      "scope": "murmur"
+    }
+  },
+  {
+    "input": {
+      "query": "murmur/",
+      "index": "tests/fixtures/artifacts-index.json"
+    },
+    "status": "passed",
+    "summary": "4 result(s)",
+    "data": {
+      "count": 4,
+      "index": "tests/fixtures/artifacts-index.json",
+      "results": [
+        {
+          "description": "Anthropic Messages API inference driver for Murmur agent capsules.",
+          "name": "murmur/driver-anthropic",
+          "runtime": "driver",
+          "tags": [
+            "driver",
+            "inference",
+            "anthropic"
+          ],
+          "versions": [
+            {
+              "built_at_level": 1,
+              "platforms": [
+                "any"
+              ],
+              "release": "v0.25.0",
+              "version": "0.10.0"
+            }
+          ]
+        },
+        {
+          "description": "Skill artifact: complete knowledge for generating valid murmur manifest files",
+          "name": "murmur/skill-create-manifest",
+          "runtime": "skill",
+          "tags": [
+            "skill",
+            "create",
+            "manifest"
+          ],
+          "versions": [
+            {
+              "built_at_level": 1,
+              "platforms": [
+                "any"
+              ],
+              "release": "v0.25.0",
+              "version": "0.1.0"
+            }
+          ]
+        },
+        {
+          "description": "Structured file editing interface for Murmur capsules.",
+          "name": "murmur/tool-editor",
+          "runtime": "tool",
+          "tags": [
+            "tool",
+            "editor"
+          ],
+          "versions": [
+            {
+              "built_at_level": 1,
+              "platforms": [
+                "any"
+              ],
+              "release": "v0.26.0",
+              "version": "0.7.0"
+            },
+            {
+              "built_at_level": 1,
+              "platforms": [
+                "any"
+              ],
+              "release": "v0.25.0",
+              "version": "0.6.0"
+            }
+          ]
+        },
+        {
+          "description": "Structured git interface for Murmur capsules.",
+          "name": "murmur/tool-git",
+          "runtime": "tool",
+          "tags": [
+            "tool",
+            "git"
+          ],
+          "versions": [
+            {
+              "built_at_level": 1,
+              "platforms": [
+                "darwin-aarch64",
+                "linux-x86_64"
+              ],
+              "release": "v0.25.0",
+              "version": "0.2.0"
+            }
+          ]
+        }
+      ],
+      "scope": "murmur"
+    }
+  },
+  {
+    "input": {
+      "query": "zzz",
+      "index": "tests/fixtures/artifacts-index.json"
+    },
+    "status": "passed",
+    "summary": "0 result(s)",
+    "data": {
+      "count": 0,
+      "index": "tests/fixtures/artifacts-index.json",
+      "results": [],
+      "scope": "murmur"
+    }
+  },
+  {
+    "input": {
+      "query": "git",
+      "index": "tests/fixtures/artifacts-index-schema1.json"
+    },
+    "status": "error",
+    "summary": "tests/fixtures/artifacts-index-schema1.json is a schema 1 artifact index, and this tool reads only schema 2; its publisher regenerates it with `mur index <dir> --repo <owner>/<repo> --release <tag>`",
+    "data": null
+  },
+  {
+    "input": {
+      "query": "x",
+      "index": "no/such/artifacts-index.json"
+    },
+    "status": "error",
+    "summary": "failed to read no/such/artifacts-index.json: No such file or directory (os error 2)",
+    "data": null
+  },
+  {
+    "input": {
+      "query": "editor",
+      "index": "local"
+    },
+    "status": "error",
+    "summary": "'local' is the global artifact store on the host, which a capsule cannot see; run 'mur search editor --index local' on the host instead",
+    "data": null
+  },
+  {
+    "input": {
+      "query": "x",
+      "registry": "local"
+    },
+    "status": "error",
+    "summary": "the 'registry' input was removed; pass the index URL or file path as 'index' (omit it for the latest default-artifacts release)",
+    "data": null
+  }
+]

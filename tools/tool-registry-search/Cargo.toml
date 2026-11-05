@@ -4,14 +4,28 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 
-[[bin]]
-name = "tool-registry-search"
-path = "src/main.rs"
+[lib]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+# Only the root items (host roots, `open_in_host_root`, `envelope`, `NativeOutcome`): no tool
+# feature, so none of the four file tools' code, regex or walkdir is compiled in.
+murmur-file-tools = { path = "../../libs/murmur-file-tools", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
-ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+wit-bindgen.workspace = true
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasip2 = "1.0.4"
+
+# Host-target-only. wasmtime, wasmtime-wasi and wasmtime-wasi-http are used solely by
+# tests/search_index.rs to instantiate the compiled wasm32-wasip2 component with
+# `wasi:http/outgoing-handler` linked, so its GETs reach loopback stubs (and, in the ignored
+# tests, github.com) for real. tempfile gives the host tests and tests/mur_run_network.rs
+# scratch directories. Never a build-time dependency of the wasm target itself — a
+# `[dev-dependencies]` entry is excluded from the cdylib the component is built from.
 [dev-dependencies]
+wasmtime = "46"
+wasmtime-wasi = "46"
+wasmtime-wasi-http = "46"
 tempfile = "3"

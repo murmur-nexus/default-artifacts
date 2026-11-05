@@ -37,9 +37,10 @@ from its `name:` or a name with a `murmur-` prefix.
 | native | `implementation: native` | `bin/<name>`, one zip per platform | `./scripts/build-native.sh` (all) / `cargo build --release -p <name>` (one) |
 | skill | `runtime: skill` | `skill.md` | nothing to compile |
 
-A tool is native only when a `wasm32-wasip2` guest cannot do its job — spawning `git`, raw sockets
-with a native TLS stack, or C sources that do not cross-compile. A tool that calls a third-party
-API stays wasm: the credential gateway serves wasm stores alone.
+A tool is native only when a `wasm32-wasip2` guest cannot do its job — spawning `git`, or C sources
+that do not cross-compile. A WASM tool reaches the network through `wasi:http`, under
+`capabilities.network.allow`, so network access never makes a tool native. A tool that calls a
+third-party API stays wasm: the credential gateway serves wasm stores alone.
 
 `libs/` holds shared crates compiled into the artifacts that use them; they have no `murmur.yaml`
 and are never published. `./scripts/classify-crates.sh` classifies every workspace member from its

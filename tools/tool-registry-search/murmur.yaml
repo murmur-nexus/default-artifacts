@@ -1,7 +1,7 @@
 name: tool-registry-search
-version: 0.5.0
+version: 0.6.0
 runtime: tool
-implementation: native
+implementation: wasm
 description: |
   Search a Murmur artifact index (schema 2) for artifacts matching a keyword.
 
@@ -19,7 +19,7 @@ description: |
   By default it searches the index on the latest default-artifacts release.
 
 requires_files:
-  - bin/tool-registry-search
+  - tool_registry_search.wasm
 
 input_schema:
   type: object
@@ -36,10 +36,12 @@ input_schema:
   required:
     - query
 
-# Documents what the tool reaches; the runtime does not read this block. A
-# native tool runs in the capsule's own sandbox under the capsule-wide
-# capabilities, so the capsule must list these hosts in its own
-# capabilities.network.allow.
+# The hosts the default index needs: the latest-release URL on github.com
+# redirects to release-assets.githubusercontent.com. The runtime reads grants
+# only from the capsule's manifest, never from this file, so the capsule's
+# capabilities.network.allow must list both for the default index. Copying
+# this block onto the tool's entry narrows the tool to exactly these hosts.
+# An `index` on another host needs that host and every host it redirects to.
 capabilities:
   network:
     allow:
