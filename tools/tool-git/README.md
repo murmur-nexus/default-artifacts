@@ -276,8 +276,8 @@ capabilities:
             list_dir: false
 ```
 
-Each operation gave the same result as the native 0.6.0 build under the same `mur`, and the same as
-the results recorded from the native binary (`tests/fixtures/native-0.6.0-results.json`).
+Under a real `mur run`, each operation gives the same result as the frozen results recorded from
+tool-git 0.6.0 (`tests/fixtures/native-0.6.0-results.json`).
 
 ## Building
 
@@ -301,19 +301,13 @@ cargo test -p tool-git
 | `git_tool`, `git_tool_integration`, `symbol_history` | The behaviour suites (`tests/cases/`), through the compiled component in Wasmtime with a test host for `murmur:process` `run` |
 | `git_tool_core`, `git_tool_integration_core`, `symbol_history_core` | The same suites through the portable core on the host, also asserting each `error_kind` |
 | `wasm_component`, `rules_core` | Refusals, `failed`, time-outs, the 1 MiB caps, the database lookup, `clone`'s destination and `log_path`, through the component and through the core |
-| `parity` | Every operation over a fixture work folder, through the component and the core, against the results and git argv recorded from the native 0.6.0 binary |
+| `parity` | Every operation over a fixture work folder, through the component and the core, against the results and git argv recorded from tool-git 0.6.0 |
 | `manifest_declares_destinations` | The `dest`/`dest_paths` annotations in `murmur.yaml` |
 
-Two suites are ignored by default:
+One suite is ignored by default:
 
 ```bash
-# Re-record tests/fixtures/native-0.6.0-results.json from the native 0.6.0 binary
-# (recipe in tests/fixtures/README.md).
-TOOL_GIT_NATIVE_BIN=<native tool-git 0.6.0> \
-  cargo test -p tool-git --test parity record_native -- --ignored
-
-# Real `mur run` at scoped and sealed, WASM and native, through a fake provider on loopback;
-# and what an on-shell hook and a read_only grant refuse.
-MUR_BIN=<mur at WIT level 4> TOOL_GIT_NATIVE_ZIP=<tool-git-0.6.0-…mur.zip> \
-  cargo test -p tool-git --test mur_run_parity -- --ignored --nocapture
+# Real `mur run` at scoped and sealed through a fake provider on loopback, against the recorded
+# 0.6.0 results; and what an on-shell hook and a read_only grant refuse.
+MUR_BIN=<mur at WIT level 4> cargo test -p tool-git --test mur_run_parity -- --ignored --nocapture
 ```

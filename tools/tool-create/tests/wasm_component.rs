@@ -143,38 +143,25 @@ fn scaffold_wasm_tool_through_component() {
 }
 
 #[test]
-fn scaffold_native_tool_through_component() {
-    // The literal request from the slice design's Verification Scenarios: a native-runtime
-    // scaffold, proven through the real compiled component (not just host-side `logic`).
+fn scaffold_native_tool_is_refused_through_component() {
+    // Every tool is a wasm32-wasip2 component, so `runtime: native` is an unknown runtime,
+    // proven through the real compiled component (not just host-side `logic`).
     let workdir = unique_workdir("scaffold_native");
     let (status, summary, data) = run_create(
         &workdir,
         r#"{"type":"tool","name":"probe-tool","runtime":"native"}"#,
     );
 
-    assert!(matches!(status, Status::Passed), "status: {status:?}");
-    assert_eq!(summary.as_deref(), Some("Created tools/probe-tool/"));
-    assert_eq!(data["path"], "tools/probe-tool");
-
-    let base = workdir.join("tools").join("probe-tool");
-    let manifest = std::fs::read_to_string(base.join("murmur.yaml")).expect("murmur.yaml missing");
-    assert!(manifest.contains("name: probe-tool"));
-    // The role/packaging split `mur` reads, not the request word: a manifest saying
-    // `runtime: native` publishes as wasm and is rejected by a capsule manifest outright.
-    assert!(manifest.contains("runtime: tool"), "manifest: {manifest}");
-    assert!(
-        manifest.contains("implementation: native"),
-        "manifest: {manifest}"
+    assert!(matches!(status, Status::Error), "status: {status:?}");
+    assert_eq!(
+        summary.as_deref(),
+        Some("scaffold failed: unknown runtime 'native'; expected 'wasm' or 'hook'")
     );
+    assert_eq!(data, Value::Null);
     assert!(
-        manifest.contains("requires_files:\n  - bin/probe-tool\n"),
-        "manifest: {manifest}"
+        !workdir.join("tools").join("probe-tool").exists(),
+        "a refused runtime should leave no directory behind"
     );
-    assert!(
-        base.join("bin").join("probe-tool").exists(),
-        "bin/probe-tool missing"
-    );
-    assert!(base.join("README.md").exists(), "README.md missing");
 
     let _ = std::fs::remove_dir_all(&workdir);
 }

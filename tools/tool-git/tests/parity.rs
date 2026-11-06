@@ -1,12 +1,11 @@
-//! Same answers as the native 0.6.0 build.
+//! Same answers as the published 0.6.0 build.
 //!
-//! `record_native` (ignored) runs [`common::sequence`] over a fresh [`common::fixture`] folder
-//! through the native 0.6.0 binary named by `TOOL_GIT_NATIVE_BIN`, maps each stdout object as
-//! murmur's native dispatch did, records the argv of every git the binary ran (through a `git`
-//! shim first on `PATH`), normalises both and writes `tests/fixtures/native-0.6.0-results.json`.
-//! `native_0_6_0_results` runs the same sequence through the component and compares: `status`
-//! and `summary` exactly, `data` as a JSON value, and the argv of every git command. The recipe
-//! for the native binary is in `tests/fixtures/README.md`.
+//! `tests/fixtures/native-0.6.0-results.json` is a frozen recording of [`common::sequence`] run
+//! over a fresh [`common::fixture`] folder by tool-git 0.6.0: what the model saw for each call and
+//! the argv of every git command it ran, normalised. Its provenance is in
+//! `tests/fixtures/README.md`. `native_0_6_0_results` runs the same sequence through the
+//! component (and `native_0_6_0_results_core` through the host-side core) and compares: `status`
+//! and `summary` exactly, `data` as a JSON value, and the argv of every git command.
 
 #![cfg(unix)]
 
@@ -14,10 +13,7 @@ mod common;
 
 use std::{
     fs,
-    io::Write,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
 };
 
 use common::{normalise::Normaliser, sequence};
@@ -39,13 +35,6 @@ fn work_names(work: &Path) -> Vec<String> {
     names
 }
 
-fn parse(data: Option<String>) -> Value {
-    match data {
-        None => Value::Null,
-        Some(s) => serde_json::from_str(&s).unwrap_or(Value::String(s)),
-    }
-}
-
 /// One recorded call: what the model saw, and the argv of each git command it ran.
 fn entry(step: &str, result: Value, argv: Vec<Vec<String>>) -> Value {
     json!({
@@ -55,108 +44,6 @@ fn entry(step: &str, result: Value, argv: Vec<Vec<String>>) -> Value {
         "data": result["data"],
         "argv": argv,
     })
-}
-
-#[test]
-#[ignore = "needs TOOL_GIT_NATIVE_BIN, the native 0.6.0 binary; see tests/fixtures/README.md"]
-fn record_native() {
-    let bin =
-        PathBuf::from(std::env::var_os("TOOL_GIT_NATIVE_BIN").expect("set TOOL_GIT_NATIVE_BIN"));
-    let work = common::scratch("parity-native");
-    common::fixture::build(&work);
-    let home = common::scratch("parity-native-home");
-
-    // A `git` first on PATH that appends its argv (each argument NUL-terminated, then RS) to
-    // `argv.log` and runs the real git.
-    let real_git = String::from_utf8(
-        Command::new("sh")
-            .args(["-c", "command -v git"])
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap();
-    let shim = common::scratch("parity-native-shim");
-    let log = shim.join("argv.log");
-    let script = shim.join("git");
-    fs::write(
-        &script,
-        format!(
-            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\0' \"$a\"; done >> '{log}'\n\
-             printf '\\036' >> '{log}'\nexec '{git}' \"$@\"\n",
-            log = log.display(),
-            git = real_git.trim()
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-    let path = format!(
-        "{}:{}",
-        shim.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-
-    let mut results = Vec::new();
-    for step in sequence::steps() {
-        let _ = fs::remove_file(&log);
-        let mut child = Command::new(&bin)
-            .current_dir(&work)
-            .env_clear()
-            .env("PATH", &path)
-            .env("HOME", &home)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("native binary starts");
-        let envelope = json!({"data": step.data.to_string(), "log_path": null}).to_string();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(envelope.as_bytes())
-            .unwrap();
-        let out = child.wait_with_output().unwrap();
-        let stdout: Value = serde_json::from_slice(&out.stdout)
-            .unwrap_or_else(|e| panic!("{}: stdout not JSON ({e})", step.name));
-        // murmur's native dispatch: status, summary, and data as a string or compact JSON.
-        let outcome = tool_git::NativeOutcome::of(&stdout);
-        let result = json!({
-            "status": match outcome.status {
-                tool_git::OutcomeStatus::Passed => "passed",
-                tool_git::OutcomeStatus::Failed => "failed",
-                tool_git::OutcomeStatus::Error => "error",
-            },
-            "summary": outcome.summary,
-            "data": parse(outcome.data),
-        });
-        let argv: Vec<Vec<String>> = fs::read(&log)
-            .unwrap_or_default()
-            .split(|b| *b == 0x1e)
-            .filter(|r| !r.is_empty())
-            .map(|r| {
-                r.split(|b| *b == 0)
-                    .filter(|a| !a.is_empty())
-                    .map(|a| String::from_utf8_lossy(a).into_owned())
-                    .collect()
-            })
-            .collect();
-        results.push(entry(step.name, result, argv));
-    }
-
-    let results = Normaliser::new(&work_names(&work)).run(&results);
-    let doc = json!({
-        "recorded_from": "native tool-git 0.6.0, built from default-artifacts 95e17e1",
-        "results": results,
-    });
-    fs::create_dir_all(fixture_path().parent().unwrap()).unwrap();
-    fs::write(
-        fixture_path(),
-        serde_json::to_string_pretty(&doc).unwrap() + "\n",
-    )
-    .unwrap();
-    eprintln!("wrote {}", fixture_path().display());
 }
 
 /// Run the sequence through `backend` over a fresh fixture folder and normalise it.
@@ -197,7 +84,7 @@ fn compare(backend: common::Backend) {
         for key in ["step", "status", "summary", "data", "argv"] {
             if g[key] != w[key] {
                 diffs.push(format!(
-                    "{} {key}:\n  native:    {}\n  {backend:?}: {}",
+                    "{} {key}:\n  fixture:   {}\n  {backend:?}: {}",
                     w["step"], w[key], g[key]
                 ));
             }

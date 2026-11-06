@@ -75,11 +75,12 @@ Run it from the repo root:
 
 The script:
 
-1. makes `/tmp/cc-image-check.XXXXXX`, holding `capsule/` and, outside it, `expected.txt`;
+1. makes `${TMPDIR:-/tmp}/cc-image-check.XXXXXX`, holding `capsule/` and, outside it, `expected.txt`;
 2. draws `capsule/picture.png` with a random number and colour;
 3. writes the capsule's `murmur.yaml`;
-4. packs a native tool `picture-tool` with `mur build` and installs it with `mur install`. The
-   tool answers `PICTURE-TOOL-RAN` and attaches `picture.png`;
+4. installs the workspace's `tool-read` with `scripts/local-install.sh tool-read <capsule>`.
+   Called with `path: picture.png`, it answers with the image's type, size and dimensions and
+   attaches `picture.png`;
 5. installs the driver with `scripts/local-install.sh driver-claude-code <capsule>`;
 6. writes `task.md`, which asks for `NUMBER=<n> BACKGROUND=<colour>`, or `NO-PICTURE` rather
    than a guess;

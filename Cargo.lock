@@ -1905,6 +1905,14 @@ name = "murmur-driver-stream"
 version = "0.0.0"
 
 [[package]]
+name = "murmur-fake-computer"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
 name = "murmur-file-tools"
 version = "0.0.0"
 dependencies = [

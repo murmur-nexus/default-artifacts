@@ -20,6 +20,7 @@ members = [
   "libs/murmur-driver-env",
   "libs/murmur-driver-image",
   "libs/murmur-driver-stream",
+  "libs/murmur-fake-computer",
   "libs/murmur-file-tools",
   "libs/murmur-hook-transcript",
   "libs/murmur-host-roots",

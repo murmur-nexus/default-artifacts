@@ -39,11 +39,11 @@ The `runtime:` field declares how the artifact behaves at runtime.
 ### `tool`
 
 Agent-callable tool. Appears in the LLM tool inventory and in MURMUR.md `## Installed Tools`.
-The implementation details (WASM component vs. native binary) are declared inside the artifact's
-own `murmur.yaml` via `implementation: native` or `implementation: wasm` (default: wasm).
+Every tool is a WASM component; the artifact's own `murmur.yaml` declares
+`implementation: wasm`.
 
-In the **capsule `artifacts:` block**, always use `runtime: tool` for tools — never
-`runtime: native` or `runtime: wasm`. Those values are errors:
+In the **capsule `artifacts:` block**, always use `runtime: tool` for tools. Any other value is
+refused:
 
 ```
 murmur.yaml: use 'runtime: tool'; implementation is declared in the artifact's own manifest
@@ -129,7 +129,7 @@ Semver ranges are not supported. The runtime resolves the exact version or fails
 error.
 
 **Valid `runtime` values in the artifacts block:** `tool`, `driver`, `hook`, `skill`.
-`native` and `wasm` are rejected — use `tool`.
+Any other value is rejected; a tool uses `tool`.
 
 ---
 
@@ -693,9 +693,6 @@ name its `artifacts:` entry uses. For live discovery, use `mur search <keyword>`
 | `murmur/tool-write` | tool | Creates or replaces a file and any missing directories: `path`, `content`. Its `path` is a declared write destination, so `filesystem.read_only` refuses a write under a read-only entry. |
 | `murmur/skill-create-manifest` | skill | This artifact. Provides complete manifest generation guidance. |
 | `murmur/skill-investigation-checkpoint` | skill | The investigations convention for `checkpoints/decisions.json`: record and reuse investigative verdicts (ruled-out, confirmed, uncertain) across a session instead of re-deriving them. |
-
-A native tool runs with the capsule-wide grants; a `capabilities:` block on its entry does not
-narrow them and warns `W-SEC-008`.
 
 **Using artifacts in a capsule manifest:**
 

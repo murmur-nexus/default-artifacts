@@ -1,25 +1,23 @@
-//! tool-git in a real `mur run`, as WASM and as the native 0.6.0 build, at `containment: scoped`
-//! and `containment: sealed`.
+//! tool-git in a real `mur run`, at `containment: scoped` and `containment: sealed`, against the
+//! frozen fixture recorded from tool-git 0.6.0.
 //!
 //! A fake Chat Completions provider on loopback scripts [`common::sequence`], one tool call per
 //! turn, against a fresh [`common::fixture`] work folder (`--workdir`). It captures each tool
 //! result as murmur hands it to the model — `data`, or `summary` when there is none, inside
 //! `<untrusted-content source=tool:tool-git>` — and the trace gives each call's status. Both are
-//! normalised as `tests/parity.rs` normalises, and per tier the WASM results must equal the
-//! native results call for call, and both must equal the recorded native fixture. The WASM run's
-//! trace holds one `process_start`/`process_exit` pair (`kind: run`, `tool: tool-git`) per git
-//! command; the native run's holds none.
+//! normalised as `tests/parity.rs` normalises, and per tier every call's result and trace status
+//! must equal the fixture's (`tests/fixtures/native-0.6.0-results.json`). The run's trace holds
+//! one `process_start`/`process_exit` pair (`kind: run`, `tool: tool-git`) per git command the
+//! fixture records.
 //!
 //! `decision_point_sees_tool_git_commands` checks, at `scoped`, that a `hook-command-guard` rule
 //! refusing `git push --force` refuses `push` with `force: true`, and records what a
 //! `capabilities.filesystem.read_only` grant refuses.
 //!
-//! Needs a `mur` at WIT level 4 or later (`MUR_BIN`) and the native 0.6.0 zip
-//! (`TOOL_GIT_NATIVE_ZIP`; recipe in `tests/fixtures/README.md`):
+//! Needs a `mur` at WIT level 4 or later (`MUR_BIN`):
 //!
 //! ```sh
-//! MUR_BIN=<level-4 mur> TOOL_GIT_NATIVE_ZIP=<tool-git-0.6.0-…mur.zip> \
-//!   cargo test -p tool-git --test mur_run_parity -- --ignored --nocapture
+//! MUR_BIN=<level-4 mur> cargo test -p tool-git --test mur_run_parity -- --ignored --nocapture
 //! ```
 
 #![cfg(unix)]
@@ -61,15 +59,6 @@ fn mur_binary() -> PathBuf {
         "MUR_BIN must report WIT level 4 or higher:\n{text}"
     );
     path
-}
-
-fn native_zip() -> PathBuf {
-    let zip = PathBuf::from(
-        std::env::var_os("TOOL_GIT_NATIVE_ZIP")
-            .expect("set TOOL_GIT_NATIVE_ZIP to the native tool-git 0.6.0 zip"),
-    );
-    assert!(zip.is_file(), "no zip at {}", zip.display());
-    zip
 }
 
 fn workspace_root() -> PathBuf {
@@ -167,8 +156,7 @@ fn run_to_success(mut command: Command, what: &str) {
 
 // ── staging ──────────────────────────────────────────────────────────────────
 
-/// A `HOME` holding the store, and one project per tool-git build: a project's `murmur.lock`
-/// resolves each artifact name to one version, so the two builds cannot share one.
+/// A `HOME` holding the store, and the project that installs the driver and tool-git.
 struct Staging {
     home: PathBuf,
     root: PathBuf,
@@ -176,41 +164,39 @@ struct Staging {
 }
 
 const WASM_VERSION: &str = "0.7.0";
-const NATIVE_VERSION: &str = "0.6.0";
 
 impl Staging {
-    /// The project that installs tool-git at `version`.
-    fn project(&self, version: &str) -> PathBuf {
-        self.root.join(format!("project-{version}"))
+    /// The project that installs tool-git.
+    fn project(&self) -> PathBuf {
+        self.root.join("project")
     }
 
-    fn mur(&self, version: &str) -> Command {
+    fn mur(&self) -> Command {
         let mut command = Command::new(mur_binary());
         command
             .env("HOME", &self.home)
             .env("PATH", path_with_mur())
-            .current_dir(self.project(version));
+            .current_dir(self.project());
         command
     }
 
-    /// A capsule using driver-openai at `endpoint` and tool-git at `version`, plus `extra`
-    /// artifact entries; `capabilities` is the YAML under `capabilities:`.
+    /// A capsule using driver-openai at `endpoint` and tool-git, plus `extra` artifact entries;
+    /// `capabilities` is the YAML under `capabilities:`.
     fn write_manifest(
         &self,
         name: &str,
         endpoint: &str,
-        version: &str,
         extra: &str,
         capabilities: &str,
     ) -> PathBuf {
-        let path = self.project(version).join(format!("{name}.yaml"));
+        let path = self.project().join(format!("{name}.yaml"));
         fs::write(
             &path,
             format!(
                 "name: {name}\nversion: 0.1.0\nartifacts:\n\
                  \x20 - name: local/driver-openai\n    version: {}\n    runtime: driver\n    \
                  gateway:\n      endpoint: {endpoint}\n      api_key: test-key\n\
-                 \x20 - name: local/tool-git\n    version: {version}\n    runtime: tool\n\
+                 \x20 - name: local/tool-git\n    version: {WASM_VERSION}\n    runtime: tool\n\
                  {extra}\
                  capabilities:\n{capabilities}\
                  trace:\n  capture: content\n\
@@ -223,8 +209,8 @@ impl Staging {
         path
     }
 
-    fn run(&self, version: &str, manifest: &Path, workdir: &Path) -> Output {
-        let mut command = self.mur(version);
+    fn run(&self, manifest: &Path, workdir: &Path) -> Output {
+        let mut command = self.mur();
         command.args([
             "run",
             "--manifest",
@@ -271,51 +257,41 @@ fn stage(extra_zips: &[PathBuf]) -> Staging {
     fs::create_dir_all(&staging.home).unwrap();
     assert_eq!(manifest_field("tools/tool-git", "version"), WASM_VERSION);
     let driver = pack("drivers/driver-openai", &artifacts);
-    let builds = [
-        (WASM_VERSION, pack("tools/tool-git", &artifacts)),
-        (NATIVE_VERSION, native_zip()),
-    ];
-    for (version, _) in &builds {
-        let project = staging.project(version);
-        fs::create_dir_all(&project).unwrap();
-        // `mur install` installs into the project whose murmur.yaml it finds.
-        fs::write(
-            project.join("murmur.yaml"),
-            "name: staging\nversion: 0.1.0\n",
-        )
-        .unwrap();
-    }
-    let mut every_zip = vec![driver.clone(), builds[0].1.clone(), builds[1].1.clone()];
-    every_zip.extend(extra_zips.iter().cloned());
-    for zip in &every_zip {
-        let mut publish = staging.mur(WASM_VERSION);
+    let tool = pack("tools/tool-git", &artifacts);
+    let project = staging.project();
+    fs::create_dir_all(&project).unwrap();
+    // `mur install` installs into the project whose murmur.yaml it finds.
+    fs::write(
+        project.join("murmur.yaml"),
+        "name: staging\nversion: 0.1.0\n",
+    )
+    .unwrap();
+    let mut zips = vec![driver, tool];
+    zips.extend(extra_zips.iter().cloned());
+    for zip in &zips {
+        let mut publish = staging.mur();
         publish.arg("publish").arg(zip);
         run_to_success(publish, &format!("publishing {}", zip.display()));
     }
-    for (version, tool) in &builds {
-        let project = staging.project(version);
-        let mut zips = vec![driver.clone(), tool.clone()];
-        zips.extend(extra_zips.iter().cloned());
-        for zip in &zips {
-            let mut install = staging.mur(version);
-            install.arg("install").arg(zip);
-            run_to_success(install, &format!("installing {}", zip.display()));
-        }
-        let lock = fs::read_to_string(project.join("murmur.lock")).unwrap();
-        assert!(
-            lock.contains(&format!(
-                "name: local/tool-git\n  resolved_version: {version}"
-            )),
-            "project-{version} resolves tool-git to {version}:\n{lock}"
-        );
+    for zip in &zips {
+        let mut install = staging.mur();
+        install.arg("install").arg(zip);
+        run_to_success(install, &format!("installing {}", zip.display()));
     }
+    let lock = fs::read_to_string(project.join("murmur.lock")).unwrap();
+    assert!(
+        lock.contains(&format!(
+            "name: local/tool-git\n  resolved_version: {WASM_VERSION}"
+        )),
+        "the project resolves tool-git to {WASM_VERSION}:\n{lock}"
+    );
     staging
 }
 
 /// What `capabilities.containment: <tier>` grants git: `git` in `shell.allow`, its
 /// remote-helper directory as an `interpreter_runtime` entry, and `sh`, through which git starts
 /// `git-upload-pack` and `git-receive-pack` for a remote that is a local path: without it
-/// `fetch`, `pull`, `push` and `clone` of `remote.git` fail on both tiers, for both builds, with
+/// `fetch`, `pull`, `push` and `clone` of `remote.git` fail on both tiers with
 /// `cannot exec 'git-upload-pack …': Permission denied`.
 fn git_capabilities(tier: &str) -> String {
     format!(
@@ -516,22 +492,16 @@ struct RunResult {
     process_exits: usize,
 }
 
-/// One `mur run` of the whole sequence with tool-git at `version`, at `tier`.
-fn run_sequence(staging: &Staging, tier: &str, version: &str) -> RunResult {
+/// One `mur run` of the whole sequence at `tier`.
+fn run_sequence(staging: &Staging, tier: &str) -> RunResult {
     let steps = sequence::steps();
     let provider = Provider::start(steps.iter().map(|s| s.data.clone()).collect());
-    let name = format!("parity-{tier}-{version}");
-    let manifest = staging.write_manifest(
-        &name,
-        &provider.endpoint,
-        version,
-        "",
-        &git_capabilities(tier),
-    );
-    let workdir = staging.project(version).join(format!("work-{name}"));
+    let name = format!("parity-{tier}");
+    let manifest = staging.write_manifest(&name, &provider.endpoint, "", &git_capabilities(tier));
+    let workdir = staging.project().join(format!("work-{name}"));
     fs::create_dir_all(&workdir).unwrap();
     common::fixture::build(&workdir);
-    let output = staging.run(version, &manifest, &workdir);
+    let output = staging.run(&manifest, &workdir);
     let text = combined(&output);
     assert!(output.status.success(), "mur run {name} failed:\n{text}");
 
@@ -582,8 +552,8 @@ fn fixture() -> Vec<Value> {
 }
 
 #[test]
-#[ignore = "launches the real mur binary; needs MUR_BIN and TOOL_GIT_NATIVE_ZIP"]
-fn wasm_and_native_agree_on_scoped_and_sealed() {
+#[ignore = "launches the real mur binary; needs MUR_BIN"]
+fn wasm_matches_the_recorded_fixture_on_scoped_and_sealed() {
     let staging = stage(&[]);
     let fixture = fixture();
     let git_commands: usize = fixture
@@ -592,49 +562,45 @@ fn wasm_and_native_agree_on_scoped_and_sealed() {
         .sum();
     let mut failures = Vec::new();
     for tier in ["scoped", "sealed"] {
-        let wasm = run_sequence(&staging, tier, WASM_VERSION);
-        let native = run_sequence(&staging, tier, NATIVE_VERSION);
+        let wasm = run_sequence(&staging, tier);
         println!("--- {tier} ---");
-        for ((w, n), f) in wasm.calls.iter().zip(&native.calls).zip(&fixture) {
+        assert_eq!(
+            wasm.calls.len(),
+            fixture.len(),
+            "{tier}: one result per call"
+        );
+        for (w, f) in wasm.calls.iter().zip(&fixture) {
             let want = seen_from_fixture(f);
             let line = format!(
-                "{:<18} wasm {:<6} native {:<6} fixture {:<6} {}",
+                "{:<18} wasm {:<6} fixture {:<6} {}",
                 f["step"].as_str().unwrap(),
                 w["status"].as_str().unwrap(),
-                n["status"].as_str().unwrap(),
                 trace_status(f),
-                if w["seen"] == n["seen"] && w["seen"] == want {
+                if w["seen"] == want {
                     "same"
                 } else {
                     "DIFFERENT"
                 }
             );
             println!("{line}");
-            if w["seen"] != n["seen"] || w["seen"] != want || w["status"] != n["status"] {
+            if w["seen"] != want || w["status"] != trace_status(f) {
                 failures.push(format!(
-                    "{tier} {}:\n  wasm:    {} {}\n  native:  {} {}\n  fixture: {} {}",
-                    f["step"], w["status"], w["seen"], n["status"], n["seen"], f["status"], want
-                ));
-            }
-            if n["status"] != trace_status(f) {
-                failures.push(format!(
-                    "{tier} {}: native status {} vs fixture {}",
+                    "{tier} {}:\n  wasm:    {} {}\n  fixture: {} {}",
                     f["step"],
-                    n["status"],
-                    trace_status(f)
+                    w["status"],
+                    w["seen"],
+                    trace_status(f),
+                    want
                 ));
             }
         }
         println!(
-            "{tier}: wasm trace process_start {} process_exit {} (git commands in the fixture: \
-             {git_commands}); native trace process_start {} process_exit {}",
-            wasm.process_starts, wasm.process_exits, native.process_starts, native.process_exits
+            "{tier}: trace process_start {} process_exit {} (git commands in the fixture: \
+             {git_commands})",
+            wasm.process_starts, wasm.process_exits
         );
         if wasm.process_starts != git_commands || wasm.process_exits != git_commands {
-            failures.push(format!("{tier}: wasm process_start/process_exit count"));
-        }
-        if native.process_starts != 0 || native.process_exits != 0 {
-            failures.push(format!("{tier}: native run wrote process lines"));
+            failures.push(format!("{tier}: process_start/process_exit count"));
         }
     }
     assert!(failures.is_empty(), "differences:\n{}", failures.join("\n"));
@@ -642,23 +608,21 @@ fn wasm_and_native_agree_on_scoped_and_sealed() {
 
 // ── the decision point ───────────────────────────────────────────────────────
 
-/// Run `calls` with tool-git at `version` at `scoped`; returns each result's fenced text and the
-/// trace.
+/// Run `calls` with tool-git; returns each result's fenced text, the trace and the work folder.
 fn run_calls(
     staging: &Staging,
     name: &str,
-    version: &str,
     extra: &str,
     capabilities: &str,
     calls: Vec<Value>,
 ) -> (Vec<String>, Vec<Value>, PathBuf) {
     let n = calls.len();
     let provider = Provider::start(calls);
-    let manifest = staging.write_manifest(name, &provider.endpoint, version, extra, capabilities);
-    let workdir = staging.project(version).join(format!("work-{name}"));
+    let manifest = staging.write_manifest(name, &provider.endpoint, extra, capabilities);
+    let workdir = staging.project().join(format!("work-{name}"));
     fs::create_dir_all(&workdir).unwrap();
     common::fixture::build(&workdir);
-    let output = staging.run(version, &manifest, &workdir);
+    let output = staging.run(&manifest, &workdir);
     let text = combined(&output);
     assert!(output.status.success(), "mur run {name} failed:\n{text}");
     let results = tool_results(&provider.last_request());
@@ -684,7 +648,7 @@ fn hook_zip() -> PathBuf {
 }
 
 #[test]
-#[ignore = "launches the real mur binary; needs MUR_BIN and TOOL_GIT_NATIVE_ZIP"]
+#[ignore = "launches the real mur binary; needs MUR_BIN"]
 fn decision_point_sees_tool_git_commands() {
     let staging = stage(&[hook_zip()]);
     let guard = format!(
@@ -692,73 +656,60 @@ fn decision_point_sees_tool_git_commands() {
          rules:\n        - program: git\n          any_flag: [\"--force\"]\n          reason: no force push\n",
         manifest_field("hooks/hook-command-guard", "version")
     );
-    for version in [WASM_VERSION, NATIVE_VERSION] {
-        let (texts, trace, workdir) = run_calls(
-            &staging,
-            &format!("guard-{version}"),
-            version,
-            &guard,
-            &git_capabilities("scoped"),
-            vec![
-                json!({"operation": "push", "repo": "repo", "force": true}),
-                json!({"operation": "push", "repo": "repo"}),
-            ],
-        );
-        let denied: Vec<&Value> = trace
-            .iter()
-            .filter(|l| trace_kind(l) == "call_denied")
-            .collect();
-        println!("--- guard, tool-git {version} ---");
-        println!("push force: {}", texts[0]);
-        println!("push:       {}", texts[1]);
-        for d in &denied {
-            println!("call_denied: {d}");
-        }
-        let remote_main = common::git_ok(&[
-            "-C",
-            workdir.join("remote.git").to_str().unwrap(),
-            "rev-parse",
-            "main",
-        ]);
-        let repo_main = common::git_ok(&[
-            "-C",
-            workdir.join("repo").to_str().unwrap(),
-            "rev-parse",
-            "main",
-        ]);
-        println!(
-            "remote main {} repo main {}",
-            remote_main.trim(),
-            repo_main.trim()
-        );
-        // The fixture is deterministic, so a fresh one shows the remote as the run found it.
-        let fresh = common::scratch("fixture-fresh");
-        common::fixture::build(&fresh);
-        let remote_before = common::git_ok(&[
-            "-C",
-            fresh.join("remote.git").to_str().unwrap(),
-            "rev-parse",
-            "main",
-        ]);
-        if version == WASM_VERSION {
-            assert_eq!(
-                texts[0],
-                "tool-git: murmur refused to run git: on-shell: policy hook 'hook-command-guard' \
-                 refused: rules[0]: no force push; matched `git -C repo push --porcelain --force \
-                 origin`"
-            );
-            assert_eq!(denied.len(), 1, "one call_denied line");
-            assert_eq!(remote_main, remote_before, "remote.git is unchanged");
-        } else {
-            // The native build runs git itself, out of the decision point's sight.
-            assert!(denied.is_empty());
-            assert_eq!(
-                remote_main.trim(),
-                repo_main.trim(),
-                "the native force push landed"
-            );
-        }
+    let (texts, trace, workdir) = run_calls(
+        &staging,
+        "guard",
+        &guard,
+        &git_capabilities("scoped"),
+        vec![
+            json!({"operation": "push", "repo": "repo", "force": true}),
+            json!({"operation": "push", "repo": "repo"}),
+        ],
+    );
+    let denied: Vec<&Value> = trace
+        .iter()
+        .filter(|l| trace_kind(l) == "call_denied")
+        .collect();
+    println!("--- guard, tool-git {WASM_VERSION} ---");
+    println!("push force: {}", texts[0]);
+    println!("push:       {}", texts[1]);
+    for d in &denied {
+        println!("call_denied: {d}");
     }
+    let remote_main = common::git_ok(&[
+        "-C",
+        workdir.join("remote.git").to_str().unwrap(),
+        "rev-parse",
+        "main",
+    ]);
+    let repo_main = common::git_ok(&[
+        "-C",
+        workdir.join("repo").to_str().unwrap(),
+        "rev-parse",
+        "main",
+    ]);
+    println!(
+        "remote main {} repo main {}",
+        remote_main.trim(),
+        repo_main.trim()
+    );
+    // The fixture is deterministic, so a fresh one shows the remote as the run found it.
+    let fresh = common::scratch("fixture-fresh");
+    common::fixture::build(&fresh);
+    let remote_before = common::git_ok(&[
+        "-C",
+        fresh.join("remote.git").to_str().unwrap(),
+        "rev-parse",
+        "main",
+    ]);
+    assert_eq!(
+        texts[0],
+        "tool-git: murmur refused to run git: on-shell: policy hook 'hook-command-guard' \
+         refused: rules[0]: no force push; matched `git -C repo push --porcelain --force \
+         origin`"
+    );
+    assert_eq!(denied.len(), 1, "one call_denied line");
+    assert_eq!(remote_main, remote_before, "remote.git is unchanged");
 
     // A read_only grant on repo/src.
     let mut caps = git_capabilities("scoped");
@@ -777,47 +728,38 @@ fn decision_point_sees_tool_git_commands() {
                "dest": "repo/src/wt", "branch": "topic"}),
         json!({"operation": "clone", "url": "remote.git", "dest": "repo/src/c"}),
     ];
-    for version in [WASM_VERSION, NATIVE_VERSION] {
-        let (texts, trace, _) = run_calls(
-            &staging,
-            &format!("readonly-{version}"),
-            version,
-            "",
-            &caps,
-            calls.clone(),
+    let (texts, trace, _) = run_calls(&staging, "readonly", "", &caps, calls.clone());
+    println!("--- read_only [repo/src], tool-git {WASM_VERSION} ---");
+    for (call, text) in calls.iter().zip(&texts) {
+        let short: String = text.chars().take(200).collect();
+        println!("{} → {}", call, short.replace('\n', "\\n"));
+    }
+    let refused: Vec<&Value> = trace
+        .iter()
+        .filter(|l| {
+            matches!(
+                trace_kind(l),
+                "process_refused" | "call_denied" | "call_refused"
+            )
+        })
+        .collect();
+    for r in refused {
+        println!("trace: {r}");
+    }
+    let runtime_refused =
+        |i: usize| texts[i].starts_with("[runtime] Refused by the capsule manifest: ");
+    for i in [0, 1, 4, 5, 6, 7, 8] {
+        assert!(
+            texts[i].starts_with('{'),
+            "{} passes: {}",
+            calls[i],
+            texts[i]
         );
-        println!("--- read_only [repo/src], tool-git {version} ---");
-        for (call, text) in calls.iter().zip(&texts) {
-            let short: String = text.chars().take(200).collect();
-            println!("{} → {}", call, short.replace('\n', "\\n"));
-        }
-        let refused: Vec<&Value> = trace
-            .iter()
-            .filter(|l| {
-                matches!(
-                    trace_kind(l),
-                    "process_refused" | "call_denied" | "call_refused"
-                )
-            })
-            .collect();
-        for r in refused {
-            println!("trace: {r}");
-        }
-        let runtime_refused =
-            |i: usize| texts[i].starts_with("[runtime] Refused by the capsule manifest: ");
-        for i in [0, 1, 4, 5, 6, 7, 8] {
-            assert!(
-                texts[i].starts_with('{'),
-                "{} passes: {}",
-                calls[i],
-                texts[i]
-            );
-        }
-        // `dest_paths` are checked relative to the work folder: `src/a.rs` is not under
-        // `repo/src`, and git, run in `repo`, finds no such path.
-        assert!(!runtime_refused(2) && texts[2].starts_with("git restore failed: "));
-        for i in [3, 9, 10] {
-            assert!(runtime_refused(i), "{} is refused: {}", calls[i], texts[i]);
-        }
+    }
+    // `dest_paths` are checked relative to the work folder: `src/a.rs` is not under
+    // `repo/src`, and git, run in `repo`, finds no such path.
+    assert!(!runtime_refused(2) && texts[2].starts_with("git restore failed: "));
+    for i in [3, 9, 10] {
+        assert!(runtime_refused(i), "{} is refused: {}", calls[i], texts[i]);
     }
 }

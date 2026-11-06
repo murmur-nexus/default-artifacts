@@ -115,8 +115,7 @@ fn loaded() -> &'static Loaded {
     LOADED.get_or_init(|| loaded_from(&component_path()))
 }
 
-/// The component at `wasm`, compiled once per process into its own engine. Besides the
-/// workspace build ([`component_path`]), `tests/corpus_parity.rs` times other builds with it.
+/// The component at `wasm`, compiled once per process into its own engine.
 fn loaded_from(wasm: &Path) -> &'static Loaded {
     static ALL: Mutex<Vec<(PathBuf, &'static Loaded)>> = Mutex::new(Vec::new());
     let mut all = ALL.lock().unwrap();

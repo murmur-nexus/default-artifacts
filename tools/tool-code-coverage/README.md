@@ -132,10 +132,10 @@ SQLite is compiled into the component from rusqlite's bundled C sources by the p
 ./scripts/wasi-sdk.sh                                                # from the repo root, once
 cargo build -p tool-code-coverage --target wasm32-wasip2 --release
 ./scripts/validate-component.sh target/wasm32-wasip2/release/tool_code_coverage.wasm
-cargo test -p tool-code-coverage                                     # behaviour, native 0.5.0 parity, SQLite writes and host paths, against the component
+cargo test -p tool-code-coverage                                     # behaviour, 0.5.0 parity, SQLite writes and host paths, against the component
 MUR_BIN=$(command -v mur) cargo test -p tool-code-coverage --test mur_run_localize -- --ignored
 ./scripts/package-artifact.sh tools/tool-code-coverage release/      # → release/tool-code-coverage-0.6.0.mur.zip
 ```
 
-`tests/fixtures/README.md` holds the recipe that recorded the native 0.5.0 results the component
-is held to.
+`tests/fixtures/README.md` names the tool-code-coverage 0.5.0 build that recorded the frozen results the
+component is held to.

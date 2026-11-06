@@ -18,9 +18,8 @@
 #
 # Then, with a scratch HOME and MUR_GITHUB_API_BASE pointed at the fake, every
 # version in <release-dir>/artifacts-index.json whose `release` is <tag> is
-# installed with `mur install -g murmur/<name>@<version>` — `--all-platforms` for a
-# native tool, so each platform's payload is fetched and checked, not only the
-# host's — and each asset file is asserted under
+# installed with `mur install -g murmur/<name>@<version>`, and each asset file is
+# asserted under
 # $HOME/.murmur/artifacts/murmur/<name>/<version>/. Versions an earlier release
 # published are not installed: their assets are on that release, not in this
 # directory.
@@ -145,14 +144,13 @@ port="$(cat "$WORK/port")"
 export MUR_GITHUB_API_BASE="http://127.0.0.1:$port"
 unset GITHUB_TOKEN GH_TOKEN
 
-# What to install: <name>\t<version>\t<native 0|1>\t<file> per asset of each version
+# What to install: <name>\t<version>\t<file> per asset of each version
 # this release adds. With no index there is nothing to enumerate, so the first zip's
 # name and version stand in, and the install below fails the way a consumer's would.
 if [ -f "$INDEX" ]; then
     plan="$(jq -r --arg tag "$TAG" '
         .artifacts[] as $a | $a.versions[] | select(.release == $tag) as $v
-        | ($v.assets | any(has("platform"))) as $native
-        | $v.assets[] | [$a.name, $v.version, (if $native then 1 else 0 end), .file] | @tsv
+        | $v.assets[] | [$a.name, $v.version, .file] | @tsv
     ' "$INDEX")"
     if [ -z "$plan" ]; then
         echo "error: $INDEX lists no version released as $TAG" >&2
@@ -161,33 +159,30 @@ if [ -f "$INDEX" ]; then
 else
     echo "warning: no artifacts-index.json in $RELEASE_DIR; attempting one install so mur reports what a consumer would see" >&2
     first="$(find "$RELEASE_DIR" -maxdepth 1 -name '*.mur.zip' -exec basename {} \; | LC_ALL=C sort | head -1)"
-    if [[ ! "$first" =~ ^(.+)-([0-9]+\.[0-9]+\.[0-9]+)(-(darwin|linux)-(aarch64|x86_64))?\.mur\.zip$ ]]; then
+    if [[ ! "$first" =~ ^(.+)-([0-9]+\.[0-9]+\.[0-9]+)\.mur\.zip$ ]]; then
         echo "error: no artifacts-index.json and no <name>-<version>.mur.zip in $RELEASE_DIR" >&2
         exit 1
     fi
-    plan="$(printf '%s\t%s\t0\t%s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "$first")"
+    plan="$(printf '%s\t%s\t%s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "$first")"
 fi
 
 count=0
 for key in $(printf '%s\n' "$plan" | awk -F'\t' '{ print $1 "@" $2 }' | LC_ALL=C sort -u); do
     name="${key%@*}" version="${key#*@}"
-    native="$(printf '%s\n' "$plan" | awk -F'\t' -v n="$name" -v v="$version" '$1 == n && $2 == v { print $3; exit }')"
-    flags=(-g)
-    [ "$native" = "1" ] && flags+=(--all-platforms)
-    if ! output="$(cd "$WORK" && "$MUR" install "${flags[@]}" "murmur/$name@$version" 2>&1)"; then
-        echo "FAIL  murmur/$name@$version — mur install ${flags[*]} exited non-zero:" >&2
+    if ! output="$(cd "$WORK" && "$MUR" install -g "murmur/$name@$version" 2>&1)"; then
+        echo "FAIL  murmur/$name@$version — mur install -g exited non-zero:" >&2
         printf '%s\n' "$output" | sed 's/^/    /' >&2
         exit 1
     fi
     store="$HOME/.murmur/artifacts/murmur/$name/$version"
-    while IFS=$'\t' read -r _n _v _native file; do
+    while IFS=$'\t' read -r _n _v file; do
         if [ ! -f "$store/$file" ]; then
             echo "FAIL  murmur/$name@$version — installed, but $store/$file is absent. mur printed:" >&2
             printf '%s\n' "$output" | sed 's/^/    /' >&2
             exit 1
         fi
     done < <(printf '%s\n' "$plan" | awk -F'\t' -v n="$name" -v v="$version" '$1 == n && $2 == v')
-    files="$(printf '%s\n' "$plan" | awk -F'\t' -v n="$name" -v v="$version" '$1 == n && $2 == v { printf "%s%s", sep, $4; sep = ", " }')"
+    files="$(printf '%s\n' "$plan" | awk -F'\t' -v n="$name" -v v="$version" '$1 == n && $2 == v { printf "%s%s", sep, $3; sep = ", " }')"
     echo "ok    murmur/$name@$version ($files)"
     count=$((count + 1))
 done

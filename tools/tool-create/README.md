@@ -19,10 +19,11 @@ See [murmur.yaml](./murmur.yaml) for the full manifest.
 |---|---|---|
 | `type` | yes | `tool` |
 | `name` | yes | Directory name under `tools/`, and the artifact's `name:` |
-| `runtime` | no (default `native`) | `native`, `wasm`, or `hook` |
+| `runtime` | no (default `wasm`) | `wasm` or `hook` |
 
-Any other `runtime` is rejected with `unknown runtime '<value>'` and nothing is
-written to disk.
+Any other `runtime` is rejected with
+`unknown runtime '<value>'; expected 'wasm' or 'hook'` and nothing is written to
+disk.
 
 ## What each arm generates
 
@@ -32,7 +33,6 @@ produces.
 | `runtime` | manifest `runtime:` | manifest `implementation:` | `requires_files:` | payload written |
 |---|---|---|---|---|
 | `wasm` | `tool` | `wasm` | `{snake}.wasm` | `component.wat` |
-| `native` | `tool` | `native` | `bin/{name}` | `bin/{name}` |
 | `hook` | `hook` | `wasm` | `{snake}.wasm` | `Cargo.toml` + `src/lib.rs` |
 
 `runtime:` is the artifact's role and `implementation:` is how its payload is
@@ -47,11 +47,11 @@ the generated README's attribution line.
 `requires_files:` names the payload `mur build` packs beside `murmur.yaml`.
 Without it the built `.mur.zip` would hold the manifest alone.
 
-The `wasm` and `hook` arms declare their payload before it exists — it is
+Both arms declare their payload before it exists — it is
 produced by a cargo build you run afterwards. `mur build` requires the file to
 be present, so build the component before packaging.
 
-### Tool arms (`wasm`, `native`)
+### Tool arm (`wasm`)
 
 ```yaml
 name: csv-parser
@@ -97,8 +97,8 @@ The generated `src/lib.rs` has four top-level items, in this order:
 
 `logic::decide(&Event) -> Result<Decision, String>` is the single entry point all
 nine dispatches route through, and mirrors the WIT `result<hook-output, string>`.
-The `logic` module names no WIT type and carries no `cfg`, so `cargo test` on a
-native host compiles and runs it. The adapter converts and nothing else: every
+The `logic` module names no WIT type and carries no `cfg`, so `cargo test` on the
+host compiles and runs it. The adapter converts and nothing else: every
 `Guest` method builds an `Event`, calls `decide`, and maps the returned
 `Decision` onto the `HookOutput` case of the same name.
 
@@ -120,18 +120,3 @@ so the section is there before the author needs it.
 The generated README's checklist points step 2 at the `logic` module and step 3
 at `cargo test -p <crate name>`, which passes before a line of behaviour is
 written. See `BUILD.md`'s "Add one" for the convention this follows.
-
-## Native payload permissions
-
-The native stub is written to `bin/{name}` — the only path the capsule runtime
-resolves a native binary at. Running as a WASM component the scaffolder cannot
-set the executable bit (WASI has no `chmod`), and `mur build` packs the payload
-with the mode it finds on disk, so run this before building:
-
-```bash
-chmod +x bin/{name}
-```
-
-The generated README repeats the step. The capsule runtime re-applies `0755`
-when it extracts the payload, so skipping it costs you a local run of the stub
-rather than a broken install.

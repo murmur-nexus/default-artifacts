@@ -17,17 +17,9 @@
 # nothing, so they share one invocation, which still proves they cross-compile.
 #
 # The crate lists are derived by scripts/classify-crates.sh from each crate's own
-# manifest, never hand-listed here. Two rules exclude a crate: `implementation:
-# native` in an artifact's murmur.yaml, and an internal `[[bin]]` crate with no
-# murmur.yaml. That script's header documents which crates each rule catches and
-# fails on a member it cannot classify.
-#
-# Native tools are excluded because they are host binaries, not components:
-# they need host capabilities (spawning `git`, raw sockets and a native TLS
-# stack) that a wasm32-wasip2 guest does not have, or a display. Attempting one
-# anyway fails deep inside a build with an error naming the C compiler or a
-# missing host API rather than the real mistake. scripts/build-native.sh builds
-# them instead.
+# manifest, never hand-listed here. One rule excludes a crate: an internal
+# `[[bin]]` crate with no murmur.yaml. That script's header documents which crates
+# it catches and fails on a member it cannot classify.
 #
 # C sources that are compiled for wasm32-wasip2 (rusqlite's bundled SQLite, in
 # tool-test-report, tool-code-coverage and tool-code-graph, and tree-sitter with
@@ -49,7 +41,6 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 classification="$(bash "$SCRIPT_DIR/classify-crates.sh")"
 
-excluded_native="$(printf '%s\n' "$classification" | awk -F'\t' '$1 == "native-artifact" { print $2 }')"
 excluded_bins="$(printf '%s\n' "$classification"   | awk -F'\t' '$1 == "internal-bin"    { print $2 }')"
 libs="$(printf '%s\n' "$classification"            | awk -F'\t' '$1 == "internal-lib"    { print $2 }')"
 artifacts="$(printf '%s\n' "$classification"       | awk -F'\t' '$1 == "wasm-artifact"   { print $2 }')"
@@ -58,9 +49,6 @@ if [ -z "$libs$artifacts" ]; then
     echo "error: no workspace member targets wasm32-wasip2 — refusing to run a build that would produce nothing." >&2
     exit 1
 fi
-
-echo "Excluded — native artifact (implementation: native in murmur.yaml):"
-for crate in $excluded_native; do echo "  $crate"; done
 
 echo "Excluded — internal [[bin]] crate (no murmur.yaml, host-only):"
 for crate in $excluded_bins; do echo "  $crate"; done

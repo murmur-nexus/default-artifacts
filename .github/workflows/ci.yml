@@ -89,14 +89,13 @@ jobs:
       - name: Cargo test
         run: cargo test --workspace --locked
 
-      # Native tools (`implementation: native` in their murmur.yaml) are excluded:
-      # they are host binaries, not components. Their C dependencies that are not
-      # yet ported do not build for wasm32-wasip2; the bundled SQLite of
-      # tool-test-report, tool-code-coverage and tool-code-graph, and the latter's
-      # tree-sitter, do, with the pinned wasi-sdk installed above.
+      # Every artifact is a wasm32-wasip2 component; only internal `[[bin]]` crates
+      # are excluded. C sources (the bundled SQLite of tool-test-report,
+      # tool-code-coverage and tool-code-graph, and the latter's tree-sitter) build
+      # with the pinned wasi-sdk installed above.
       #
-      # The script derives that exclusion set from the manifests rather than
-      # repeating it here, so "build everything that targets wasm" has one
+      # The script derives the crate lists from the manifests rather than
+      # repeating them here, so "build everything that targets wasm" has one
       # definition a developer can run locally, and the release runs the same one.
       - name: Cargo build (wasm)
         run: bash scripts/build-wasm.sh
@@ -106,8 +105,7 @@ jobs:
       # with no murmur:* import; drivers/tools export murmur:tool/run and import
       # only murmur:stream/events and/or murmur:task/task), at the exact interface
       # version the vendored WIT declares — a component built against a stale WIT
-      # is unloadable by the host. Native command components
-      # (tool-{git,git-validate,computer}) are skipped by name.
+      # is unloadable by the host. Every .wasm is checked; none is skipped.
       # A malformed or mis-bound component fails here instead of at `mur run`.
       #
       # Invoked bare, the script walks target/wasm32-wasip2/release/ itself, so
@@ -187,7 +185,7 @@ jobs:
       - name: Check every doc pin matches its artifact's murmur.yaml version
         run: ./scripts/check-readme-pins.sh
 
-  # Prove that every compiled artifact (wasm and native) packs the same bytes built
+  # Prove that every artifact's wasm component packs the same bytes built
   # alone as it does in the release build. A crate's bytes can depend on which other
   # crates share its cargo invocation (feature unification), so an artifact rebuilt
   # alone could ship different bytes at the same version; check-build-isolation.sh
