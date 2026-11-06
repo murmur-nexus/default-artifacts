@@ -12,7 +12,8 @@ mod common;
 
 use std::{fs, time::Duration};
 
-use common::{data, ref_of, wait_gone, Env, Guard};
+use common::{ref_of, Env, Guard};
+use murmur_process_test_host::{data, wait_gone};
 use serde_json::{json, Value};
 
 const NO_GRANT_LINE: &str = "tool-browser needs a browser: add one of chromium, chromium-browser, google-chrome or chrome to capabilities.shell.allow";
@@ -433,7 +434,8 @@ fn concurrent_first_calls_start_one_browser() {
         "one state folder: {:?}",
         env.state_dirs()
     );
-    let profiles = common::pids_mentioning(&format!("{}/profile", env.state_rel()));
+    let profiles =
+        murmur_process_test_host::pids_mentioning(&format!("{}/profile", env.state_rel()));
     assert!(profiles.contains(&u64::from(env.browser_pid().unwrap())));
 }
 
@@ -533,17 +535,22 @@ fn session_end_leaves_no_browser_process() {
     open_fixture(&env);
     let needle = format!("{}/profile", env.state_rel());
     assert!(
-        !common::pids_mentioning(&needle).is_empty(),
+        !murmur_process_test_host::pids_mentioning(&needle).is_empty(),
         "the browser runs with {needle}"
     );
     let pid = env.browser_pid().unwrap();
     drop(env);
     assert!(wait_gone(pid.into(), Duration::from_secs(5)));
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while !common::pids_mentioning(&needle).is_empty() && std::time::Instant::now() < deadline {
+    while !murmur_process_test_host::pids_mentioning(&needle).is_empty()
+        && std::time::Instant::now() < deadline
+    {
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert_eq!(common::pids_mentioning(&needle), Vec::<u64>::new());
+    assert_eq!(
+        murmur_process_test_host::pids_mentioning(&needle),
+        Vec::<u64>::new()
+    );
 }
 
 /// `close` removes the profile and keeps the screenshots, the log and `state.json`.

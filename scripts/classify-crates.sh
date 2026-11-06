@@ -29,7 +29,9 @@
 #                    into wasm artifacts, so it must cross-compile.
 #                    Catches: murmur-{driver-computer,driver-env,driver-image,
 #                    driver-stream,file-tools,hook-transcript,host-roots,
-#                    test-parse,time,wasi-http}.
+#                    process-host,process-test-host,test-parse,time,
+#                    wasi-http}. murmur-process-test-host is a dev-dependency
+#                    only; it compiles to an empty lib for wasm32.
 #
 # A member matching none of the four is a hard error rather than a silent guess
 # in either direction: excluding it would drop an artifact out of the build, and

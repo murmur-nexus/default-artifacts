@@ -17,8 +17,6 @@
 
 #![cfg(target_os = "linux")]
 
-mod common;
-
 use std::{
     fs,
     io::{Read, Write},
@@ -26,7 +24,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Output},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
     thread,
     time::{Duration, Instant},
 };
@@ -40,6 +38,17 @@ const HELD: &str = "tool-computer did not run left_click: this capsule's config 
                     in confirm, so it needs a person's yes, and a tool cannot ask a person for \
                     one; ask the person to do this step, or to remove left_click from confirm";
 const FENCE_OPEN: &str = "<untrusted-content source=tool:tool-computer>";
+
+/// The leftover checks scan every process on the host for `.tool-computer/` and `Press:0`, so a
+/// test that ends while another test's display still runs would count that display as its own.
+/// Each test holds this lock for its whole run.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+fn one_at_a_time() -> MutexGuard<'static, ()> {
+    ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 // ── the runtime under test ───────────────────────────────────────────────────
 
@@ -373,7 +382,7 @@ fn print_logs(staging: &Staging) {
 /// Live Xvfb or xmessage processes started by this run: their command lines name the run's
 /// state folder (Xvfb's `-auth`) or its xmessage text.
 fn leftovers() -> Vec<u64> {
-    let mut left = common::pids_mentioning(".tool-computer/");
+    let mut left = murmur_process_test_host::pids_mentioning(".tool-computer/");
     left.retain(|pid| {
         fs::read(format!("/proc/{pid}/cmdline"))
             .is_ok_and(|c| !String::from_utf8_lossy(&c).contains("cargo"))
@@ -382,7 +391,7 @@ fn leftovers() -> Vec<u64> {
 }
 
 fn xmessages_running() -> Vec<u64> {
-    common::pids_mentioning("Press:0")
+    murmur_process_test_host::pids_mentioning("Press:0")
         .into_iter()
         .filter(|pid| {
             fs::read(format!("/proc/{pid}/cmdline"))
@@ -671,6 +680,7 @@ fn screenshot_click_screenshot(staging: &Staging, tier: &str) {
 #[test]
 #[ignore = "launches the real mur binary; run with --ignored"]
 fn s14_sealed_screenshots_clicks_and_returns_both_images() {
+    let _serial = one_at_a_time();
     let staging = stage_from(None);
     screenshot_click_screenshot(&staging, "sealed");
 }
@@ -680,6 +690,7 @@ fn s14_sealed_screenshots_clicks_and_returns_both_images() {
 #[test]
 #[ignore = "launches the real mur binary; run with --ignored"]
 fn s15_scoped_refuses_the_provider_tool_and_runs_a_copy_without_it() {
+    let _serial = one_at_a_time();
     let staging = stage_from(None);
     let provider = Provider::start();
     staging.write_manifest(&provider.endpoint, "scoped", false);
@@ -714,6 +725,7 @@ fn s15_scoped_refuses_the_provider_tool_and_runs_a_copy_without_it() {
 #[test]
 #[ignore = "launches the real mur binary; run with --ignored"]
 fn s16_a_confirm_listed_click_is_held_on_sealed() {
+    let _serial = one_at_a_time();
     let staging = stage_from(None);
     let provider = Provider::start();
     staging.write_manifest(&provider.endpoint, "sealed", true);

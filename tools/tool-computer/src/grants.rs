@@ -94,12 +94,7 @@ pub fn not_installed_line(name: &str, package: Option<&str>) -> String {
     )
 }
 
-/// murmur's `failed` text for a program that is not on `PATH`: the spawn's `io::Error`, which
-/// murmur's `spawn_contained` (`crates/capsule-runtime/src/shell.rs`) passes on unchanged, so
-/// `No such file or directory (os error 2)`.
-pub fn is_not_found(failed_text: &str) -> bool {
-    failed_text.contains("No such file or directory") || failed_text.contains("(os error 2)")
-}
+pub use murmur_process_host::is_not_found;
 
 #[cfg(test)]
 mod tests {
@@ -140,11 +135,5 @@ mod tests {
              the xvfb package on this host first (mur deploy run does not upload host programs)"
         );
         assert!(not_installed_line("zenity", None).contains("install zenity on this host first"));
-    }
-
-    #[test]
-    fn not_found_is_the_spawn_error() {
-        assert!(is_not_found("No such file or directory (os error 2)"));
-        assert!(!is_not_found("Permission denied (os error 13)"));
     }
 }

@@ -1,0 +1,21 @@
+[package]
+name = "murmur-process-test-host"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+
+# Internal-only test support, a dev-dependency of the WASM tools on murmur:process
+# (tool-browser, tool-computer): the Wasmtime harness that runs a tool's compiled component with
+# a host for murmur:process that starts real programs. NOT an artifact: it has no murmur.yaml,
+# so nothing publishes it, and no tool depends on it outside [dev-dependencies], so it never
+# reaches a payload. Its code and dependencies are host-target only, so the workspace wasm build
+# (which builds every internal lib for wasm32-wasip2) compiles it to an empty lib.
+
+[lib]
+name = "murmur_process_test_host"
+path = "src/lib.rs"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+serde_json.workspace = true
+wasmtime = "46"
+wasmtime-wasi = "46"

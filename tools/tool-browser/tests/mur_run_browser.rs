@@ -635,8 +635,9 @@ fn granted_session(staging: &Staging, tier: &str) {
         .collect();
     println!("trace lines naming screenshot-1.png: {}", attachments.len());
 
-    let left = common::pids_mentioning(&format!("{}/.tool-browser/", workdir.display()));
-    let rel_left = common::pids_mentioning("--user-data-dir=.tool-browser/");
+    let left =
+        murmur_process_test_host::pids_mentioning(&format!("{}/.tool-browser/", workdir.display()));
+    let rel_left = murmur_process_test_host::pids_mentioning("--user-data-dir=.tool-browser/");
     assert!(
         left.is_empty() && rel_left.is_empty(),
         "no process names .tool-browser/ after mur run exits on {tier}: {left:?} {rel_left:?}"

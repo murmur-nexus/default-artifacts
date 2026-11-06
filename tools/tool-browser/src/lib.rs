@@ -13,7 +13,7 @@ pub mod buffers;
 pub mod cdp;
 pub mod discovery;
 pub mod envelope;
-pub mod host;
+pub use murmur_process_host as host;
 pub mod launch;
 pub mod page;
 pub mod request;

@@ -14,6 +14,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use common::*;
+use murmur_process_test_host::{pid_gone, wait_gone};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use x11rb::connection::Connection;

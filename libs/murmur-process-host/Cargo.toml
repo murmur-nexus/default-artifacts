@@ -1,0 +1,16 @@
+[package]
+name = "murmur-process-host"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+
+# Internal-only shared library: what a WASM tool needs from murmur:process, as traits the call
+# logic is written against, so tool-browser and tool-computer share one copy and test their
+# logic on the host target against fakes. Depends on nothing but `std`, so it cross-compiles to
+# wasm32-wasip2 cleanly. NOT an artifact: it has no murmur.yaml, so nothing publishes it. The
+# `wit_bindgen` adapter that implements these traits over the import stays in each tool, because
+# the bindings are generated per component.
+
+[lib]
+name = "murmur_process_host"
+path = "src/lib.rs"

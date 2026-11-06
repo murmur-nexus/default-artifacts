@@ -373,6 +373,12 @@ pub mod fake {
     pub const KC_RETURN: u8 = 36;
     pub const SPARE: u8 = 255;
 
+    impl Default for FakeX {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl FakeX {
         pub fn new() -> Self {
             let (min, max) = (8u8, 255u8);

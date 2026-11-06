@@ -11,13 +11,10 @@
 //! Everything but [`wasm_tool`] is portable and tested on the host target, against the
 //! [`host::Processes`] and [`host::Clock`] traits.
 
-// `exec`'s test double, `FakeX`, has a `new()` and no `Default`.
-#![cfg_attr(test, allow(clippy::new_without_default))]
-
 pub mod config;
 pub mod exec;
 pub mod grants;
-pub mod host;
+pub use murmur_process_host as host;
 pub mod input;
 pub mod keys;
 pub mod png;

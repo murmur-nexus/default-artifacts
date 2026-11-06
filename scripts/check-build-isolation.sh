@@ -13,8 +13,9 @@
 #
 # Two sides, in one target dir:
 #
-#   release  scripts/build-wasm.sh --locked, then scripts/build-native.sh --locked,
-#            exactly as build.yml runs them, always in full even for a subset;
+#   release  scripts/build-wasm.sh --locked, then scripts/build-native.sh --locked
+#            (skipped when list-artifacts.sh lists no native artifact), exactly as
+#            build.yml runs them, always in full even for a subset;
 #            then each selected artifact is packed with package-artifact.sh.
 #   alone    per artifact, `cargo build -p <name> --target wasm32-wasip2 --release
 #            --locked` (wasm) or `cargo build --release -p <name> --locked`
@@ -129,9 +130,15 @@ if ! bash "$SCRIPT_DIR/build-wasm.sh" --locked >&2; then
     echo "error: release build failed: scripts/build-wasm.sh --locked" >&2
     exit 1
 fi
-if ! bash "$SCRIPT_DIR/build-native.sh" --locked >&2; then
-    echo "error: release build failed: scripts/build-native.sh --locked" >&2
-    exit 1
+# build-native.sh refuses a run with no native tool to build. With none listed, the
+# release builds no native payload either, so there is no native side to compare.
+if printf '%s\n' "$artifacts" | awk -F'\t' '$5 == "native" { found = 1 } END { exit !found }'; then
+    if ! bash "$SCRIPT_DIR/build-native.sh" --locked >&2; then
+        echo "error: release build failed: scripts/build-native.sh --locked" >&2
+        exit 1
+    fi
+else
+    echo "No native artifact is listed; skipping scripts/build-native.sh" >&2
 fi
 
 # The rows are read on fd 3: cargo and mur inherit stdin, and one that read it

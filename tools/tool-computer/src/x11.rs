@@ -89,8 +89,6 @@ pub struct XClient<'a> {
     proto: Connection,
     reader: PacketReader,
     root: Window,
-    width: u16,
-    height: u16,
     layout: PixelLayout,
     min_keycode: u8,
     max_keycode: u8,
@@ -178,8 +176,6 @@ impl<'a> XClient<'a> {
             proto: Connection::new(),
             reader: PacketReader::new(),
             root: screen.root,
-            width: screen.width_in_pixels,
-            height: screen.height_in_pixels,
             layout,
             min_keycode: setup.min_keycode,
             max_keycode: setup.max_keycode,
@@ -196,11 +192,6 @@ impl<'a> XClient<'a> {
         }
         client.xtest_opcode = reply.major_opcode;
         Ok(client)
-    }
-
-    /// The root window's size in pixels.
-    pub fn size(&self) -> (u16, u16) {
-        (self.width, self.height)
     }
 
     /// How many children of the root are mapped and viewable.
@@ -504,7 +495,6 @@ mod tests {
     struct Canned {
         chunks: VecDeque<Vec<u8>>,
         clock: &'static FakeClock,
-        written: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
     }
 
     impl Conn for Canned {
@@ -523,8 +513,7 @@ mod tests {
                 }
             }
         }
-        fn write(&mut self, bytes: &[u8]) -> Result<(), ProcError> {
-            self.written.borrow_mut().extend_from_slice(bytes);
+        fn write(&mut self, _bytes: &[u8]) -> Result<(), ProcError> {
             Ok(())
         }
     }
@@ -537,7 +526,6 @@ mod tests {
         Box::new(Canned {
             chunks: chunks.into(),
             clock,
-            written: Default::default(),
         })
     }
 

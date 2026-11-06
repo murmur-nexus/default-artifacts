@@ -1931,6 +1931,19 @@ name = "murmur-host-roots"
 version = "0.0.0"
 
 [[package]]
+name = "murmur-process-host"
+version = "0.0.0"
+
+[[package]]
+name = "murmur-process-test-host"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "wasmtime",
+ "wasmtime-wasi",
+]
+
+[[package]]
 name = "murmur-test-parse"
 version = "0.0.0"
 dependencies = [
@@ -2750,13 +2763,13 @@ name = "tool-browser"
 version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
+ "murmur-process-host",
+ "murmur-process-test-host",
  "serde",
  "serde_json",
  "sha1",
  "tempfile",
  "wasip2",
- "wasmtime",
- "wasmtime-wasi",
  "wit-bindgen 0.59.0",
 ]
 
@@ -2799,14 +2812,13 @@ version = "0.0.0"
 dependencies = [
  "crc32fast",
  "flate2",
- "libc",
+ "murmur-process-host",
+ "murmur-process-test-host",
  "serde",
  "serde_json",
  "serde_norway",
  "tempfile",
  "wasip2",
- "wasmtime",
- "wasmtime-wasi",
  "wit-bindgen 0.59.0",
  "x11rb",
  "x11rb-protocol",

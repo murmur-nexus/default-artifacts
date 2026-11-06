@@ -60,6 +60,13 @@ wasm stores alone.
 and are never published. `./scripts/classify-crates.sh` classifies every workspace member from its
 own manifest, and is what excludes native and internal crates from the wasm build.
 
+The tools that run programs through `murmur:process` share two of them:
+
+| Crate | What it holds | Used as |
+|---|---|---|
+| `libs/murmur-process-host` | The `Processes`, `Conn` and `Clock` traits a tool's call logic is written against, and `is_not_found` for murmur's text for a program missing from `PATH` | a dependency. Each tool still implements the traits over its own `wit_bindgen` import |
+| `libs/murmur-process-test-host` | The Wasmtime test host: it runs a tool's compiled component with a `murmur:process` host that starts real programs | a dev-dependency only. It is empty on `wasm32`, so the workspace wasm build compiles it without Wasmtime |
+
 A shared crate whose artifacts each need only part of it puts each part behind a cargo feature, so
 an artifact compiles only what it calls. `libs/murmur-file-tools` has one feature per file tool,
 `read`, `write`, `edit` and `find`, all on by default so its own tests cover every tool. Each tool
@@ -307,13 +314,14 @@ The test links it as `chromium` in its own directory. It packs the workspace `dr
 driver zip nor a manifest with `vision:` stripped.
 
 The default run of `tool-browser` (its `browser` suite) runs the compiled component in Wasmtime,
-with a test host for `murmur:process` that starts the browser outside any capsule. It needs Chrome or
+with the test host for `murmur:process` in `libs/murmur-process-test-host`, which starts the browser
+outside any capsule. It needs Chrome or
 Chromium on Linux: one of `chromium`, `chromium-browser`, `google-chrome` or `chrome` on `PATH`, a
 Playwright Chromium under `~/.cache/ms-playwright`, or `TOOL_BROWSER_TEST_CHROME`. Without one it
 fails, naming what to install. `TOOL_BROWSER_KEEP_LOGS=<dir>` copies each test's `browser.log` and `state.json` there.
 
 The default run of `tool-computer` (its `display` suite) runs the compiled component in Wasmtime the
-same way, with a test host for `murmur:process` that starts the real Xvfb and `xmessage` outside any
-capsule and clicks `xmessage`'s button through the component. It needs `Xvfb` (`xvfb`), `xkbcomp`
+same way, on the same test host, which starts the real Xvfb and `xmessage` outside any capsule; the
+suite clicks `xmessage`'s button through the component. It needs `Xvfb` (`xvfb`), `xkbcomp`
 (`x11-xkb-utils`) and `xmessage` (`x11-utils`) on Linux, and fails without them, naming the package
 to install. `TOOL_COMPUTER_KEEP_LOGS=<dir>` copies each test's logs and `state.json` there.
