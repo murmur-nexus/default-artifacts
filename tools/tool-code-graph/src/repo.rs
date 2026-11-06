@@ -9,7 +9,9 @@
 
 use std::path::{Path, PathBuf};
 
-use murmur_host_roots::{describe_roots, locate, HostRoot, Located, Refusal, RootAccess};
+use murmur_host_roots::{
+    describe_roots, lexical_segments, locate, HostRoot, Located, Refusal, RootAccess,
+};
 use serde_json::Value;
 
 use crate::db;
@@ -132,37 +134,15 @@ pub fn read_only_refusal(repo: &Repo) -> Option<Value> {
     )))
 }
 
-/// The segments of `value` after lexical normalisation: `.` and empty segments dropped, `..`
-/// popping the previous normal segment. A relative value keeps a `..` it cannot pop; an
-/// absolute one drops it at `/`.
-fn lexical_segments(value: &str) -> Vec<&str> {
-    let absolute = value.starts_with('/');
-    let mut segments: Vec<&str> = Vec::new();
-    for segment in value.split('/') {
-        match segment {
-            "" | "." => {}
-            ".." => match segments.last() {
-                Some(&last) if last != ".." => {
-                    segments.pop();
-                }
-                _ if absolute => {}
-                _ => segments.push(".."),
-            },
-            normal => segments.push(normal),
-        }
-    }
-    segments
-}
-
 /// The package name for files under no Rust package or Python project name: the last normal
 /// segment of `repo_path` as written, lexically normalised. `None` when there is none (`.`,
 /// `./`, `..`, `/`, an omitted value): the parsers then use `crate` for Rust and `package` for
 /// Python. Computed from the value as written, never from the `murmur-host…` open path.
 pub fn fallback_name(written: &str) -> Option<String> {
-    match lexical_segments(written).last() {
-        Some(&last) if last != ".." => Some(last.to_string()),
-        _ => None,
-    }
+    lexical_segments(written)
+        .0
+        .last()
+        .map(|last| last.to_string())
 }
 
 /// Reduce `impact_analysis`'s `file` to the stored repo-relative form:
@@ -183,9 +163,9 @@ where
         f = rest.to_string();
     }
     if f.starts_with('/') {
-        let file_segments = lexical_segments(&f);
+        let file_segments = lexical_segments(&f).0;
         if repo_path.starts_with('/') {
-            let repo_segments = lexical_segments(repo_path);
+            let repo_segments = lexical_segments(repo_path).0;
             if file_segments.len() >= repo_segments.len()
                 && file_segments[..repo_segments.len()] == repo_segments[..]
             {
@@ -195,13 +175,13 @@ where
             let best = indexed()
                 .into_iter()
                 .filter(|path| {
-                    let path_segments = lexical_segments(path);
+                    let path_segments = lexical_segments(path).0;
                     !path_segments.is_empty()
                         && file_segments.len() >= path_segments.len()
                         && file_segments[file_segments.len() - path_segments.len()..]
                             == path_segments[..]
                 })
-                .max_by_key(|path| lexical_segments(path).len());
+                .max_by_key(|path| lexical_segments(path).0.len());
             if let Some(best) = best {
                 return best;
             }

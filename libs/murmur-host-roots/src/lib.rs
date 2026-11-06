@@ -173,8 +173,9 @@ pub fn sqlite_immutable_uri(path: &str) -> String {
 }
 
 /// The segments of `value` with `.` and empty segments dropped and each `..` popping the segment
-/// before it, and whether some `..` found no segment left to pop.
-fn lexical_segments(value: &str) -> (Vec<&str>, bool) {
+/// before it, and whether some `..` found no segment left to pop. Purely lexical: nothing is
+/// read from the filesystem, so a symlink is a segment like any other.
+pub fn lexical_segments(value: &str) -> (Vec<&str>, bool) {
     let mut segments: Vec<&str> = Vec::new();
     let mut climbed_above = false;
     for segment in value.split('/') {

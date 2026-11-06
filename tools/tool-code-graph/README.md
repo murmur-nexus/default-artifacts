@@ -116,6 +116,8 @@ beside it, for reads as well as writes, and removes it when the call is done.
 0.6.0 was a native binary; 0.7.0 is a WASM component. What changed for a capsule:
 
 - One zip serves every platform; there are no per-platform zips.
+- It needs murmur v0.9.0 or later: it exports `murmur:tool/run@0.2.0` and finds host folders
+  through the `murmur-host` preopens, which both arrived in v0.9.0. On an older `mur`, keep 0.6.0.
 - `repo_path` is relative to the work folder and defaults to `.`, the work folder itself. An
   absolute value opens only inside a host folder the session opened, and `index_repository`
   needs that folder read-write.
