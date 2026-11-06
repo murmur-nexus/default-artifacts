@@ -133,9 +133,8 @@ driver.
 Tool artifacts (`runtime: tool`) exposed to the agent as callable functions. `tool-corpus`,
 `tool-create`, `tool-read`, `tool-write`, `tool-edit`, `tool-find`, `tool-github`,
 `tool-registry-search`, `tool-report`, `tool-request-input`, `tool-tavily`, `tool-test-report`,
-`tool-code-graph`, `tool-browser`, `tool-git` and `tool-code-coverage` are WASM components
-(`wasm32-wasip2`, exporting `murmur:tool/run`); the remaining one is a native binary:
-`tool-computer` runs an X server (see
+`tool-code-graph`, `tool-browser`, `tool-git`, `tool-code-coverage` and `tool-computer` are WASM
+components (`wasm32-wasip2`, exporting `murmur:tool/run`); none is a native binary (see
 [BUILD.md](./BUILD.md)).
 
 | Artifact | Location | Implementation | Description |
@@ -156,7 +155,7 @@ Tool artifacts (`runtime: tool`) exposed to the agent as callable functions. `to
 | `tool-git` | `tools/tool-git/` | WASM | Git operations (clone, checkout, status, diff, commit, push, worktree, and more), each git command run through `murmur:process`, so it needs a `mur` at WIT level 4 or higher and `git` in `capabilities.shell.allow`; on-shell hooks and the `read_only` check judge every git command it runs; see its [README](./tools/tool-git/README.md) |
 | `tool-code-coverage` | `tools/tool-code-coverage/` | WASM | Spectrum-based fault localization (Ochiai / Tarantula) over per-test LCOV reports, writing suspicion scores onto `tool-code-graph`'s database; `repo_path` and `coverage_dir` are relative to the work folder or absolute inside a host folder the session opened (read-write for `repo_path`); see its [README](./tools/tool-code-coverage/README.md) |
 | `tool-browser` | `tools/tool-browser/` | WASM | Drives a headless Chrome or Chromium on the capsule's host one action per call: opens a page, reads it as an accessibility tree with refs, clicks, types, presses, selects, waits and goes back with a summary of what changed, reads console errors and failed requests, and saves screenshots. Starts the browser as a session process through `murmur:process` and keeps it until `close` or the session's end, so it needs a `mur` at WIT level 4 or higher. Needs one of `chromium`, `chromium-browser`, `google-chrome` or `chrome` in `capabilities.shell.allow`, and on murmur's `scoped` and `sealed` tiers `chrome-headless-shell` under that name; see its [README](./tools/tool-browser/README.md) |
-| `tool-computer` | `tools/tool-computer/` | native | The capsule's own 1440x900 virtual display (Xvfb): screenshot, click, drag, scroll, type, keys, wait and zoom, one action per call, each returning the cursor and a PNG screenshot. Declares `provider_tool: {kind: computer}`, so it runs only in a `sealed` capsule on Linux and needs a `mur` from murmur `a9ea4726` or later; see its [README](./tools/tool-computer/README.md) |
+| `tool-computer` | `tools/tool-computer/` | WASM | The capsule's own 1440x900 virtual display (Xvfb): screenshot, click, drag, scroll, type, keys, wait and zoom, one action per call, each returning the cursor and a PNG screenshot. Starts Xvfb, a window manager and the configured programs as `murmur:process` session processes, so it needs a `mur` reporting WIT level 4 or higher and a Linux host with Xvfb. Declares `provider_tool: {kind: computer}`, so it runs only in a `sealed` capsule; see its [README](./tools/tool-computer/README.md) |
 
 ## Skills
 
@@ -219,9 +218,9 @@ output. A `mur` serves it from WIT level 4 on, and no murmur release does yet: v
 tag, serves level 3.
 
 A component's level follows the interfaces it actually imports and exports, not the world it was
-built from. `tool-browser` 0.2.0 and `tool-git` 0.7.0 are the only artifacts here that import
-`murmur:process`, so they are the only ones that need level 4; an older `mur` refuses them with
-`E-WIT-LEVEL-001`. Every other WASM tool and driver still fits level 3.
+built from. `tool-browser` 0.2.0, `tool-git` 0.7.0 and `tool-computer` 0.2.0 are the only artifacts
+here that import `murmur:process`, so they are the only ones that need level 4; an older `mur`
+refuses them with `E-WIT-LEVEL-001`. Every other WASM tool and driver still fits level 3.
 
 ### WIT level 3
 

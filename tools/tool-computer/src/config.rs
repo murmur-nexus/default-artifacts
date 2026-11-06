@@ -5,8 +5,9 @@ use serde_json::Value;
 use crate::grants::Grants;
 use crate::input::Action;
 
-/// The most programs `launch` may hold.
-pub const MAX_LAUNCH: usize = 16;
+/// The most programs `launch` may hold. murmur runs at most 8 session processes per session, all
+/// tools together, and Xvfb plus a window manager take two of them.
+pub const MAX_LAUNCH: usize = 6;
 
 /// The checked config. An unset variable is the default: nothing launched, nothing held.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -22,6 +23,8 @@ fn err(line: String) -> String {
 }
 
 /// Parses and checks `raw` (the variable's value, `None` when unset) against the capsule's grants.
+/// When the grants cannot be seen, `launch` programs are not checked against them; the call is
+/// refused for that reason next.
 pub fn parse(raw: Option<&str>, grants: &Grants) -> Result<Config, String> {
     let Some(raw) = raw else {
         return Ok(Config::default());
@@ -87,7 +90,7 @@ pub fn parse(raw: Option<&str>, grants: &Grants) -> Result<Config, String> {
                      capabilities.shell.allow lists it"
                 )));
             }
-            if !grants.granted(program) {
+            if grants.known() && !grants.granted(program) {
                 return Err(err(format!(
                     "launch[{i}] runs {program}, which capabilities.shell.allow does not grant"
                 )));
@@ -119,8 +122,8 @@ pub fn held_line(action: Action) -> String {
     let name = action.name();
     format!(
         "tool-computer did not run {name}: this capsule's config lists {name} in confirm, so it \
-         needs a person's yes, and murmur gives a native tool no way to ask for one; ask the \
-         person to do this step, or to remove {name} from confirm"
+         needs a person's yes, and a tool cannot ask a person for one; ask the person to do this \
+         step, or to remove {name} from confirm"
     )
 }
 
@@ -185,11 +188,15 @@ mod tests {
         assert!(parse(Some(r#"{"launch":[["xmessage",1]]}"#), &g)
             .unwrap_err()
             .contains("launch[0][1] is not a string"));
-        let many = format!(
-            r#"{{"launch":[{}]}}"#,
-            vec![r#"["xmessage"]"#; 17].join(",")
+        let many = format!(r#"{{"launch":[{}]}}"#, [r#"["xmessage"]"#; 7].join(","));
+        assert_eq!(
+            parse(Some(&many), &g).unwrap_err(),
+            "tool-computer: config launch holds 7 programs; at most 6 are allowed"
         );
-        assert!(parse(Some(&many), &g).unwrap_err().contains("at most 16"));
+        let six = format!(r#"{{"launch":[{}]}}"#, [r#"["xmessage"]"#; 6].join(","));
+        assert_eq!(parse(Some(&six), &g).unwrap().launch.len(), 6);
+        let unseen = parse(Some(r#"{"launch":[["zenity"]]}"#), &Grants::new(None)).unwrap();
+        assert_eq!(unseen.launch, vec![vec!["zenity"]]);
     }
 
     #[test]
@@ -197,8 +204,8 @@ mod tests {
         assert_eq!(
             held_line(Action::LeftClick),
             "tool-computer did not run left_click: this capsule's config lists left_click in \
-             confirm, so it needs a person's yes, and murmur gives a native tool no way to ask for \
-             one; ask the person to do this step, or to remove left_click from confirm"
+             confirm, so it needs a person's yes, and a tool cannot ask a person for one; ask the \
+             person to do this step, or to remove left_click from confirm"
         );
     }
 }

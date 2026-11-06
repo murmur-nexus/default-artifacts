@@ -46,12 +46,12 @@ from its `name:` or a name with a `murmur-` prefix.
 | native | `implementation: native` | `bin/<name>`, one zip per platform | `./scripts/build-native.sh` (all) / `cargo build --release -p <name>` (one) |
 | skill | `runtime: skill` | `skill.md` | nothing to compile |
 
-A tool is native only when a `wasm32-wasip2` guest cannot do its job, such as `tool-computer`'s
-display. Running a program is no reason on its own: a WASM tool runs one through `murmur:process`,
-under `capabilities.shell.allow`, as `tool-git` runs `git` and `tool-browser` runs Chrome. C sources
-are no reason on their own either: rusqlite's bundled SQLite and tree-sitter with its grammars
-compile into a component with the pinned wasi-sdk (see Prerequisites), as in `tool-test-report`,
-`tool-code-coverage` and `tool-code-graph`. A WASM tool
+A tool is native only when a `wasm32-wasip2` guest cannot do its job; no tool is native today.
+Running a program is no reason on its own: a WASM tool runs one through `murmur:process`, under
+`capabilities.shell.allow`, as `tool-git` runs `git`, `tool-browser` runs Chrome and `tool-computer`
+runs Xvfb and speaks the X protocol to it. C sources are no reason on their own either: rusqlite's
+bundled SQLite and tree-sitter with its grammars compile into a component with the pinned wasi-sdk
+(see Prerequisites), as in `tool-test-report`, `tool-code-coverage` and `tool-code-graph`. A WASM tool
 reaches the network through `wasi:http`, under `capabilities.network.allow`, so network access never
 makes a tool native. A tool that calls a third-party API stays wasm: the credential gateway serves
 wasm stores alone.
@@ -273,7 +273,7 @@ MUR_BIN=$MUR_BIN cargo test -p tool-test-report --test mur_run_stable_id -- --ig
 MUR_BIN=$MUR_BIN cargo test -p tool-code-coverage --test mur_run_localize -- --ignored  # 2 tests
 MUR_BIN=$MUR_BIN cargo test -p tool-code-graph --test mur_run_code_graph -- --ignored  # 2 tests
 MUR_BIN=$MUR_BIN TOOL_BROWSER_TEST_CHROME=<chrome-headless-shell> cargo test -p tool-browser --test mur_run_browser -- --ignored  # 1 test; its mur must be WIT level 4
-MUR_BIN=$MUR_BIN cargo test -p tool-computer --test mur_run_computer -- --ignored    # 3 tests; needs Xvfb, xkbcomp, xmessage
+MUR_BIN=$MUR_BIN cargo test -p tool-computer --test mur_run_computer -- --ignored    # 3 tests; its mur must be WIT level 4; needs Xvfb, xkbcomp, xmessage
 MUR_BIN=$MUR_BIN TOOL_GIT_NATIVE_ZIP=<tool-git-0.6.0 zip> cargo test -p tool-git --test mur_run_parity -- --ignored --nocapture  # 2 tests; its mur must be WIT level 4
 MUR_BIN=$MUR_BIN cargo test -p driver-anthropic --test mur_run_computer_tool -- --ignored  # 3 tests
 MUR_BIN=$MUR_BIN cargo test -p driver-openai --test mur_run_computer_tool -- --ignored     # 4 tests
@@ -292,7 +292,7 @@ CODE_GRAPH_NATIVE_BIN=<native tool-code-graph 0.6.0> CODE_GRAPH_CORPUS=<a scratc
 | `mur_run_localize` | under a real `mur run`, scores one call of a session writes into a work-folder code-graph database are reset and rewritten by the next, leaving no lock or journal file beside it, and an absolute `repo_path` in a `read-write` host path writes the scores into that host database |
 | `mur_run_code_graph` | under a real `mur run`, a repository in the work folder is indexed, edited on the host between calls, re-indexed (one changed file) and its `impact_analysis` names the new caller, with no lock or journal left; a repository in a `read-write` host path is indexed through an absolute `repo_path` onto the host |
 | `corpus_parity` | indexing a whole tree (`CODE_GRAPH_CORPUS`) through the component gives the same `files`, `symbols`, `edges` and `symbols_fts` rows as the native 0.6.0 binary (`CODE_GRAPH_NATIVE_BIN`), and prints interleaved call times for both |
-| `mur_run_computer` | in a `sealed` capsule the tool starts its display, clicks a real button, and both screenshots reach the trace as attachments; a `scoped` capsule is refused with `E-CAP-003`, and a `confirm`-listed click is held. Its `mur` must carry murmur `a9ea4726` |
+| `mur_run_computer` | in a `sealed` capsule the tool starts Xvfb and `xmessage` as `murmur:process` session processes, speaks X over a `connect` to the display's port, clicks the real button, and the screenshots before and after differ and reach the next model request as images. The trace records `process_start` for `display` and `launch-0` and `process_exit` for `display` with `reason: session_end`, and no Xvfb or xmessage runs after `mur run` exits. The shipped manifest on `scoped` is refused with `E-CAP-003`; a test-only copy without `provider_tool:` runs the same flow on `scoped`, granting Xvfb `/usr/share/X11/xkb` through `interpreter_runtime`. A `confirm`-listed click is held. Its `mur` must report WIT level 4 or higher |
 | `mur_run_computer_tool` (driver-anthropic) | in a `sealed` capsule a tool declaring `provider_tool: {kind: computer}` goes to `claude-sonnet-4-6` as `computer_20251124` with its beta header and to `claude-sonnet-5-5` as the toolset; Claude's click reaches the tool scaled to the display, a toolset batch runs in order, and the next request replays the calls in provider form. Without the block the tool stays a function. Its `mur` must carry murmur `a9ea4726` |
 | `mur_run_computer_tool` (driver-openai) | in a `sealed` capsule the same tool goes to `gpt-5.6-luna` as `{"type": "computer"}`, a `computer_call` runs as an ordered group answered by one `computer_call_output`, a flagged call nobody answers under `mur run --task` times out unrun, and a served capsule runs it only after a person's yes over the door and never after a no. Without the block the tool stays a function. Its `mur` must carry murmur `a9ea4726` |
 | `scaffolded_hook_tests` | a freshly scaffolded hook reports `1 passed`, not `0 passed` |
@@ -311,3 +311,9 @@ with a test host for `murmur:process` that starts the browser outside any capsul
 Chromium on Linux: one of `chromium`, `chromium-browser`, `google-chrome` or `chrome` on `PATH`, a
 Playwright Chromium under `~/.cache/ms-playwright`, or `TOOL_BROWSER_TEST_CHROME`. Without one it
 fails, naming what to install. `TOOL_BROWSER_KEEP_LOGS=<dir>` copies each test's `browser.log` and `state.json` there.
+
+The default run of `tool-computer` (its `display` suite) runs the compiled component in Wasmtime the
+same way, with a test host for `murmur:process` that starts the real Xvfb and `xmessage` outside any
+capsule and clicks `xmessage`'s button through the component. It needs `Xvfb` (`xvfb`), `xkbcomp`
+(`x11-xkb-utils`) and `xmessage` (`x11-utils`) on Linux, and fails without them, naming the package
+to install. `TOOL_COMPUTER_KEEP_LOGS=<dir>` copies each test's logs and `state.json` there.

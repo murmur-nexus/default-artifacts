@@ -21,11 +21,7 @@
 #     write,edit,find,corpus,report,            that export murmur:tool/run)
 #     tavily,github,registry-search,
 #     test-report,browser,git,
-#     code-coverage,code-graph}
-#   tool-computer                      -> SKIP   (a native bin crate the workspace build
-#                                               may still leave a .wasm for; shipped as a
-#                                               native binary, it exports wasi:cli/run and
-#                                               is NOT a murmur guest component)
+#     code-coverage,code-graph,computer}
 #   anything else                      -> ERROR  (fail closed: an unrecognised
 #                                               artifact must not silently skip)
 #
@@ -68,7 +64,7 @@
 #          With a path: validate that one artifact.
 #          With no argument: validate every .wasm under
 #          target/wasm32-wasip2/release/ (this is what CI runs).
-# Exit:    0 = pass (or a deliberately-skipped native artifact)
+# Exit:    0 = pass
 #          1 = validation/shape/version failure (message names the artifact + the
 #              specific unexpected import/export/version)
 #          2 = usage error / unrecognised artifact name / no components to validate
@@ -131,10 +127,6 @@ validate_one() {
 
   # ---- category resolution ---------------------------------------------------
   case "$name" in
-    tool-computer)
-      echo "skip: $base is a native command component (exports wasi:cli/run), not a murmur guest component — not validated"
-      return 0
-      ;;
     hook-*)
       category="hook"
       expected_export="murmur:hook/lifecycle"
@@ -145,7 +137,7 @@ validate_one() {
       expected_export="murmur:driver/process"
       expected_version="$process_driver_version"
       ;;
-    driver-*|tool-request-input|tool-create|tool-read|tool-write|tool-edit|tool-find|tool-corpus|tool-report|tool-tavily|tool-github|tool-registry-search|tool-test-report|tool-browser|tool-git|tool-code-coverage|tool-code-graph)
+    driver-*|tool-request-input|tool-create|tool-read|tool-write|tool-edit|tool-find|tool-corpus|tool-report|tool-tavily|tool-github|tool-registry-search|tool-test-report|tool-browser|tool-git|tool-code-coverage|tool-code-graph|tool-computer)
       category="tool"
       expected_export="murmur:tool/run"
       expected_version="$tool_version"

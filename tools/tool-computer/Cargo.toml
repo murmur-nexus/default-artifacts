@@ -4,26 +4,35 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 
-[[bin]]
-name = "tool-computer"
-path = "src/main.rs"
+[lib]
+crate-type = ["cdylib", "rlib"]
 
+# Every dependency below is already in Cargo.lock at the version named, so this crate adds no
+# package and moves no version: a new or moved version would change every wasm artifact's
+# bytes. The X client in src/x11.rs is hand-written on x11rb-protocol, the sans-I/O half of
+# x11rb, because x11rb itself does not build for wasm32-wasip2.
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-
-# The display runs only on Linux; every other OS compiles the refusal alone.
-[target.'cfg(target_os = "linux")'.dependencies]
+wit-bindgen.workspace = true
 flate2 = "1"
 crc32fast = "1"
-libc = "0.2"
-getrandom = "0.2"
-x11rb = { version = "0.13", default-features = false, features = ["xtest"] }
+x11rb-protocol = { version = "0.13.2", default-features = false, features = ["std", "xtest"] }
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasip2 = "1.0.4"
+
+# Host-target-only. wasmtime and wasmtime-wasi run the compiled wasm32-wasip2 component in
+# tests/common, with a test host for `murmur:process` that starts the real Xvfb; tempfile gives
+# every suite its scratch folders; serde_norway reads murmur.yaml. A `[dev-dependencies]` entry
+# never reaches the cdylib.
 [dev-dependencies]
+wasmtime = "46"
+wasmtime-wasi = "46"
 tempfile = "3"
 serde_norway = "0.9"
 
+# The host-side X clients S10 points at the display, the PNG decoder, and the SIGKILL S11 sends.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 flate2 = "1"
 libc = "0.2"

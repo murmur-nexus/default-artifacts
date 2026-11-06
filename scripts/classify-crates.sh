@@ -11,10 +11,9 @@
 #
 #   native-artifact  A publishable artifact whose murmur.yaml says
 #                    `implementation: native`. These ship as host binaries and
-#                    need host capabilities (subprocesses, a display) that a
-#                    wasm32-wasip2 guest does not have, or link C sources not
-#                    yet ported to wasm (none at present).
-#                    Catches: tool-computer.
+#                    need host capabilities that a wasm32-wasip2 guest does
+#                    not have (none at present).
+#                    Catches: no member today.
 #
 #   internal-bin     A crate with no murmur.yaml (so: never published, absent from
 #                    list-artifacts.sh) whose Cargo.toml declares a `[[bin]]`. These

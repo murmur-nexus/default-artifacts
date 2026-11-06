@@ -1,206 +1,136 @@
-//! The state folder, `<work folder>/.tool-computer/<session-id>/`, and every file in it.
+//! What outlives a call: `.tool-computer/<id>/` beside the display it started, holding
+//! `state.json` (found again by the `display` handle it records), the cookie, the logs and the
+//! screenshots.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+/// The folder in the work folder that holds one subfolder per display started.
+pub const STATE_ROOT: &str = ".tool-computer";
 /// Logs are cut at this size; later output is discarded.
 pub const LOG_CAP: u64 = 1024 * 1024;
 /// How many `screen-<n>.png` files stay; older ones are deleted after each write.
 pub const SCREENS_KEPT: usize = 20;
 
-pub const DISPLAY_JSON: &str = "display.json";
-pub const STOPPED_JSON: &str = "stopped.json";
+pub const STATE_JSON: &str = "state.json";
 pub const XAUTHORITY: &str = "Xauthority";
-pub const KEEPER_LOG: &str = "keeper.log";
-pub const START_LOCK: &str = "start.lock";
-pub const EXITS: &str = "exits.jsonl";
-pub const EXITS_SEEN: &str = "exits.seen";
+/// Xvfb's and the window manager's output.
+pub const DISPLAY_LOG: &str = "display.log";
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowManager {
     pub name: String,
-    pub pid: i32,
+    /// The session-process handle of `wm`.
+    pub handle: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Launched {
+    /// The `config.launch` entry.
     pub index: usize,
     pub argv: Vec<String>,
-    pub pid: i32,
+    /// The session-process handle of `launch-<index>`; `None` when it was not started.
+    pub handle: Option<String>,
     /// Work-folder-relative path of the program's log.
     pub log: String,
+    /// `<rule>: <reason>` when murmur refused to start it.
+    pub refused: Option<String>,
 }
 
-/// `display.json`, written by the keeper once the display is ready.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DisplayInfo {
+/// `state.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct State {
+    /// The session-process handle of `display`, Xvfb.
+    pub handle: String,
     pub display: u16,
+    /// `6000 + display`.
+    pub port: u16,
     /// `127.0.0.1:<display>`.
     pub address: String,
     pub width: u32,
     pub height: u32,
-    pub keeper_pid: i32,
-    pub xvfb_pid: i32,
     pub window_manager: Option<WindowManager>,
     pub launched: Vec<Launched>,
+    /// Handles whose exit a result has reported.
+    pub reported_exits: Vec<String>,
     /// Unix seconds.
     pub started_at: u64,
 }
 
-/// `stopped.json`, written by the keeper when the display stops or fails to start.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Stopped {
-    pub reason: String,
-    /// `false` when the display never started.
-    pub was_running: bool,
-    /// Xvfb's exit status, when it exited.
-    pub xvfb_status: Option<i32>,
-}
-
-/// One line of `exits.jsonl`. `index` is the `launch` entry, or `None` for the window manager.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Exit {
-    pub index: Option<usize>,
-    pub argv0: String,
-    pub status: i32,
-}
-
-/// The paths of one session's state folder.
-#[derive(Debug, Clone)]
+/// One display's folder, `.tool-computer/<id>/`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateDir {
-    /// Absolute.
-    pub abs: PathBuf,
-    /// Relative to the work folder, as attachments and `data` name it.
-    pub rel: PathBuf,
+    pub id: String,
+    /// The folder, as the tool opens it.
+    pub root: PathBuf,
+    /// The folder relative to the work folder, as results and Xvfb's arguments name it.
+    pub rel: String,
 }
 
 impl StateDir {
-    pub fn new(workdir: &Path, session_id: &str) -> Self {
-        let rel = Path::new(".tool-computer").join(session_id);
+    pub fn new(work: &Path, id: &str) -> Self {
         Self {
-            abs: workdir.join(&rel),
-            rel,
+            id: id.to_string(),
+            root: work.join(STATE_ROOT).join(id),
+            rel: format!("{STATE_ROOT}/{id}"),
         }
     }
 
-    /// From the keeper's absolute path argument; `rel` is the last two components.
-    pub fn from_abs(abs: &Path) -> Self {
-        let session = abs.file_name().map(PathBuf::from).unwrap_or_default();
-        Self {
-            abs: abs.to_path_buf(),
-            rel: Path::new(".tool-computer").join(session),
-        }
+    pub fn file(&self, name: &str) -> PathBuf {
+        self.root.join(name)
     }
 
-    pub fn path(&self, name: &str) -> PathBuf {
-        self.abs.join(name)
+    pub fn rel_file(&self, name: &str) -> String {
+        format!("{}/{name}", self.rel)
     }
 
-    pub fn rel_path(&self, name: &str) -> String {
-        self.rel.join(name).to_string_lossy().into_owned()
+    pub fn load(&self) -> Option<State> {
+        serde_json::from_slice(&fs::read(self.file(STATE_JSON)).ok()?).ok()
     }
 
-    pub fn create(&self) -> io::Result<()> {
-        fs::create_dir_all(&self.abs)?;
-        fs::set_permissions(&self.abs, fs::Permissions::from_mode(0o700))
-    }
-
-    pub fn read_display(&self) -> Option<DisplayInfo> {
-        let text = fs::read_to_string(self.path(DISPLAY_JSON)).ok()?;
-        serde_json::from_str(&text).ok()
-    }
-
-    pub fn read_stopped(&self) -> Option<Stopped> {
-        let text = fs::read_to_string(self.path(STOPPED_JSON)).ok()?;
-        serde_json::from_str(&text).ok()
-    }
-
-    pub fn write_display(&self, info: &DisplayInfo) -> io::Result<()> {
-        let json = serde_json::to_vec_pretty(info).expect("display.json serializes");
-        write_atomic(&self.path(DISPLAY_JSON), &json, 0o600)
-    }
-
-    pub fn write_stopped(&self, stopped: &Stopped) -> io::Result<()> {
-        let json = serde_json::to_vec_pretty(stopped).expect("stopped.json serializes");
-        write_atomic(&self.path(STOPPED_JSON), &json, 0o600)
-    }
-
-    /// Removes `display.json` only when it names `keeper_pid`, so a stopping keeper never
-    /// removes the file of the keeper that replaced it.
-    pub fn remove_display_if_kept_by(&self, keeper_pid: i32) {
-        if self
-            .read_display()
-            .is_some_and(|info| info.keeper_pid == keeper_pid)
-        {
-            let _ = fs::remove_file(self.path(DISPLAY_JSON));
-        }
-    }
-
-    pub fn append_exit(&self, exit: &Exit) -> io::Result<()> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(self.path(EXITS))?;
-        let mut line = serde_json::to_string(exit).expect("exit serializes");
-        line.push('\n');
-        file.write_all(line.as_bytes())
-    }
-
-    /// The exits not yet reported, which this call now reports.
-    pub fn take_new_exits(&self) -> Vec<Exit> {
-        let Ok(file) = File::open(self.path(EXITS)) else {
-            return Vec::new();
-        };
-        let all: Vec<Exit> = io::BufReader::new(file)
-            .lines()
-            .map_while(Result::ok)
-            .filter_map(|line| serde_json::from_str(&line).ok())
-            .collect();
-        let seen: usize = fs::read_to_string(self.path(EXITS_SEEN))
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(0);
-        if all.len() <= seen {
-            return Vec::new();
-        }
-        let _ = write_atomic(
-            &self.path(EXITS_SEEN),
-            all.len().to_string().as_bytes(),
-            0o600,
-        );
-        all[seen..].to_vec()
+    /// Writes `state.json` through `state.json.tmp` and a rename, so a reader never sees half.
+    pub fn save(&self, state: &State) -> Result<(), String> {
+        let tmp = self.file("state.json.tmp");
+        let text = serde_json::to_vec_pretty(state)
+            .map_err(|e| format!("tool-computer: cannot serialise state.json: {e}"))?;
+        fs::write(&tmp, text)
+            .and_then(|_| fs::rename(&tmp, self.file(STATE_JSON)))
+            .map_err(|e| format!("tool-computer: cannot write {}/state.json: {e}", self.rel))
     }
 
     /// Writes the next `screen-<n>.png` and keeps only the newest [`SCREENS_KEPT`]; returns its
     /// work-folder-relative path.
     pub fn write_screen(&self, png: &[u8]) -> io::Result<String> {
         let mut numbers = self.screen_numbers();
-        let n = numbers.last().copied().unwrap_or(0) + 1;
-        let name = format!("screen-{n}.png");
-        let path = self.path(&name);
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)?;
+        let mut n = numbers.last().copied().unwrap_or(0) + 1;
+        // A call running beside this one may take the same number first.
+        let (name, mut file) = loop {
+            let name = format!("screen-{n}.png");
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(self.file(&name))
+            {
+                Ok(file) => break (name, file),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => n += 1,
+                Err(e) => return Err(e),
+            }
+        };
         file.write_all(png)?;
         numbers.push(n);
         if numbers.len() > SCREENS_KEPT {
             for old in &numbers[..numbers.len() - SCREENS_KEPT] {
-                let _ = fs::remove_file(self.path(&format!("screen-{old}.png")));
+                let _ = fs::remove_file(self.file(&format!("screen-{old}.png")));
             }
         }
-        Ok(self.rel_path(&name))
+        Ok(self.rel_file(&name))
     }
 
     fn screen_numbers(&self) -> Vec<u64> {
-        let mut numbers: Vec<u64> = fs::read_dir(&self.abs)
+        let mut numbers: Vec<u64> = fs::read_dir(&self.root)
             .into_iter()
             .flatten()
             .filter_map(Result::ok)
@@ -216,35 +146,56 @@ impl StateDir {
         numbers
     }
 
-    /// The last `n` lines of `keeper.log`.
-    pub fn keeper_log_tail(&self, n: usize) -> Vec<String> {
-        let text = fs::read_to_string(self.path(KEEPER_LOG)).unwrap_or_default();
+    /// Appends `bytes` to the log `name`, which stops growing at [`LOG_CAP`].
+    pub fn append_log(&self, name: &str, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let path = self.file(name);
+        let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if len >= LOG_CAP {
+            return;
+        }
+        let room = (LOG_CAP - len) as usize;
+        if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = file.write_all(&bytes[..bytes.len().min(room)]);
+        }
+    }
+
+    /// The last `n` non-empty lines of the log `name`.
+    pub fn log_tail(&self, name: &str, n: usize) -> Vec<String> {
+        let text = fs::read(self.file(name))
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
         let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
         lines[lines.len().saturating_sub(n)..]
             .iter()
-            .map(|l| l.to_string())
+            .map(|l| l.trim_end().to_string())
             .collect()
+    }
+
+    /// Removes a folder this call made and does not keep.
+    pub fn discard(&self) {
+        let _ = fs::remove_dir_all(&self.root);
+        if let Some(parent) = self.root.parent() {
+            // Only when empty: another display's folder stays.
+            let _ = fs::remove_dir(parent);
+        }
     }
 }
 
-/// Writes `bytes` to a temporary file beside `path` and renames it over `path`.
-pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let tmp = path.with_file_name(format!(".{name}.tmp-{}", std::process::id()));
-    {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(mode)
-            .open(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-    }
-    fs::rename(&tmp, path)
+/// The folder whose `state.json` records `handle`, with its state.
+pub fn find_by_handle(work: &Path, handle: &str) -> Option<(StateDir, State)> {
+    fs::read_dir(work.join(STATE_ROOT))
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let id = e.file_name().to_str()?.to_string();
+            let dir = StateDir::new(work, &id);
+            let state = dir.load()?;
+            (state.handle == handle).then_some((dir, state))
+        })
+        .next()
 }
 
 const COOKIE_NAME: &[u8] = b"MIT-MAGIC-COOKIE-1";
@@ -286,54 +237,30 @@ pub fn read_cookie(path: &Path) -> Option<Vec<u8>> {
     None
 }
 
-/// An append-only log cut at [`LOG_CAP`], shared by the threads that drain a child's pipes.
-#[derive(Clone)]
-pub struct CappedLog {
-    file: Arc<Mutex<File>>,
-}
-
-impl CappedLog {
-    pub fn open(path: &Path) -> io::Result<Self> {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(path)?;
-        Ok(Self {
-            file: Arc::new(Mutex::new(file)),
-        })
-    }
-
-    pub fn write(&self, bytes: &[u8]) {
-        let Ok(mut file) = self.file.lock() else {
-            return;
-        };
-        let len = file.metadata().map(|m| m.len()).unwrap_or(LOG_CAP);
-        if len >= LOG_CAP {
-            return;
-        }
-        let room = (LOG_CAP - len) as usize;
-        let _ = file.write_all(&bytes[..bytes.len().min(room)]);
-    }
-
-    /// Copies `reader` into the log on a thread until it reaches end of file.
-    pub fn drain(&self, mut reader: impl io::Read + Send + 'static) {
-        let log = self.clone();
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 8192];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => log.write(&buf[..n]),
-                }
-            }
-        });
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn state(handle: &str) -> State {
+        State {
+            handle: handle.into(),
+            display: 3,
+            port: 6003,
+            address: "127.0.0.1:3".into(),
+            width: 1440,
+            height: 900,
+            window_manager: None,
+            launched: vec![Launched {
+                index: 0,
+                argv: vec!["xmessage".into(), "hi".into()],
+                handle: None,
+                log: ".tool-computer/a/launch-0-xmessage.log".into(),
+                refused: Some("session-process-cap: full".into()),
+            }],
+            reported_exits: vec!["prc_1".into()],
+            started_at: 7,
+        }
+    }
 
     #[test]
     fn xauthority_round_trips_its_cookie() {
@@ -349,75 +276,77 @@ mod tests {
         assert_eq!(&bytes[7..9], &[0, 18]);
         assert_eq!(&bytes[9..27], COOKIE_NAME);
         assert_eq!(&bytes[27..29], &[0, 16]);
+        let any = xauthority_bytes(None, &cookie);
+        assert_eq!(&any[4..6], &[0, 0], "no display number");
     }
 
     #[test]
-    fn exits_are_reported_once() {
+    fn state_json_round_trips_and_is_found_by_handle() {
         let dir = tempfile::tempdir().unwrap();
-        let state = StateDir::new(dir.path(), "ses_x");
-        state.create().unwrap();
-        assert!(state.take_new_exits().is_empty());
-        let exit = Exit {
-            index: Some(0),
-            argv0: "xmessage".into(),
-            status: 0,
-        };
-        state.append_exit(&exit).unwrap();
-        assert_eq!(state.take_new_exits(), vec![exit.clone()]);
-        assert!(state.take_new_exits().is_empty());
-        state.append_exit(&exit).unwrap();
-        assert_eq!(state.take_new_exits().len(), 1);
+        let a = StateDir::new(dir.path(), "aaaa");
+        let b = StateDir::new(dir.path(), "bbbb");
+        fs::create_dir_all(&a.root).unwrap();
+        fs::create_dir_all(&b.root).unwrap();
+        a.save(&state("prc_1")).unwrap();
+        b.save(&state("prc_2")).unwrap();
+        assert!(!a.file("state.json.tmp").exists());
+        let (found, loaded) = find_by_handle(dir.path(), "prc_2").unwrap();
+        assert_eq!(found, b);
+        assert_eq!(loaded, state("prc_2"));
+        assert!(find_by_handle(dir.path(), "prc_3").is_none());
+        let text = fs::read_to_string(a.file(STATE_JSON)).unwrap();
+        for key in [
+            "\"handle\"",
+            "\"display\"",
+            "\"port\"",
+            "\"address\"",
+            "\"width\"",
+            "\"height\"",
+            "\"window_manager\": null",
+            "\"launched\"",
+            "\"refused\"",
+            "\"reported_exits\"",
+            "\"started_at\"",
+        ] {
+            assert!(text.contains(key), "{key} in {text}");
+        }
+        assert!(text.contains("\n  "), "pretty JSON");
     }
 
     #[test]
     fn only_the_newest_twenty_screens_stay() {
         let dir = tempfile::tempdir().unwrap();
-        let state = StateDir::new(dir.path(), "ses_x");
-        state.create().unwrap();
+        let state = StateDir::new(dir.path(), "0123456789abcdef");
+        fs::create_dir_all(&state.root).unwrap();
         for n in 1..=23 {
             let rel = state.write_screen(b"png").unwrap();
-            assert_eq!(rel, format!(".tool-computer/ses_x/screen-{n}.png"));
+            assert_eq!(
+                rel,
+                format!(".tool-computer/0123456789abcdef/screen-{n}.png")
+            );
         }
         assert_eq!(state.screen_numbers(), (4..=23).collect::<Vec<_>>());
     }
 
     #[test]
-    fn display_json_is_removed_only_by_its_keeper() {
+    fn a_log_stops_at_one_mebibyte() {
         let dir = tempfile::tempdir().unwrap();
-        let state = StateDir::new(dir.path(), "ses_x");
-        state.create().unwrap();
-        let info = DisplayInfo {
-            display: 3,
-            address: "127.0.0.1:3".into(),
-            width: 1440,
-            height: 900,
-            keeper_pid: 10,
-            xvfb_pid: 11,
-            window_manager: None,
-            launched: Vec::new(),
-            started_at: 0,
-        };
-        state.write_display(&info).unwrap();
-        let mode = fs::metadata(state.path(DISPLAY_JSON))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
-        state.remove_display_if_kept_by(99);
-        assert_eq!(state.read_display(), Some(info));
-        state.remove_display_if_kept_by(10);
-        assert_eq!(state.read_display(), None);
+        let state = StateDir::new(dir.path(), "x");
+        fs::create_dir_all(&state.root).unwrap();
+        let chunk = vec![b'a'; 300 * 1024];
+        for _ in 0..5 {
+            state.append_log("x.log", &chunk);
+        }
+        assert_eq!(fs::metadata(state.file("x.log")).unwrap().len(), LOG_CAP);
     }
 
     #[test]
-    fn a_capped_log_stops_at_one_mebibyte() {
+    fn the_tail_is_the_last_non_empty_lines() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("x.log");
-        let log = CappedLog::open(&path).unwrap();
-        let chunk = vec![b'a'; 300 * 1024];
-        for _ in 0..5 {
-            log.write(&chunk);
-        }
-        assert_eq!(fs::metadata(&path).unwrap().len(), LOG_CAP);
+        let state = StateDir::new(dir.path(), "x");
+        fs::create_dir_all(&state.root).unwrap();
+        state.append_log("d.log", b"one\n\ntwo\nthree\n\nfour\n");
+        assert_eq!(state.log_tail("d.log", 3), ["two", "three", "four"]);
+        assert!(state.log_tail("none.log", 3).is_empty());
     }
 }
