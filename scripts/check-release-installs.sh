@@ -169,9 +169,8 @@ fi
 count=0
 for key in $(printf '%s\n' "$plan" | awk -F'\t' '{ print $1 "@" $2 }' | LC_ALL=C sort -u); do
     name="${key%@*}" version="${key#*@}"
-    flags=(-g)
-    if ! output="$(cd "$WORK" && "$MUR" install "${flags[@]}" "murmur/$name@$version" 2>&1)"; then
-        echo "FAIL  murmur/$name@$version — mur install ${flags[*]} exited non-zero:" >&2
+    if ! output="$(cd "$WORK" && "$MUR" install -g "murmur/$name@$version" 2>&1)"; then
+        echo "FAIL  murmur/$name@$version — mur install -g exited non-zero:" >&2
         printf '%s\n' "$output" | sed 's/^/    /' >&2
         exit 1
     fi

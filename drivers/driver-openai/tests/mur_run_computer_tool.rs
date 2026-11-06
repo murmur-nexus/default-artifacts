@@ -4,9 +4,9 @@
 //!
 //! The capsule runs driver-openai on `gpt-5.6-luna` with `fake-computer`, the
 //! `murmur-fake-computer` test component (`libs/murmur-fake-computer`) built for wasm32-wasip2
-//! and packed with `provider_tool: {kind: computer, display_width: 1440, display_height: 900}`. It logs each call
-//! it gets to `computer-calls.jsonl` in the work folder and attaches the 1440×900 `shot.png` the
-//! test writes there. The capsule runs `capabilities.containment: sealed`, which a provider tool
+//! and packed with `provider_tool: {kind: computer, display_width: 1440, display_height: 900}`.
+//! It logs each call it gets to `computer-calls.jsonl` in the work folder and attaches the
+//! 1440×900 `shot.png` the test writes there. The capsule runs `capabilities.containment: sealed`, which a provider tool
 //! requires. A loopback fake OpenAI Responses API records each request and answers with scripted
 //! `computer_call` items, then a final text.
 //!

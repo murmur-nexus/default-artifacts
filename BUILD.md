@@ -104,7 +104,8 @@ features. CI runs it on every push and pull request, in `ci.yml`'s `build-isolat
 
 ## Add one
 
-1. Create `<category>/<name>/murmur.yaml`. `tool-create` scaffolds a wasm tool or a hook with the `runtime:`, `implementation:` and `requires_files:` this layout needs — see
+1. Create `<category>/<name>/murmur.yaml`. `tool-create` scaffolds a wasm tool or a hook with the
+   `runtime:`, `implementation:` and `requires_files:` this layout needs — see
    [tools/tool-create/README.md](./tools/tool-create/README.md).
 2. Add the crate to `[workspace] members` in `Cargo.toml` and run `cargo update --workspace --offline`.
    Give it `version = "0.0.0"` in its own `[package]`, never `version.workspace = true`: rustc
@@ -172,8 +173,9 @@ The driver's README lists each provider error it marks under `## Transient failu
    Bump those, and commit the `MURMUR_REV` line, the mirror and the bumps together.
 4. Merge, then tag the merge commit `v<workspace version>` and push the tag.
 5. The `build` workflow runs. `verify` checks that the tag is `v` + the workspace version and the
-   newest `v*` tag, and that no artifact drifted. `release` builds `mur` at `MURMUR_REV` and the wasm artifacts, validates them, packs
-   every version the latest release's index does not already list with
+   newest `v*` tag, and that no artifact drifted. `release` builds `mur` at `MURMUR_REV` and the
+   wasm artifacts, validates them, packs every version the latest release's index does not
+   already list with
    `./scripts/package-release.sh --previous`, and writes `artifacts-index.json` with
    `./scripts/index-release.sh`, merged with the latest release's index. A version an earlier
    release published stays on that release with its entry carried forward: repacked by a newer

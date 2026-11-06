@@ -2,8 +2,8 @@
 //! under a real `mur run`.
 //!
 //! The capsule runs driver-openai with the workspace's `tool-read`, built for wasm32-wasip2 and
-//! packed as a release packs it. A loopback fake OpenAI answers the first request with a call to the tool for a 3000×2000 PNG in the work folder, and the second
-//! with a final text. On `chat-latest` (Chat Completions) the second request must carry the image
+//! packed as a release packs it. A loopback fake OpenAI answers the first request with a call to
+//! the tool for a 3000×2000 PNG in the work folder, and the second with a final text. On `chat-latest` (Chat Completions) the second request must carry the image
 //! in a user message right after the tool message, at 1920×1280; on `gpt-5.6-luna` (Responses), in
 //! the call's `function_call_output` array at its original 3000×2000. The guest must never trap.
 //! Only a launch runs `mod wasm_driver`, where the decode, resize and re-encode happen inside the

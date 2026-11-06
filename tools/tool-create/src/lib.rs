@@ -40,8 +40,9 @@ pub mod logic {
     /// `runtime:` and its *packaging* from `implementation:`, and derives the published
     /// classification from the pair (`Manifest::registry_runtime`). Writing the request word
     /// straight into `runtime:` collapses the two: `runtime: wasm` is rejected outright when
-    /// the artifact is named from a capsule manifest. Each arm here spells the pair back out, along with the payload entry `mur build` has to be told to
-    /// pack — an undeclared `requires_files:` means an archive holding the manifest alone.
+    /// the artifact is named from a capsule manifest. Each arm here spells the pair back out,
+    /// along with the payload entry `mur build` has to be told to pack — an undeclared
+    /// `requires_files:` means an archive holding the manifest alone.
     #[derive(Clone, Copy)]
     enum Kind {
         Wasm,

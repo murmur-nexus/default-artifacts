@@ -2,8 +2,9 @@
 //! under a real `mur run`.
 //!
 //! The capsule runs driver-anthropic on `claude-sonnet-5-5` with the workspace's `tool-read`,
-//! built for wasm32-wasip2 and packed as a release packs it. A loopback fake Anthropic answers the first request with a call to the tool for a 3000×2000 PNG in the
-//! work folder, and the second with a final text. The test asserts the second request carries the
+//! built for wasm32-wasip2 and packed as a release packs it. A loopback fake Anthropic answers the
+//! first request with a call to the tool for a 3000×2000 PNG in the work folder, and the second
+//! with a final text. The test asserts the second request carries the
 //! image in the call's `tool_result`, decoded at the high-resolution tier's 2352×1568, and that
 //! the guest never trapped. Only a launch runs `mod wasm_driver`, where the decode, resize and
 //! re-encode happen inside the component under the runtime's memory cap.
