@@ -1,0 +1,784 @@
+{
+ "cases": [
+  {
+   "name": "rust_queries",
+   "fixture": "rust",
+   "steps": [
+    {
+     "call": {
+      "operation": "index_repository",
+      "repo_path": "@REPO@"
+     }
+    },
+    {
+     "call": {
+      "operation": "index_repository",
+      "repo_path": "@REPO@"
+     }
+    },
+    {
+     "call": {
+      "operation": "find_symbol",
+      "repo_path": "@REPO@",
+      "query": "widget"
+     }
+    },
+    {
+     "call": {
+      "operation": "find_symbol",
+      "repo_path": "@REPO@",
+      "query": "nonexistentzzz"
+     }
+    },
+    {
+     "call": {
+      "operation": "find_symbol",
+      "repo_path": "@REPO@",
+      "query": "p",
+      "limit": 1
+     }
+    },
+    {
+     "call": {
+      "operation": "find_symbol",
+      "repo_path": "@REPO@",
+      "query": "add",
+      "limit": 0
+     }
+    },
+    {
+     "call": {
+      "operation": "find_symbol",
+      "repo_path": "@REPO@",
+      "query": "--"
+     }
+    },
+    {
+     "call": {
+      "operation": "find_symbol",
+      "repo_path": "@REPO@/",
+      "query": "ping"
+     }
+    },
+    {
+     "call": {
+      "operation": "get_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "rust://fixture_crate/#top(->i64)"
+     }
+    },
+    {
+     "call": {
+      "operation": "get_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "rust://fixture_crate/#nope()"
+     }
+    },
+    {
+     "call": {
+      "operation": "slice_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "rust://fixture_crate/#top(->i64)"
+     }
+    },
+    {
+     "call": {
+      "operation": "slice_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "rust://fixture_crate/#top(->i64)",
+      "max_depth": 1,
+      "max_nodes": 50
+     }
+    },
+    {
+     "call": {
+      "operation": "slice_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "rust://fixture_crate/#top(->i64)",
+      "max_depth": 5,
+      "max_nodes": 2
+     }
+    },
+    {
+     "call": {
+      "operation": "slice_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "rust://fixture_crate/#add(i64,i64->i64)",
+      "direction": "callers"
+     }
+    },
+    {
+     "call": {
+      "operation": "slice_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "rust://fixture_crate/#ping(->i64)",
+      "max_depth": 10,
+      "max_nodes": 50
+     }
+    },
+    {
+     "call": {
+      "operation": "slice_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "rust://fixture_crate/#top(->i64)",
+      "direction": "sideways"
+     }
+    },
+    {
+     "call": {
+      "operation": "slice_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "rust://fixture_crate/#nope()"
+     }
+    },
+    {
+     "call": {
+      "operation": "explain_path",
+      "repo_path": "@REPO@",
+      "from": "rust://fixture_crate/#top(->i64)",
+      "to": "rust://fixture_crate/#add(i64,i64->i64)"
+     }
+    },
+    {
+     "call": {
+      "operation": "explain_path",
+      "repo_path": "@REPO@",
+      "from": "rust://fixture_crate/#top(->i64)",
+      "to": "rust://fixture_crate/#add(i64,i64->i64)",
+      "max_depth": 1
+     }
+    },
+    {
+     "call": {
+      "operation": "explain_path",
+      "repo_path": "@REPO@",
+      "from": "rust://fixture_crate/#add(i64,i64->i64)",
+      "to": "rust://fixture_crate/#top(->i64)",
+      "max_depth": 6
+     }
+    },
+    {
+     "call": {
+      "operation": "explain_path",
+      "repo_path": "@REPO@",
+      "from": "rust://fixture_crate/#ping(->i64)",
+      "to": "rust://fixture_crate/#ping(->i64)"
+     }
+    },
+    {
+     "call": {
+      "operation": "explain_path",
+      "repo_path": "@REPO@",
+      "from": "rust://fixture_crate/#nope()",
+      "to": "rust://fixture_crate/#add(i64,i64->i64)"
+     }
+    },
+    {
+     "call": {
+      "operation": "explain_path",
+      "repo_path": "@REPO@",
+      "from": "rust://fixture_crate/#top(->i64)",
+      "to": "rust://fixture_crate/#nope()"
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "src/lib.rs",
+      "start_line": 4,
+      "end_line": 4
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "src/lib.rs",
+      "start_line": 15,
+      "end_line": 15,
+      "max_depth": 1
+     }
+    }
+   ]
+  },
+  {
+   "name": "rust_edits",
+   "fixture": "rust",
+   "steps": [
+    {
+     "call": {
+      "operation": "index_repository",
+      "repo_path": "@REPO@"
+     }
+    },
+    {
+     "write": {
+      "path": "src/util.rs",
+      "content": "/// Edited helper.\npub fn helper() -> i64 {\n    99\n}\n"
+     }
+    },
+    {
+     "call": {
+      "operation": "index_repository",
+      "repo_path": "@REPO@"
+     }
+    },
+    {
+     "call": {
+      "operation": "get_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "rust://fixture_crate/#top(->i64)"
+     }
+    },
+    {
+     "write": {
+      "path": "src/lib.rs",
+      "content": "//! Fixture crate root.\n\n/// Adds two numbers.\npub fn add(a: i64, b: i64) -> i64 {\n    a + b\n}\n\n/// A widget holding a number.\npub struct Widget {\n    pub n: i64,\n}\n\nimpl Widget {\n    /// Construct a widget.\n    pub fn new(n: i64) -> Widget {\n        Widget { n }\n    }\n    /// Double the widget via add.\n    pub fn doubled(&self) -> i64 {\n        add(self.n, self.n)\n    }\n}\n\n/// Entry point that builds a widget and doubles it.\npub fn top(x: i64) -> i64 {\n    let w = Widget::new(2);\n    w.doubled()\n}\n\n/// Mutually recursive with pong \u2014 exercises cycle termination.\npub fn ping() -> i64 {\n    pong()\n}\n\n/// Mutually recursive with ping.\npub fn pong() -> i64 {\n    ping()\n}\n"
+     }
+    },
+    {
+     "call": {
+      "operation": "index_repository",
+      "repo_path": "@REPO@"
+     }
+    },
+    {
+     "call": {
+      "operation": "get_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "rust://fixture_crate/#top(->i64)"
+     }
+    },
+    {
+     "call": {
+      "operation": "get_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "rust://fixture_crate/#top(i64->i64)"
+     }
+    },
+    {
+     "remove": "src/util.rs"
+    },
+    {
+     "call": {
+      "operation": "index_repository",
+      "repo_path": "@REPO@"
+     }
+    },
+    {
+     "call": {
+      "operation": "find_symbol",
+      "repo_path": "@REPO@",
+      "query": "helper"
+     }
+    },
+    {
+     "write": {
+      "path": "src/extra.rs",
+      "content": "pub fn extra() -> i64 {\n    crate::add(1, 2)\n}\n"
+     }
+    },
+    {
+     "call": {
+      "operation": "index_repository",
+      "repo_path": "@REPO@"
+     }
+    },
+    {
+     "call": {
+      "operation": "get_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "rust://fixture_crate/#add(i64,i64->i64)"
+     }
+    }
+   ]
+  },
+  {
+   "name": "rust_before_index",
+   "fixture": "rust",
+   "steps": [
+    {
+     "call": {
+      "operation": "get_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "rust://fixture_crate/#top(->i64)"
+     }
+    },
+    {
+     "call": {
+      "operation": "find_symbol",
+      "repo_path": "@REPO@",
+      "query": "top"
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "src/lib.rs",
+      "start_line": 4,
+      "end_line": 4
+     }
+    }
+   ]
+  },
+  {
+   "name": "errors",
+   "fixture": "rust",
+   "steps": [
+    {
+     "call": {
+      "repo_path": "@REPO@"
+     }
+    },
+    {
+     "call": {
+      "operation": "frobnicate"
+     }
+    },
+    {
+     "call": {
+      "operation": ""
+     }
+    },
+    {
+     "call": {
+      "operation": "index_repository",
+      "repo_path": "@REPO@/nope"
+     }
+    },
+    {
+     "call": {
+      "operation": "get_symbol",
+      "repo_path": "@REPO@/Cargo.toml",
+      "symbol_id": "rust://fixture_crate/#top(->i64)"
+     }
+    },
+    {
+     "call": {
+      "operation": "find_symbol",
+      "repo_path": "@REPO@"
+     }
+    },
+    {
+     "call": {
+      "operation": "find_symbol",
+      "repo_path": "@REPO@",
+      "query": ""
+     }
+    },
+    {
+     "call": {
+      "operation": "get_symbol",
+      "repo_path": "@REPO@"
+     }
+    },
+    {
+     "call": {
+      "operation": "slice_symbol",
+      "repo_path": "@REPO@"
+     }
+    },
+    {
+     "call": {
+      "operation": "explain_path",
+      "repo_path": "@REPO@",
+      "to": "rust://fixture_crate/#top(->i64)"
+     }
+    },
+    {
+     "call": {
+      "operation": "explain_path",
+      "repo_path": "@REPO@",
+      "from": "rust://fixture_crate/#top(->i64)"
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "start_line": 1,
+      "end_line": 2
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "src/lib.rs",
+      "end_line": 2
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "src/lib.rs",
+      "start_line": 2
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "src/lib.rs",
+      "start_line": "3",
+      "end_line": 4
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "src/lib.rs",
+      "start_line": 10,
+      "end_line": 5
+     }
+    }
+   ]
+  },
+  {
+   "name": "impact",
+   "fixture": "impact",
+   "steps": [
+    {
+     "call": {
+      "operation": "index_repository",
+      "repo_path": "@REPO@"
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "src/lib.rs",
+      "start_line": 10,
+      "end_line": 10
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "src/lib.rs",
+      "start_line": 34,
+      "end_line": 34
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "src/handlers.rs",
+      "start_line": 4,
+      "end_line": 4
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "src/repo.rs",
+      "start_line": 4,
+      "end_line": 4
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "src/ambig_a.rs",
+      "start_line": 1,
+      "end_line": 1
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "src/lib.rs",
+      "start_line": 10,
+      "end_line": 10,
+      "max_nodes": 2
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "src/lib.rs",
+      "start_line": 10,
+      "end_line": 10,
+      "max_depth": 0
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "src/lib.rs",
+      "start_line": 10,
+      "end_line": 10,
+      "max_depth": 1
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "src/lib.rs",
+      "start_line": 21,
+      "end_line": 27
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "src/lib.rs",
+      "start_line": 9000,
+      "end_line": 9001
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "src/does_not_exist.rs",
+      "start_line": 1,
+      "end_line": 2
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "./src/repo.rs",
+      "start_line": 4,
+      "end_line": 4
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": ".\\src\\repo.rs",
+      "start_line": 4,
+      "end_line": 4
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "@REPO@/src/service.rs",
+      "start_line": 3,
+      "end_line": 3
+     }
+    },
+    {
+     "call": {
+      "operation": "slice_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "rust://impact_fixture/#core(->i64)",
+      "direction": "callers",
+      "max_depth": 4
+     }
+    },
+    {
+     "call": {
+      "operation": "get_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "rust://impact_fixture/#Engine::run(&self->i64)"
+     }
+    },
+    {
+     "call": {
+      "operation": "find_symbol",
+      "repo_path": "@REPO@",
+      "query": "engine"
+     }
+    }
+   ]
+  },
+  {
+   "name": "python",
+   "fixture": "python",
+   "steps": [
+    {
+     "call": {
+      "operation": "index_repository",
+      "repo_path": "@REPO@"
+     }
+    },
+    {
+     "call": {
+      "operation": "index_repository",
+      "repo_path": "@REPO@"
+     }
+    },
+    {
+     "call": {
+      "operation": "find_symbol",
+      "repo_path": "@REPO@",
+      "query": "widget"
+     }
+    },
+    {
+     "call": {
+      "operation": "get_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "python://pyfixture/pyfixture.core#top()"
+     }
+    },
+    {
+     "call": {
+      "operation": "get_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "python://pyfixture/pyfixture.core#_private()"
+     }
+    },
+    {
+     "call": {
+      "operation": "slice_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "python://pyfixture/pyfixture.core#top()",
+      "max_depth": 1
+     }
+    },
+    {
+     "call": {
+      "operation": "explain_path",
+      "repo_path": "@REPO@",
+      "from": "python://pyfixture/pyfixture.core#top()",
+      "to": "python://pyfixture/pyfixture.core#add(a,b)"
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "pyfixture/core.py",
+      "start_line": 4,
+      "end_line": 4
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "pyfixture/handlers.py",
+      "start_line": 2,
+      "end_line": 2
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "pyfixture/handlers.py",
+      "start_line": 6,
+      "end_line": 6
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "@REPO@/pyfixture/core.py",
+      "start_line": 14,
+      "end_line": 14
+     }
+    },
+    {
+     "write": {
+      "path": "pyfixture/handlers.py",
+      "content": "def save():\n    execute()\n    return 2\n\n\ndef execute():\n    return 0\n"
+     }
+    },
+    {
+     "call": {
+      "operation": "index_repository",
+      "repo_path": "@REPO@"
+     }
+    },
+    {
+     "call": {
+      "operation": "get_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "python://pyfixture/pyfixture.core#add(a,b)"
+     }
+    },
+    {
+     "write": {
+      "path": "pyfixture/core.py",
+      "content": "\"\"\"Core module.\"\"\"\n\n\ndef add(a, b, c):\n    return a + b\n\n\nclass Widget:\n    \"\"\"A widget holding a number.\"\"\"\n\n    def __init__(self, n):\n        self.n = n\n\n    def doubled(self):\n        return add(self.n, self.n)\n\n    def _hidden(self):\n        return add(1, 2)\n\n\ndef top():\n    w = Widget(2)\n    return w.doubled()\n\n\ndef _private():\n    return 0\n"
+     }
+    },
+    {
+     "call": {
+      "operation": "index_repository",
+      "repo_path": "@REPO@"
+     }
+    },
+    {
+     "call": {
+      "operation": "get_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "python://pyfixture/pyfixture.core#add(a,b)"
+     }
+    },
+    {
+     "call": {
+      "operation": "get_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "python://pyfixture/pyfixture.core#add(a,b,c)"
+     }
+    }
+   ]
+  },
+  {
+   "name": "mixed",
+   "fixture": "mixed",
+   "steps": [
+    {
+     "call": {
+      "operation": "index_repository",
+      "repo_path": "@REPO@"
+     }
+    },
+    {
+     "call": {
+      "operation": "find_symbol",
+      "repo_path": "@REPO@",
+      "query": "py_fn"
+     }
+    },
+    {
+     "call": {
+      "operation": "get_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "rust://mixcrate/#rust_fn(->i64)"
+     }
+    },
+    {
+     "call": {
+      "operation": "get_symbol",
+      "repo_path": "@REPO@",
+      "symbol_id": "python://fixture_repo/py.app#py_fn()"
+     }
+    },
+    {
+     "call": {
+      "operation": "impact_analysis",
+      "repo_path": "@REPO@",
+      "file": "py/app.py",
+      "start_line": 5,
+      "end_line": 5
+     }
+    }
+   ]
+  }
+ ]
+}

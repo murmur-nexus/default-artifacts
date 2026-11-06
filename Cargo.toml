@@ -58,9 +58,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 wit-bindgen = "0.59"
 # Dependencies that pull in C sources: SQLite via `bundled`, and tree-sitter's C
-# runtime + grammars. Bundled SQLite compiles for wasm32-wasip2 with the pinned
-# wasi-sdk (wasi-sdk.toml; tool-test-report and tool-code-coverage link it as components);
-# the native tools that use these (tool-code-graph and others) are native until their ports.
+# runtime + grammars. Both compile for wasm32-wasip2 with the pinned wasi-sdk
+# (wasi-sdk.toml): tool-test-report and tool-code-coverage link SQLite, and
+# tool-code-graph links SQLite and tree-sitter, into components.
+# Another tree-sitter or grammar version can change what tool-code-graph indexes.
 rusqlite = { version = "0.31", features = ["bundled"] }
 tree-sitter = "0.22"
 tree-sitter-rust = "0.21"

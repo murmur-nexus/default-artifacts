@@ -1,163 +1,40 @@
-//! Real-filesystem integration tests for tool-code-graph.
-//!
-//! Each test spawns the actual compiled binary via `std::process::Command`,
-//! feeds a real JSON envelope on stdin, and inspects the real JSON on stdout —
-//! no mocks. The fixture is a small real Rust crate written to a fresh temp
-//! directory per test (the `TestDir` helper below), mirroring the pattern in
-//! `tool-git`'s integration suite.
+//! The tool's behaviour scenarios, run against the compiled **wasm32-wasip2 component** in
+//! Wasmtime (`tests/common`): each call gets a fresh `Store` with the test's scratch directory
+//! preopened read-write at `.`, as murmur opens a work folder, and sees what the model sees —
+//! `status`, `summary` and `data`. The fixture repositories are `tests/fixtures/repos.json`.
+//! Files are created and edited on the host between calls.
 
-use std::{
-    fs,
-    io::Write,
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
-};
+mod common;
 
+use std::fs;
+use std::path::Path;
+
+use common::{index, run_tool, write_repo, Outcome, TestDir};
 use serde_json::{json, Value};
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
+// ── Fixture: a small real crate named `fixture_crate` (repos.json "rust") ─────
 
-struct TestDir {
-    path: PathBuf,
-}
-
-impl TestDir {
-    fn new() -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should be valid")
-            .as_nanos();
-        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "tool-code-graph-it-{}-{nanos}-{n}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&path).expect("temp test directory should be created");
-        Self { path }
-    }
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
-// ── Fixture: a small real crate named `fixture_crate` ─────────────────────────
-
-const PKG: &str = "fixture_crate";
 const SYM_TOP: &str = "rust://fixture_crate/#top(->i64)";
 const SYM_ADD: &str = "rust://fixture_crate/#add(i64,i64->i64)";
 const SYM_DOUBLED: &str = "rust://fixture_crate/#Widget::doubled(&self->i64)";
 const SYM_NEW: &str = "rust://fixture_crate/#Widget::new(i64->Widget)";
 const SYM_PING: &str = "rust://fixture_crate/#ping(->i64)";
 
-fn write_fixture(repo: &Path) {
-    fs::write(
-        repo.join("Cargo.toml"),
-        format!("[package]\nname = \"{PKG}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
-    )
-    .unwrap();
-    fs::create_dir_all(repo.join("src")).unwrap();
-    fs::write(
-        repo.join("src/lib.rs"),
-        r#"//! Fixture crate root.
-
-/// Adds two numbers.
-pub fn add(a: i64, b: i64) -> i64 {
-    a + b
-}
-
-/// A widget holding a number.
-pub struct Widget {
-    pub n: i64,
-}
-
-impl Widget {
-    /// Construct a widget.
-    pub fn new(n: i64) -> Widget {
-        Widget { n }
-    }
-    /// Double the widget via add.
-    pub fn doubled(&self) -> i64 {
-        add(self.n, self.n)
-    }
-}
-
-/// Entry point that builds a widget and doubles it.
-pub fn top() -> i64 {
-    let w = Widget::new(2);
-    w.doubled()
-}
-
-/// Mutually recursive with pong — exercises cycle termination.
-pub fn ping() -> i64 {
-    pong()
-}
-
-/// Mutually recursive with ping.
-pub fn pong() -> i64 {
-    ping()
-}
-"#,
-    )
-    .unwrap();
-    fs::write(
-        repo.join("src/util.rs"),
-        "/// An unrelated helper in another file.\npub fn helper() -> i64 {\n    42\n}\n",
-    )
-    .unwrap();
-}
-
-// ── Harness ───────────────────────────────────────────────────────────────────
-
-fn run_tool(repo: &Path, op: Value) -> Value {
-    let envelope = json!({ "data": op.to_string(), "log_path": null }).to_string();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tool-code-graph"))
-        .current_dir(repo)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("binary should start");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(envelope.as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().expect("tool should complete");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // Invariant: stdout is always exactly one JSON object, never partial output.
-    serde_json::from_str(stdout.trim())
-        .unwrap_or_else(|e| panic!("stdout must be valid JSON ({e}): {stdout:?}"))
-}
-
-fn index(repo: &Path) -> Value {
-    run_tool(
-        repo,
-        json!({ "operation": "index_repository", "repo_path": repo.to_str().unwrap() }),
-    )
-}
-
 // ── Scenario 1: index populates and reports a summary ─────────────────────────
 
 #[test]
 fn scenario_01_index_populates_and_reports() {
-    let td = TestDir::new();
-    write_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("rust", td.path());
     let r = index(td.path());
-    assert_eq!(r["status"], "passed");
-    assert!(r["total_symbols"].as_i64().unwrap() >= 6, "symbols: {r}");
-    assert!(r["total_edges"].as_i64().unwrap() >= 1, "edges: {r}");
-    assert_eq!(r["changed_files"], 2); // lib.rs + util.rs
-                                       // The db file is really on disk.
+    assert_eq!(r.status, "passed");
+    assert!(
+        r.data["total_symbols"].as_i64().unwrap() >= 6,
+        "symbols: {r}"
+    );
+    assert!(r.data["total_edges"].as_i64().unwrap() >= 1, "edges: {r}");
+    assert_eq!(r.data["changed_files"], 2); // lib.rs + util.rs
+                                            // The db file is really on disk.
     assert!(td.path().join(".murmur/code-graph.db").exists());
 }
 
@@ -165,30 +42,31 @@ fn scenario_01_index_populates_and_reports() {
 
 #[test]
 fn scenario_02_reindex_is_noop_read() {
-    let td = TestDir::new();
-    write_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("rust", td.path());
     index(td.path());
     let r = index(td.path());
-    assert_eq!(r["status"], "passed");
-    assert_eq!(r["changed_files"], 0);
-    assert_eq!(r["unchanged_files"], 2);
-    // Declares read so the redundant-call detector flags the repeat.
-    assert_eq!(r["metadata"]["state_effect"], "read");
+    assert_eq!(r.status, "passed");
+    assert_eq!(r.data["changed_files"], 0);
+    assert_eq!(r.data["unchanged_files"], 2);
+    // The envelope declares this call a read for the redundant-call detector; metadata never
+    // reaches the model (the harness asserts ToolResult.metadata is empty, and murmur's native
+    // dispatch dropped it too), so lib test `ops::tests::a_noop_reindex_declares_a_read_and_a_change_a_mutate` asserts it.
 }
 
 // ── Scenario 3: find_symbol ranked FTS search ─────────────────────────────────
 
 #[test]
 fn scenario_03_find_symbol_matches() {
-    let td = TestDir::new();
-    write_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("rust", td.path());
     index(td.path());
     let r = run_tool(
         td.path(),
         json!({ "operation": "find_symbol", "repo_path": td.path().to_str().unwrap(), "query": "widget" }),
     );
-    assert_eq!(r["status"], "passed");
-    let ids: Vec<&str> = r["matches"]
+    assert_eq!(r.status, "passed");
+    let ids: Vec<&str> = r.data["matches"]
         .as_array()
         .unwrap()
         .iter()
@@ -204,35 +82,35 @@ fn scenario_03_find_symbol_matches() {
 
 #[test]
 fn scenario_04_find_symbol_empty_is_passed() {
-    let td = TestDir::new();
-    write_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("rust", td.path());
     index(td.path());
     let r = run_tool(
         td.path(),
         json!({ "operation": "find_symbol", "repo_path": td.path().to_str().unwrap(), "query": "nonexistentzzz" }),
     );
-    assert_eq!(r["status"], "passed");
-    assert_eq!(r["count"], 0);
-    assert!(r["matches"].as_array().unwrap().is_empty());
+    assert_eq!(r.status, "passed");
+    assert_eq!(r.data["count"], 0);
+    assert!(r.data["matches"].as_array().unwrap().is_empty());
 }
 
 // ── Scenario 5: get_symbol full detail ────────────────────────────────────────
 
 #[test]
 fn scenario_05_get_symbol_detail() {
-    let td = TestDir::new();
-    write_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("rust", td.path());
     index(td.path());
     let r = run_tool(
         td.path(),
         json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap(), "symbol_id": SYM_TOP }),
     );
-    assert_eq!(r["status"], "passed");
-    assert_eq!(r["qualified_name"], "top");
-    assert_eq!(r["kind"], "function");
-    assert_eq!(r["file"], "src/lib.rs");
+    assert_eq!(r.status, "passed");
+    assert_eq!(r.data["qualified_name"], "top");
+    assert_eq!(r.data["kind"], "function");
+    assert_eq!(r.data["file"], "src/lib.rs");
     // top calls Widget::new and Widget::doubled.
-    let callees: Vec<&str> = r["callees"]
+    let callees: Vec<&str> = r.data["callees"]
         .as_array()
         .unwrap()
         .iter()
@@ -242,17 +120,18 @@ fn scenario_05_get_symbol_detail() {
         callees.contains(&SYM_NEW) && callees.contains(&SYM_DOUBLED),
         "callees: {callees:?}"
     );
-    // Declared resource_id is the symbol_id itself (no path field to sniff).
-    assert_eq!(r["metadata"]["resource_id"], SYM_TOP);
-    assert_eq!(r["metadata"]["state_effect"], "read");
+    // Declared resource_id is the symbol_id itself (no path field to sniff). Metadata never
+    // reaches the model (the harness asserts ToolResult.metadata is empty, and murmur's native
+    // dispatch dropped it too), so lib test
+    // `ops::tests::symbol_operations_declare_the_symbol_id_as_the_resource` asserts it.
 }
 
 // ── Scenario 6: identity survives an unrelated edit + reindex ─────────────────
 
 #[test]
 fn scenario_06_identity_survives_unrelated_edit() {
-    let td = TestDir::new();
-    write_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("rust", td.path());
     index(td.path());
     // Edit an unrelated file (util.rs), leaving top() untouched.
     fs::write(
@@ -261,21 +140,21 @@ fn scenario_06_identity_survives_unrelated_edit() {
     )
     .unwrap();
     let re = index(td.path());
-    assert_eq!(re["changed_files"], 1, "only util.rs changed: {re}");
+    assert_eq!(re.data["changed_files"], 1, "only util.rs changed: {re}");
     // Same symbol_id still resolves.
     let r = run_tool(
         td.path(),
         json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap(), "symbol_id": SYM_TOP }),
     );
-    assert_eq!(r["status"], "passed", "top must still resolve: {r}");
+    assert_eq!(r.status, "passed", "top must still resolve: {r}");
 }
 
 // ── Scenario 7: editing the symbol's own signature mints a new id ─────────────
 
 #[test]
 fn scenario_07_signature_change_mints_new_id() {
-    let td = TestDir::new();
-    write_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("rust", td.path());
     index(td.path());
     // Change top's own signature: top() -> top(x: i64).
     let lib = fs::read_to_string(td.path().join("src/lib.rs")).unwrap();
@@ -288,7 +167,7 @@ fn scenario_07_signature_change_mints_new_id() {
         td.path(),
         json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap(), "symbol_id": SYM_TOP }),
     );
-    assert_eq!(old["status"], "failed", "old id should be not-found: {old}");
+    assert_eq!(old.status, "failed", "old id should be not-found: {old}");
 
     // New id resolves.
     let new_id = "rust://fixture_crate/#top(i64->i64)";
@@ -296,15 +175,15 @@ fn scenario_07_signature_change_mints_new_id() {
         td.path(),
         json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap(), "symbol_id": new_id }),
     );
-    assert_eq!(new["status"], "passed", "new id should resolve: {new}");
+    assert_eq!(new.status, "passed", "new id should resolve: {new}");
 }
 
 // ── Scenario 8: slice_symbol bounded by max_depth ─────────────────────────────
 
 #[test]
 fn scenario_08_slice_bounded_by_depth() {
-    let td = TestDir::new();
-    write_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("rust", td.path());
     index(td.path());
     // Depth 1 from top reaches only its direct callees, not add (depth 2).
     let r = run_tool(
@@ -312,8 +191,8 @@ fn scenario_08_slice_bounded_by_depth() {
         json!({ "operation": "slice_symbol", "repo_path": td.path().to_str().unwrap(),
                 "symbol_id": SYM_TOP, "max_depth": 1, "max_nodes": 50 }),
     );
-    assert_eq!(r["status"], "passed");
-    let ids: Vec<&str> = r["nodes"]
+    assert_eq!(r.status, "passed");
+    let ids: Vec<&str> = r.data["nodes"]
         .as_array()
         .unwrap()
         .iter()
@@ -333,8 +212,8 @@ fn scenario_08_slice_bounded_by_depth() {
 
 #[test]
 fn scenario_08b_slice_terminates_on_cycle() {
-    let td = TestDir::new();
-    write_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("rust", td.path());
     index(td.path());
     // ping <-> pong is a cycle; the depth bound must terminate it.
     let r = run_tool(
@@ -342,10 +221,10 @@ fn scenario_08b_slice_terminates_on_cycle() {
         json!({ "operation": "slice_symbol", "repo_path": td.path().to_str().unwrap(),
                 "symbol_id": SYM_PING, "max_depth": 10, "max_nodes": 50 }),
     );
-    assert_eq!(r["status"], "passed");
+    assert_eq!(r.status, "passed");
     // Only ping and pong exist in the cycle; no runaway.
     assert_eq!(
-        r["node_count"], 2,
+        r.data["node_count"], 2,
         "cycle should yield exactly ping+pong: {r}"
     );
 }
@@ -354,21 +233,24 @@ fn scenario_08b_slice_terminates_on_cycle() {
 
 #[test]
 fn scenario_09_slice_bounded_by_nodes_and_writes_path() {
-    let td = TestDir::new();
-    write_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("rust", td.path());
     index(td.path());
     let r = run_tool(
         td.path(),
         json!({ "operation": "slice_symbol", "repo_path": td.path().to_str().unwrap(),
                 "symbol_id": SYM_TOP, "max_depth": 5, "max_nodes": 2 }),
     );
-    assert_eq!(r["status"], "passed");
-    assert_eq!(r["node_count"], 2);
-    assert_eq!(r["truncated"], true);
-    // data_path points at the full slice on disk, not an inline dump.
-    let dp = r["data_path"].as_str().expect("data_path present");
-    assert!(Path::new(dp).exists(), "slice file should exist: {dp}");
-    let full: Value = serde_json::from_str(&fs::read_to_string(dp).unwrap()).unwrap();
+    assert_eq!(r.status, "passed");
+    assert_eq!(r.data["node_count"], 2);
+    assert_eq!(r.data["truncated"], true);
+    // data_path points at the full slice on disk, not an inline dump. It names the file as
+    // the call named the repository: under `.`, relative to the work folder.
+    let dp = r.data["data_path"].as_str().expect("data_path present");
+    assert!(dp.starts_with(".murmur/slices/slice-"), "data_path: {dp}");
+    let on_host = td.path().join(dp);
+    assert!(on_host.exists(), "slice file should exist: {dp}");
+    let full: Value = serde_json::from_str(&fs::read_to_string(on_host).unwrap()).unwrap();
     assert!(full["nodes"].is_array() && full["edges"].is_array());
 }
 
@@ -376,17 +258,17 @@ fn scenario_09_slice_bounded_by_nodes_and_writes_path() {
 
 #[test]
 fn scenario_10_explain_path_found() {
-    let td = TestDir::new();
-    write_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("rust", td.path());
     index(td.path());
     let r = run_tool(
         td.path(),
         json!({ "operation": "explain_path", "repo_path": td.path().to_str().unwrap(),
                 "from": SYM_TOP, "to": SYM_ADD, "max_depth": 6 }),
     );
-    assert_eq!(r["status"], "passed");
-    assert_eq!(r["found"], true);
-    let path: Vec<&str> = r["path"]
+    assert_eq!(r.status, "passed");
+    assert_eq!(r.data["found"], true);
+    let path: Vec<&str> = r.data["path"]
         .as_array()
         .unwrap()
         .iter()
@@ -400,8 +282,8 @@ fn scenario_10_explain_path_found() {
 
 #[test]
 fn scenario_11_explain_path_no_path_is_passed() {
-    let td = TestDir::new();
-    write_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("rust", td.path());
     index(td.path());
     // add never calls top, so there is no add -> top path.
     let r = run_tool(
@@ -409,55 +291,69 @@ fn scenario_11_explain_path_no_path_is_passed() {
         json!({ "operation": "explain_path", "repo_path": td.path().to_str().unwrap(),
                 "from": SYM_ADD, "to": SYM_TOP, "max_depth": 6 }),
     );
-    assert_eq!(r["status"], "passed", "no-path is not an error: {r}");
-    assert_eq!(r["found"], false);
-    assert!(r["message"].as_str().unwrap().contains("no path"));
+    assert_eq!(r.status, "passed", "no-path is not an error: {r}");
+    assert_eq!(r.data["found"], false);
+    assert!(r.summary().contains("no path"));
 }
 
 // ── Scenario 12: missing/invalid operation → failed ───────────────────────────
 
 #[test]
 fn scenario_12_missing_operation_failed() {
-    let td = TestDir::new();
+    let td = TestDir::new("it");
     let missing = run_tool(
         td.path(),
         json!({ "repo_path": td.path().to_str().unwrap() }),
     );
-    assert_eq!(missing["status"], "failed");
+    assert_eq!(missing.status, "failed");
     let bogus = run_tool(td.path(), json!({ "operation": "frobnicate" }));
-    assert_eq!(bogus["status"], "failed");
-    assert!(bogus["message"]
-        .as_str()
-        .unwrap()
-        .contains("unknown operation"));
+    assert_eq!(bogus.status, "failed");
+    assert!(bogus.summary().contains("unknown operation"));
 }
 
 // ── Scenario 13: missing required per-op field → failed ───────────────────────
 
 #[test]
 fn scenario_13_missing_required_field_failed() {
-    let td = TestDir::new();
-    write_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("rust", td.path());
     index(td.path());
     let r = run_tool(
         td.path(),
         json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap() }),
     );
-    assert_eq!(r["status"], "failed");
-    assert!(r["message"].as_str().unwrap().contains("symbol_id"));
+    assert_eq!(r.status, "failed");
+    assert!(r.summary().contains("symbol_id"));
 }
 
 // ── Scenario 14: non-existent repo_path → failed ──────────────────────────────
 
 #[test]
 fn scenario_14_bad_repo_path_failed() {
-    let td = TestDir::new();
+    let td = TestDir::new("it");
+    // A relative repo_path opens in the work folder; an absolute one only inside a host folder
+    // (tests/wasm_component.rs covers those refusals).
     let r = run_tool(
         td.path(),
-        json!({ "operation": "index_repository", "repo_path": "/no/such/repo/anywhere" }),
+        json!({ "operation": "index_repository", "repo_path": "no/such/repo/anywhere" }),
     );
-    assert_eq!(r["status"], "failed");
-    assert!(r["message"].as_str().unwrap().contains("does not exist"));
+    assert_eq!(r.status, "failed");
+    assert!(r.summary().contains("does not exist"), "{r}");
+    assert_eq!(
+        r.summary(),
+        "index_repository: repo_path does not exist: no/such/repo/anywhere"
+    );
+
+    fs::write(td.path().join("a-file.rs"), "fn f() {}\n").unwrap();
+    let file = run_tool(
+        td.path(),
+        json!({ "operation": "index_repository", "repo_path": "a-file.rs" }),
+    );
+    assert_eq!(file.status, "failed");
+    assert_eq!(
+        file.summary(),
+        "index_repository: repo_path is not a directory: a-file.rs"
+    );
 }
 
 // ── Scenario 15: SWE-bench go/no-go is an external manual follow-up ────────────
@@ -471,14 +367,14 @@ fn scenario_14_bad_repo_path_failed() {
 
 #[test]
 fn extra_get_symbol_before_index_is_failed() {
-    let td = TestDir::new();
-    write_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("rust", td.path());
     // No index yet — the db is empty; symbol lookup must be a clean failure.
     let r = run_tool(
         td.path(),
         json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap(), "symbol_id": SYM_TOP }),
     );
-    assert_eq!(r["status"], "failed");
+    assert_eq!(r.status, "failed");
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -496,7 +392,6 @@ fn extra_get_symbol_before_index_is_failed() {
 //   unit_tests::test_core ──path──▶ core     (#[test])
 //   handler carries #[get("/core")]          (route)
 
-const IPKG: &str = "impact_fixture";
 const I_CORE: &str = "rust://impact_fixture/#core(->i64)";
 const I_RUN: &str = "rust://impact_fixture/#Engine::run(&self->i64)";
 const I_HELPER: &str = "rust://impact_fixture/#Engine::helper(&self->i64)";
@@ -508,82 +403,6 @@ const I_HANDLER: &str = "rust://impact_fixture/handlers#handler(->i64)";
 const I_TEST_CORE: &str = "rust://impact_fixture/unit_tests#test_core()";
 const I_AMBIG_CALLER: &str = "rust://impact_fixture/#ambiguous_caller(->i64)";
 const I_SHARED_A: &str = "rust://impact_fixture/ambig_a#shared(->i64)";
-
-fn write_impact_fixture(repo: &Path) {
-    fs::write(
-        repo.join("Cargo.toml"),
-        format!("[package]\nname = \"{IPKG}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
-    )
-    .unwrap();
-    fs::create_dir_all(repo.join("src")).unwrap();
-    fs::write(
-        repo.join("src/lib.rs"),
-        r#"//! Impact analysis fixture crate.
-
-pub mod repo;
-pub mod service;
-pub mod handlers;
-pub mod ambig_a;
-pub mod ambig_b;
-
-/// The core leaf everyone depends on.
-pub fn core() -> i64 {
-    1
-}
-
-/// An engine that reaches core through a method call.
-pub struct Engine;
-
-impl Engine {
-    pub fn run(&self) -> i64 {
-        self.helper()
-    }
-    fn helper(&self) -> i64 {
-        core()
-    }
-}
-
-/// Free call to an ambiguous name `shared`.
-pub fn ambiguous_caller() -> i64 {
-    shared()
-}
-
-#[cfg(test)]
-mod unit_tests {
-    #[test]
-    fn test_core() {
-        super::core();
-    }
-}
-"#,
-    )
-    .unwrap();
-    fs::write(
-        repo.join("src/repo.rs"),
-        "//! Repository / persistence layer.\n\n/// Saves via a raw execute call.\npub fn save() -> i64 {\n    execute();\n    crate::core()\n}\n\nfn execute() -> i64 {\n    0\n}\n",
-    )
-    .unwrap();
-    fs::write(
-        repo.join("src/service.rs"),
-        "//! Service layer.\n\npub fn svc() -> i64 {\n    crate::repo::save()\n}\n",
-    )
-    .unwrap();
-    fs::write(
-        repo.join("src/handlers.rs"),
-        "//! HTTP handlers.\n\n#[get(\"/core\")]\npub fn handler() -> i64 {\n    svc()\n}\n",
-    )
-    .unwrap();
-    fs::write(
-        repo.join("src/ambig_a.rs"),
-        "pub fn shared() -> i64 {\n    0\n}\n",
-    )
-    .unwrap();
-    fs::write(
-        repo.join("src/ambig_b.rs"),
-        "pub fn shared() -> i64 {\n    1\n}\n",
-    )
-    .unwrap();
-}
 
 fn ids(list: &Value) -> Vec<String> {
     list.as_array()
@@ -602,13 +421,13 @@ fn conf_of(list: &Value, sid: &str) -> Option<String> {
 
 /// Run impact_analysis over the single line a symbol occupies (looked up via
 /// get_symbol), so tests don't hard-code brittle line numbers.
-fn impact_over_symbol(repo: &Path, file: &str, symbol_id: &str, max_nodes: i64) -> Value {
+fn impact_over_symbol(repo: &Path, file: &str, symbol_id: &str, max_nodes: i64) -> Outcome {
     let g = run_tool(
         repo,
         json!({ "operation": "get_symbol", "repo_path": repo.to_str().unwrap(), "symbol_id": symbol_id }),
     );
-    let start = g["start_line"].as_i64().unwrap();
-    let end = g["end_line"].as_i64().unwrap();
+    let start = g.data["start_line"].as_i64().unwrap();
+    let end = g.data["end_line"].as_i64().unwrap();
     run_tool(
         repo,
         json!({ "operation": "impact_analysis", "repo_path": repo.to_str().unwrap(),
@@ -620,20 +439,20 @@ fn impact_over_symbol(repo: &Path, file: &str, symbol_id: &str, max_nodes: i64) 
 
 #[test]
 fn impact_01_full_shape_and_confidence() {
-    let td = TestDir::new();
-    write_impact_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("impact", td.path());
     index(td.path());
 
     let r = impact_over_symbol(td.path(), "src/lib.rs", I_CORE, 50);
-    assert_eq!(r["status"], "passed", "{r}");
+    assert_eq!(r.status, "passed", "{r}");
 
     // roots = exactly core, depth 0, definite.
-    assert_eq!(ids(&r["roots"]), vec![I_CORE.to_string()]);
-    assert_eq!(r["roots"][0]["depth"], 0);
-    assert_eq!(r["roots"][0]["confidence"], "definite");
+    assert_eq!(ids(&r.data["roots"]), vec![I_CORE.to_string()]);
+    assert_eq!(r.data["roots"][0]["depth"], 0);
+    assert_eq!(r.data["roots"][0]["confidence"], "definite");
 
     // callers = the reverse call-graph closure (roots excluded).
-    let callers = ids(&r["callers"]);
+    let callers = ids(&r.data["callers"]);
     for expect in [I_HELPER, I_SAVE, I_TEST_CORE, I_RUN, I_SERVICE, I_HANDLER] {
         assert!(
             callers.contains(&expect.to_string()),
@@ -648,35 +467,38 @@ fn impact_01_full_shape_and_confidence() {
     // Confidence: unique free/path calls are definite; the method hop to helper
     // makes run heuristic (weakest along the path).
     assert_eq!(
-        conf_of(&r["callers"], I_HELPER).as_deref(),
-        Some("definite")
-    );
-    assert_eq!(conf_of(&r["callers"], I_SAVE).as_deref(), Some("definite"));
-    assert_eq!(
-        conf_of(&r["callers"], I_SERVICE).as_deref(),
+        conf_of(&r.data["callers"], I_HELPER).as_deref(),
         Some("definite")
     );
     assert_eq!(
-        conf_of(&r["callers"], I_HANDLER).as_deref(),
+        conf_of(&r.data["callers"], I_SAVE).as_deref(),
         Some("definite")
     );
     assert_eq!(
-        conf_of(&r["callers"], I_RUN).as_deref(),
+        conf_of(&r.data["callers"], I_SERVICE).as_deref(),
+        Some("definite")
+    );
+    assert_eq!(
+        conf_of(&r.data["callers"], I_HANDLER).as_deref(),
+        Some("definite")
+    );
+    assert_eq!(
+        conf_of(&r.data["callers"], I_RUN).as_deref(),
         Some("heuristic"),
         "run reaches core via a method hop → weakest confidence heuristic: {r}"
     );
 
     // Classification buckets (drawn from roots ∪ callers).
-    let tests = ids(&r["tests"]);
+    let tests = ids(&r.data["tests"]);
     assert!(tests.contains(&I_TEST_CORE.to_string()), "tests: {tests:?}");
-    let routes = ids(&r["routes"]);
+    let routes = ids(&r.data["routes"]);
     assert_eq!(routes, vec![I_HANDLER.to_string()], "routes: {routes:?}");
-    let persistence = ids(&r["persistence_operations"]);
+    let persistence = ids(&r.data["persistence_operations"]);
     assert!(
         persistence.contains(&I_SAVE.to_string()),
         "persistence: {persistence:?}"
     );
-    let public = ids(&r["public_apis"]);
+    let public = ids(&r.data["public_apis"]);
     for expect in [I_CORE, I_SAVE, I_SERVICE, I_HANDLER, I_RUN] {
         assert!(
             public.contains(&expect.to_string()),
@@ -693,47 +515,51 @@ fn impact_01_full_shape_and_confidence() {
         "test_core is not pub: {public:?}"
     );
 
-    assert_eq!(r["truncated"], false);
-    // Full payload is on disk.
-    let dp = r["data_path"].as_str().expect("data_path present");
-    assert!(Path::new(dp).exists(), "impact file should exist: {dp}");
+    assert_eq!(r.data["truncated"], false);
+    // Full payload is on disk, named relative to the work folder the call named.
+    let dp = r.data["data_path"].as_str().expect("data_path present");
+    assert!(dp.starts_with(".murmur/impacts/impact-"), "data_path: {dp}");
+    assert!(
+        td.path().join(dp).exists(),
+        "impact file should exist: {dp}"
+    );
 }
 
 // ── impact 02: root is itself a test/route/persistence/public (buckets ∋ root) ─
 
 #[test]
 fn impact_02_root_classification() {
-    let td = TestDir::new();
-    write_impact_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("impact", td.path());
     index(td.path());
 
     // Editing the test fn itself: it is a root AND classified as a test.
     let rt = impact_over_symbol(td.path(), "src/lib.rs", I_TEST_CORE, 50);
-    assert_eq!(rt["status"], "passed");
+    assert_eq!(rt.status, "passed");
     assert!(
-        ids(&rt["tests"]).contains(&I_TEST_CORE.to_string()),
+        ids(&rt.data["tests"]).contains(&I_TEST_CORE.to_string()),
         "root test bucket: {rt}"
     );
 
     // Editing the handler: root, and classified as a route + public api.
     let rh = impact_over_symbol(td.path(), "src/handlers.rs", I_HANDLER, 50);
     assert!(
-        ids(&rh["routes"]).contains(&I_HANDLER.to_string()),
+        ids(&rh.data["routes"]).contains(&I_HANDLER.to_string()),
         "root route bucket: {rh}"
     );
     assert!(
-        ids(&rh["public_apis"]).contains(&I_HANDLER.to_string()),
+        ids(&rh.data["public_apis"]).contains(&I_HANDLER.to_string()),
         "root public bucket: {rh}"
     );
 
     // Editing save: root, classified as a persistence op + public api.
     let rs = impact_over_symbol(td.path(), "src/repo.rs", I_SAVE, 50);
     assert!(
-        ids(&rs["persistence_operations"]).contains(&I_SAVE.to_string()),
+        ids(&rs.data["persistence_operations"]).contains(&I_SAVE.to_string()),
         "root persist: {rs}"
     );
     assert!(
-        ids(&rs["public_apis"]).contains(&I_SAVE.to_string()),
+        ids(&rs.data["public_apis"]).contains(&I_SAVE.to_string()),
         "root public: {rs}"
     );
 }
@@ -742,17 +568,17 @@ fn impact_02_root_classification() {
 
 #[test]
 fn impact_03_ambiguous_name_is_possible() {
-    let td = TestDir::new();
-    write_impact_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("impact", td.path());
     index(td.path());
 
     // Editing ambig_a::shared (the lexicographically-first, hence resolved,
     // candidate for the bare `shared()` call): its caller was reached via an
     // ambiguous name → possible.
     let r = impact_over_symbol(td.path(), "src/ambig_a.rs", I_SHARED_A, 50);
-    assert_eq!(r["status"], "passed", "{r}");
+    assert_eq!(r.status, "passed", "{r}");
     assert_eq!(
-        conf_of(&r["callers"], I_AMBIG_CALLER).as_deref(),
+        conf_of(&r.data["callers"], I_AMBIG_CALLER).as_deref(),
         Some("possible"),
         "ambiguous free call must be possible: {r}"
     );
@@ -763,8 +589,8 @@ fn impact_03_ambiguous_name_is_possible() {
 #[test]
 fn impact_04_edge_confidence_in_db() {
     use rusqlite::Connection;
-    let td = TestDir::new();
-    write_impact_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("impact", td.path());
     index(td.path());
 
     let db = td.path().join(".murmur/code-graph.db");
@@ -803,45 +629,48 @@ fn impact_04_edge_confidence_in_db() {
 
 #[test]
 fn impact_05_range_overlaps_nothing_is_empty() {
-    let td = TestDir::new();
-    write_impact_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("impact", td.path());
     index(td.path());
     let r = run_tool(
         td.path(),
         json!({ "operation": "impact_analysis", "repo_path": td.path().to_str().unwrap(),
                 "file": "src/lib.rs", "start_line": 9000, "end_line": 9001 }),
     );
-    assert_eq!(r["status"], "passed", "empty overlap is not an error: {r}");
-    assert!(ids(&r["roots"]).is_empty());
-    assert!(ids(&r["callers"]).is_empty());
-    assert_eq!(r["truncated"], false);
+    assert_eq!(r.status, "passed", "empty overlap is not an error: {r}");
+    assert!(ids(&r.data["roots"]).is_empty());
+    assert!(ids(&r.data["callers"]).is_empty());
+    assert_eq!(r.data["truncated"], false);
 }
 
 // ── impact 06: a leaf with no callers returns an empty callers list ───────────
 
 #[test]
 fn impact_06_leaf_has_no_callers() {
-    let td = TestDir::new();
-    write_impact_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("impact", td.path());
     index(td.path());
     // Nobody calls handler; it is a root with zero callers.
     let r = impact_over_symbol(td.path(), "src/handlers.rs", I_HANDLER, 50);
-    assert_eq!(r["status"], "passed");
-    assert_eq!(ids(&r["roots"]), vec![I_HANDLER.to_string()]);
-    assert!(ids(&r["callers"]).is_empty(), "handler has no callers: {r}");
+    assert_eq!(r.status, "passed");
+    assert_eq!(ids(&r.data["roots"]), vec![I_HANDLER.to_string()]);
+    assert!(
+        ids(&r.data["callers"]).is_empty(),
+        "handler has no callers: {r}"
+    );
 }
 
 // ── impact 07: max_nodes truncation ───────────────────────────────────────────
 
 #[test]
 fn impact_07_max_nodes_truncates() {
-    let td = TestDir::new();
-    write_impact_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("impact", td.path());
     index(td.path());
     let r = impact_over_symbol(td.path(), "src/lib.rs", I_CORE, 2);
-    assert_eq!(r["status"], "passed");
-    assert_eq!(r["truncated"], true, "{r}");
-    let total = ids(&r["roots"]).len() + ids(&r["callers"]).len();
+    assert_eq!(r.status, "passed");
+    assert_eq!(r.data["truncated"], true, "{r}");
+    let total = ids(&r.data["roots"]).len() + ids(&r.data["callers"]).len();
     assert_eq!(total, 2, "roots+callers capped at max_nodes: {r}");
 }
 
@@ -849,8 +678,8 @@ fn impact_07_max_nodes_truncates() {
 
 #[test]
 fn impact_08_malformed_inputs_failed() {
-    let td = TestDir::new();
-    write_impact_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("impact", td.path());
     index(td.path());
     let base = td.path().to_str().unwrap();
 
@@ -858,55 +687,46 @@ fn impact_08_malformed_inputs_failed() {
         td.path(),
         json!({ "operation": "impact_analysis", "repo_path": base, "start_line": 1, "end_line": 2 }),
     );
-    assert_eq!(missing_file["status"], "failed");
-    assert!(missing_file["message"].as_str().unwrap().contains("file"));
+    assert_eq!(missing_file.status, "failed");
+    assert!(missing_file.summary().contains("file"));
 
     let missing_start = run_tool(
         td.path(),
         json!({ "operation": "impact_analysis", "repo_path": base, "file": "src/lib.rs", "end_line": 2 }),
     );
-    assert_eq!(missing_start["status"], "failed");
-    assert!(missing_start["message"]
-        .as_str()
-        .unwrap()
-        .contains("start_line"));
+    assert_eq!(missing_start.status, "failed");
+    assert!(missing_start.summary().contains("start_line"));
 
     let missing_end = run_tool(
         td.path(),
         json!({ "operation": "impact_analysis", "repo_path": base, "file": "src/lib.rs", "start_line": 2 }),
     );
-    assert_eq!(missing_end["status"], "failed");
-    assert!(missing_end["message"]
-        .as_str()
-        .unwrap()
-        .contains("end_line"));
+    assert_eq!(missing_end.status, "failed");
+    assert!(missing_end.summary().contains("end_line"));
 
     let inverted = run_tool(
         td.path(),
         json!({ "operation": "impact_analysis", "repo_path": base, "file": "src/lib.rs",
                 "start_line": 10, "end_line": 5 }),
     );
-    assert_eq!(inverted["status"], "failed");
-    assert!(inverted["message"].as_str().unwrap().contains("start_line"));
+    assert_eq!(inverted.status, "failed");
+    assert!(inverted.summary().contains("start_line"));
 }
 
 // ── impact 09: a file that was never indexed → failed (distinct from empty) ────
 
 #[test]
 fn impact_09_file_not_indexed_failed() {
-    let td = TestDir::new();
-    write_impact_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("impact", td.path());
     index(td.path());
     let r = run_tool(
         td.path(),
         json!({ "operation": "impact_analysis", "repo_path": td.path().to_str().unwrap(),
                 "file": "src/does_not_exist.rs", "start_line": 1, "end_line": 2 }),
     );
-    assert_eq!(r["status"], "failed");
-    assert!(
-        r["message"].as_str().unwrap().contains("not indexed"),
-        "{r}"
-    );
+    assert_eq!(r.status, "failed");
+    assert!(r.summary().contains("not indexed"), "{r}");
 }
 
 // ── impact 10: pre-slice database migrates + clears + repopulates ─────────────
@@ -958,8 +778,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[test]
 fn impact_10_pre_slice_db_migrates_and_repopulates() {
     use rusqlite::Connection;
-    let td = TestDir::new();
-    write_impact_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("impact", td.path());
 
     // Build a pre-slice-shape database by hand. Crucially, store src/lib.rs with
     // its *real* current content hash and a stale symbol row: without the
@@ -989,7 +809,7 @@ fn impact_10_pre_slice_db_migrates_and_repopulates() {
     // Open with the new binary via a normal index pass (triggers db::open →
     // migration). Migration must add the columns and clear all rows.
     let idx = index(td.path());
-    assert_eq!(idx["status"], "passed", "{idx}");
+    assert_eq!(idx.status, "passed", "{idx}");
 
     // The stale pre-slice symbol is gone (tables were cleared on migration).
     let stale = run_tool(
@@ -998,7 +818,7 @@ fn impact_10_pre_slice_db_migrates_and_repopulates() {
                 "symbol_id": "rust://impact_fixture/#stale()" }),
     );
     assert_eq!(
-        stale["status"], "failed",
+        stale.status, "failed",
         "stale symbol must be cleared: {stale}"
     );
 
@@ -1009,11 +829,11 @@ fn impact_10_pre_slice_db_migrates_and_repopulates() {
         td.path(),
         json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap(), "symbol_id": I_CORE }),
     );
+    assert_eq!(g.status, "passed", "core must resolve post-migration: {g}");
     assert_eq!(
-        g["status"], "passed",
-        "core must resolve post-migration: {g}"
+        g.data["visibility"], "pub",
+        "visibility must be populated: {g}"
     );
-    assert_eq!(g["visibility"], "pub", "visibility must be populated: {g}");
 
     // The new columns really exist on disk.
     let conn = Connection::open(&db_path).unwrap();
@@ -1035,9 +855,9 @@ fn impact_10_pre_slice_db_migrates_and_repopulates() {
 
     // And impact_analysis now sees populated confidence data.
     let r = impact_over_symbol(td.path(), "src/lib.rs", I_CORE, 50);
-    assert_eq!(r["status"], "passed", "{r}");
+    assert_eq!(r.status, "passed", "{r}");
     assert_eq!(
-        conf_of(&r["callers"], I_RUN).as_deref(),
+        conf_of(&r.data["callers"], I_RUN).as_deref(),
         Some("heuristic"),
         "{r}"
     );
@@ -1063,7 +883,6 @@ fn impact_10_pre_slice_db_migrates_and_repopulates() {
 //   test_add ──free──▶ add
 //   use_client ──method─▶ fetch     (unresolved: no `fetch` symbol)
 
-const PYPKG: &str = "pyfixture";
 const PY_ADD: &str = "python://pyfixture/pyfixture.core#add(a,b)";
 const PY_WIDGET: &str = "python://pyfixture/pyfixture.core#Widget()";
 const PY_DOUBLED: &str = "python://pyfixture/pyfixture.core#Widget::doubled(self)";
@@ -1074,86 +893,20 @@ const PY_HANDLER: &str = "python://pyfixture/pyfixture.handlers#handler()";
 const PY_SAVE: &str = "python://pyfixture/pyfixture.handlers#save()";
 const PY_TEST_ADD: &str = "python://pyfixture/tests.test_core#test_add()";
 
-fn write_python_fixture(repo: &Path) {
-    fs::write(
-        repo.join("pyproject.toml"),
-        format!("[project]\nname = \"{PYPKG}\"\nversion = \"0.1.0\"\n"),
-    )
-    .unwrap();
-    fs::create_dir_all(repo.join("pyfixture")).unwrap();
-    fs::write(repo.join("pyfixture/__init__.py"), "").unwrap();
-    fs::write(
-        repo.join("pyfixture/core.py"),
-        r#""""Core module."""
-
-
-def add(a, b):
-    return a + b
-
-
-class Widget:
-    """A widget holding a number."""
-
-    def __init__(self, n):
-        self.n = n
-
-    def doubled(self):
-        return add(self.n, self.n)
-
-    def _hidden(self):
-        return add(1, 2)
-
-
-def top():
-    w = Widget(2)
-    return w.doubled()
-
-
-def _private():
-    return 0
-"#,
-    )
-    .unwrap();
-    fs::write(
-        repo.join("pyfixture/handlers.py"),
-        r#"@app.get("/core")
-def handler():
-    return save()
-
-
-def save():
-    execute()
-    return 1
-
-
-def execute():
-    return 0
-
-
-def use_client(c):
-    return c.fetch()
-"#,
-    )
-    .unwrap();
-    fs::create_dir_all(repo.join("tests")).unwrap();
-    fs::write(
-        repo.join("tests/test_core.py"),
-        "from pyfixture.core import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n",
-    )
-    .unwrap();
-}
-
 // ── py 01: index populates python rows, python:// ids, files.language ─────────
 
 #[test]
 fn py_01_index_populates_python_rows() {
     use rusqlite::Connection;
-    let td = TestDir::new();
-    write_python_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("python", td.path());
     let r = index(td.path());
-    assert_eq!(r["status"], "passed", "{r}");
-    assert_eq!(r["changed_files"], 4, "4 .py files: {r}");
-    assert!(r["total_symbols"].as_i64().unwrap() >= 8, "symbols: {r}");
+    assert_eq!(r.status, "passed", "{r}");
+    assert_eq!(r.data["changed_files"], 4, "4 .py files: {r}");
+    assert!(
+        r.data["total_symbols"].as_i64().unwrap() >= 8,
+        "symbols: {r}"
+    );
 
     let conn = Connection::open(td.path().join(".murmur/code-graph.db")).unwrap();
     // Every files row is language = 'python' (the upsert_file '\''rust'\'' literal fix).
@@ -1191,29 +944,31 @@ fn py_01_index_populates_python_rows() {
 
 #[test]
 fn py_02_reindex_is_noop_read() {
-    let td = TestDir::new();
-    write_python_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("python", td.path());
     index(td.path());
     let r = index(td.path());
-    assert_eq!(r["status"], "passed");
-    assert_eq!(r["changed_files"], 0);
-    assert_eq!(r["unchanged_files"], 4);
-    assert_eq!(r["metadata"]["state_effect"], "read");
+    assert_eq!(r.status, "passed");
+    assert_eq!(r.data["changed_files"], 0);
+    assert_eq!(r.data["unchanged_files"], 4);
+    // The envelope declares this call a read for the redundant-call detector; metadata never
+    // reaches the model (the harness asserts ToolResult.metadata is empty, and murmur's native
+    // dispatch dropped it too), so lib test `ops::tests::a_noop_reindex_declares_a_read_and_a_change_a_mutate` asserts it.
 }
 
 // ── py 03: find_symbol ranked FTS search ──────────────────────────────────────
 
 #[test]
 fn py_03_find_symbol_matches() {
-    let td = TestDir::new();
-    write_python_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("python", td.path());
     index(td.path());
     let r = run_tool(
         td.path(),
         json!({ "operation": "find_symbol", "repo_path": td.path().to_str().unwrap(), "query": "widget" }),
     );
-    assert_eq!(r["status"], "passed");
-    let ids: Vec<&str> = r["matches"]
+    assert_eq!(r.status, "passed");
+    let ids: Vec<&str> = r.data["matches"]
         .as_array()
         .unwrap()
         .iter()
@@ -1229,20 +984,20 @@ fn py_03_find_symbol_matches() {
 
 #[test]
 fn py_04_get_symbol_detail() {
-    let td = TestDir::new();
-    write_python_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("python", td.path());
     index(td.path());
     let r = run_tool(
         td.path(),
         json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap(), "symbol_id": PY_TOP }),
     );
-    assert_eq!(r["status"], "passed", "{r}");
-    assert_eq!(r["qualified_name"], "top");
-    assert_eq!(r["kind"], "function");
-    assert_eq!(r["language"], "python");
-    assert_eq!(r["file"], "pyfixture/core.py");
+    assert_eq!(r.status, "passed", "{r}");
+    assert_eq!(r.data["qualified_name"], "top");
+    assert_eq!(r.data["kind"], "function");
+    assert_eq!(r.data["language"], "python");
+    assert_eq!(r.data["file"], "pyfixture/core.py");
     // top calls Widget (free) and doubled (method); both resolve.
-    let callees: Vec<&str> = r["callees"]
+    let callees: Vec<&str> = r.data["callees"]
         .as_array()
         .unwrap()
         .iter()
@@ -1252,21 +1007,23 @@ fn py_04_get_symbol_detail() {
         callees.contains(&PY_WIDGET) && callees.contains(&PY_DOUBLED),
         "callees: {callees:?}"
     );
-    assert_eq!(r["metadata"]["resource_id"], PY_TOP);
+    // The resource_id is the symbol_id: lib test
+    // `ops::tests::symbol_operations_declare_the_symbol_id_as_the_resource` (metadata never
+    // reaches the model).
 }
 
 // ── py 05: visibility from underscore convention ──────────────────────────────
 
 #[test]
 fn py_05_visibility_underscore_convention() {
-    let td = TestDir::new();
-    write_python_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("python", td.path());
     index(td.path());
     let vis = |sid: &str| -> String {
         run_tool(
             td.path(),
             json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap(), "symbol_id": sid }),
-        )["visibility"]
+        ).data["visibility"]
             .as_str()
             .unwrap()
             .to_string()
@@ -1281,8 +1038,8 @@ fn py_05_visibility_underscore_convention() {
 
 #[test]
 fn py_06_identity_survives_unrelated_edit() {
-    let td = TestDir::new();
-    write_python_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("python", td.path());
     index(td.path());
     // Edit an unrelated file (handlers.py), leaving core.py untouched.
     fs::write(
@@ -1291,20 +1048,23 @@ fn py_06_identity_survives_unrelated_edit() {
     )
     .unwrap();
     let re = index(td.path());
-    assert_eq!(re["changed_files"], 1, "only handlers.py changed: {re}");
+    assert_eq!(
+        re.data["changed_files"], 1,
+        "only handlers.py changed: {re}"
+    );
     let r = run_tool(
         td.path(),
         json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap(), "symbol_id": PY_ADD }),
     );
-    assert_eq!(r["status"], "passed", "add must still resolve: {r}");
+    assert_eq!(r.status, "passed", "add must still resolve: {r}");
 }
 
 // ── py 07: editing the symbol's own parameter list mints a new id ─────────────
 
 #[test]
 fn py_07_signature_change_mints_new_id() {
-    let td = TestDir::new();
-    write_python_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("python", td.path());
     index(td.path());
     // Change add's own parameter list: add(a, b) -> add(a, b, c).
     let core = fs::read_to_string(td.path().join("pyfixture/core.py")).unwrap();
@@ -1317,7 +1077,7 @@ fn py_07_signature_change_mints_new_id() {
         td.path(),
         json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap(), "symbol_id": PY_ADD }),
     );
-    assert_eq!(old["status"], "failed", "old id should be not-found: {old}");
+    assert_eq!(old.status, "failed", "old id should be not-found: {old}");
 
     // New id resolves.
     let new_id = "python://pyfixture/pyfixture.core#add(a,b,c)";
@@ -1325,15 +1085,15 @@ fn py_07_signature_change_mints_new_id() {
         td.path(),
         json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap(), "symbol_id": new_id }),
     );
-    assert_eq!(new["status"], "passed", "new id should resolve: {new}");
+    assert_eq!(new.status, "passed", "new id should resolve: {new}");
 }
 
 // ── py 08: slice_symbol bounded by max_depth ──────────────────────────────────
 
 #[test]
 fn py_08_slice_bounded_by_depth() {
-    let td = TestDir::new();
-    write_python_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("python", td.path());
     index(td.path());
     // Depth 1 from top reaches its direct callees (Widget, doubled) not add (depth 2).
     let r = run_tool(
@@ -1341,8 +1101,8 @@ fn py_08_slice_bounded_by_depth() {
         json!({ "operation": "slice_symbol", "repo_path": td.path().to_str().unwrap(),
                 "symbol_id": PY_TOP, "max_depth": 1, "max_nodes": 50 }),
     );
-    assert_eq!(r["status"], "passed");
-    let ids: Vec<&str> = r["nodes"]
+    assert_eq!(r.status, "passed");
+    let ids: Vec<&str> = r.data["nodes"]
         .as_array()
         .unwrap()
         .iter()
@@ -1362,17 +1122,17 @@ fn py_08_slice_bounded_by_depth() {
 
 #[test]
 fn py_09_explain_path_found() {
-    let td = TestDir::new();
-    write_python_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("python", td.path());
     index(td.path());
     let r = run_tool(
         td.path(),
         json!({ "operation": "explain_path", "repo_path": td.path().to_str().unwrap(),
                 "from": PY_TOP, "to": PY_ADD, "max_depth": 6 }),
     );
-    assert_eq!(r["status"], "passed");
-    assert_eq!(r["found"], true, "{r}");
-    let path: Vec<&str> = r["path"]
+    assert_eq!(r.status, "passed");
+    assert_eq!(r.data["found"], true, "{r}");
+    let path: Vec<&str> = r.data["path"]
         .as_array()
         .unwrap()
         .iter()
@@ -1386,19 +1146,19 @@ fn py_09_explain_path_found() {
 
 #[test]
 fn py_10_impact_full_shape() {
-    let td = TestDir::new();
-    write_python_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("python", td.path());
     index(td.path());
 
     let r = impact_over_symbol(td.path(), "pyfixture/core.py", PY_ADD, 50);
-    assert_eq!(r["status"], "passed", "{r}");
+    assert_eq!(r.status, "passed", "{r}");
 
     // roots = exactly add, depth 0, definite.
-    assert_eq!(ids(&r["roots"]), vec![PY_ADD.to_string()]);
-    assert_eq!(r["roots"][0]["confidence"], "definite");
+    assert_eq!(ids(&r.data["roots"]), vec![PY_ADD.to_string()]);
+    assert_eq!(r.data["roots"][0]["confidence"], "definite");
 
     // callers include doubled, _hidden, test_add, and (transitively) top.
-    let callers = ids(&r["callers"]);
+    let callers = ids(&r.data["callers"]);
     for expect in [PY_DOUBLED, PY_HIDDEN, PY_TEST_ADD, PY_TOP] {
         assert!(
             callers.contains(&expect.to_string()),
@@ -1412,24 +1172,24 @@ fn py_10_impact_full_shape() {
 
     // top reaches add via a method hop (w.doubled()) → heuristic (weakest).
     assert_eq!(
-        conf_of(&r["callers"], PY_TOP).as_deref(),
+        conf_of(&r.data["callers"], PY_TOP).as_deref(),
         Some("heuristic"),
         "top reaches add through a method call → heuristic: {r}"
     );
     // doubled -> add is a bare free call to a unique name → definite.
     assert_eq!(
-        conf_of(&r["callers"], PY_DOUBLED).as_deref(),
+        conf_of(&r.data["callers"], PY_DOUBLED).as_deref(),
         Some("definite")
     );
 
     // tests bucket: test_add (test_ prefix + test_*.py file + tests/ dir).
     assert!(
-        ids(&r["tests"]).contains(&PY_TEST_ADD.to_string()),
+        ids(&r.data["tests"]).contains(&PY_TEST_ADD.to_string()),
         "tests: {r}"
     );
 
     // public_apis: names not starting with _  (add, top, doubled); not _hidden.
-    let public = ids(&r["public_apis"]);
+    let public = ids(&r.data["public_apis"]);
     assert!(
         public.contains(&PY_ADD.to_string()),
         "add public: {public:?}"
@@ -1448,22 +1208,22 @@ fn py_10_impact_full_shape() {
 
 #[test]
 fn py_11_impact_route_and_persistence() {
-    let td = TestDir::new();
-    write_python_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("python", td.path());
     index(td.path());
 
     // handler carries @app.get("/core") → route; it is a root with no callers.
     let rh = impact_over_symbol(td.path(), "pyfixture/handlers.py", PY_HANDLER, 50);
-    assert_eq!(rh["status"], "passed");
+    assert_eq!(rh.status, "passed");
     assert!(
-        ids(&rh["routes"]).contains(&PY_HANDLER.to_string()),
+        ids(&rh.data["routes"]).contains(&PY_HANDLER.to_string()),
         "route bucket: {rh}"
     );
 
     // save calls execute() (a persistence marker) → persistence bucket.
     let rs = impact_over_symbol(td.path(), "pyfixture/handlers.py", PY_SAVE, 50);
     assert!(
-        ids(&rs["persistence_operations"]).contains(&PY_SAVE.to_string()),
+        ids(&rs.data["persistence_operations"]).contains(&PY_SAVE.to_string()),
         "persist: {rs}"
     );
 }
@@ -1473,8 +1233,8 @@ fn py_11_impact_route_and_persistence() {
 #[test]
 fn py_12_method_call_is_heuristic() {
     use rusqlite::Connection;
-    let td = TestDir::new();
-    write_python_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("python", td.path());
     index(td.path());
 
     let conn = Connection::open(td.path().join(".murmur/code-graph.db")).unwrap();
@@ -1506,49 +1266,27 @@ fn py_12_method_call_is_heuristic() {
 
 #[test]
 fn py_13_missing_symbol_id_failed() {
-    let td = TestDir::new();
-    write_python_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("python", td.path());
     index(td.path());
     let r = run_tool(
         td.path(),
         json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap() }),
     );
-    assert_eq!(r["status"], "failed");
-    assert!(r["message"].as_str().unwrap().contains("symbol_id"));
+    assert_eq!(r.status, "failed");
+    assert!(r.summary().contains("symbol_id"));
 }
 
 // ── py 14: a single index pass covers a mixed Rust + Python repo ───────────────
 
-fn write_mixed_fixture(repo: &Path) {
-    // A Rust crate at the root...
-    fs::write(
-        repo.join("Cargo.toml"),
-        "[package]\nname = \"mixcrate\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-    )
-    .unwrap();
-    fs::create_dir_all(repo.join("src")).unwrap();
-    fs::write(
-        repo.join("src/lib.rs"),
-        "pub fn rust_fn() -> i64 {\n    1\n}\n",
-    )
-    .unwrap();
-    // ...and a Python tree beside it.
-    fs::create_dir_all(repo.join("py")).unwrap();
-    fs::write(
-        repo.join("py/app.py"),
-        "def py_fn():\n    return helper()\n\n\ndef helper():\n    return 2\n",
-    )
-    .unwrap();
-}
-
 #[test]
 fn py_14_mixed_repo_indexes_both_languages() {
     use rusqlite::Connection;
-    let td = TestDir::new();
-    write_mixed_fixture(td.path());
+    let td = TestDir::new("it");
+    write_repo("mixed", td.path());
     let r = index(td.path());
-    assert_eq!(r["status"], "passed", "{r}");
-    assert_eq!(r["changed_files"], 2, "lib.rs + app.py: {r}");
+    assert_eq!(r.status, "passed", "{r}");
+    assert_eq!(r.data["changed_files"], 2, "lib.rs + app.py: {r}");
 
     let conn = Connection::open(td.path().join(".murmur/code-graph.db")).unwrap();
     // Rust file/symbol...
@@ -1575,10 +1313,7 @@ fn py_14_mixed_repo_indexes_both_languages() {
         json!({ "operation": "get_symbol", "repo_path": td.path().to_str().unwrap(),
                 "symbol_id": "rust://mixcrate/#rust_fn(->i64)" }),
     );
-    assert_eq!(
-        rust_fn["status"], "passed",
-        "rust symbol resolves: {rust_fn}"
-    );
+    assert_eq!(rust_fn.status, "passed", "rust symbol resolves: {rust_fn}");
     // The Python package name falls back to the repo directory name (an opaque
     // tempdir), so assert the Python symbol via find_symbol rather than a
     // hard-coded id, keeping the test independent of the tempdir name.
@@ -1586,7 +1321,7 @@ fn py_14_mixed_repo_indexes_both_languages() {
         td.path(),
         json!({ "operation": "find_symbol", "repo_path": td.path().to_str().unwrap(), "query": "py_fn" }),
     );
-    let ids: Vec<String> = found["matches"]
+    let ids: Vec<String> = found.data["matches"]
         .as_array()
         .unwrap()
         .iter()

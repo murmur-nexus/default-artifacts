@@ -2779,13 +2779,18 @@ dependencies = [
 name = "tool-code-graph"
 version = "0.0.0"
 dependencies = [
+ "murmur-file-tools",
+ "murmur-host-roots",
  "rusqlite",
- "serde",
  "serde_json",
  "sha2",
  "tree-sitter",
  "tree-sitter-python",
  "tree-sitter-rust",
+ "wasip2",
+ "wasmtime",
+ "wasmtime-wasi",
+ "wit-bindgen 0.59.0",
 ]
 
 [[package]]

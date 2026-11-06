@@ -37,7 +37,8 @@
 #                   third-party versions walked out of Cargo.lock,
 #                   rust-toolchain.toml, and — for a wasm artifact whose
 #                   resolved closure holds a crate that compiles C sources
-#                   (WASM_C_CRATES: libsqlite3-sys) — wasi-sdk.toml, the C
+#                   (WASM_C_CRATES: libsqlite3-sys, tree-sitter and its
+#                   grammars) — wasi-sdk.toml, the C
 #                   toolchain that compiles them into the component. Narrowed to the one artifact on
 #                   purpose: adding an unrelated crate to the workspace changes
 #                   neither its dependencies nor its bytes. A crate's version
@@ -389,9 +390,11 @@ def locked_closure(state, crate):
 
 # Third-party crates that compile C sources into a wasm32-wasip2 component with the
 # pinned wasi-sdk (wasi-sdk.toml). A wasm artifact whose resolved closure holds one
-# of these takes wasi-sdk.toml as a build input. A later port that brings another C
-# crate into a component adds it here (e.g. tree-sitter's, for tool-code-graph).
-WASM_C_CRATES = ("libsqlite3-sys",)
+# of these takes wasi-sdk.toml as a build input: bundled SQLite (tool-test-report,
+# tool-code-graph), and tree-sitter's runtime and the Rust and Python grammars
+# (tool-code-graph). A later port that brings another C crate into a component adds
+# it here.
+WASM_C_CRATES = ("libsqlite3-sys", "tree-sitter", "tree-sitter-rust", "tree-sitter-python")
 
 
 def workspace_inputs(ref, crate, declared, inherits_version, is_wasm):

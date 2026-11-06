@@ -1,0 +1,28 @@
+{
+  "impact": {
+    "Cargo.toml": "[package]\nname = \"impact_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    "src/ambig_a.rs": "pub fn shared() -> i64 {\n    0\n}\n",
+    "src/ambig_b.rs": "pub fn shared() -> i64 {\n    1\n}\n",
+    "src/handlers.rs": "//! HTTP handlers.\n\n#[get(\"/core\")]\npub fn handler() -> i64 {\n    svc()\n}\n",
+    "src/lib.rs": "//! Impact analysis fixture crate.\n\npub mod repo;\npub mod service;\npub mod handlers;\npub mod ambig_a;\npub mod ambig_b;\n\n/// The core leaf everyone depends on.\npub fn core() -> i64 {\n    1\n}\n\n/// An engine that reaches core through a method call.\npub struct Engine;\n\nimpl Engine {\n    pub fn run(&self) -> i64 {\n        self.helper()\n    }\n    fn helper(&self) -> i64 {\n        core()\n    }\n}\n\n/// Free call to an ambiguous name `shared`.\npub fn ambiguous_caller() -> i64 {\n    shared()\n}\n\n#[cfg(test)]\nmod unit_tests {\n    #[test]\n    fn test_core() {\n        super::core();\n    }\n}\n",
+    "src/repo.rs": "//! Repository / persistence layer.\n\n/// Saves via a raw execute call.\npub fn save() -> i64 {\n    execute();\n    crate::core()\n}\n\nfn execute() -> i64 {\n    0\n}\n",
+    "src/service.rs": "//! Service layer.\n\npub fn svc() -> i64 {\n    crate::repo::save()\n}\n"
+  },
+  "mixed": {
+    "Cargo.toml": "[package]\nname = \"mixcrate\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    "py/app.py": "def py_fn():\n    return helper()\n\n\ndef helper():\n    return 2\n",
+    "src/lib.rs": "pub fn rust_fn() -> i64 {\n    1\n}\n"
+  },
+  "python": {
+    "pyfixture/__init__.py": "",
+    "pyfixture/core.py": "\"\"\"Core module.\"\"\"\n\n\ndef add(a, b):\n    return a + b\n\n\nclass Widget:\n    \"\"\"A widget holding a number.\"\"\"\n\n    def __init__(self, n):\n        self.n = n\n\n    def doubled(self):\n        return add(self.n, self.n)\n\n    def _hidden(self):\n        return add(1, 2)\n\n\ndef top():\n    w = Widget(2)\n    return w.doubled()\n\n\ndef _private():\n    return 0\n",
+    "pyfixture/handlers.py": "@app.get(\"/core\")\ndef handler():\n    return save()\n\n\ndef save():\n    execute()\n    return 1\n\n\ndef execute():\n    return 0\n\n\ndef use_client(c):\n    return c.fetch()\n",
+    "pyproject.toml": "[project]\nname = \"pyfixture\"\nversion = \"0.1.0\"\n",
+    "tests/test_core.py": "from pyfixture.core import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+  },
+  "rust": {
+    "Cargo.toml": "[package]\nname = \"fixture_crate\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    "src/lib.rs": "//! Fixture crate root.\n\n/// Adds two numbers.\npub fn add(a: i64, b: i64) -> i64 {\n    a + b\n}\n\n/// A widget holding a number.\npub struct Widget {\n    pub n: i64,\n}\n\nimpl Widget {\n    /// Construct a widget.\n    pub fn new(n: i64) -> Widget {\n        Widget { n }\n    }\n    /// Double the widget via add.\n    pub fn doubled(&self) -> i64 {\n        add(self.n, self.n)\n    }\n}\n\n/// Entry point that builds a widget and doubles it.\npub fn top() -> i64 {\n    let w = Widget::new(2);\n    w.doubled()\n}\n\n/// Mutually recursive with pong \u2014 exercises cycle termination.\npub fn ping() -> i64 {\n    pong()\n}\n\n/// Mutually recursive with ping.\npub fn pong() -> i64 {\n    ping()\n}\n",
+    "src/util.rs": "/// An unrelated helper in another file.\npub fn helper() -> i64 {\n    42\n}\n"
+  }
+}

@@ -4,21 +4,47 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 
-[[bin]]
-name = "tool-code-graph"
-path = "src/main.rs"
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
 
 [dependencies]
-serde.workspace = true
 serde_json.workspace = true
+# The graph database. Its `bundled` feature compiles SQLite's C sources into the component
+# with the pinned wasi-sdk (wasi-sdk.toml), which .cargo/config.toml names as the
+# wasm32-wasip2 C compiler; no system SQLite is linked.
 rusqlite.workspace = true
+# The parsers. tree-sitter's runtime and both grammars are C sources, compiled by the same
+# wasi-sdk. No `wasm` feature (that embeds a Wasm engine to load grammars at run time).
 tree-sitter.workspace = true
 tree-sitter-rust.workspace = true
 tree-sitter-python.workspace = true
+# Per-file content hashes and the slice/impact payload file names.
 sha2.workspace = true
+# Binds the murmur:tool/run@0.2.0 export (world `tool`) in the wasm32 module.
+wit-bindgen.workspace = true
+# Where `repo_path` opens: in the work folder, or inside a host folder the runtime preopened
+# as `murmur-host…`.
+murmur-host-roots = { path = "../../libs/murmur-host-roots" }
+# `NativeOutcome`: the result envelope reduced to what murmur's native dispatch handed the
+# model, as the 0.6.0 tool's stdout was. Root items only: no file-tool feature.
+murmur-file-tools = { path = "../../libs/murmur-file-tools", default-features = false }
+
+# The WASI preopens and their descriptor flags, from which the component builds its host
+# roots. Only the component reads them; the host-testable core takes the roots as a value.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasip2 = "1.0.4"
 
 [dev-dependencies]
-# Used by the schema-migration integration test to hand-build a pre-slice-shape
-# database (the b5159e36 schema, lacking the new columns) and to inspect columns.
+# The behaviour, parity and SQLite-on-WASI suites instantiate the compiled component in
+# Wasmtime with the scratch work folder at `.` and host folders at `murmur-host<path>`, as
+# murmur opens them.
+wasmtime = "46"
+wasmtime-wasi = "46"
+# Inspects the database the component wrote, hand-builds a pre-migration one
+# (impact_10) and turns one into WAL mode.
 rusqlite.workspace = true
+# The pre-migration fixture's content hash and the payload file names.
 sha2.workspace = true
+# Parses the component's `data` and the recorded native fixtures.
+serde_json.workspace = true
