@@ -1,10 +1,9 @@
-//! What the capsule grants (`capabilities.shell.allow`) and what the host has on `PATH`.
+//! What the capsule grants (`capabilities.shell.allow`), as murmur stages it in the session's
+//! runtime directory, and the lines for programs that are not granted or not installed.
 
 #[cfg(test)]
 use std::collections::BTreeSet;
-use std::ffi::OsString;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// The programs the display needs, each with the Debian/Ubuntu package that ships it.
 pub const DISPLAY_PROGRAMS: [(&str, &str); 2] = [("Xvfb", "xvfb"), ("xkbcomp", "x11-xkb-utils")];
@@ -18,19 +17,25 @@ pub const WINDOW_MANAGERS: [&str; 5] = [
     "matchbox-window-manager",
 ];
 
-/// The capsule's grants. A program counts as granted exactly when the runtime staged
-/// `$MURMUR_RUNTIME_DIR/tools/<name>/murmur.yaml` as a regular file.
+/// The answer when the runtime directory is not preopened, which murmur does for an entry that
+/// declares `capabilities.filesystem.scope`.
+pub const SCOPE_LINE: &str = "tool-computer cannot see which programs capabilities.shell.allow grants, because its entry declares capabilities.filesystem.scope; tool-computer runs only from an entry without one";
+
+/// The capsule's grants. A program counts as granted exactly when murmur staged
+/// `tools/<name>/murmur.yaml` as a regular file in the runtime directory.
 #[derive(Debug, Clone)]
 pub enum Grants {
-    RuntimeDir(Option<PathBuf>),
+    /// The runtime directory, as the tool opens it.
+    Runtime(PathBuf),
+    /// No runtime directory is preopened, so no grant can be seen.
+    Unknown,
     #[cfg(test)]
     Names(BTreeSet<String>),
 }
 
 impl Grants {
-    /// From `MURMUR_RUNTIME_DIR`; unset means nothing is granted.
-    pub fn from_env() -> Self {
-        Grants::RuntimeDir(std::env::var_os("MURMUR_RUNTIME_DIR").map(PathBuf::from))
+    pub fn new(runtime: Option<PathBuf>) -> Self {
+        runtime.map_or(Grants::Unknown, Grants::Runtime)
     }
 
     #[cfg(test)]
@@ -38,16 +43,23 @@ impl Grants {
         Grants::Names(names.iter().map(|s| s.to_string()).collect())
     }
 
+    /// Whether the grants can be seen at all.
+    pub fn known(&self) -> bool {
+        !matches!(self, Grants::Unknown)
+    }
+
     pub fn granted(&self, name: &str) -> bool {
         if name.is_empty() || name.contains('/') || name == "." || name == ".." {
             return false;
         }
         match self {
-            Grants::RuntimeDir(None) => false,
-            Grants::RuntimeDir(Some(dir)) => {
-                std::fs::symlink_metadata(dir.join("tools").join(name).join("murmur.yaml"))
-                    .is_ok_and(|meta| meta.file_type().is_file())
-            }
+            Grants::Unknown => false,
+            Grants::Runtime(dir) => dir
+                .join("tools")
+                .join(name)
+                .join("murmur.yaml")
+                .symlink_metadata()
+                .is_ok_and(|meta| meta.file_type().is_file()),
             #[cfg(test)]
             Grants::Names(names) => names.contains(name),
         }
@@ -70,20 +82,6 @@ pub fn missing_display_grants(grants: &Grants) -> Option<String> {
     ))
 }
 
-/// The first executable `name` on `path`.
-pub fn which(name: &str, path: Option<&OsString>) -> Option<PathBuf> {
-    let path = path?;
-    std::env::split_paths(path)
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .map(|dir| dir.join(name))
-        .find(|candidate| is_executable(candidate))
-}
-
-fn is_executable(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-}
-
 /// The line for a granted program that is not on `PATH`.
 pub fn not_installed_line(name: &str, package: Option<&str>) -> String {
     let install = match package {
@@ -96,51 +94,7 @@ pub fn not_installed_line(name: &str, package: Option<&str>) -> String {
     )
 }
 
-/// The host programs a display start runs, resolved on `PATH`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Resolved {
-    pub xvfb: PathBuf,
-    /// The window manager's name and path, when one is granted and installed.
-    pub window_manager: Option<(String, PathBuf)>,
-    /// Each `launch` entry's program path, in order.
-    pub launch: Vec<PathBuf>,
-}
-
-/// Resolves the display programs, each `launch` program and the window manager on `path`.
-pub fn resolve(
-    grants: &Grants,
-    launch: &[Vec<String>],
-    path: Option<&OsString>,
-) -> Result<Resolved, String> {
-    let mut xvfb = None;
-    for (name, package) in DISPLAY_PROGRAMS {
-        match which(name, path) {
-            Some(found) => {
-                if name == "Xvfb" {
-                    xvfb = Some(found);
-                }
-            }
-            None => return Err(not_installed_line(name, Some(package))),
-        }
-    }
-    let mut programs = Vec::with_capacity(launch.len());
-    for argv in launch {
-        let name = &argv[0];
-        let found = which(name, path).ok_or_else(|| not_installed_line(name, None))?;
-        programs.push(found);
-    }
-    let window_manager = WINDOW_MANAGERS.iter().find_map(|name| {
-        if !grants.granted(name) {
-            return None;
-        }
-        which(name, path).map(|found| (name.to_string(), found))
-    });
-    Ok(Resolved {
-        xvfb: xvfb.expect("Xvfb resolved above"),
-        window_manager,
-        launch: programs,
-    })
-}
+pub use murmur_process_host::is_not_found;
 
 #[cfg(test)]
 mod tests {
@@ -152,7 +106,8 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("tools/Xvfb")).unwrap();
         std::fs::write(dir.path().join("tools/Xvfb/murmur.yaml"), "name: Xvfb\n").unwrap();
         std::fs::create_dir_all(dir.path().join("tools/xkbcomp/murmur.yaml")).unwrap();
-        let grants = Grants::RuntimeDir(Some(dir.path().to_path_buf()));
+        let grants = Grants::new(Some(dir.path().to_path_buf()));
+        assert!(grants.known());
         assert!(grants.granted("Xvfb"));
         assert!(!grants.granted("xkbcomp"), "a directory is no grant");
         assert!(!grants.granted("../tools/Xvfb"));
@@ -160,9 +115,15 @@ mod tests {
             missing_display_grants(&grants).unwrap(),
             "tool-computer needs a display server: add xkbcomp to capabilities.shell.allow"
         );
+        let unknown = Grants::new(None);
+        assert!(!unknown.known() && !unknown.granted("Xvfb"));
         assert_eq!(
-            missing_display_grants(&Grants::RuntimeDir(None)).unwrap(),
+            missing_display_grants(&Grants::from_names(&[])).unwrap(),
             "tool-computer needs a display server: add Xvfb and xkbcomp to capabilities.shell.allow"
+        );
+        assert_eq!(
+            missing_display_grants(&Grants::from_names(&["Xvfb", "xkbcomp"])),
+            None
         );
     }
 

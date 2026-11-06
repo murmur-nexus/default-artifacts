@@ -11,10 +11,9 @@
 #
 #   native-artifact  A publishable artifact whose murmur.yaml says
 #                    `implementation: native`. These ship as host binaries and
-#                    need host capabilities (subprocesses, a display) that a
-#                    wasm32-wasip2 guest does not have, or link C sources not
-#                    yet ported to wasm (none at present).
-#                    Catches: tool-computer.
+#                    need host capabilities that a wasm32-wasip2 guest does
+#                    not have (none at present).
+#                    Catches: no member today.
 #
 #   internal-bin     A crate with no murmur.yaml (so: never published, absent from
 #                    list-artifacts.sh) whose Cargo.toml declares a `[[bin]]`. These
@@ -30,7 +29,9 @@
 #                    into wasm artifacts, so it must cross-compile.
 #                    Catches: murmur-{driver-computer,driver-env,driver-image,
 #                    driver-stream,file-tools,hook-transcript,host-roots,
-#                    test-parse,time,wasi-http}.
+#                    process-host,process-test-host,test-parse,time,
+#                    wasi-http}. murmur-process-test-host is a dev-dependency
+#                    only; it compiles to an empty lib for wasm32.
 #
 # A member matching none of the four is a hard error rather than a silent guess
 # in either direction: excluding it would drop an artifact out of the build, and

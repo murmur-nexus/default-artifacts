@@ -1,7 +1,7 @@
 name: tool-computer
-version: 0.1.0
+version: 0.2.0
 runtime: tool
-implementation: native
+implementation: wasm
 description: |
   Operates this capsule's own virtual display (1440x900): screenshot, click,
   drag, move, scroll, type, press keys, wait, zoom. One action per call.
@@ -11,7 +11,7 @@ description: |
   `modifiers`, never in `text`.
 
 requires_files:
-  - bin/tool-computer
+  - tool_computer.wasm
 
 # The display this tool starts. A driver may offer the tool as its provider's own
 # computer tool and scale coordinates to this size. A capsule declaring it must run
@@ -80,10 +80,13 @@ input_schema:
 
 capabilities:
   # Documents what the capsule must grant; the runtime does not read this block.
-  # The capsule's own capabilities.shell.allow must list Xvfb and xkbcomp, plus every
-  # program named in this tool's config.launch, and the capsule must run
-  # capabilities.containment: sealed. Under sealed it must also list sh: Xvfb runs
-  # xkbcomp through /bin/sh to compile its keymap.
+  # murmur:process refuses to start any program the capsule's own
+  # capabilities.shell.allow does not list, so the capsule grants Xvfb and xkbcomp,
+  # sh under capabilities.containment: sealed (Xvfb runs xkbcomp through /bin/sh to
+  # compile its keymap), optionally one window manager (openbox, fluxbox, icewm, twm
+  # or matchbox-window-manager), and every program named in this tool's
+  # config.launch. The tool finds those grants through the manifests murmur stages
+  # in the runtime directory it preopens.
   shell:
     allow:
       - Xvfb

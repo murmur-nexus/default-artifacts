@@ -1,8 +1,9 @@
-//! What the tool needs from its host, as two traits: the session's processes
-//! (`murmur:process/process@0.1.0` in the component, a fake in unit tests) and a clock.
+//! What a WASM tool needs from its host, as two traits: the session's processes
+//! (`murmur:process/process@0.1.0` in a component, a fake in unit tests) and a clock.
 //!
-//! Everything else in the crate reaches the browser only through these, so the call logic runs
-//! and is tested on the host target.
+//! A tool reaches its programs only through these, so its call logic runs and is tested on the
+//! host target. Each tool implements [`Processes`] and [`Conn`] over its own `wit_bindgen`
+//! import of `murmur:process`.
 
 /// `process-error`, as the runtime returns it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +113,30 @@ impl Clock for SystemClock {
     }
 
     fn unix_secs(&self) -> u64 {
-        crate::util::unix_now()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+}
+
+/// murmur's `failed` text for a program that is not on `PATH`: the spawn's `io::Error`, which
+/// murmur's `spawn_contained` (`crates/capsule-runtime/src/shell.rs`) passes on unchanged, so
+/// `No such file or directory (os error 2)`.
+pub fn is_not_found(failed_text: &str) -> bool {
+    failed_text.contains("No such file or directory") || failed_text.contains("(os error 2)")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_not_found;
+
+    #[test]
+    fn not_found_is_the_spawn_error() {
+        assert!(is_not_found("No such file or directory (os error 2)"));
+        assert!(!is_not_found("Permission denied (os error 13)"));
+        assert!(!is_not_found(
+            "sandbox: murmur:process enforcement setup failed before exec: landlock"
+        ));
     }
 }

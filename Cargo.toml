@@ -23,6 +23,8 @@ members = [
   "libs/murmur-file-tools",
   "libs/murmur-hook-transcript",
   "libs/murmur-host-roots",
+  "libs/murmur-process-host",
+  "libs/murmur-process-test-host",
   "libs/murmur-test-parse",
   "libs/murmur-time",
   "libs/murmur-wasi-http",
