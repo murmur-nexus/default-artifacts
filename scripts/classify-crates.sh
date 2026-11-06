@@ -1,19 +1,11 @@
 #!/usr/bin/env bash
 # Classify every `[workspace] members` crate as targeting wasm32-wasip2 or not.
 #
-# This is the single derivation behind "what does the workspace wasm build skip"
-# and "which crates are native binaries": scripts/build-wasm.sh turns it into
-# its crate lists, and scripts/build-native.sh (which build.yml's native job
-# calls) builds one cargo invocation per `native-artifact` row. Nothing
-# hand-maintains a list of crate names.
+# This is the single derivation behind "what does the workspace wasm build skip":
+# scripts/build-wasm.sh turns it into its crate lists. Nothing hand-maintains a
+# list of crate names.
 #
-# Two independent rules produce an exclusion, and each catches a different set:
-#
-#   native-artifact  A publishable artifact whose murmur.yaml says
-#                    `implementation: native`. These ship as host binaries and
-#                    need host capabilities that a wasm32-wasip2 guest does
-#                    not have (none at present).
-#                    Catches: no member today.
+# One class is excluded from the wasm build:
 #
 #   internal-bin     A crate with no murmur.yaml (so: never published, absent from
 #                    list-artifacts.sh) whose Cargo.toml declares a `[[bin]]`. These
@@ -24,16 +16,20 @@
 # The two included classes:
 #
 #   wasm-artifact    A murmur.yaml with `implementation: wasm` or no
-#                    `implementation:` key at all (drivers and hooks).
+#                    `implementation:` key at all (drivers and hooks). Any other
+#                    `implementation:` value is an error.
 #   internal-lib     No murmur.yaml, no `[[bin]]`, but a library — it is linked
-#                    into wasm artifacts, so it must cross-compile.
+#                    into wasm artifacts, or is a test component, so it must
+#                    cross-compile.
 #                    Catches: murmur-{driver-computer,driver-env,driver-image,
-#                    driver-stream,file-tools,hook-transcript,host-roots,
-#                    process-host,process-test-host,test-parse,time,
+#                    driver-stream,fake-computer,file-tools,hook-transcript,
+#                    host-roots,process-host,process-test-host,test-parse,time,
 #                    wasi-http}. murmur-process-test-host is a dev-dependency
 #                    only; it compiles to an empty lib for wasm32.
+#                    murmur-fake-computer is a test component the drivers'
+#                    computer-tool suites pack; nothing publishes it.
 #
-# A member matching none of the four is a hard error rather than a silent guess
+# A member matching none of the three is a hard error rather than a silent guess
 # in either direction: excluding it would drop an artifact out of the build, and
 # including it would fail the build deep inside a C toolchain error that names
 # the C compiler rather than the missing classification.
@@ -99,10 +95,9 @@ while IFS= read -r member; do
         # Absent `implementation:` means wasm: drivers and hooks omit the key.
         implementation="$(sed -n 's/^implementation:[[:space:]]*\([A-Za-z0-9_-][A-Za-z0-9_-]*\).*/\1/p' "$dir/murmur.yaml" | head -1)"
         case "${implementation:-wasm}" in
-            native) printf 'native-artifact\t%s\t%s\n' "$crate" "$member" ;;
             wasm)   printf 'wasm-artifact\t%s\t%s\n'   "$crate" "$member" ;;
             *)
-                echo "error: $member/murmur.yaml declares 'implementation: $implementation'; expected 'native' or 'wasm'" >&2
+                echo "error: $member/murmur.yaml declares 'implementation: $implementation'; expected 'wasm'" >&2
                 fail=1
                 ;;
         esac

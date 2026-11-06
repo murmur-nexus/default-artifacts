@@ -16,15 +16,15 @@
 #   - the name starts with `murmur-`. A default artifact installs as
 #     `murmur/<name>`, so the prefix would read `murmur/murmur-...`;
 #   - `name:`, `version:` or `runtime:` is missing;
-#   - `implementation:` is anything other than `native` or `wasm`. Absent means
-#     wasm, as it does for classify-crates.sh: drivers and hooks omit the key.
+#   - `implementation:` is anything other than `wasm`. Absent means wasm, as it
+#     does for classify-crates.sh: drivers and hooks omit the key.
 #
 # Output: one tab-separated row per artifact, sorted by directory:
 #
 #   <dir>\t<name>\t<version>\t<runtime>\t<impl>
 #
-# where <dir> is repo-relative (`tools/tool-read`) and <impl> is `native` for
-# `implementation: native`, `skill` for `runtime: skill`, and `wasm` otherwise.
+# where <dir> is repo-relative (`tools/tool-read`) and <impl> is `skill` for
+# `runtime: skill` and `wasm` otherwise.
 # On any refusal nothing is printed to stdout, so a caller never acts on a
 # partial list.
 #
@@ -76,10 +76,9 @@ while IFS= read -r manifest; do
             ;;
     esac
     case "${implementation:-wasm}" in
-        native) impl=native ;;
         wasm)   impl=wasm ;;
         *)
-            echo "error: $manifest declares 'implementation: $implementation'; expected 'native' or 'wasm'" >&2
+            echo "error: $manifest declares 'implementation: $implementation'; expected 'wasm'" >&2
             bad=1
             ;;
     esac

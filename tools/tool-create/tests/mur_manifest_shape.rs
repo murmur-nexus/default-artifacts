@@ -3,15 +3,14 @@
 //!
 //! `wasm_component.rs` proves the component writes the bytes the scaffolder intends to write, and
 //! the unit tests in `src/lib.rs` prove those bytes contain the keys the scaffolder intends to
-//! emit. Neither can see whether `mur` agrees. That gap is exactly how the shipped generator came
-//! to emit `runtime: native` with no `implementation:` and no `requires_files:` for years: every
-//! assertion compared the generator's output against the generator's own idea of correct output,
-//! so the manifest was internally consistent and externally wrong — it published as wasm, and it
-//! packed into an archive holding nothing but itself.
+//! emit. Neither can see whether `mur` agrees: a manifest can be internally consistent and
+//! externally wrong — published under the wrong classification, or packed into an archive holding
+//! nothing but itself because it declares no `requires_files:`.
 //!
-//! So each test here scaffolds unedited, hands the directory to a real `mur build`, publishes the
-//! result into the global store of a scratch `HOME` with `mur publish`, and reads back the
-//! classification the store recorded plus the entries the archive actually holds.
+//! So each test here scaffolds one of the two arms, `wasm` and `hook`, unedited, hands the
+//! directory to a real `mur build`, publishes the result into the global store of a scratch `HOME`
+//! with `mur publish`, and reads back the classification the store recorded plus the entries the
+//! archive actually holds.
 //!
 //! `mur` is built in the murmur repository, never from here — it comes from `MUR_BIN` or from
 //! `PATH`, and a run that can find it in neither fails rather than skipping, so a green run of
@@ -110,22 +109,19 @@ struct Published {
 /// Scaffold `name` for `runtime`, build it, publish it locally, and read back both what the
 /// store recorded and what the archive holds.
 ///
-/// The scaffold is used exactly as generated, save for `extra_payload`: `mur build` requires every
+/// The scaffold is used exactly as generated, save for `payload`: `mur build` requires every
 /// declared `requires_files:` entry to exist on disk, and a wasm payload is produced by a cargo
 /// build the scaffolder does not run. A placeholder byte file satisfies that existence check —
 /// the payload-shape rule selects the root wasm by name, and what is under test here is the
-/// manifest's classification and the archive's contents, not the payload's validity. The native
-/// arm's `bin/<name>` is written by the scaffolder itself, so it passes `extra_payload: None`.
-fn scaffold_build_publish(name: &str, runtime: &str, extra_payload: Option<&str>) -> Published {
+/// manifest's classification and the archive's contents, not the payload's validity.
+fn scaffold_build_publish(name: &str, runtime: &str, payload: &str) -> Published {
     let home = TempDir::new().expect("scratch HOME");
     let workspace = TempDir::new().expect("scratch workspace");
 
     scaffold_tool_in(workspace.path(), name, runtime).expect("scaffold");
     let tool_dir = workspace.path().join("tools").join(name);
 
-    if let Some(payload) = extra_payload {
-        fs::write(tool_dir.join(payload), b"\0asm").expect("write placeholder payload");
-    }
+    fs::write(tool_dir.join(payload), b"\0asm").expect("write placeholder payload");
 
     // `mur build` defaults its source to the process CWD, and `mur publish` resolves workspace
     // config the same way. Both run from a scratch directory holding no `murmur.yaml`, so nothing
@@ -150,8 +146,7 @@ fn scaffold_build_publish(name: &str, runtime: &str, extra_payload: Option<&str>
     run_to_success(publish, &format!("`mur publish` of the {runtime} scaffold"));
 
     // A published file belongs to scope `local`. Its meta file is named after the stored
-    // archive, which carries the platform tag `mur publish` detects for a native payload, so it
-    // is found rather than spelled.
+    // archive, so it is found rather than spelled.
     let version_dir = home
         .path()
         .join(".murmur/artifacts/local")
@@ -231,29 +226,18 @@ fn assert_published(published: &Published, runtime: &str, artifact_runtime: &str
     );
 }
 
-// ── the three arms ──────────────────────────────────────────────────────────
+// ── the two arms ──────────────────────────────────────────────────────────
 
 #[test]
 #[ignore = "drives the `mur` binary as a subprocess; see the module docs"]
 fn wasm_scaffold_publishes_as_a_wasm_tool() {
-    let published =
-        scaffold_build_publish("shape-probe-wasm", "wasm", Some("shape_probe_wasm.wasm"));
+    let published = scaffold_build_publish("shape-probe-wasm", "wasm", "shape_probe_wasm.wasm");
     assert_published(&published, "wasm", "tool", "shape_probe_wasm.wasm");
 }
 
 #[test]
 #[ignore = "drives the `mur` binary as a subprocess; see the module docs"]
-fn native_scaffold_publishes_as_a_native_tool() {
-    // The classification the shipped scaffolder got wrong: with no `implementation:` to read,
-    // `registry_runtime()` fell through to `Wasm` and the artifact published as a wasm tool.
-    let published = scaffold_build_publish("shape-probe-native", "native", None);
-    assert_published(&published, "native", "tool", "bin/shape-probe-native");
-}
-
-#[test]
-#[ignore = "drives the `mur` binary as a subprocess; see the module docs"]
 fn hook_scaffold_publishes_as_a_wasm_hook() {
-    let published =
-        scaffold_build_publish("shape-probe-hook", "hook", Some("shape_probe_hook.wasm"));
+    let published = scaffold_build_publish("shape-probe-hook", "hook", "shape_probe_hook.wasm");
     assert_published(&published, "wasm", "hook", "shape_probe_hook.wasm");
 }

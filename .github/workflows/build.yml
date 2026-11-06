@@ -28,13 +28,12 @@ env:
 # the latest release.
 #
 # No artifact is named here. scripts/list-artifacts.sh enumerates them from their own
-# murmur.yaml files, and scripts/classify-crates.sh says which crates are native.
+# murmur.yaml files.
 #
 # Pipeline:
 #   1. verify   — the tag is the workspace version and the newest v* tag, and no
 #                 artifact changed its payload at an unchanged version.
-#   2. native   — builds the native tools once per platform runner.
-#   3. release  — builds the wasm artifacts, packs everything, indexes it against the
+#   2. release  — builds the wasm artifacts, packs everything, indexes it against the
 #                 previous release's index, installs every new version through a
 #                 real `mur`, and only then uploads.
 
@@ -90,61 +89,13 @@ jobs:
         run: ./scripts/list-artifacts.sh
 
   # ---------------------------------------------------------------------------
-  # Step 2: build the native tools, one runner per platform
-  # ---------------------------------------------------------------------------
-  # The `platform:` rows are the one statement of which platforms a release ships a
-  # native payload for. `mur index` refuses an untagged native zip, so a platform is
-  # added by adding its row here and nothing else.
-  native:
-    name: Build native tools (${{ matrix.platform.name }})
-    needs: verify
-    runs-on: ${{ matrix.platform.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { name: linux-x86_64,   runner: ubuntu-latest }
-          - { name: darwin-aarch64, runner: macos-latest  }
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.TAG }}
-
-      # Pinned toolchain (source of truth: rust-toolchain.toml). Keep the
-      # `toolchain:` input in sync with that file's `channel`.
-      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
-        with:
-          toolchain: "1.95.0"
-
-      - uses: Swatinem/rust-cache@v2
-
-      # build-native.sh builds each `native-artifact` row of classify-crates.sh, which
-      # reads `implementation: native` from each murmur.yaml, in its own cargo
-      # invocation, so a tool's bytes never depend on which tools share its build. Each
-      # binary is named after its crate, which is the artifact's name.
-      - name: Build
-        run: |
-          crates=$(bash scripts/classify-crates.sh | awk -F'\t' '$1 == "native-artifact" { print $2 }')
-          bash scripts/build-native.sh --locked
-          mkdir -p native-out
-          for crate in $crates; do cp "target/release/$crate" native-out/; done
-          ls -l native-out
-
-      - name: Upload binaries
-        uses: actions/upload-artifact@v4
-        with:
-          name: native-${{ matrix.platform.name }}
-          path: native-out/*
-          if-no-files-found: error
-
-  # ---------------------------------------------------------------------------
-  # Step 3: pack, index, prove and publish
+  # Step 2: pack, index, prove and publish
   # ---------------------------------------------------------------------------
   # Every step before the upload must pass, so a release whose index breaks a
   # published version's bytes, or whose new versions do not install, uploads nothing.
   release:
     name: Create GitHub Release
-    needs: [verify, native]
+    needs: verify
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -217,19 +168,6 @@ jobs:
         working-directory: default-artifacts
         run: bash scripts/validate-component.sh
 
-      - name: Download native binaries
-        uses: actions/download-artifact@v4
-        with:
-          pattern: native-*
-          path: native
-
-      # download-artifact puts each one in native/<artifact name>/; package-release.sh
-      # reads native/<platform>/<name>.
-      - name: Arrange native binaries by platform
-        run: |
-          for dir in native/native-*; do mv "$dir" "native/${dir#native/native-}"; done
-          ls -lR native
-
       # The latest release's index carries every version published so far; the new
       # index merges it, and the bytes gate holds every version in both to the same
       # assets. Three outcomes:
@@ -269,7 +207,7 @@ jobs:
         working-directory: default-artifacts
         env:
           PREVIOUS: ${{ steps.previous.outputs.path }}
-        run: ./scripts/package-release.sh "$GITHUB_WORKSPACE/release" --native-dir "$GITHUB_WORKSPACE/native" ${PREVIOUS:+--previous "$PREVIOUS"}
+        run: ./scripts/package-release.sh "$GITHUB_WORKSPACE/release" ${PREVIOUS:+--previous "$PREVIOUS"}
 
       - name: Index the release and apply the bytes gate
         working-directory: default-artifacts

@@ -105,8 +105,8 @@ beside it, for reads as well as writes, and removes it when the call is done.
 - A call cut off mid-write can leave `code-graph.db.lock` behind. Every later call then fails
   with `database is locked`, naming the directory. Remove it once no other call is using the
   graph.
-- The lock directory does not exclude a native process using the same database at the same
-  time, such as the native `tool-code-coverage` or a host `sqlite3`. `tool-git` and
+- The lock directory does not exclude a host process using the same database at the same
+  time, such as `sqlite3`. `tool-git` and
   `tool-test-report` read the database with `immutable=1`, taking no lock at all, so a read
   while `index_repository` writes can see a half-written graph.
 - A database switched to WAL mode cannot be opened: the WASI build has no WAL support.
@@ -143,10 +143,10 @@ Install it once, then build:
 ./scripts/wasi-sdk.sh                                              # from the repo root, once
 cargo build -p tool-code-graph --target wasm32-wasip2 --release
 ./scripts/validate-component.sh target/wasm32-wasip2/release/tool_code_graph.wasm
-cargo test -p tool-code-graph                                      # behaviour, native 0.6.0 parity, SQLite and host paths, against the component
+cargo test -p tool-code-graph                                      # behaviour, 0.6.0 parity, SQLite and host paths, against the component
 MUR_BIN=$(command -v mur) cargo test -p tool-code-graph --test mur_run_code_graph -- --ignored
 ./scripts/package-artifact.sh tools/tool-code-graph release/       # → release/tool-code-graph-0.7.0.mur.zip
 ```
 
-`tests/fixtures/README.md` holds the recipe that recorded the native 0.6.0 results the component
-is held to. `tests/corpus_parity.rs` (`#[ignore]`d) indexes a whole tree with both and times them.
+`tests/fixtures/README.md` names the tool-code-graph 0.6.0 build that recorded the frozen results the
+component is held to.

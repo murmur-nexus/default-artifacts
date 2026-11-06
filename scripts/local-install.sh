@@ -4,8 +4,7 @@
 #
 # The artifact's directory and kind come from scripts/list-artifacts.sh. A wasm
 # artifact is built for wasm32-wasip2 (after scripts/wasi-sdk.sh installs the pinned
-# C toolchain) and validated, a native tool is built for the
-# host with `cargo build --release -p <name>`, and a skill compiles nothing; then
+# C toolchain) and validated, and a skill compiles nothing; then
 # scripts/package-artifact.sh packs it with `mur build`, and `mur install ./<zip>`
 # installs it into the capsule.
 #
@@ -66,12 +65,6 @@ case "$KIND" in
     ( cd "$REPO_ROOT" && cargo build -p "$NAME" --target wasm32-wasip2 --release )
     "$REPO_ROOT/scripts/validate-component.sh" "$REPO_ROOT/target/wasm32-wasip2/release/${NAME//-/_}.wasm"
     ;;
-  native)
-    # A native tool is a host binary, not a component, so it builds for the host, as
-    # build.yml's native job does.
-    echo "→ [1/4] cargo build $NAME ($VERSION) — native, host"
-    ( cd "$REPO_ROOT" && cargo build --release -p "$NAME" )
-    ;;
   skill)
     echo "→ [1/4] build $NAME ($VERSION) — skill, nothing to compile"
     ;;
@@ -84,29 +77,24 @@ echo "    $(basename "$ZIP")"
 echo "→ [3/4] install into $CAPSULE_DIR"
 ( cd "$CAPSULE_DIR" && "$MUR" install "$ZIP" )
 
-# The pin `mur install` wrote must be this zip's sha256, under the key its payload
-# shape takes: sha256.any for a wasm component or skill, sha256.platforms.<tag> for a
-# native tool (lock_version 3 refuses an entry carrying both).
+# The pin `mur install` wrote must be this zip's sha256, under sha256.any: a wasm
+# component or skill is one payload for every host.
 echo "→ [4/4] check lock local/$NAME@$VERSION"
 SHA="$(sha256_of "$ZIP")"
-PLATFORM=""
-if [ "$KIND" = "native" ]; then
-  PLATFORM="$(basename "$ZIP" .mur.zip)"; PLATFORM="${PLATFORM#"$NAME-$VERSION-"}"
-fi
 if [ ! -f "$LOCK" ]; then
   echo "error: mur install wrote no murmur.lock in $CAPSULE_DIR" >&2
   exit 1
 fi
-python3 - "$LOCK" "local/$NAME" "$VERSION" "$SHA" "$PLATFORM" <<'PY'
+python3 - "$LOCK" "local/$NAME" "$VERSION" "$SHA" <<'PY'
 import sys, yaml
-lock_path, name, version, sha, platform = sys.argv[1:6]
+lock_path, name, version, sha = sys.argv[1:5]
 doc = yaml.safe_load(open(lock_path)) or {}
 entry = next((a for a in doc.get("artifacts", []) or [] if a.get("name") == name), None)
 pinned = None
 if entry is not None and str(entry.get("resolved_version")) == version:
     hashes = entry.get("sha256") or {}
-    pinned = (hashes.get("platforms") or {}).get(platform) if platform else hashes.get("any")
-key = f"sha256.platforms.{platform}" if platform else "sha256.any"
+    pinned = hashes.get("any")
+key = "sha256.any"
 if pinned != sha:
     print(f"error: murmur.lock does not pin {name}@{version} {key} at {sha} (found {pinned!r})", file=sys.stderr)
     sys.exit(1)

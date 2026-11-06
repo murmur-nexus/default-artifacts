@@ -7,19 +7,16 @@
 # built beside it — cargo unifies dependency features across one invocation — a
 # release could fail that gate on an artifact nobody touched, and
 # `cargo build -p <name>`, local-install.sh and the `wasm_component` tests would
-# pack bytes the release does not. scripts/build-wasm.sh and
-# scripts/build-native.sh therefore build each artifact in its own invocation, and
-# this script is what proves it.
+# pack bytes the release does not. scripts/build-wasm.sh therefore builds each
+# artifact in its own invocation, and this script is what proves it.
 #
 # Two sides, in one target dir:
 #
-#   release  scripts/build-wasm.sh --locked, then scripts/build-native.sh --locked
-#            (skipped when list-artifacts.sh lists no native artifact), exactly as
-#            build.yml runs them, always in full even for a subset;
-#            then each selected artifact is packed with package-artifact.sh.
+#   release  scripts/build-wasm.sh --locked, exactly as build.yml runs it, always in
+#            full even for a subset; then each selected artifact is packed with
+#            package-artifact.sh.
 #   alone    per artifact, `cargo build -p <name> --target wasm32-wasip2 --release
-#            --locked` (wasm) or `cargo build --release -p <name> --locked`
-#            (native), packed straight after.
+#            --locked`, packed straight after.
 #
 # The target dir is shared on purpose. Cargo keys every compiled unit by its
 # resolved features, so a build that resolves the same graph reuses the release's
@@ -30,7 +27,7 @@
 # passed to package-artifact.sh with --payload.
 #
 # Usage:   scripts/check-build-isolation.sh [<artifact-name>...]
-#          No names: every wasm and native row of list-artifacts.sh.
+#          No names: every wasm row of list-artifacts.sh.
 # Output:  `ok    <name>  <zip file>  <sha256>` per artifact that matches, then a
 #          count. Cargo's own output goes to stderr.
 # Exit:    0 — every selected artifact packs identical bytes on both sides
@@ -66,7 +63,7 @@ fi
 # The selected rows, as list-artifacts.sh prints them: path, name, version,
 # runtime, kind.
 if [ -z "$names" ]; then
-    selected="$(printf '%s\n' "$artifacts" | awk -F'\t' '$5 == "wasm" || $5 == "native"')"
+    selected="$(printf '%s\n' "$artifacts" | awk -F'\t' '$5 == "wasm"')"
 else
     selected=""
     for name in $names; do
@@ -76,7 +73,7 @@ else
             exit 2
         fi
         case "$(printf '%s\n' "$row" | cut -f5)" in
-            wasm|native) ;;
+            wasm) ;;
             skill) echo "error: $name is a skill; it compiles nothing" >&2; exit 2 ;;
             *)     echo "error: $name has an unknown kind in ./scripts/list-artifacts.sh" >&2; exit 2 ;;
         esac
@@ -86,7 +83,7 @@ else
 fi
 count="$(printf '%s' "$selected" | grep -c . || true)"
 if [ "$count" -eq 0 ]; then
-    echo "error: ./scripts/list-artifacts.sh lists no wasm or native artifact" >&2
+    echo "error: ./scripts/list-artifacts.sh lists no wasm artifact" >&2
     exit 1
 fi
 
@@ -105,19 +102,16 @@ trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/release" "$TMP/alone"
 
 payload() {
-    case "$2" in
-        wasm)   echo "$TARGET_DIR/wasm32-wasip2/release/$(printf '%s' "$1" | tr - _).wasm" ;;
-        native) echo "$TARGET_DIR/release/$1" ;;
-    esac
+    echo "$TARGET_DIR/wasm32-wasip2/release/$(printf '%s' "$1" | tr - _).wasm"
 }
 
-# pack <path> <name> <kind> <side>: the zip's path on stdout.
+# pack <path> <name> <side>: the zip's path on stdout.
 pack() {
     local zip
-    if ! zip="$(bash "$SCRIPT_DIR/package-artifact.sh" "$REPO_ROOT/$1" "$TMP/$4" \
-            --payload "$(payload "$2" "$3")" 2> "$TMP/pack.log")"; then
+    if ! zip="$(bash "$SCRIPT_DIR/package-artifact.sh" "$REPO_ROOT/$1" "$TMP/$3" \
+            --payload "$(payload "$2")" 2> "$TMP/pack.log")"; then
         cat "$TMP/pack.log" >&2
-        echo "error: packing $2 from the $4 build failed: scripts/package-artifact.sh $1" >&2
+        echo "error: packing $2 from the $3 build failed: scripts/package-artifact.sh $1" >&2
         exit 1
     fi
     echo "$zip"
@@ -125,42 +119,29 @@ pack() {
 
 cd "$REPO_ROOT"
 
-echo "Release build: scripts/build-wasm.sh --locked, then scripts/build-native.sh --locked" >&2
+echo "Release build: scripts/build-wasm.sh --locked" >&2
 if ! bash "$SCRIPT_DIR/build-wasm.sh" --locked >&2; then
     echo "error: release build failed: scripts/build-wasm.sh --locked" >&2
     exit 1
 fi
-# build-native.sh refuses a run with no native tool to build. With none listed, the
-# release builds no native payload either, so there is no native side to compare.
-if printf '%s\n' "$artifacts" | awk -F'\t' '$5 == "native" { found = 1 } END { exit !found }'; then
-    if ! bash "$SCRIPT_DIR/build-native.sh" --locked >&2; then
-        echo "error: release build failed: scripts/build-native.sh --locked" >&2
-        exit 1
-    fi
-else
-    echo "No native artifact is listed; skipping scripts/build-native.sh" >&2
-fi
 
 # The rows are read on fd 3: cargo and mur inherit stdin, and one that read it
 # would swallow the rows still to be checked.
-while IFS=$'\t' read -r path name _version _runtime kind <&3; do
+while IFS=$'\t' read -r path name _version _runtime _kind <&3; do
     [ -n "$path" ] || continue
-    pack "$path" "$name" "$kind" release > /dev/null
+    pack "$path" "$name" release > /dev/null
 done 3<<< "$selected"
 
 mismatches=""
-while IFS=$'\t' read -r path name _version _runtime kind <&3; do
+while IFS=$'\t' read -r path name _version _runtime _kind <&3; do
     [ -n "$path" ] || continue
     echo "Built alone: $name" >&2
-    case "$kind" in
-        wasm)   set -- cargo build -p "$name" --target wasm32-wasip2 --release --locked ;;
-        native) set -- cargo build --release -p "$name" --locked ;;
-    esac
+    set -- cargo build -p "$name" --target wasm32-wasip2 --release --locked
     if ! "$@" >&2; then
         echo "error: building $name alone failed: $*" >&2
         exit 1
     fi
-    alone_zip="$(pack "$path" "$name" "$kind" alone)"
+    alone_zip="$(pack "$path" "$name" alone)"
     zip_file="$(basename "$alone_zip")"
     release_sha="$(sha256_of "$TMP/release/$zip_file")"
     alone_sha="$(sha256_of "$alone_zip")"

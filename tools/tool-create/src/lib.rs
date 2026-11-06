@@ -39,25 +39,22 @@ pub mod logic {
     /// The request's vocabulary is not the manifest's. `mur` reads an artifact's *role* from
     /// `runtime:` and its *packaging* from `implementation:`, and derives the published
     /// classification from the pair (`Manifest::registry_runtime`). Writing the request word
-    /// straight into `runtime:` collapses the two: `runtime: native` publishes as wasm and is
-    /// rejected outright when the artifact is named from a capsule manifest. Each arm here
-    /// spells the pair back out, along with the payload entry `mur build` has to be told to
+    /// straight into `runtime:` collapses the two: `runtime: wasm` is rejected outright when
+    /// the artifact is named from a capsule manifest. Each arm here spells the pair back out, along with the payload entry `mur build` has to be told to
     /// pack — an undeclared `requires_files:` means an archive holding the manifest alone.
     #[derive(Clone, Copy)]
     enum Kind {
         Wasm,
-        Native,
         Hook,
     }
 
     impl Kind {
         fn parse(runtime: &str) -> Result<Self, String> {
             match runtime {
-                "native" => Ok(Self::Native),
                 "wasm" => Ok(Self::Wasm),
                 "hook" => Ok(Self::Hook),
                 other => Err(format!(
-                    "unknown runtime '{other}'; expected 'native', 'wasm', or 'hook'"
+                    "unknown runtime '{other}'; expected 'wasm' or 'hook'"
                 )),
             }
         }
@@ -65,36 +62,27 @@ pub mod logic {
         /// The generated manifest's `runtime:` value — the artifact's role.
         fn role(self) -> &'static str {
             match self {
-                Self::Wasm | Self::Native => "tool",
+                Self::Wasm => "tool",
                 Self::Hook => "hook",
             }
         }
 
-        /// The generated manifest's `implementation:` value — how the payload is built.
+        /// The generated manifest's `implementation:` value — how the payload is built. Every
+        /// artifact is a wasm32-wasip2 component.
         fn implementation(self) -> &'static str {
-            match self {
-                Self::Native => "native",
-                Self::Wasm | Self::Hook => "wasm",
-            }
+            "wasm"
         }
 
         /// The sole `requires_files:` entry, which is the payload `mur build` packs beside
-        /// `murmur.yaml`.
-        ///
-        /// A native payload is `bin/<artifact-name>` because that is the only path the capsule
-        /// runtime resolves a native binary at (`payload_shape::native_binary_entry`). A wasm
-        /// payload is the cdylib filename cargo produces: the artifact name with `-` replaced
-        /// by `_`, plus `.wasm`.
+        /// `murmur.yaml`: the cdylib filename cargo produces, the artifact name with `-`
+        /// replaced by `_`, plus `.wasm`.
         fn requires_file(self, name: &str) -> String {
-            match self {
-                Self::Native => format!("bin/{name}"),
-                Self::Wasm | Self::Hook => format!("{}.wasm", name.replace('-', "_")),
-            }
+            format!("{}.wasm", name.replace('-', "_"))
         }
     }
 
-    /// Handle a scaffold request payload — the `data` field the native binary read from its
-    /// stdin envelope. Returns the created tool's `(name, relative_path)` on success.
+    /// Handle a scaffold request payload — the tool call's input, or the `data` field of a
+    /// double-encoded envelope. Returns the created tool's `(name, relative_path)` on success.
     /// `base_dir` is the workdir root under which `tools/<name>/` is created (the preopened
     /// `.` at dispatch time).
     ///
@@ -130,7 +118,7 @@ pub mod logic {
                 let runtime = request
                     .get("runtime")
                     .and_then(|r| r.as_str())
-                    .unwrap_or("native");
+                    .unwrap_or("wasm");
 
                 scaffold_tool_in(base_dir, name, runtime)?;
                 Ok((name.to_string(), format!("tools/{name}")))
@@ -164,7 +152,6 @@ pub mod logic {
         write_manifest(&tool_dir, name, kind)?;
 
         match kind {
-            Kind::Native => write_native_stub(&tool_dir, name)?,
             Kind::Wasm => write_wasm_stub(&tool_dir, name)?,
             Kind::Hook => write_hook_stub(&tool_dir, name)?,
         }
@@ -183,11 +170,11 @@ pub mod logic {
         // `hooks/hook-debug/murmur.yaml`.
         let hook_keys = match kind {
             Kind::Hook => "execution_mode: async\ncommit_policy: none\n",
-            Kind::Wasm | Kind::Native => "",
+            Kind::Wasm => "",
         };
         let schemas = match kind {
             Kind::Hook => "",
-            Kind::Wasm | Kind::Native => TOOL_SCHEMAS,
+            Kind::Wasm => TOOL_SCHEMAS,
         };
 
         let content = format!(
@@ -204,41 +191,6 @@ pub mod logic {
         );
         fs::write(tool_dir.join("murmur.yaml"), content)
             .map_err(|e| format!("failed to write murmur.yaml: {e}"))
-    }
-
-    /// Writes the native payload to `bin/<name>` — the one path
-    /// `payload_shape::native_binary_entry` resolves, and the path `mur build` packs the
-    /// compiled binary from.
-    fn write_native_stub(tool_dir: &Path, name: &str) -> Result<(), String> {
-        let bin_dir = tool_dir.join("bin");
-        fs::create_dir_all(&bin_dir).map_err(|e| format!("failed to create bin/: {e}"))?;
-
-        let stub = "#!/bin/sh\n\
-                    # Read ToolInput JSON from stdin, write ToolResult JSON to stdout.\n\
-                    # Replace this stub body with your implementation.\n\
-                    INPUT=$(cat)\n\
-                    echo '{\"status\":\"passed\",\"summary\":\"stub: not yet implemented\",\"data\":null,\"data_path\":null,\"truncated\":false,\"metadata\":[]}'\n";
-
-        let run_path = bin_dir.join(name);
-        fs::write(&run_path, stub).map_err(|e| format!("failed to write bin/{name}: {e}"))?;
-
-        // Only the host build reaches this. `wasm32-wasip2` is not `cfg(unix)` and WASI has no
-        // chmod, so the shipped component leaves the stub at the umask default and `mur build`
-        // packs whatever mode it finds. The generated README carries the `chmod +x` step for
-        // that reason; the capsule runtime re-applies 0755 when it extracts the payload, so a
-        // non-executable archive entry costs the author a local run rather than a broken install.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&run_path)
-                .map_err(|e| format!("failed to read bin/{name} metadata: {e}"))?
-                .permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&run_path, perms)
-                .map_err(|e| format!("failed to chmod bin/{name}: {e}"))?;
-        }
-
-        Ok(())
     }
 
     fn write_wasm_stub(tool_dir: &Path, _name: &str) -> Result<(), String> {
@@ -741,29 +693,20 @@ mod tests {
 
     fn write_readme(tool_dir: &Path, name: &str, kind: Kind) -> Result<(), String> {
         let stub_file = match kind {
-            Kind::Native => format!("`bin/{name}`"),
-            Kind::Hook => "`src/lib.rs`".to_string(),
-            Kind::Wasm => "`component.wat`".to_string(),
+            Kind::Hook => "`src/lib.rs`",
+            Kind::Wasm => "`component.wat`",
         };
         let hook_note = match kind {
             Kind::Hook => "This is a hook artifact. It implements `murmur:hook/lifecycle` and receives synchronous lifecycle events from the runtime. Keep `logic::decide` fast and return `Ok(Decision::None)` unless the event truly could not be recorded.\n\n",
-            Kind::Wasm | Kind::Native => "",
-        };
-        // `mur build` packs the payload with the mode it has on disk, and a scaffold written by
-        // the wasm component arrives without the executable bit — WASI cannot set one.
-        let exec_note = match kind {
-            Kind::Native => format!(
-                "\nThe payload must be executable before you build: `chmod +x bin/{name}`.\n"
-            ),
-            Kind::Wasm | Kind::Hook => String::new(),
+            Kind::Wasm => "",
         };
         let cargo_name = name.replace('_', "-");
         // Only the hook arm emits a Rust crate, so only the hook arm has a `cargo test` to
-        // point at. The `/bin/sh` stub and the `component.wat` stub are exercised by feeding
-        // them an input envelope, which is what their step 3 keeps saying.
+        // point at. The `component.wat` stub is exercised by feeding it an input envelope,
+        // which is what its step 3 keeps saying.
         let step_two = match kind {
             Kind::Hook => "**Implement the decision logic** — write to the `logic` module in `src/lib.rs`. `logic::decide` is the single entry point all nine lifecycle dispatches route through, and it is plain Rust: no `wit_bindgen`, no `exports::` types, nothing behind a `cfg`. The `wasm_hook` adapter below it converts a WIT record into a `logic::Event` and a returned `logic::Decision` back into a `HookOutput`, and must keep holding no branch, threshold or string the runtime acts on.".to_string(),
-            Kind::Wasm | Kind::Native => format!(
+            Kind::Wasm => format!(
                 "**Implement the entry point** — write to {stub_file}. The stub already has the correct input/output envelope — replace the body only."
             ),
         };
@@ -771,7 +714,7 @@ mod tests {
             Kind::Hook => format!(
                 "**Test the logic** — run `cargo test -p {cargo_name}`. The generated `#[cfg(test)] mod tests` block already carries one passing test, so the crate is covered before it has behaviour; add each new case beside it in that block."
             ),
-            Kind::Wasm | Kind::Native => "**Test the stub** — run the stub with a sample input JSON on stdin. The stub should already exit 0 and emit a valid JSON envelope.".to_string(),
+            Kind::Wasm => "**Test the stub** — run the stub with a sample input JSON on stdin. The stub should already exit 0 and emit a valid JSON envelope.".to_string(),
         };
         // The attribution names the generator and no version. The crate version is the
         // workspace's, not this artifact's, so embedding it would change this component's
@@ -787,7 +730,6 @@ mod tests {
              \n\
              - `murmur.yaml` — pre-filled manifest. Review the `input` and `output` fields and update the schema to match your tool's contract.\n\
              - {stub_file} — stub implementation. Replace the stub body with your implementation.\n\
-             {exec_note}\
              \n\
              {hook_note}\
              \n\
@@ -819,48 +761,39 @@ mod tests {
         use super::*;
         use tempfile::TempDir;
 
+        /// A request with no `runtime` scaffolds a wasm tool: `implementation: wasm` and the
+        /// cdylib cargo produces as its one payload entry, with no `bin/`.
         #[test]
-        fn scaffold_native_creates_expected_files() {
+        fn handle_request_without_runtime_scaffolds_a_wasm_tool() {
             let tmp = TempDir::new().unwrap();
-            scaffold_tool_in(tmp.path(), "my-tool", "native").unwrap();
+            let payload = r#"{"type":"tool","name":"my-tool"}"#;
+            let (name, path) = handle_request(Some(payload), tmp.path()).unwrap();
+            assert_eq!(name, "my-tool");
+            assert_eq!(path, "tools/my-tool");
 
             let base = tmp.path().join("tools").join("my-tool");
-            assert!(
-                base.join("murmur.yaml").exists(),
-                "murmur.yaml should exist"
-            );
-            assert!(base.join("README.md").exists(), "README.md should exist");
-
-            // `bin/<name>`, not `bin/run`: `payload_shape::native_binary_entry` resolves a
-            // native payload at the artifact's own name and at nothing else.
-            let payload = base.join("bin").join("my-tool");
-            assert!(payload.exists(), "bin/my-tool should exist");
-            assert!(
-                !base.join("bin").join("run").exists(),
-                "bin/run should no longer be written"
-            );
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mode = fs::metadata(&payload).unwrap().permissions().mode();
-                assert_eq!(mode & 0o777, 0o755, "bin/my-tool should be mode 0755");
-            }
+            assert!(base.join("component.wat").exists());
+            assert!(!base.join("bin").exists(), "a wasm tool has no bin/");
 
             let manifest = fs::read_to_string(base.join("murmur.yaml")).unwrap();
-            assert!(manifest.contains("name: my-tool"));
-            assert!(manifest.contains("version: 0.1.0"), "got: {manifest}");
             assert!(manifest.contains("runtime: tool"), "got: {manifest}");
+            assert!(manifest.contains("implementation: wasm"), "got: {manifest}");
             assert!(
-                manifest.contains("implementation: native"),
+                manifest.contains("requires_files:\n  - my_tool.wasm\n"),
                 "got: {manifest}"
             );
+        }
+
+        #[test]
+        fn handle_request_refuses_runtime_native() {
+            let tmp = TempDir::new().unwrap();
+            let payload = r#"{"type":"tool","name":"old-style","runtime":"native"}"#;
+            let err = handle_request(Some(payload), tmp.path()).unwrap_err();
+            assert_eq!(err, "unknown runtime 'native'; expected 'wasm' or 'hook'");
             assert!(
-                manifest.contains("requires_files:\n  - bin/my-tool\n"),
-                "got: {manifest}"
+                !tmp.path().join("tools").join("old-style").exists(),
+                "a refused runtime should leave no directory behind"
             );
-            // The defect this arm existed to carry: the request word written straight into
-            // `runtime:`, which publishes the artifact as wasm.
-            assert!(!manifest.contains("runtime: native"), "got: {manifest}");
         }
 
         #[test]
@@ -1035,13 +968,12 @@ mod tests {
         }
 
         /// Only the hook arm emits a Rust crate, so only its checklist can point at a
-        /// `cargo test`. The other two arms are exercised by feeding a stub an envelope,
-        /// and their wording must not drift onto a command they have no crate for.
+        /// `cargo test`. The wasm arm is exercised by feeding its stub an envelope, and its
+        /// wording must not drift onto a command it has no crate for.
         #[test]
-        fn hook_readme_points_at_cargo_test_and_the_others_do_not() {
+        fn hook_readme_points_at_cargo_test_and_the_wasm_arm_does_not() {
             let tmp = TempDir::new().unwrap();
             scaffold_tool_in(tmp.path(), "event_sink", "hook").unwrap();
-            scaffold_tool_in(tmp.path(), "my-tool", "native").unwrap();
             scaffold_tool_in(tmp.path(), "csv-parser", "wasm").unwrap();
 
             let step_three = |artifact: &str| -> String {
@@ -1067,17 +999,15 @@ mod tests {
                 "hook step 3 should not describe a stdin stub; got: {hook}"
             );
 
-            for tool in ["my-tool", "csv-parser"] {
-                let step = step_three(tool);
-                assert!(
-                    step.contains("on stdin"),
-                    "{tool} step 3 should keep naming the stdin stub; got: {step}"
-                );
-                assert!(
-                    !step.contains("cargo test"),
-                    "{tool} has no crate to `cargo test`; got: {step}"
-                );
-            }
+            let tool = step_three("csv-parser");
+            assert!(
+                tool.contains("on stdin"),
+                "wasm step 3 should keep naming the stdin stub; got: {tool}"
+            );
+            assert!(
+                !tool.contains("cargo test"),
+                "the wasm arm has no crate to `cargo test`; got: {tool}"
+            );
         }
 
         /// The hook checklist sends the author to the `logic` module, which is where the
@@ -1094,29 +1024,6 @@ mod tests {
             assert!(
                 step_two.contains("`logic` module"),
                 "hook step 2 should name the logic module; got: {step_two}"
-            );
-        }
-
-        /// The scaffolder sets the executable bit only on the host build; built for
-        /// `wasm32-wasip2` it cannot, and `mur build` packs the mode it finds. The README has to
-        /// carry the step, or the stub the README tells the author to run is not runnable.
-        #[test]
-        fn native_readme_asks_for_the_executable_bit() {
-            let tmp = TempDir::new().unwrap();
-            scaffold_tool_in(tmp.path(), "my-tool", "native").unwrap();
-            let readme = fs::read_to_string(tmp.path().join("tools/my-tool/README.md")).unwrap();
-            assert!(
-                readme.contains("`chmod +x bin/my-tool`"),
-                "native README should name the chmod step; got:\n{readme}"
-            );
-
-            // A wasm payload is produced by a cargo build and is never exec'd directly.
-            scaffold_tool_in(tmp.path(), "other-tool", "wasm").unwrap();
-            let wasm_readme =
-                fs::read_to_string(tmp.path().join("tools/other-tool/README.md")).unwrap();
-            assert!(
-                !wasm_readme.contains("chmod"),
-                "wasm README should not mention chmod; got:\n{wasm_readme}"
             );
         }
 
@@ -1143,8 +1050,8 @@ mod tests {
         fn scaffold_fails_if_directory_exists() {
             let tmp = TempDir::new().unwrap();
 
-            scaffold_tool_in(tmp.path(), "existing", "native").unwrap();
-            let err = scaffold_tool_in(tmp.path(), "existing", "native").unwrap_err();
+            scaffold_tool_in(tmp.path(), "existing", "wasm").unwrap();
+            let err = scaffold_tool_in(tmp.path(), "existing", "wasm").unwrap_err();
             assert!(err.contains("already exists"), "got: {err}");
         }
 
@@ -1179,7 +1086,7 @@ mod tests {
         fn handle_request_scaffolds_from_double_encoded_envelope() {
             let tmp = TempDir::new().unwrap();
             let payload =
-                r#"{"data":"{\"type\":\"tool\",\"name\":\"enveloped\",\"runtime\":\"native\"}"}"#;
+                r#"{"data":"{\"type\":\"tool\",\"name\":\"enveloped\",\"runtime\":\"wasm\"}"}"#;
             let (name, path) = handle_request(Some(payload), tmp.path()).unwrap();
             assert_eq!(name, "enveloped");
             assert_eq!(path, "tools/enveloped");
@@ -1187,8 +1094,7 @@ mod tests {
                 .path()
                 .join("tools")
                 .join("enveloped")
-                .join("bin")
-                .join("enveloped")
+                .join("component.wat")
                 .exists());
         }
 
@@ -1226,7 +1132,7 @@ mod wasm_tool {
     impl Guest for Component {
         fn run(input: ToolInput) -> ToolResult {
             // `input.data` carries the scaffold request the agent passed. Scaffold under the
-            // preopened workdir root (".") — the same CWD the native binary used.
+            // preopened workdir root (".").
             match crate::logic::handle_request(input.data.as_deref(), Path::new(".")) {
                 Ok((name, path)) => ToolResult {
                     status: Status::Passed,

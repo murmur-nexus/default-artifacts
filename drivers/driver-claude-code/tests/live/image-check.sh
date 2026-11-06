@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Does Claude Code show its model an image that comes back from a murmur tool?
 #
-# Runs one real capsule on `transport: process` with driver-claude-code and a native fixture
-# tool, `picture-tool`, whose result attaches a PNG showing a random three-digit number on a
-# coloured background. The task asks the model for the number and the colour, and to answer
-# NO-PICTURE rather than guess. The model can answer only by seeing the image: the file name,
-# the tool's text, the task and the work folder give nothing away, and the expected values are
-# written only outside the capsule.
+# Runs one real capsule on `transport: process` with driver-claude-code and the workspace's
+# `tool-read`, which attaches `picture.png` from the work folder: a PNG showing a random
+# three-digit number on a coloured background. The task asks the model for the number and the
+# colour, and to answer NO-PICTURE rather than guess. The model can answer only by seeing the
+# image: the file name, the tool's text (type, size and dimensions), the task and the work folder
+# give nothing away, and the expected values are written only outside the capsule.
 #
 # The turn spends the Claude subscription `claude` is logged in to. Prerequisites:
 #   - a `mur` built from murmur 4f65bb98 or later, whose tool bridge sends MCP image items;
@@ -56,10 +56,10 @@ PATH="$(dirname "$MUR_BIN"):$PATH"
 export PATH
 
 # ── 2. scratch: the capsule, and the expected values outside it ────────────────
-SCRATCH="$(mktemp -d /tmp/cc-image-check.XXXXXX)"
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/cc-image-check.XXXXXX")"
 CAPSULE="$SCRATCH/capsule"
 EXPECTED="$SCRATCH/expected.txt"
-mkdir -p "$CAPSULE" "$SCRATCH/zips"
+mkdir -p "$CAPSULE"
 echo "→ scratch: $SCRATCH"
 
 # ── 3. the picture ─────────────────────────────────────────────────────────────
@@ -67,6 +67,7 @@ python3 -I "$LIVE_DIR/picture.py" --out "$CAPSULE/picture.png" --expected "$EXPE
 
 # ── 5. the capsule (written before step 4: `mur install` needs its murmur.yaml) ─
 DRIVER_VERSION="$(sed -n 's/^version:[[:space:]]*//p' "$REPO_ROOT/drivers/driver-claude-code/murmur.yaml" | head -1)"
+TOOL_VERSION="$(sed -n 's/^version:[[:space:]]*//p' "$REPO_ROOT/tools/tool-read/murmur.yaml" | head -1)"
 cat > "$CAPSULE/murmur.yaml" <<YAML
 name: cc-image-check
 version: 0.1.0
@@ -74,8 +75,8 @@ artifacts:
   - name: local/driver-claude-code
     version: "$DRIVER_VERSION"
     runtime: driver
-  - name: local/picture-tool
-    version: "0.1.0"
+  - name: local/tool-read
+    version: "$TOOL_VERSION"
     runtime: tool
 capabilities:
   env:
@@ -89,34 +90,14 @@ inference:
   model: $MODEL
 YAML
 
-# ── 4. the native fixture tool ─────────────────────────────────────────────────
-TOOL_DIR="$SCRATCH/picture-tool"
-mkdir -p "$TOOL_DIR/bin"
-cat > "$TOOL_DIR/murmur.yaml" <<'YAML'
-name: picture-tool
-version: 0.1.0
-runtime: tool
-implementation: native
-description: Returns a picture.
-input_schema: |
-  {"type":"object","properties":{}}
-requires_files:
-  - bin/picture-tool
-YAML
-cat > "$TOOL_DIR/bin/picture-tool" <<'SH'
-#!/bin/sh
-echo '{"status":"passed","summary":"picture","data":"PICTURE-TOOL-RAN","data_path":null,"truncated":false,"metadata":[],"attachments":[{"media_type":"image/png","path":"picture.png"}]}'
-SH
-chmod 0755 "$TOOL_DIR/bin/picture-tool"
-"$MUR_BIN" build "$TOOL_DIR" -o "$SCRATCH/zips/" >&2
-TOOL_ZIP="$(ls "$SCRATCH"/zips/picture-tool-*.mur.zip)"
-( cd "$CAPSULE" && "$MUR_BIN" install "$TOOL_ZIP" )
+# ── 4. the tool ────────────────────────────────────────────────────────────────
+"$REPO_ROOT/scripts/local-install.sh" tool-read "$CAPSULE"
 
 "$REPO_ROOT/scripts/local-install.sh" driver-claude-code "$CAPSULE"
 
 # ── 6. the task ────────────────────────────────────────────────────────────────
 cat > "$CAPSULE/task.md" <<'TASK'
-Call the tool picture-tool exactly once, with no arguments. It returns a picture. Then answer with one line in exactly this form: NUMBER=<the number drawn in the picture> BACKGROUND=<the background colour, one word>. If the tool gave you no picture you can see, answer exactly NO-PICTURE and do not guess.
+Call the tool tool-read exactly once, with path picture.png. It returns a picture. Then answer with one line in exactly this form: NUMBER=<the number drawn in the picture> BACKGROUND=<the background colour, one word>. If the tool gave you no picture you can see, answer exactly NO-PICTURE and do not guess.
 TASK
 
 # ── 7. run ─────────────────────────────────────────────────────────────────────

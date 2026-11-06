@@ -22,6 +22,9 @@
 #     tavily,github,registry-search,
 #     test-report,browser,git,
 #     code-coverage,code-graph,computer}
+#   murmur-fake-computer               -> TOOL   category (test-only: the drivers'
+#                                               computer-tool suites pack it;
+#                                               nothing publishes it)
 #   anything else                      -> ERROR  (fail closed: an unrecognised
 #                                               artifact must not silently skip)
 #
@@ -137,7 +140,7 @@ validate_one() {
       expected_export="murmur:driver/process"
       expected_version="$process_driver_version"
       ;;
-    driver-*|tool-request-input|tool-create|tool-read|tool-write|tool-edit|tool-find|tool-corpus|tool-report|tool-tavily|tool-github|tool-registry-search|tool-test-report|tool-browser|tool-git|tool-code-coverage|tool-code-graph|tool-computer)
+    driver-*|tool-request-input|tool-create|tool-read|tool-write|tool-edit|tool-find|tool-corpus|tool-report|tool-tavily|tool-github|tool-registry-search|tool-test-report|tool-browser|tool-git|tool-code-coverage|tool-code-graph|tool-computer|murmur-fake-computer)
       category="tool"
       expected_export="murmur:tool/run"
       expected_version="$tool_version"

@@ -1,8 +1,8 @@
 //! A computer tool, proved to reach Claude as Anthropic's own computer tool and to run with
 //! Claude's coordinates scaled back to its display, under a real `mur run`.
 //!
-//! The capsule runs driver-anthropic with `fake-computer`, a native tool compiled with `rustc`
-//! from `libs/murmur-driver-computer/test-support/fake_computer.rs` and packed with
+//! The capsule runs driver-anthropic with `fake-computer`, the `murmur-fake-computer` test
+//! component (`libs/murmur-fake-computer`) built for wasm32-wasip2 and packed with
 //! `provider_tool: {kind: computer, display_width: 1440, display_height: 900}`. It logs each call
 //! it gets to `computer-calls.jsonl` in the work folder and attaches the 1440×900 `shot.png` the
 //! test writes there. The capsule runs `capabilities.containment: sealed`, which a provider tool
@@ -90,23 +90,28 @@ fn target_dir() -> PathBuf {
         .unwrap_or_else(|| workspace_root().join("target"))
 }
 
-fn build_driver() {
-    static BUILD: Once = Once::new();
-    BUILD.call_once(|| {
+/// Build `crate_name` for wasm32-wasip2, once per test binary per `once`.
+fn build_component(once: &'static Once, crate_name: &str) {
+    once.call_once(|| {
         let status = Command::new(env!("CARGO"))
             .current_dir(workspace_root())
             .args([
                 "build",
                 "-p",
-                "driver-anthropic",
+                crate_name,
                 "--target",
                 "wasm32-wasip2",
                 "--release",
             ])
             .status()
-            .expect("failed to spawn `cargo build` for driver-anthropic");
-        assert!(status.success(), "cargo build of driver-anthropic failed");
+            .unwrap_or_else(|err| panic!("failed to spawn `cargo build` for {crate_name}: {err}"));
+        assert!(status.success(), "cargo build of {crate_name} failed");
     });
+}
+
+fn build_driver() {
+    static BUILD: Once = Once::new();
+    build_component(&BUILD, "driver-anthropic");
 }
 
 fn manifest_field(manifest: &str, key: &str) -> String {
@@ -148,8 +153,8 @@ fn pack_driver(out_dir: &Path) -> (String, PathBuf) {
 }
 
 const FAKE_COMPUTER_MANIFEST: &str = "name: fake-computer\nversion: 0.1.0\nruntime: tool\n\
-implementation: native\ndescription: Stands in for tool-computer on a 1440x900 display.\n\
-requires_files:\n  - bin/fake-computer\n\
+implementation: wasm\ndescription: Stands in for tool-computer on a 1440x900 display.\n\
+requires_files:\n  - murmur_fake_computer.wasm\n\
 input_schema: '{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\"},\
 \"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"},\"text\":{\"type\":\"string\"}},\
 \"required\":[\"action\"]}'\n";
@@ -157,17 +162,12 @@ input_schema: '{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"strin
 const PROVIDER_TOOL_BLOCK: &str =
     "provider_tool:\n  kind: computer\n  display_width: 1440\n  display_height: 900\n";
 
-/// Compile `fake_computer.rs` with `rustc` and pack it as a native tool artifact, declaring the
-/// computer `provider_tool:` block when `provider_tool`.
+/// Build the `murmur-fake-computer` component and pack it as the `fake-computer` tool artifact,
+/// declaring the computer `provider_tool:` block when `provider_tool`.
 fn pack_fake_computer(scratch: &Path, out_dir: &Path, provider_tool: bool) -> PathBuf {
-    let binary = scratch.join("fake-computer-bin");
-    let status = Command::new("rustc")
-        .args(["--edition", "2021", "-O", "-o"])
-        .arg(&binary)
-        .arg(workspace_root().join("libs/murmur-driver-computer/test-support/fake_computer.rs"))
-        .status()
-        .expect("failed to spawn rustc");
-    assert!(status.success(), "rustc fake_computer.rs failed");
+    static BUILD: Once = Once::new();
+    build_component(&BUILD, "murmur-fake-computer");
+    let wasm = target_dir().join("wasm32-wasip2/release/murmur_fake_computer.wasm");
     let dir = scratch.join("fake-computer");
     fs::create_dir_all(&dir).unwrap();
     let mut manifest = FAKE_COMPUTER_MANIFEST.to_string();
@@ -175,7 +175,7 @@ fn pack_fake_computer(scratch: &Path, out_dir: &Path, provider_tool: bool) -> Pa
         manifest.push_str(PROVIDER_TOOL_BLOCK);
     }
     fs::write(dir.join("murmur.yaml"), manifest).unwrap();
-    package(&dir, out_dir, &binary)
+    package(&dir, out_dir, &wasm)
 }
 
 // ── the fake provider ────────────────────────────────────────────────────────

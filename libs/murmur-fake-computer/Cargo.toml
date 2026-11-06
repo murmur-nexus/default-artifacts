@@ -1,0 +1,15 @@
+# A test component, never published: no murmur.yaml, so classify-crates.sh classifies it as
+# `internal-lib` and no release packs it. The drivers' `mur_run_computer_tool` suites build it
+# for wasm32-wasip2 and pack it with a manifest of their own.
+[package]
+name = "murmur-fake-computer"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde_json.workspace = true
+wit-bindgen.workspace = true

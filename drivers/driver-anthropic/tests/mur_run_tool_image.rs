@@ -1,9 +1,8 @@
 //! A tool's image, proved to reach the provider inside its `tool_result`, sized to the model,
 //! under a real `mur run`.
 //!
-//! The capsule runs driver-anthropic on `claude-sonnet-5-5` with the native `show-image` tool,
-//! compiled with `rustc` from `libs/murmur-driver-image/test-support/show_image.rs`. A loopback
-//! fake Anthropic answers the first request with a call to the tool for a 3000×2000 PNG in the
+//! The capsule runs driver-anthropic on `claude-sonnet-5-5` with the workspace's `tool-read`,
+//! built for wasm32-wasip2 and packed as a release packs it. A loopback fake Anthropic answers the first request with a call to the tool for a 3000×2000 PNG in the
 //! work folder, and the second with a final text. The test asserts the second request carries the
 //! image in the call's `tool_result`, decoded at the high-resolution tier's 2352×1568, and that
 //! the guest never trapped. Only a launch runs `mod wasm_driver`, where the decode, resize and
@@ -90,23 +89,28 @@ fn target_dir() -> PathBuf {
         .unwrap_or_else(|| workspace_root().join("target"))
 }
 
-fn build_driver() {
-    static BUILD: Once = Once::new();
-    BUILD.call_once(|| {
+/// Build `crate_name` for wasm32-wasip2, once per test binary per `once`.
+fn build_component(once: &'static Once, crate_name: &str) {
+    once.call_once(|| {
         let status = Command::new(env!("CARGO"))
             .current_dir(workspace_root())
             .args([
                 "build",
                 "-p",
-                "driver-anthropic",
+                crate_name,
                 "--target",
                 "wasm32-wasip2",
                 "--release",
             ])
             .status()
-            .expect("failed to spawn `cargo build` for driver-anthropic");
-        assert!(status.success(), "cargo build of driver-anthropic failed");
+            .unwrap_or_else(|err| panic!("failed to spawn `cargo build` for {crate_name}: {err}"));
+        assert!(status.success(), "cargo build of {crate_name} failed");
     });
+}
+
+fn build_driver() {
+    static BUILD: Once = Once::new();
+    build_component(&BUILD, "driver-anthropic");
 }
 
 fn manifest_field(manifest: &str, key: &str) -> String {
@@ -147,26 +151,16 @@ fn pack_driver(out_dir: &Path) -> (String, PathBuf) {
     (version, package(&crate_path, out_dir, &wasm))
 }
 
-const SHOW_IMAGE_MANIFEST: &str = "name: show-image\nversion: 0.1.0\nruntime: tool\n\
-implementation: native\ndescription: Attaches one image from the work folder.\n\
-requires_files:\n  - bin/show-image\n\
-input_schema: '{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\
-\"description\":\"The image, relative to the work folder.\"}},\"required\":[\"path\"]}'\n";
-
-/// Compile `show_image.rs` with `rustc` and pack it as a native tool artifact.
-fn pack_show_image(scratch: &Path, out_dir: &Path) -> PathBuf {
-    let binary = scratch.join("show-image-bin");
-    let status = Command::new("rustc")
-        .args(["--edition", "2021", "-O", "-o"])
-        .arg(&binary)
-        .arg(workspace_root().join("libs/murmur-driver-image/test-support/show_image.rs"))
-        .status()
-        .expect("failed to spawn rustc");
-    assert!(status.success(), "rustc show_image.rs failed");
-    let dir = scratch.join("show-image");
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("murmur.yaml"), SHOW_IMAGE_MANIFEST).unwrap();
-    package(&dir, out_dir, &binary)
+/// Pack the workspace's `tool-read`, which attaches an image file it is asked to read; returns
+/// its version and zip.
+fn pack_tool_read(out_dir: &Path) -> (String, PathBuf) {
+    static BUILD: Once = Once::new();
+    build_component(&BUILD, "tool-read");
+    let crate_path = workspace_root().join("tools/tool-read");
+    let manifest = fs::read_to_string(crate_path.join("murmur.yaml")).unwrap();
+    let version = manifest_field(&manifest, "version");
+    let wasm = target_dir().join("wasm32-wasip2/release/tool_read.wasm");
+    (version, package(&crate_path, out_dir, &wasm))
 }
 
 /// A 3000×2000 PNG of flat bands and one dark block: small enough on disk for the runtime's
@@ -193,27 +187,22 @@ fn response(body: &Value) -> String {
     )
 }
 
-/// The name the request offers the show-image tool under.
-fn show_image_tool(request: &Value) -> String {
+/// The name the request offers tool-read under.
+fn read_tool(request: &Value) -> String {
     request["tools"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|tool| tool["name"].as_str())
-        .find(|name| name.contains("show"))
-        .unwrap_or_else(|| {
-            panic!(
-                "the request offers no show-image tool: {}",
-                request["tools"]
-            )
-        })
+        .find(|name| name.contains("read"))
+        .unwrap_or_else(|| panic!("the request offers no tool-read: {}", request["tools"]))
         .to_string()
 }
 
-/// The first answer calls the show-image tool; every later one ends the turn.
+/// The first answer calls tool-read on the image; every later one ends the turn.
 fn answer(index: usize, request: &Value) -> String {
     if index == 0 {
-        let tool = show_image_tool(request);
+        let tool = read_tool(request);
         response(&json!({
             "id": "msg_1", "type": "message", "role": "assistant", "model": MODEL,
             "content": [{"type": "tool_use", "id": "toolu_img1", "name": tool, "input": {"path": IMAGE}}],
@@ -322,12 +311,11 @@ fn files_containing(dir: &Path, needle: &str) -> Vec<PathBuf> {
 #[test]
 #[ignore = "launches the real mur binary; run with --ignored"]
 fn a_tool_image_reaches_the_tool_result_sized_to_the_model() {
-    let scratch = tempfile::tempdir().unwrap();
     let artifacts = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     let (version, driver_zip) = pack_driver(artifacts.path());
-    let tool_zip = pack_show_image(scratch.path(), artifacts.path());
+    let (tool_version, tool_zip) = pack_tool_read(artifacts.path());
     let provider = Provider::start();
 
     let manifest = project.path().join("murmur.yaml");
@@ -337,7 +325,7 @@ fn a_tool_image_reaches_the_tool_result_sized_to_the_model() {
             "name: tool-image-proof\nversion: 0.1.0\nartifacts:\n\
              \x20 - name: local/driver-anthropic\n    version: {version}\n    runtime: driver\n    \
              gateway:\n      endpoint: {}\n      api_key: test-key\n\
-             \x20 - name: local/show-image\n    version: 0.1.0\n    runtime: tool\n\
+             \x20 - name: local/tool-read\n    version: {tool_version}\n    runtime: tool\n\
              inference:\n  transport: http\n  model: {MODEL}\n  max_tokens: 4096\n  \
              driver:\n    artifact: local/driver-anthropic\n\
              trace:\n  capture: content\n",
@@ -360,7 +348,7 @@ fn a_tool_image_reaches_the_tool_result_sized_to_the_model() {
     let task = project.path().join("task.md");
     fs::write(
         &task,
-        format!("Call show-image on {IMAGE} and tell me what it shows.\n"),
+        format!("Call tool-read on {IMAGE} and tell me what it shows.\n"),
     )
     .unwrap();
 

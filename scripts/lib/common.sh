@@ -3,10 +3,6 @@
 #
 #   . "$SCRIPT_DIR/lib/common.sh"
 
-# The platforms a native payload can be tagged with: the set `mur index` accepts.
-# shellcheck disable=SC2034 # read by the scripts that source this
-PLATFORMS="darwin-aarch64 darwin-x86_64 linux-aarch64 linux-x86_64"
-
 # The value of a top-level `key:` in a murmur.yaml, unquoted, or nothing. Only
 # scalar keys are read, and only from column 0, so a `name:` inside a block
 # scalar or a nested mapping is never mistaken for the artifact's own.
