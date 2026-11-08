@@ -78,10 +78,32 @@ pub fn parse_devtools_line(stderr: &str) -> Option<(u16, String)> {
 const SINGLETON_HINT: &str = "; full Chrome and Chromium cannot run on murmur's scoped and sealed tiers, grant chrome-headless-shell under this name instead";
 const MEMORY_HINT: &str = "; set capabilities.resources.memory_bytes to at least 85899345920 (80 GiB), for example 274877906944";
 
-/// The one line for a Chrome that exited before it opened DevTools. It quotes Chrome's last
-/// `FATAL` line when there is one (a crash prints its stack trace after it), else its last
-/// non-empty stderr line.
-pub fn exit_line(name: &str, code: i32, stderr: &str) -> String {
+/// Text in Chrome's stderr that shows NSS could not load one of the modules it opens with
+/// `dlopen`.
+pub const NSS_SIGNATURES: &[&str] = &[
+    "nss_util",
+    "Error initializing NSS",
+    "libsoftokn3",
+    "libfreebl",
+    "libnssckbi",
+];
+
+/// The NSS hint for a browser granted as `name`. murmur grants the shared-library closure of a
+/// granted binary; NSS opens these modules, and reads each `.chk` beside its module, at run time,
+/// and `libsoftokn3.so` needs `libsqlite3.so.0`, which Chrome does not link.
+pub fn nss_hint(name: &str) -> String {
+    format!(
+        "; Chrome loads NSS's modules with dlopen, so granting {name} does not grant them: add \
+         libsoftokn3.so, libsoftokn3.chk, libfreebl3.so, libfreebl3.chk, libfreeblpriv3.so, \
+         libfreeblpriv3.chk, libnssdbm3.so, libnssdbm3.chk, libnssckbi.so and libsqlite3.so.0, \
+         which libsoftokn3.so links, to the capabilities.shell.interpreter_runtime dirs of \
+         {name}, as tool-browser's README lists"
+    )
+}
+
+/// Chrome's last `FATAL` line when there is one (a crash prints its stack trace after it), else
+/// its last non-empty stderr line.
+fn last_line(stderr: &str) -> String {
     let lines = || {
         stderr
             .lines()
@@ -89,24 +111,16 @@ pub fn exit_line(name: &str, code: i32, stderr: &str) -> String {
             .map(str::trim)
             .filter(|l| !l.is_empty())
     };
-    let last = lines()
+    lines()
         .find(|l| l.contains(":FATAL:"))
         .or_else(|| lines().next())
         .map(|l| one_line(l, 300))
-        .unwrap_or_else(|| "(nothing on stderr)".into());
-    let mut line = format!("tool-browser: {name} exited with {code} while starting: {last}");
-    let singleton = [
-        "ProcessSingleton",
-        "process_singleton",
-        "SingletonSocket",
-        "SingletonLock",
-    ]
-    .iter()
-    .any(|s| stderr.contains(s));
-    if singleton {
-        line.push_str(SINGLETON_HINT);
-    }
-    let memory_text = stderr.lines().any(|l| {
+        .unwrap_or_else(|| "(nothing on stderr)".into())
+}
+
+/// Whether stderr talks about memory or address space.
+fn memory_text(stderr: &str) -> bool {
+    stderr.lines().any(|l| {
         let l = l.to_ascii_lowercase();
         // Chrome logs "Failed to adjust OOM score of renderer" on every contained start; that
         // line says nothing about memory.
@@ -117,11 +131,50 @@ pub fn exit_line(name: &str, code: i32, stderr: &str) -> String {
                 .split(|c: char| !c.is_ascii_alphanumeric())
                 .any(|w| w == "oom")
                 && !l.contains("oom score"))
-    });
-    if memory_text || (code >= 128 && !singleton) {
-        line.push_str(MEMORY_HINT);
+    })
+}
+
+/// At most one hint, the first that applies: singleton, NSS, memory. `starting` is a browser
+/// that exited before it opened DevTools: a code of 128 or more is then taken as short address
+/// space too, which a browser that ran and then died is not.
+fn hint(name: &str, code: i32, stderr: &str, starting: bool) -> String {
+    let singleton = [
+        "ProcessSingleton",
+        "process_singleton",
+        "SingletonSocket",
+        "SingletonLock",
+    ]
+    .iter()
+    .any(|s| stderr.contains(s));
+    if singleton {
+        SINGLETON_HINT.into()
+    } else if NSS_SIGNATURES.iter().any(|s| stderr.contains(s)) {
+        nss_hint(name)
+    } else if memory_text(stderr) || (starting && code >= 128) {
+        MEMORY_HINT.into()
+    } else {
+        String::new()
     }
-    line
+}
+
+/// The one line for a Chrome that exited before it opened DevTools, or while the tool was still
+/// starting it.
+pub fn exit_line(name: &str, code: i32, stderr: &str) -> String {
+    format!(
+        "tool-browser: {name} exited with {code} while starting: {}{}",
+        last_line(stderr),
+        hint(name, code, stderr, true)
+    )
+}
+
+/// The one line for a running Chrome that exited during a call. `during` is the DevTools method
+/// the tool last sent before it found the connection closed, else the action's name.
+pub fn died_line(name: &str, code: i32, during: &str, stderr: &str) -> String {
+    format!(
+        "tool-browser: {name} exited with {code} during {during}: {}{}",
+        last_line(stderr),
+        hint(name, code, stderr, false)
+    )
 }
 
 pub fn no_port_line(name: &str, state_rel: &str) -> String {
@@ -313,6 +366,81 @@ mod tests {
             no_port_line("chromium", ".tool-browser/ab"),
             "tool-browser: chromium opened no DevTools port within 20 s; see .tool-browser/ab/browser.log"
         );
+    }
+
+    /// Chrome's stderr when NSS cannot open its modules: the last lines of `browser.log` from
+    /// `chrome-headless-shell` 145.0.7632.6 on murmur's `scoped` tier with the README's manifest
+    /// less its nine NSS files, verbatim.
+    const NSS_STDERR: &str = "[1108/204147.929516:ERROR:crypto/nss_util.cc:225] Error initializing NSS with a persistent database (sql:/space/scratch/5c8f-tmp/.tmpo8Xhdo/.murmur/records/space/scratch/5c8f-tmp/.tmpgqpwtE/work-nss-withheld/ses_01a1bce54dc876329c9d777f73288751/home/.pki/nssdb): libsoftokn3.so: cannot open shared object file: No such file or directory\n\
+[1108/204147.929588:ERROR:crypto/nss_util.cc:113] Error initializing NSS without a persistent database: NSS error code: -5925\n\
+[1108/204147.929598:FATAL:crypto/nss_util.cc:115] nss_error=-5925, os_error=0\n";
+    const NSS_FATAL: &str =
+        "[1108/204147.929598:FATAL:crypto/nss_util.cc:115] nss_error=-5925, os_error=0";
+
+    #[test]
+    fn a_death_during_a_call_names_the_method_and_the_nss_hint() {
+        assert_eq!(
+            died_line("chromium", 133, "Page.navigate", NSS_STDERR),
+            format!(
+                "tool-browser: chromium exited with 133 during Page.navigate: {NSS_FATAL}{}",
+                nss_hint("chromium")
+            )
+        );
+        assert_eq!(
+            nss_hint("chromium"),
+            "; Chrome loads NSS's modules with dlopen, so granting chromium does not grant them: add libsoftokn3.so, libsoftokn3.chk, libfreebl3.so, libfreebl3.chk, libfreeblpriv3.so, libfreeblpriv3.chk, libnssdbm3.so, libnssdbm3.chk, libnssckbi.so and libsqlite3.so.0, which libsoftokn3.so links, to the capabilities.shell.interpreter_runtime dirs of chromium, as tool-browser's README lists"
+        );
+    }
+
+    #[test]
+    fn hints_take_one_in_order_and_memory_by_code_only_while_starting() {
+        // While starting, NSS text outranks the code-based memory hint.
+        let line = exit_line("chromium", 133, NSS_STDERR);
+        assert_eq!(
+            line,
+            format!(
+                "tool-browser: chromium exited with 133 while starting: {NSS_FATAL}{}",
+                nss_hint("chromium")
+            )
+        );
+        assert!(!line.contains("memory_bytes"), "{line}");
+        // Each trigger alone fires it.
+        for s in NSS_SIGNATURES {
+            assert!(
+                exit_line("c", 1, &format!("x {s} y")).ends_with(&nss_hint("c")),
+                "{s}"
+            );
+        }
+        // Singleton outranks NSS.
+        let both = "[1:1:ERROR:process_singleton_posix.cc] SingletonLock\n[1:1:ERROR:crypto/nss_util.cc:256] Error initializing NSS";
+        assert!(exit_line("chromium", 21, both).ends_with(SINGLETON_HINT));
+        // During a call a signal code alone gives no hint.
+        assert_eq!(
+            died_line("chromium", 137, "click", "[1:1:ERROR:x.cc] something else"),
+            "tool-browser: chromium exited with 137 during click: [1:1:ERROR:x.cc] something else"
+        );
+        assert_eq!(
+            died_line("chrome", 1, "open", ""),
+            "tool-browser: chrome exited with 1 during open: (nothing on stderr)"
+        );
+        // Memory text still gets the memory hint during a call.
+        let line = died_line(
+            "chromium",
+            133,
+            "Runtime.evaluate",
+            "[1:1:FATAL:partition_alloc.cc] OOM: out of address space",
+        );
+        assert_eq!(
+            line,
+            format!("tool-browser: chromium exited with 133 during Runtime.evaluate: [1:1:FATAL:partition_alloc.cc] OOM: out of address space{MEMORY_HINT}")
+        );
+        let line = died_line(
+            "chromium",
+            133,
+            "Page.navigate",
+            "[1:1:FATAL:x.cc] boom\nReceived signal 5",
+        );
+        assert!(line.ends_with(": [1:1:FATAL:x.cc] boom"), "{line}");
     }
 
     #[test]

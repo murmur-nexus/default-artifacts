@@ -15,7 +15,7 @@ use crate::{
     envelope::{self, Reply},
     host::{Clock, ProcError, ProcState, Processes},
     launch::{self, PROCESS_NAME},
-    page::Page,
+    page::{Outcome, Page},
     request::{self, Action, Request},
     state::{self, BrowserInfo, CallLock, DocumentState, PageLog, State, StateDir},
     ws::{Random, WebSocket},
@@ -32,6 +32,13 @@ const LOG_CUT_LINE: &str = "\n… browser.log cut at 1 MiB; later output is not 
 const POLL_MS: u64 = 100;
 /// How long the WebSocket upgrade may take.
 const HANDSHAKE_MS: u32 = 10_000;
+/// How long a failed call waits for the runtime to report a browser exited once its DevTools
+/// connection closed.
+const EXIT_WAIT_MS: u64 = 2_000;
+/// How long the last lines of an exited browser may take through the runtime's reader.
+const EXIT_SETTLE_MS: u64 = 300;
+/// How much of `browser.log` a failed call reads when the output it drains holds no `FATAL` line.
+const LOG_TAIL_BYTES: u64 = 64 * 1024;
 
 /// What a call runs with.
 pub struct Ctx<'a> {
@@ -210,6 +217,77 @@ fn drain_output(procs: &mut dyn Processes, handle: &str, dir: &StateDir) -> Stri
     String::from_utf8_lossy(&stderr).into_owned()
 }
 
+/// The last [`LOG_TAIL_BYTES`] of `browser.log`.
+fn log_tail(dir: &StateDir) -> String {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let Ok(mut f) = fs::File::open(dir.file("browser.log")) else {
+        return String::new();
+    };
+    let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut bytes = Vec::new();
+    if f.seek(SeekFrom::Start(size.saturating_sub(LOG_TAIL_BYTES)))
+        .and_then(|_| f.read_to_end(&mut bytes))
+        .is_err()
+    {
+        return String::new();
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// A call that failed on an attached browser.
+struct Failure<'s> {
+    /// The error as the failing step gave it.
+    line: String,
+    /// The DevTools method in flight when the connection closed, else the action's name; `None`
+    /// while the browser is still being started.
+    during: Option<&'s str>,
+    /// The DevTools connection was seen closed.
+    closed: bool,
+}
+
+/// The line a failed call answers with. When the browser `handle` has exited, it names Chrome's
+/// exit code, what was in flight and Chrome's last `FATAL` line ([`launch::died_line`], or
+/// [`launch::exit_line`] while starting); while the browser runs, or when its status cannot be
+/// read, the failure's own line stands. A closed connection usually means Chrome has exited, but
+/// the runtime can report it a moment later, so status is then read every [`POLL_MS`] for up to
+/// [`EXIT_WAIT_MS`], within `deadline`; otherwise it is read once.
+fn explain_exit(
+    ctx: &mut Ctx,
+    handle: &str,
+    dir: &StateDir,
+    name: &str,
+    deadline: u64,
+    failure: Failure,
+) -> String {
+    let until = (ctx.clock.now_ms() + EXIT_WAIT_MS).min(deadline);
+    let code = loop {
+        match ctx.procs.status(handle) {
+            Ok(ProcState::Exited(code)) => break code,
+            Ok(ProcState::Running) if failure.closed && ctx.clock.now_ms() < until => {
+                ctx.clock.sleep_ms(POLL_MS);
+            }
+            _ => return failure.line,
+        }
+    };
+    ctx.clock.sleep_ms(EXIT_SETTLE_MS);
+    let drained = drain_output(ctx.procs, handle, dir);
+    // Output an earlier read already moved to browser.log, or a FATAL line the drain split.
+    let stderr = if drained.contains(":FATAL:") {
+        drained
+    } else {
+        let tail = log_tail(dir);
+        if tail.contains(":FATAL:") || drained.trim().is_empty() {
+            tail
+        } else {
+            drained
+        }
+    };
+    match failure.during {
+        Some(during) => launch::died_line(name, code, during, &stderr),
+        None => launch::exit_line(name, code, &stderr),
+    }
+}
+
 enum DevTools {
     Ready(u16, String),
     Exited(i32, String),
@@ -331,13 +409,19 @@ fn start<'a>(
         }
     };
 
-    let fail = |ctx: &mut Ctx, line: String| -> String {
+    let fail = |ctx: &mut Ctx, line: String, closed: bool| -> String {
+        let failure = Failure {
+            line,
+            during: None,
+            closed,
+        };
+        let line = explain_exit(ctx, &handle, &dir, name, deadline, failure);
         let _ = ctx.procs.stop(&handle);
         line
     };
     let ws = match open_ws(ctx, &handle, port, &path) {
         Ok(ws) => ws,
-        Err(e) => return Err(fail(ctx, e)),
+        Err(e) => return Err(fail(ctx, e, false)),
     };
     let mut cdp = Cdp::new(ws, ctx.clock, deadline, PageLog::default());
     let version = cdp
@@ -347,9 +431,13 @@ fn start<'a>(
         .unwrap_or_else(|| "(unknown version)".into());
     let targets = match cdp.browser("Target.getTargets", json!({})) {
         Ok(t) => t,
-        Err(e) => return Err(fail(ctx, format!("tool-browser: {e}"))),
+        Err(e) => {
+            let closed = cdp.ev.closed.is_some();
+            return Err(fail(ctx, format!("tool-browser: {e}"), closed));
+        }
     };
     let Some((target_id, workdir_url)) = launch::initial_page(&targets, &dir.rel) else {
+        let closed = cdp.ev.closed.is_some();
         return Err(fail(
             ctx,
             format!(
@@ -357,6 +445,7 @@ fn start<'a>(
                 dir.rel,
                 launch::BLANK_PAGE
             ),
+            closed,
         ));
     };
     let state = State {
@@ -572,21 +661,55 @@ fn finish(ctx: &mut Ctx, mut a: Attached, req: &Request) -> Reply {
     reply
 }
 
+/// Run the action, then close this call's connection. A failure on a browser that has exited
+/// names the exit (see [`explain_exit`]).
 fn act(ctx: &mut Ctx, a: &mut Attached, req: &Request, workdir_abs: &str) -> Reply {
-    let Some(mut cdp) = a.cdp.take() else {
+    let Some(cdp) = a.cdp.take() else {
         return envelope::error("tool-browser: no DevTools connection");
     };
+    let (outcome, mut cdp) = act_on(ctx, a, req, workdir_abs, cdp);
+    a.state.log = std::mem::take(&mut cdp.ev.log);
+    cdp.close();
+    let action = req.action.name();
+    match outcome {
+        Ok(out) => envelope::passed(action, &out.data, out.attachment.as_deref()),
+        Err(line) => {
+            let failure = Failure {
+                line,
+                during: Some(cdp.ev.closed_during.as_deref().unwrap_or(action)),
+                closed: cdp.ev.closed.is_some(),
+            };
+            let line = explain_exit(
+                ctx,
+                &a.state.handle,
+                &a.dir,
+                &a.state.browser.name,
+                cdp.deadline_ms(),
+                failure,
+            );
+            envelope::error(&line)
+        }
+    }
+}
+
+/// Attach, prepare the page and run the action; hands the connection back with the outcome.
+fn act_on<'c>(
+    ctx: &Ctx,
+    a: &mut Attached<'c>,
+    req: &Request,
+    workdir_abs: &str,
+    mut cdp: Cdp<'c>,
+) -> (Result<Outcome, String>, Cdp<'c>) {
     let created = match attach(&mut cdp, &mut a.state) {
         Ok(c) => c,
-        Err(e) => return envelope::error(&format!("tool-browser: {e}")),
+        Err(e) => return (Err(format!("tool-browser: {e}")), cdp),
     };
     if created {
         a.state.document = DocumentState::default();
         cdp.ev.log = PageLog::default();
     }
     if let Err(e) = prepare(&mut cdp, &a.dir, workdir_abs) {
-        a.state.log = std::mem::take(&mut cdp.ev.log);
-        return envelope::error(&format!("tool-browser: {e}"));
+        return (Err(format!("tool-browser: {e}")), cdp);
     }
     if a.fresh {
         let before = cdp.ev.load_events;
@@ -607,8 +730,7 @@ fn act(ctx: &mut Ctx, a: &mut Attached, req: &Request, workdir_abs: &str) -> Rep
             "Emulation.setDeviceMetricsOverride",
             json!({"width": w, "height": h, "deviceScaleFactor": 1, "mobile": false}),
         ) {
-            a.state.log = std::mem::take(&mut cdp.ev.log);
-            return envelope::error(&format!("tool-browser: {e}"));
+            return (Err(format!("tool-browser: {e}")), cdp);
         }
     }
     let mut page = Page::new(
@@ -626,13 +748,7 @@ fn act(ctx: &mut Ctx, a: &mut Attached, req: &Request, workdir_abs: &str) -> Rep
     a.state.document = document;
     a.state.dialogs = dialogs;
     a.state.screenshots = page.screenshots;
-    a.state.log = std::mem::take(&mut page.cdp.ev.log);
-    page.cdp.close();
-    let action = req.action.name();
-    match outcome {
-        Ok(out) => envelope::passed(action, &out.data, out.attachment.as_deref()),
-        Err(e) => envelope::error(&e),
-    }
+    (outcome, page.cdp)
 }
 
 fn close(ctx: &mut Ctx, a: &mut Attached) -> Reply {
@@ -663,6 +779,9 @@ mod tests {
         stderr: Vec<u8>,
         exit: i32,
         unread: bool,
+        /// Status reads answering `Running` before the process reads as exited.
+        running_reads: u32,
+        status_reads: u32,
     }
 
     impl Processes for FakeProcs {
@@ -687,6 +806,10 @@ mod tests {
             (!self.started.is_empty()).then(|| format!("prc_{:02x}", self.started.len()))
         }
         fn status(&mut self, _handle: &str) -> Result<ProcState, ProcError> {
+            self.status_reads += 1;
+            if self.status_reads <= self.running_reads {
+                return Ok(ProcState::Running);
+            }
             Ok(ProcState::Exited(self.exit))
         }
         fn read(&mut self, _handle: &str, _max: u32) -> Result<Output, ProcError> {
@@ -797,6 +920,139 @@ mod tests {
         );
         let dirs: Vec<_> = fs::read_dir(work.join(".tool-browser")).unwrap().collect();
         assert_eq!(dirs.len(), 1, "both attempts share one folder");
+    }
+
+    const CLOSED_LINE: &str =
+        "the browser connection closed during Page.navigate (the WebSocket closed)";
+    const NSS_STDERR: &[u8] = b"[1107/150512.1:ERROR:crypto/nss_util.cc:256] Error initializing NSS: libsoftokn3.so: cannot open shared object file\n[1107/150512.2:FATAL:crypto/nss_util.cc:146] nss_error=-5925\n";
+
+    fn closed_failure(during: Option<&str>) -> Failure<'_> {
+        Failure {
+            line: CLOSED_LINE.into(),
+            during,
+            closed: true,
+        }
+    }
+
+    /// `explain_exit` on a fresh browser folder; the line and the clock's advance.
+    fn explain(
+        procs: &mut FakeProcs,
+        work: &Path,
+        deadline: u64,
+        failure: Failure,
+    ) -> (String, u64) {
+        let clock = FakeClock::default();
+        let mut ctx = Ctx {
+            procs,
+            clock: &clock,
+            random: &zeros,
+            work: work.to_path_buf(),
+            runtime: None,
+        };
+        let dir = StateDir::new(work, "00");
+        fs::create_dir_all(&dir.root).unwrap();
+        let line = explain_exit(&mut ctx, "prc_01", &dir, "chromium", deadline, failure);
+        (line, clock.now_ms())
+    }
+
+    #[test]
+    fn a_closed_connection_on_a_running_browser_keeps_its_line() {
+        let (_d, work, _) = folders(&[]);
+        let mut procs = FakeProcs {
+            running_reads: u32::MAX,
+            ..FakeProcs::default()
+        };
+        let (line, waited) = explain(&mut procs, &work, 90_000, closed_failure(Some("open")));
+        assert_eq!(line, CLOSED_LINE);
+        assert_eq!(waited, EXIT_WAIT_MS, "polled for at most 2 s");
+        assert_eq!(procs.status_reads as u64, EXIT_WAIT_MS / POLL_MS + 1);
+        // Within a call deadline nearer than 2 s, the poll stops there.
+        let mut procs = FakeProcs {
+            running_reads: u32::MAX,
+            ..FakeProcs::default()
+        };
+        let (_, waited) = explain(&mut procs, &work, 500, closed_failure(Some("open")));
+        assert_eq!(waited, 500);
+        // An open connection reads status once.
+        let mut procs = FakeProcs {
+            running_reads: u32::MAX,
+            ..FakeProcs::default()
+        };
+        let failure = Failure {
+            line: "click needs ref".into(),
+            during: Some("click"),
+            closed: false,
+        };
+        let (line, waited) = explain(&mut procs, &work, 90_000, failure);
+        assert_eq!(
+            (line.as_str(), waited, procs.status_reads),
+            ("click needs ref", 0, 1)
+        );
+    }
+
+    #[test]
+    fn an_exited_browser_names_its_code_method_fatal_line_and_hint() {
+        let (_d, work, _) = folders(&[]);
+        let mut procs = FakeProcs {
+            stderr: NSS_STDERR.to_vec(),
+            unread: true,
+            exit: 133,
+            running_reads: 3,
+            ..FakeProcs::default()
+        };
+        let (line, waited) = explain(
+            &mut procs,
+            &work,
+            90_000,
+            closed_failure(Some("Page.navigate")),
+        );
+        assert_eq!(
+            line,
+            format!(
+                "tool-browser: chromium exited with 133 during Page.navigate: [1107/150512.2:FATAL:crypto/nss_util.cc:146] nss_error=-5925{}",
+                launch::nss_hint("chromium")
+            )
+        );
+        assert_eq!(waited, 3 * POLL_MS + EXIT_SETTLE_MS);
+        let log = fs::read(StateDir::new(&work, "00").file("browser.log")).unwrap();
+        assert_eq!(log, NSS_STDERR, "the drained output is kept in browser.log");
+        // While starting, the same exit takes the start wording.
+        let mut procs = FakeProcs {
+            stderr: NSS_STDERR.to_vec(),
+            unread: true,
+            exit: 133,
+            ..FakeProcs::default()
+        };
+        let (_d2, work2, _) = folders(&[]);
+        let (line, _) = explain(&mut procs, &work2, 90_000, closed_failure(None));
+        assert!(
+            line.starts_with(
+                "tool-browser: chromium exited with 133 while starting: [1107/150512.2:FATAL:"
+            ) && line.ends_with(&launch::nss_hint("chromium")),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_fatal_line_already_in_browser_log_is_used() {
+        let (_d, work, _) = folders(&[]);
+        let dir = StateDir::new(&work, "00");
+        fs::create_dir_all(&dir.root).unwrap();
+        fs::write(dir.file("browser.log"), NSS_STDERR).unwrap();
+        let mut procs = FakeProcs {
+            exit: 133,
+            ..FakeProcs::default()
+        };
+        let (line, _) = explain(
+            &mut procs,
+            &work,
+            90_000,
+            closed_failure(Some("Page.navigate")),
+        );
+        assert!(
+            line.contains("during Page.navigate: [1107/150512.2:FATAL:crypto/nss_util.cc:146] nss_error=-5925; Chrome loads NSS"),
+            "{line}"
+        );
     }
 
     #[test]

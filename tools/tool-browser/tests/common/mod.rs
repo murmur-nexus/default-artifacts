@@ -137,6 +137,20 @@ pub fn serve_page(page: &'static str) -> u16 {
     port
 }
 
+/// Whether `host:443` answers a TCP connect within 5 s; the reason when not. The https checks
+/// skip, saying why, where it does not.
+pub fn reachable(host: &str) -> Result<(), String> {
+    use std::net::{TcpStream, ToSocketAddrs};
+    let addr = (host, 443)
+        .to_socket_addrs()
+        .map_err(|e| format!("{host} does not resolve: {e}"))?
+        .next()
+        .ok_or_else(|| format!("{host} resolves to no address"))?;
+    TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(5))
+        .map(drop)
+        .map_err(|e| format!("{host}:443 is not reachable: {e}"))
+}
+
 // ── a session ────────────────────────────────────────────────────────────────
 
 /// A scratch session: a runtime directory with `tools/<name>/murmur.yaml` per granted name, a

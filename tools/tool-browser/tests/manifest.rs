@@ -24,7 +24,7 @@ fn declares_a_wasm_tool_with_its_component() {
     let m = manifest();
     for line in [
         "name: tool-browser",
-        "version: 0.2.0",
+        "version: 0.3.0",
         "runtime: tool",
         "implementation: wasm",
     ] {
@@ -126,4 +126,69 @@ fn documents_the_browser_grant() {
         );
     }
     assert!(caps.contains("does not read this block"));
+}
+
+/// The first ```yaml block after `heading` in the README.
+fn readme_yaml(heading: &str) -> String {
+    let readme =
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md"))
+            .unwrap();
+    readme
+        .lines()
+        .skip_while(|l| *l != heading)
+        .skip_while(|l| *l != "```yaml")
+        .skip(1)
+        .take_while(|l| *l != "```")
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The README's working manifest grants what the measured runs needed, https included: the
+/// nine NSS files and the `libsqlite3.so.0` that `libsoftokn3.so` links.
+#[test]
+fn readme_manifest_grants_the_browser_its_files_and_an_https_host() {
+    let yaml = readme_yaml("### A working manifest on `scoped` and `sealed`");
+    assert!(!yaml.is_empty(), "no yaml block under the heading");
+    let allow: Vec<&str> = yaml
+        .lines()
+        .skip_while(|l| l.trim() != "allow:")
+        .skip(1)
+        .take_while(|l| l.trim().starts_with("- "))
+        .map(str::trim)
+        .collect();
+    assert_eq!(allow, vec!["- chromium"], "shell.allow: {yaml}");
+    for path in ["/proc", "/etc/fonts", "/usr/share/fonts"] {
+        assert!(
+            yaml.lines().any(|l| l.trim() == format!("- path: {path}")),
+            "path: {path}"
+        );
+    }
+    for file in [
+        "libsoftokn3.so",
+        "libsoftokn3.chk",
+        "libfreebl3.so",
+        "libfreebl3.chk",
+        "libfreeblpriv3.so",
+        "libfreeblpriv3.chk",
+        "libnssdbm3.so",
+        "libnssdbm3.chk",
+        "libnssckbi.so",
+        "libsqlite3.so.0",
+    ] {
+        let line = format!("- {{ path: /usr/lib/x86_64-linux-gnu/{file}, list_dir: false }}");
+        assert!(yaml.lines().any(|l| l.trim() == line), "{line}");
+    }
+    assert!(yaml.contains("    memory_bytes: 274877906944"));
+    let network: Vec<&str> = yaml
+        .lines()
+        .skip_while(|l| *l != "  network:")
+        .skip(1)
+        .take_while(|l| l.starts_with("    "))
+        .collect();
+    assert!(
+        network
+            .iter()
+            .any(|l| l.trim().starts_with("allow: [\"https://")),
+        "network.allow lists an https host: {network:?}"
+    );
 }

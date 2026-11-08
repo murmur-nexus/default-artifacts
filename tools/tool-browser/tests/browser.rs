@@ -771,3 +771,92 @@ fn dialog_opened_between_calls_is_dismissed() {
     let again = env.call(json!({"action": "snapshot"}));
     assert_eq!(again["status"], "passed", "{again}");
 }
+
+/// What Chrome prints when NSS cannot open its modules (from a capsule withholding them),
+/// written into the browser's stderr.
+const NSS_ERROR_LINE: &str = "[1108/204147.929516:ERROR:crypto/nss_util.cc:225] Error initializing NSS with a persistent database (sql:/space/scratch/5c8f-tmp/.tmpo8Xhdo/.murmur/records/space/scratch/5c8f-tmp/.tmpgqpwtE/work-nss-withheld/ses_01a1bce54dc876329c9d777f73288751/home/.pki/nssdb): libsoftokn3.so: cannot open shared object file: No such file or directory";
+const NSS_FATAL_LINE: &str =
+    "[1108/204147.929598:FATAL:crypto/nss_util.cc:115] nss_error=-5925, os_error=0";
+const NSS_HINT: &str = "; Chrome loads NSS's modules with dlopen, so granting chromium does not grant them: add libsoftokn3.so, libsoftokn3.chk, libfreebl3.so, libfreebl3.chk, libfreeblpriv3.so, libfreeblpriv3.chk, libnssdbm3.so, libnssdbm3.chk, libnssckbi.so and libsqlite3.so.0, which libsoftokn3.so links, to the capabilities.shell.interpreter_runtime dirs of chromium, as tool-browser's README lists";
+
+/// A Chrome that dies while a navigation is in flight is reported by its exit code, the DevTools
+/// method in flight and its FATAL line, with the NSS hint; the next call replaces it.
+#[test]
+fn chrome_dying_during_navigation_names_its_fatal_line() {
+    use std::{io::Write as _, net::TcpListener, process::Command, sync::mpsc};
+
+    let env = Env::new();
+    let _guard = Guard(&env);
+    open_fixture(&env);
+    let pid = env.browser_pid().unwrap();
+    let stall = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = stall.local_addr().unwrap().port();
+    let (accepted, on_accept) = mpsc::channel();
+    let r = std::thread::scope(|s| {
+        s.spawn(move || {
+            // Accept and hold the connection without answering, so the navigation stays open.
+            let held = stall.accept().map(|(c, _)| c);
+            accepted.send(()).unwrap();
+            std::thread::sleep(Duration::from_secs(5));
+            drop(held);
+        });
+        let call = s.spawn(|| {
+            env.call(json!({"action": "open", "url": format!("http://127.0.0.1:{port}/")}))
+        });
+        on_accept
+            .recv_timeout(Duration::from_secs(20))
+            .expect("Chrome connects to the stalled server");
+        let mut stderr = fs::OpenOptions::new()
+            .write(true)
+            .open(format!("/proc/{pid}/fd/2"))
+            .expect("open the browser's stderr through /proc");
+        writeln!(stderr, "{NSS_ERROR_LINE}\n{NSS_FATAL_LINE}").unwrap();
+        drop(stderr);
+        let killed = Command::new("kill")
+            .args(["-TRAP", &pid.to_string()])
+            .status()
+            .unwrap();
+        assert!(killed.success());
+        call.join().unwrap()
+    });
+    assert_eq!(r["status"], "error", "{r}");
+    assert_eq!(
+        data(&r),
+        format!("tool-browser: chromium exited with 133 during Page.navigate: {NSS_FATAL_LINE}{NSS_HINT}")
+    );
+    let log = fs::read_to_string(env.state().join("browser.log")).unwrap();
+    assert!(
+        log.contains(NSS_ERROR_LINE) && log.contains(NSS_FATAL_LINE),
+        "browser.log keeps the lines: {log}"
+    );
+    let s = env.call(json!({"action": "snapshot"}));
+    assert_eq!(s["status"], "passed", "{s}");
+    assert!(
+        data(&s).contains(
+            "browser: the previous browser exited with 133; this is a new one and refs start again at e1"
+        ),
+        "{s}"
+    );
+}
+
+/// An https page opens on the same browser, where the host reaches it.
+#[test]
+fn https_page_opens_where_the_host_reaches_it() {
+    if let Err(why) = common::reachable("example.com") {
+        println!("skipped https_page_opens_where_the_host_reaches_it: {why}");
+        return;
+    }
+    let env = Env::new();
+    let _guard = Guard(&env);
+    open_fixture(&env);
+    let pid = env.browser_pid().unwrap();
+    let r = env.call(json!({"action": "open", "url": "https://example.com/"}));
+    assert_eq!(r["status"], "passed", "{r}");
+    assert!(
+        data(&r)
+            .lines()
+            .any(|l| l == "page: Example Domain — https://example.com/"),
+        "{r}"
+    );
+    assert_eq!(env.browser_pid(), Some(pid), "the same browser");
+}

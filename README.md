@@ -215,7 +215,7 @@ output. A `mur` serves it from WIT level 4 on, and no murmur release does yet: v
 tag, serves level 3.
 
 A component's level follows the interfaces it actually imports and exports, not the world it was
-built from. `tool-browser` 0.2.0, `tool-git` 0.7.0 and `tool-computer` 0.2.0 are the only artifacts
+built from. `tool-browser` 0.3.0, `tool-git` 0.7.0 and `tool-computer` 0.2.0 are the only artifacts
 here that import `murmur:process`, so they are the only ones that need level 4; an older `mur`
 refuses them with `E-WIT-LEVEL-001`. Every other WASM tool and driver still fits level 3.
 
