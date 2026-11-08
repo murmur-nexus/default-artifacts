@@ -1,6 +1,12 @@
 //! One call, from its input to its reply: find the session's browser by its process name, or
 //! start it; take the browser's call lock; open this call's DevTools connection; run the
 //! action; save what the next call needs.
+//!
+//! Calls sent together each run this in their own instance, with nothing shared but the work
+//! folder and murmur's session processes. Each call looks at the latest `browser` process and
+//! the `state.json` recording it until it can attach to a running browser or start one (see
+//! [`next_step`]); the call that starts it holds its `call.lock` from before Chrome starts, so
+//! its action runs first, and the waiting calls take the lock in turn.
 
 use std::{
     fs,
@@ -10,7 +16,7 @@ use std::{
 use serde_json::json;
 
 use crate::{
-    cdp::Cdp,
+    cdp::{Cdp, OUT_OF_TIME},
     discovery,
     envelope::{self, Reply},
     host::{Clock, ProcError, ProcState, Processes},
@@ -23,15 +29,13 @@ use crate::{
 
 /// The longest a call runs, by its own clock.
 pub const CALL_LIMIT_MS: u64 = 90_000;
-/// How long a call waits for the `state.json` of a browser another call is starting.
-const JOIN_WAIT_MS: u64 = 30_000;
 /// `browser.log` stops growing here, with one closing line.
 pub const LOG_MAX_BYTES: u64 = 1024 * 1024;
 const LOG_CUT_LINE: &str = "\n… browser.log cut at 1 MiB; later output is not kept\n";
 /// How long each read of Chrome's output and of the DevTools socket may wait.
 const POLL_MS: u64 = 100;
 /// How long the WebSocket upgrade may take.
-const HANDSHAKE_MS: u32 = 10_000;
+const HANDSHAKE_MS: u64 = 10_000;
 /// How long a failed call waits for the runtime to report a browser exited once its DevTools
 /// connection closed.
 const EXIT_WAIT_MS: u64 = 2_000;
@@ -39,6 +43,21 @@ const EXIT_WAIT_MS: u64 = 2_000;
 const EXIT_SETTLE_MS: u64 = 300;
 /// How much of `browser.log` a failed call reads when the output it drains holds no `FATAL` line.
 const LOG_TAIL_BYTES: u64 = 64 * 1024;
+/// How long a start waits, once Chrome has exited, for its last output to come through.
+const EXIT_DRAIN_MS: u64 = 300;
+/// How long a running `browser` that no `state.json` records is left to the call starting it
+/// before a waiting call stops it. A start saves its `state.json` within
+/// [`launch::START_LIMIT_MS`] or stops its process (see [`start`]).
+const ORPHAN_MS: u64 = launch::START_LIMIT_MS + 5_000;
+/// How long an exited `browser` that no `state.json` records is left alone before a waiting call
+/// starts its own: it was a start attempt, and the call that made it may be about to retry
+/// without the sandbox. That call's gap between the exit and the retry is up to [`POLL_MS`] to
+/// see the exit, then [`EXIT_DRAIN_MS`] and the reads of the last output.
+const RESTART_GAP_MS: u64 = 1_000;
+// The gap holds a starter's exit-to-retry time twice over, and a start runs out before a waiting
+// call takes its browser for an orphan.
+const _: () = assert!(RESTART_GAP_MS >= 2 * (POLL_MS + EXIT_DRAIN_MS));
+const _: () = assert!(ORPHAN_MS > launch::START_LIMIT_MS);
 
 /// What a call runs with.
 pub struct Ctx<'a> {
@@ -73,14 +92,10 @@ fn run(data: &str, config: Option<&str>, ctx: &mut Ctx) -> Result<Reply, String>
     let deadline = ctx.clock.now_ms() + CALL_LIMIT_MS;
 
     // Close needs no grant: with no browser running it starts nothing.
-    let found = ctx.procs.find(PROCESS_NAME);
-    let status = found.as_ref().map(|h| ctx.procs.status(h));
-    let running = match (&found, &status) {
-        (Some(h), Some(Ok(ProcState::Running))) => Some(h.clone()),
-        _ => None,
-    };
-    if req.action == Action::Close && running.is_none() {
-        return Ok(envelope::passed("close", "browser closed", None));
+    let closing = req.action == Action::Close;
+    let seen = look(ctx);
+    if closing && !matches!(seen, Seen::Running { .. }) {
+        return Ok(closed_reply());
     }
 
     let Some(runtime) = ctx.runtime.clone() else {
@@ -91,27 +106,169 @@ fn run(data: &str, config: Option<&str>, ctx: &mut Ctx) -> Result<Reply, String>
         return Err(discovery::NO_GRANT_LINE.into());
     }
 
-    let attached = match running {
-        Some(handle) => join(ctx, &handle, deadline)?,
-        None => {
-            let note = match (&found, &status) {
-                (Some(h), Some(Ok(ProcState::Exited(code)))) => {
-                    // Only a browser that was running gets a note: a start that failed left
-                    // no state.json, and `close` marks its state closed.
-                    match state::find_by_handle(&ctx.work, h) {
-                        Some((_, old)) if !old.closed => Some(launch::replaced_note(*code)),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            };
-            match start(ctx, &granted, note, deadline)? {
-                Started::Fresh(attached) => *attached,
-                Started::Joined(handle) => join(ctx, &handle, deadline)?,
+    match find_or_start(ctx, &granted, closing, seen, deadline)? {
+        Some(attached) => Ok(finish(ctx, attached, &req)),
+        None => Ok(closed_reply()),
+    }
+}
+
+fn closed_reply() -> Reply {
+    envelope::passed("close", "browser closed", None)
+}
+
+/// What a `state.json` under `.tool-browser/` says of a handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Record {
+    /// None records it.
+    Missing,
+    /// One records it, not closed.
+    Open,
+    /// One records it, closed by `close`.
+    Closed,
+}
+
+/// One look at the session's latest `browser` process and the `state.json` recording it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Seen {
+    /// No `browser` process was ever started in the session.
+    Nothing,
+    Running {
+        handle: String,
+        record: Record,
+    },
+    Exited {
+        handle: String,
+        code: i32,
+        record: Record,
+    },
+}
+
+/// What a call does after a look.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Next {
+    /// Start a browser; `note` goes under the banner.
+    Start { note: Option<String> },
+    /// Take the lock of this running browser and connect to it.
+    Attach(String),
+    /// Sleep [`POLL_MS`] and look again: another call is starting the browser.
+    Wait,
+    /// Stop this running browser, which no call is starting any more, and answer so.
+    StopOrphan(String),
+}
+
+/// The next step after seeing `seen`, unchanged for `held_for_ms` by this call's clock.
+fn next_step(seen: &Seen, held_for_ms: u64) -> Next {
+    match seen {
+        Seen::Nothing => Next::Start { note: None },
+        Seen::Running {
+            handle,
+            record: Record::Missing,
+        } if held_for_ms >= ORPHAN_MS => Next::StopOrphan(handle.clone()),
+        Seen::Running {
+            record: Record::Missing,
+            ..
+        } => Next::Wait,
+        Seen::Running { handle, .. } => Next::Attach(handle.clone()),
+        Seen::Exited {
+            record: Record::Missing,
+            ..
+        } if held_for_ms < RESTART_GAP_MS => Next::Wait,
+        // A start that failed left no state.json, and `close` marks its state closed: only a
+        // browser that was running gets a note.
+        Seen::Exited {
+            record: Record::Missing | Record::Closed,
+            ..
+        } => Next::Start { note: None },
+        Seen::Exited {
+            code,
+            record: Record::Open,
+            ..
+        } => Next::Start {
+            note: Some(launch::replaced_note(*code)),
+        },
+    }
+}
+
+/// How long this call has seen one handle in one condition, by its clock.
+#[derive(Default)]
+struct Held(Option<(Seen, u64)>);
+
+impl Held {
+    /// How long `seen` has held at `now`: 0 the first time, and again on any change of handle or
+    /// condition.
+    fn update(&mut self, seen: &Seen, now: u64) -> u64 {
+        match &self.0 {
+            Some((s, since)) if s == seen => now.saturating_sub(*since),
+            _ => {
+                self.0 = Some((seen.clone(), now));
+                0
             }
         }
+    }
+}
+
+/// Look at the latest `browser` process, then for the `state.json` recording it.
+fn look(ctx: &mut Ctx) -> Seen {
+    let Some(handle) = ctx.procs.find(PROCESS_NAME) else {
+        return Seen::Nothing;
     };
-    Ok(finish(ctx, attached, &req))
+    let status = ctx.procs.status(&handle);
+    let record = match state::find_by_handle(&ctx.work, &handle) {
+        None => Record::Missing,
+        Some((_, s)) if s.closed => Record::Closed,
+        Some(_) => Record::Open,
+    };
+    match status {
+        Ok(ProcState::Running) => Seen::Running { handle, record },
+        Ok(ProcState::Exited(code)) => Seen::Exited {
+            handle,
+            code,
+            record,
+        },
+        Err(_) => Seen::Nothing,
+    }
+}
+
+/// Look and act on [`next_step`] until this call holds a browser, starting from `seen`. `None`
+/// when `closing` and no browser runs.
+fn find_or_start<'a>(
+    ctx: &mut Ctx<'a>,
+    granted: &[&'static str],
+    closing: bool,
+    mut seen: Seen,
+    deadline: u64,
+) -> Result<Option<Attached<'a>>, String> {
+    let mut held = Held::default();
+    loop {
+        if closing && !matches!(seen, Seen::Running { .. }) {
+            return Ok(None);
+        }
+        let now = ctx.clock.now_ms();
+        if now >= deadline {
+            return Err(OUT_OF_TIME.into());
+        }
+        match next_step(&seen, held.update(&seen, now)) {
+            Next::Wait => ctx.clock.sleep_ms(POLL_MS.min(deadline - now)),
+            Next::StopOrphan(handle) => {
+                let _ = ctx.procs.stop(&handle);
+                return Err(format!(
+                    "tool-browser: the running browser ({handle}) has no state.json under {}/, so it was stopped; the next call starts a new one",
+                    state::STATE_ROOT
+                ));
+            }
+            Next::Attach(handle) => {
+                if let Some(attached) = join(ctx, &handle, deadline)? {
+                    return Ok(Some(attached));
+                }
+            }
+            Next::Start { note } => match start(ctx, granted, note, deadline)? {
+                Started::Fresh(attached) => return Ok(Some(*attached)),
+                // Another call's start is under way: wait for its state.json.
+                Started::Joined => {}
+            },
+        }
+        seen = look(ctx);
+    }
 }
 
 /// A browser this call holds the lock of, with its open connection.
@@ -127,55 +284,65 @@ struct Attached<'a> {
 
 enum Started<'a> {
     Fresh(Box<Attached<'a>>),
-    /// Another call started it first.
-    Joined(String),
+    /// A `browser` process was already running under the name; nothing new ran.
+    Joined,
 }
 
-/// Attach to a running browser by its handle.
-fn join<'a>(ctx: &mut Ctx<'a>, handle: &str, deadline: u64) -> Result<Attached<'a>, String> {
-    let wait_until = ctx.clock.now_ms() + JOIN_WAIT_MS;
-    let dir = loop {
-        if let Some((dir, _)) = state::find_by_handle(&ctx.work, handle) {
-            break dir;
-        }
-        if ctx.clock.now_ms() >= wait_until.min(deadline) {
-            let _ = ctx.procs.stop(handle);
-            return Err(format!(
-                "tool-browser: the running browser ({handle}) has no state.json under {}/, so it was stopped; the next call starts a new one",
-                state::STATE_ROOT
-            ));
-        }
-        ctx.clock.sleep_ms(POLL_MS);
+/// Take the call lock of the running browser `handle` and connect to it. `None` when no
+/// `state.json` records it, or when it stopped running while this call waited for the lock.
+fn join<'a>(
+    ctx: &mut Ctx<'a>,
+    handle: &str,
+    deadline: u64,
+) -> Result<Option<Attached<'a>>, String> {
+    let Some((dir, _)) = state::find_by_handle(&ctx.work, handle) else {
+        return Ok(None);
     };
     let wait = state::LOCK_WAIT_MS.min(deadline.saturating_sub(ctx.clock.now_ms()));
     let lock = CallLock::acquire(&dir, ctx.clock, wait)?;
+    // The call that held the lock may have closed the browser.
+    if ctx.procs.status(handle) != Ok(ProcState::Running) {
+        return Ok(None);
+    }
     let state = dir
         .load()
         .ok_or_else(|| format!("tool-browser: cannot read {}/state.json", dir.rel))?;
-    let ws = open_ws(ctx, &state.handle, state.port, &state.browser_ws_path)?;
+    let ws = open_ws(
+        ctx,
+        &state.handle,
+        state.port,
+        &state.browser_ws_path,
+        deadline,
+    )?;
     let log = state.log.clone();
-    Ok(Attached {
+    Ok(Some(Attached {
         cdp: Some(Cdp::new(ws, ctx.clock, deadline, log)),
         dir,
         state,
         _lock: lock,
         fresh: false,
-    })
+    }))
 }
 
+/// Connect to the browser's DevTools WebSocket, the upgrade cut to `until`.
 fn open_ws<'a>(
     ctx: &mut Ctx<'a>,
     handle: &str,
     port: u16,
     path: &str,
+    until: u64,
 ) -> Result<WebSocket<'a>, String> {
+    let left = until.saturating_sub(ctx.clock.now_ms());
+    if left == 0 {
+        return Err(OUT_OF_TIME.into());
+    }
     let conn = ctx.procs.connect(handle, port).map_err(|e| match e {
         ProcError::Refused { rule, reason } => {
             format!("tool-browser: murmur refused the DevTools connection: {rule}: {reason}")
         }
         other => format!("tool-browser: cannot reach the browser's DevTools port {port}: {other}"),
     })?;
-    WebSocket::handshake(conn, port, path, ctx.random, HANDSHAKE_MS)
+    WebSocket::handshake(conn, port, path, ctx.random, HANDSHAKE_MS.min(left) as u32)
         .map_err(|e| format!("tool-browser: the browser's DevTools connection failed: {e}"))
 }
 
@@ -309,7 +476,7 @@ fn wait_devtools(ctx: &mut Ctx, handle: &str, dir: &StateDir, until: u64) -> Dev
         match ctx.procs.status(handle) {
             Ok(ProcState::Exited(code)) => {
                 // The last lines can still be on their way through the runtime's reader.
-                ctx.clock.sleep_ms(300);
+                ctx.clock.sleep_ms(EXIT_DRAIN_MS);
                 stderr.push_str(&drain_output(ctx.procs, handle, dir));
                 return DevTools::Exited(code, stderr);
             }
@@ -332,7 +499,10 @@ fn discard(dir: &StateDir) {
     }
 }
 
-/// Start Chrome under the process name `browser`.
+/// Start Chrome under the process name `browser`, holding the new folder's call lock from before
+/// Chrome starts. Every step until `state.json` is saved is cut to [`launch::START_LIMIT_MS`]; a
+/// start that runs out stops its process. `Joined` when the name already runs a process, which
+/// leaves no folder.
 fn start<'a>(
     ctx: &mut Ctx<'a>,
     granted: &[&'static str],
@@ -382,7 +552,7 @@ fn start<'a>(
                 Ok(s) if s.already_running => {
                     drop(lock);
                     discard(&dir);
-                    return Ok(Started::Joined(s.handle));
+                    return Ok(Started::Joined);
                 }
                 Ok(s) => {
                     started = Some((name, s.handle));
@@ -421,13 +591,19 @@ fn start<'a>(
         };
         let line = explain_exit(ctx, &handle, &dir, name, deadline, failure);
         let _ = ctx.procs.stop(&handle);
-        line
+        if ctx.clock.now_ms() < start_deadline {
+            line
+        } else if start_deadline >= deadline {
+            OUT_OF_TIME.into()
+        } else {
+            launch::start_timeout_line(name, &dir.rel)
+        }
     };
-    let ws = match open_ws(ctx, &handle, port, &path) {
+    let ws = match open_ws(ctx, &handle, port, &path, start_deadline) {
         Ok(ws) => ws,
         Err(e) => return Err(fail(ctx, e, false)),
     };
-    let mut cdp = Cdp::new(ws, ctx.clock, deadline, PageLog::default());
+    let mut cdp = Cdp::new(ws, ctx.clock, start_deadline, PageLog::default());
     let version = cdp
         .browser("Browser.getVersion", json!({}))
         .ok()
@@ -452,6 +628,9 @@ fn start<'a>(
             closed,
         ));
     };
+    if ctx.clock.now_ms() >= start_deadline {
+        return Err(fail(ctx, OUT_OF_TIME.into(), false));
+    }
     let state = State {
         handle,
         browser: BrowserInfo {
@@ -473,7 +652,11 @@ fn start<'a>(
         document: DocumentState::default(),
         log: PageLog::default(),
     };
-    dir.save(&state)?;
+    if let Err(e) = dir.save(&state) {
+        let _ = ctx.procs.stop(&state.handle);
+        return Err(e);
+    }
+    cdp.set_deadline(deadline);
     Ok(Started::Fresh(Box::new(Attached {
         dir,
         state,
@@ -772,10 +955,11 @@ mod tests {
     use super::*;
     use crate::host::{Conn, Output, Started as ProcStarted};
     use crate::state::tests::FakeClock;
-    use std::collections::VecDeque;
+    use std::{cell::Cell, collections::VecDeque, rc::Rc};
 
     /// A scripted `murmur:process`: each start takes the next answer; a started process prints
-    /// `stderr` once and is then exited with `exit`.
+    /// `stderr` once and is then exited with `exit`, or, with `running`, runs until stopped.
+    /// With `hang`, `connect` answers the WebSocket upgrade and then nothing, moving that clock.
     #[derive(Default)]
     struct FakeProcs {
         starts: VecDeque<Result<(), ProcError>>,
@@ -786,6 +970,30 @@ mod tests {
         /// Status reads answering `Running` before the process reads as exited.
         running_reads: u32,
         status_reads: u32,
+        running: bool,
+        stopped: Vec<String>,
+        hang: Option<Rc<Cell<u64>>>,
+    }
+
+    /// A DevTools port that completes the WebSocket upgrade for the key sixteen zero bytes
+    /// make, then never answers; every read waits out its timeout on the [`FakeClock`] whose
+    /// `now` it shares.
+    struct HangingConn {
+        clock: Rc<Cell<u64>>,
+        upgraded: bool,
+    }
+
+    impl Conn for HangingConn {
+        fn read(&mut self, _max: u32, timeout_ms: u32) -> Result<Vec<u8>, ProcError> {
+            if !std::mem::replace(&mut self.upgraded, true) {
+                return Ok(crate::ws::tests::upgrade_response());
+            }
+            self.clock.set(self.clock.get() + u64::from(timeout_ms));
+            Err(ProcError::TimedOut)
+        }
+        fn write(&mut self, _bytes: &[u8]) -> Result<(), ProcError> {
+            Ok(())
+        }
     }
 
     impl Processes for FakeProcs {
@@ -809,12 +1017,16 @@ mod tests {
         fn find(&mut self, _name: &str) -> Option<String> {
             (!self.started.is_empty()).then(|| format!("prc_{:02x}", self.started.len()))
         }
-        fn status(&mut self, _handle: &str) -> Result<ProcState, ProcError> {
+        fn status(&mut self, handle: &str) -> Result<ProcState, ProcError> {
             self.status_reads += 1;
             if self.status_reads <= self.running_reads {
                 return Ok(ProcState::Running);
             }
-            Ok(ProcState::Exited(self.exit))
+            if self.running && !self.stopped.iter().any(|h| h == handle) {
+                Ok(ProcState::Running)
+            } else {
+                Ok(ProcState::Exited(self.exit))
+            }
         }
         fn read(&mut self, _handle: &str, _max: u32) -> Result<Output, ProcError> {
             let stderr = if std::mem::take(&mut self.unread) {
@@ -827,11 +1039,18 @@ mod tests {
                 stderr,
             })
         }
-        fn stop(&mut self, _handle: &str) -> Result<ProcState, ProcError> {
+        fn stop(&mut self, handle: &str) -> Result<ProcState, ProcError> {
+            self.stopped.push(handle.to_string());
             Ok(ProcState::Exited(self.exit))
         }
         fn connect(&mut self, _handle: &str, _port: u16) -> Result<Box<dyn Conn>, ProcError> {
-            Err(ProcError::NotRunning)
+            match &self.hang {
+                Some(clock) => Ok(Box::new(HangingConn {
+                    clock: clock.clone(),
+                    upgraded: false,
+                })),
+                None => Err(ProcError::NotRunning),
+            }
         }
     }
 
@@ -853,10 +1072,19 @@ mod tests {
     }
 
     fn run_with(procs: &mut FakeProcs, work: &Path, runtime: &Path, data: &str) -> Reply {
-        let clock = FakeClock::default();
+        run_on(procs, &FakeClock::default(), work, runtime, data)
+    }
+
+    fn run_on(
+        procs: &mut FakeProcs,
+        clock: &dyn Clock,
+        work: &Path,
+        runtime: &Path,
+        data: &str,
+    ) -> Reply {
         let mut ctx = Ctx {
             procs,
-            clock: &clock,
+            clock,
             random: &zeros,
             work: work.to_path_buf(),
             runtime: Some(runtime.to_path_buf()),
@@ -1090,5 +1318,173 @@ mod tests {
         let r = run_with(&mut procs, &work, &runtime, r#"{"action":"close"}"#);
         assert_eq!((r.passed, r.data.as_str()), (true, "browser closed"));
         assert!(procs.started.is_empty());
+    }
+
+    #[test]
+    fn a_start_that_outruns_its_limit_stops_its_browser() {
+        let (_d, work, runtime) = folders(&["chromium"]);
+        let clock = FakeClock::default();
+        let mut procs = FakeProcs {
+            starts: VecDeque::from([Ok(())]),
+            stderr: b"DevTools listening on ws://127.0.0.1:9222/devtools/browser/x\n".to_vec(),
+            running: true,
+            hang: Some(clock.now.clone()),
+            ..FakeProcs::default()
+        };
+        let r = run_on(
+            &mut procs,
+            &clock,
+            &work,
+            &runtime,
+            r#"{"action":"snapshot"}"#,
+        );
+        assert_eq!(
+            (r.passed, r.data.as_str()),
+            (
+                false,
+                "tool-browser: chromium did not finish starting within 30 s, so it was stopped; see .tool-browser/0000000000000000/browser.log"
+            )
+        );
+        assert_eq!(procs.stopped, ["prc_01"]);
+        assert!(
+            (launch::START_LIMIT_MS..launch::START_LIMIT_MS + 2_000).contains(&clock.now_ms()),
+            "the start ends at its own limit, not the call's: {} ms",
+            clock.now_ms()
+        );
+        assert!(!work
+            .join(".tool-browser/0000000000000000/state.json")
+            .exists());
+    }
+
+    fn running(record: Record) -> Seen {
+        Seen::Running {
+            handle: "prc_01".into(),
+            record,
+        }
+    }
+
+    fn exited(record: Record) -> Seen {
+        Seen::Exited {
+            handle: "prc_01".into(),
+            code: 137,
+            record,
+        }
+    }
+
+    #[test]
+    fn nothing_seen_starts_without_a_note() {
+        assert_eq!(next_step(&Seen::Nothing, 0), Next::Start { note: None });
+    }
+
+    #[test]
+    fn a_recorded_running_browser_is_attached() {
+        for record in [Record::Open, Record::Closed] {
+            assert_eq!(
+                next_step(&running(record), 0),
+                Next::Attach("prc_01".into())
+            );
+        }
+    }
+
+    #[test]
+    fn an_unrecorded_running_browser_is_waited_for_until_it_is_an_orphan() {
+        let seen = running(Record::Missing);
+        assert_eq!(next_step(&seen, 0), Next::Wait);
+        assert_eq!(next_step(&seen, ORPHAN_MS - 1), Next::Wait);
+        assert_eq!(
+            next_step(&seen, ORPHAN_MS),
+            Next::StopOrphan("prc_01".into())
+        );
+    }
+
+    #[test]
+    fn an_unrecorded_exited_browser_is_left_for_the_restart_gap() {
+        let seen = exited(Record::Missing);
+        assert_eq!(next_step(&seen, 0), Next::Wait);
+        assert_eq!(next_step(&seen, RESTART_GAP_MS - 1), Next::Wait);
+        assert_eq!(next_step(&seen, RESTART_GAP_MS), Next::Start { note: None });
+    }
+
+    #[test]
+    fn a_recorded_exited_browser_is_replaced_with_a_note() {
+        assert_eq!(
+            next_step(&exited(Record::Open), 0),
+            Next::Start {
+                note: Some(launch::replaced_note(137))
+            }
+        );
+    }
+
+    #[test]
+    fn a_closed_exited_browser_is_replaced_without_a_note() {
+        assert_eq!(
+            next_step(&exited(Record::Closed), 0),
+            Next::Start { note: None }
+        );
+    }
+
+    #[test]
+    fn a_change_of_handle_or_condition_restarts_the_hold() {
+        let mut held = Held::default();
+        let attempt = exited(Record::Missing);
+        assert_eq!(held.update(&attempt, 500), 0);
+        assert_eq!(
+            held.update(&attempt, 500 + RESTART_GAP_MS - 1),
+            RESTART_GAP_MS - 1
+        );
+        // The retry runs under a new handle.
+        let retry = Seen::Running {
+            handle: "prc_02".into(),
+            record: Record::Missing,
+        };
+        assert_eq!(held.update(&retry, 2_000), 0);
+        assert_eq!(
+            next_step(&retry, held.update(&retry, 2_000 + ORPHAN_MS - 1)),
+            Next::Wait
+        );
+        assert_eq!(
+            next_step(&retry, held.update(&retry, 2_000 + ORPHAN_MS)),
+            Next::StopOrphan("prc_02".into())
+        );
+        // The same handle in a new condition: its state.json appeared.
+        let recorded = Seen::Running {
+            handle: "prc_02".into(),
+            record: Record::Open,
+        };
+        assert_eq!(held.update(&recorded, 40_000), 0);
+    }
+
+    #[test]
+    fn a_look_reads_the_latest_handle_and_its_record() {
+        let (_d, work, runtime) = folders(&["chromium"]);
+        let clock = FakeClock::default();
+        let mut procs = FakeProcs {
+            started: vec![("chromium".into(), Vec::new())],
+            running: true,
+            ..FakeProcs::default()
+        };
+        let mut ctx = Ctx {
+            procs: &mut procs,
+            clock: &clock,
+            random: &zeros,
+            work: work.clone(),
+            runtime: Some(runtime),
+        };
+        assert_eq!(look(&mut ctx), running(Record::Missing));
+        let dir = StateDir::new(&work, "ab");
+        fs::create_dir_all(&dir.root).unwrap();
+        let mut state = crate::state::tests::sample_state();
+        state.handle = "prc_01".into();
+        dir.save(&state).unwrap();
+        assert_eq!(look(&mut ctx), running(Record::Open));
+        ctx.procs.stop("prc_01").unwrap();
+        assert_eq!(
+            look(&mut ctx),
+            Seen::Exited {
+                handle: "prc_01".into(),
+                code: 0,
+                record: Record::Open
+            }
+        );
     }
 }

@@ -340,7 +340,7 @@ characters. `.tool-browser/` is worth adding to `.gitignore`:
 | `blank.html` | The page Chrome opens first; its URL tells the tool where the work folder is |
 | `state.json` | The session-process handle, Chrome's DevTools port and path, the work folder's `file://` URL, the page's target id, refs, the last snapshot, unread console and network entries with their fingerprints, and the screenshot counter |
 | `browser.log` | Chrome's stdout and stderr, cut at 1 MiB with one closing line |
-| `call.lock` | Held while a call runs, so calls take turns. A call waits up to 90 s for it, then answers `tool-browser: another tool-browser call is still running`. A lock older than 120 s was left by a call that died, and the next call takes it over |
+| `call.lock` | Held while a call runs, so calls take turns, in no set order. The call that starts the browser takes it before Chrome starts, so its action runs first. A call waits up to 90 s for it, then answers `tool-browser: another tool-browser call is still running`. A lock older than 120 s was left by a call that died, and the next call takes it over |
 | `screenshot-<n>.png` | Screenshots |
 
 A session that ends without `close` leaves its folder, profile included. A WASM tool cannot tell a
@@ -353,10 +353,23 @@ folder of another live session from one of an ended session, so the tool removes
 |---|---|
 | Capsule launch | Nothing |
 | First browser call | The tool checks the grant, starts Chrome as the session process `browser` and answers with the banner |
-| Each later call | The same Chrome, one call at a time; each opens its own DevTools connection, which closes when the call returns. A call is bounded at 90 s, counted from when it began, including any wait for another call to finish; a call that reaches it, a long `wait` included, answers `tool-browser: the call ran out of its 90 s` |
+| Each later call | The same Chrome, one call at a time; calls that arrive while it is starting wait for that start, then take turns in no set order. Each opens its own DevTools connection, which closes when the call returns. A call is bounded at 90 s, counted from when it began, including any wait for another call to finish; a call that reaches it, a long `wait` included, answers `tool-browser: the call ran out of its 90 s` |
 | `close` | Chrome stops and its profile is removed; the next call starts a new one |
 | Chrome exits on its own | A call it exits during answers `tool-browser: <name> exited with <code> during <the DevTools method in flight, else the action>: <Chrome's last FATAL line, else its last line>`, plus a hint when the cause is known. The next call starts a new one, and its first result says so: `browser: the previous browser exited with <code>; this is a new one and refs start again at e1` |
 | Session end | murmur kills Chrome with its process group, on every platform, and the trace records `process_exit` with `reason: session_end` |
+
+Calls sent together share one browser. A harness on the process transport may send all of a
+turn's calls at once; they find the browser through `murmur:process`, wait for the one start, and
+then run one at a time in no set order, with the starting call's action first. A model that needs
+an order sends each call after the last one answers.
+
+A start has 30 s to bring Chrome up, through the sandbox retry, and record it in `state.json`:
+
+| When | The call answers |
+|---|---|
+| The starting call runs out of the 30 s | `tool-browser: chromium did not finish starting within 30 s, so it was stopped; see .tool-browser/<id>/browser.log` |
+| A waiting call finds a running browser that no `state.json` records for 35 s, because the call starting it died | `tool-browser: the running browser (<handle>) has no state.json under .tool-browser/, so it was stopped; the next call starts a new one` |
+| Chrome exits while starting, and other calls are waiting on that start | Each waiting call makes its own attempt about 1 s after the last one failed, and answers its own `tool-browser: chromium exited with <code> while starting: …` if that fails too |
 
 ## Breaking in 0.2.0
 

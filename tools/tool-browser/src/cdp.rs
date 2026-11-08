@@ -58,7 +58,7 @@ pub struct Cdp<'a> {
     ws: WebSocket<'a>,
     clock: &'a dyn Clock,
     next_id: u64,
-    /// The call's end, on `clock`.
+    /// The end every command and wait is cut to, on `clock`: the call's end, or a start's.
     deadline_ms: u64,
     responses: HashMap<u64, Result<Value, String>>,
     /// The method of the last command sent.
@@ -79,6 +79,11 @@ impl<'a> Cdp<'a> {
             last_method: None,
             ev: Events::new(log),
         }
+    }
+
+    /// Move the end every command and wait is cut to, on `clock`.
+    pub fn set_deadline(&mut self, deadline_ms: u64) {
+        self.deadline_ms = deadline_ms;
     }
 
     pub fn clock(&self) -> &'a dyn Clock {
@@ -562,6 +567,30 @@ mod tests {
         assert!(!cdp.wait_until(30_000, |s| s.load_events > 0));
         assert!(cdp.page("DOM.getDocument", json!({})).is_err());
         assert_eq!(cdp.ev.closed_during.as_deref(), Some("Page.navigate"));
+    }
+
+    #[test]
+    fn a_moved_deadline_cuts_commands_to_the_new_end() {
+        let clock = crate::state::tests::FakeClock::default();
+        let conn = crate::ws::tests::FakeConn::default();
+        let mut cdp = Cdp::new(
+            crate::ws::tests::upgraded(&conn, b""),
+            &clock,
+            100,
+            PageLog::default(),
+        );
+        clock.sleep_ms(100);
+        assert!(cdp.out_of_time());
+        assert_eq!(
+            cdp.browser("Browser.getVersion", json!({}))
+                .err()
+                .as_deref(),
+            Some(OUT_OF_TIME)
+        );
+        cdp.set_deadline(200);
+        assert!(!cdp.out_of_time());
+        clock.sleep_ms(100);
+        assert!(cdp.out_of_time());
     }
 
     fn page_events() -> Events {

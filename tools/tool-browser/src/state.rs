@@ -263,12 +263,13 @@ impl Drop for CallLock {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use std::cell::Cell;
+    use std::{cell::Cell, rc::Rc};
 
-    /// A clock that moves only when slept on.
+    /// A clock that moves only when slept on, or when something holding a clone of `now` moves
+    /// it.
     #[derive(Default)]
     pub struct FakeClock {
-        pub now: Cell<u64>,
+        pub now: Rc<Cell<u64>>,
     }
 
     impl Clock for FakeClock {

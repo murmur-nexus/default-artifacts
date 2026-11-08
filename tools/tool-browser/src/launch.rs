@@ -185,6 +185,15 @@ pub fn no_port_line(name: &str, state_rel: &str) -> String {
     )
 }
 
+/// The line for a start that saved no `state.json` within [`START_LIMIT_MS`]; its process is
+/// stopped.
+pub fn start_timeout_line(name: &str, state_rel: &str) -> String {
+    format!(
+        "tool-browser: {name} did not finish starting within {} s, so it was stopped; see {state_rel}/browser.log",
+        START_LIMIT_MS / 1000
+    )
+}
+
 pub fn refused_line(name: &str, rule: &str, reason: &str) -> String {
     format!("tool-browser: murmur refused to start {name}: {rule}: {reason}")
 }
