@@ -9,7 +9,7 @@ it as a session process through `murmur:process`, later calls reuse it, and it r
 or the session's end, when murmur kills it with its process group. Nothing runs at capsule launch.
 
 ```bash
-mur install -g murmur/tool-browser@0.3.0
+mur install -g murmur/tool-browser@0.4.0
 ```
 
 The tool is a WASM component that imports `murmur:process`. It needs a `mur` whose `mur version`
@@ -17,8 +17,14 @@ reports WIT level 4 or higher: murmur v0.10.0 is the first release that serves l
 An older `mur` installs the zip, then refuses the capsule at launch:
 
 ```text
-error[E-WIT-LEVEL-001]: artifact 'local/tool-browser@0.3.0' does not fit WIT level 3, the level this mur serves: it imports murmur:process/process@0.1.0, and level 3 has no version of murmur:process
+error[E-WIT-LEVEL-001]: artifact 'local/tool-browser@0.4.0' does not fit WIT level 3, the level this mur serves: it imports murmur:process/process@0.1.0, and level 3 has no version of murmur:process
 ```
+
+What Chrome needs from the host is declared in the tool's own `programs:` block (see
+[What the capsule must grant](#what-the-capsule-must-grant)). A `mur` reads it from murmur
+`38988719` (#399) on, and no murmur release holds that yet. An older `mur` ignores the block, so
+the browser's folder is not granted and Chrome dies at start with `Invalid file descriptor to ICU
+data received`.
 
 ## Actions
 
@@ -169,7 +175,7 @@ Measured on Ubuntu 24.04.5, Linux 7.0.0-28-generic, x86_64. `chrome-headless-she
 
 | Browser | `scoped` and `sealed` | Outside a capsule |
 |---|---|---|
-| `chrome-headless-shell` (Chrome for Testing 145) | Runs, with the grants below | Runs |
+| `chrome-headless-shell` (Chrome for Testing 145) | Runs, with what tool-browser declares | Runs |
 | Google Chrome 156, `/opt/google/chrome/chrome` or its `google-chrome` wrapper | Does not start | Runs; `cargo test -p tool-browser` uses it |
 | Playwright's full Chromium 1208 | Does not start | Runs |
 | Ubuntu's snap `chromium-browser`, Debian's `chromium` wrapper | Not measured: neither is installed on the measuring host. Both are full Chromium, so they meet the refusal below | Not measured |
@@ -190,79 +196,80 @@ instead`. `chrome-headless-shell` has no ProcessSingleton, so it is the browser 
 
 ### A working manifest on `scoped` and `sealed`
 
-Install `chrome-headless-shell`, for example with `npx @puppeteer/browsers install chrome-headless-shell@stable`
-or as Playwright's headless shell (the measurements used Playwright's build 1208). Then link it as
-`chromium` **inside its own directory** and put that directory on `PATH`:
-
-```bash
-HS=$HOME/.cache/ms-playwright/chromium_headless_shell-1208/chrome-headless-shell-linux64
-ln -s chrome-headless-shell "$HS/chromium"
-export PATH="$HS:$PATH"   # in the shell that runs `mur run`
-```
-
-On `sealed` the composed root binds the directory the granted binary resolves to, so a link kept in
-another directory is not on `PATH` inside it. On `scoped` a link anywhere on `PATH` works.
-
 ```yaml
+artifacts:
+  - name: murmur/tool-browser
+    version: 0.4.0
+    runtime: tool
 capabilities:
-  containment: sealed        # or scoped
+  containment: sealed  # or scoped
   shell:
-    allow:
-      - chromium
-    interpreter_runtime:
-      - binary: chromium
-        dirs:
-          - path: /home/you/.cache/ms-playwright/chromium_headless_shell-1208/chrome-headless-shell-linux64
-            list_dir: true
-          - path: /proc
-            list_dir: true
-          - path: /etc/fonts
-            list_dir: true
-          - path: /usr/share/fonts
-            list_dir: true
-          # NSS's modules and their .chk integrity files, which Chrome opens with dlopen for
-          # https, and the libsqlite3 libsoftokn3 links: without them the first https page
-          # kills the browser
-          - { path: /usr/lib/x86_64-linux-gnu/libsoftokn3.so, list_dir: false }
-          - { path: /usr/lib/x86_64-linux-gnu/libsoftokn3.chk, list_dir: false }
-          - { path: /usr/lib/x86_64-linux-gnu/libfreebl3.so, list_dir: false }
-          - { path: /usr/lib/x86_64-linux-gnu/libfreebl3.chk, list_dir: false }
-          - { path: /usr/lib/x86_64-linux-gnu/libfreeblpriv3.so, list_dir: false }
-          - { path: /usr/lib/x86_64-linux-gnu/libfreeblpriv3.chk, list_dir: false }
-          - { path: /usr/lib/x86_64-linux-gnu/libnssdbm3.so, list_dir: false }
-          - { path: /usr/lib/x86_64-linux-gnu/libnssdbm3.chk, list_dir: false }
-          - { path: /usr/lib/x86_64-linux-gnu/libnssckbi.so, list_dir: false }
-          - { path: /usr/lib/x86_64-linux-gnu/libsqlite3.so.0, list_dir: false }
+    allow: [chromium]
   network:
-    # every https host a page loads, its subresources' hosts included
-    allow: ["https://example.com"]
+    allow: [https://example.com]  # the hosts the task opens
   resources:
     memory_bytes: 274877906944
     cgroup_pids_max: 1024
     cgroup_memory_bytes: 4294967296
 ```
 
-| Grant | Without it |
+The capsule names no host path. tool-browser's `murmur.yaml` declares, under `programs:`, what
+Chrome needs from the host, by name, and the same list for each of `chromium`, `chromium-browser`,
+`google-chrome` and `chrome`. murmur grants it, read-only, when both hold:
+
+- the capsule pins the tool with `mur install`, not a pull at run time
+- the capsule grants the name in `capabilities.shell.allow`
+
+`mur run --explain-scope` lists what it granted under `declared needs:`, one line per need, such as
+`local/tool-browser (chromium): file libsoftokn3.chk beside libsoftokn3.so -> /usr/lib/x86_64-linux-gnu/libsoftokn3.chk`.
+`mur doctor` names a need this host lacks, with the Ubuntu package that provides it.
+
+| What tool-browser declares | Without it |
 |---|---|
-| The browser's own directory | `Invalid file descriptor to ICU data received`, and the browser dies with SIGTRAP: it reads `icudtl.dat` and its `.pak` files from there |
-| `/proc` | `GPU process launch failed: error_code=1002`, then a fatal GPU process error |
-| `/etc/fonts`, `/usr/share/fonts` | The browser starts, but the page never renders and the first snapshot times out |
+| The browser's own folder (`program_folder: .`) | `Invalid file descriptor to ICU data received`, and the browser dies with SIGTRAP: it reads `icudtl.dat` and its `.pak` files from there |
+| NSS's modules, which Chrome loads with `dlopen`: `libsoftokn3.so`, `libfreebl3.so`, `libfreeblpriv3.so`, `libnssdbm3.so` and `libnssckbi.so`, with the `.chk` files beside them | The first `https` page kills the browser with exit code 133. Chrome prints `ERROR:crypto/nss_util.cc:225] Error initializing NSS with a persistent database (…): libsoftokn3.so: cannot open shared object file: No such file or directory`, then `FATAL:crypto/nss_util.cc:115] nss_error=-5925, os_error=0`, and the call answers `tool-browser: chromium exited with 133 during Page.navigate: <that FATAL line>; Chrome loads NSS's modules with dlopen: tool-browser declares them for chromium under programs: …`. They are not in the shared-library closure murmur derives from the granted binary, and each `.chk` is its module's integrity file, which NSS reads beside it. `library: libsoftokn3.so` also brings the `libsqlite3.so.0` it links |
+| The fonts (`system: fonts`, `etc: fonts/fonts.conf`) | The browser starts and the snapshot reads the page's text, but no text is drawn: a screenshot shows the page without a glyph, and `browser.log` says `Fontconfig error: Cannot load default config file: Unable to open /etc/fonts/fonts.conf` |
+| The libraries Chrome links, such as `libnss3.so`, `libgbm.so.1` and `libasound.so.2` | murmur grants them anyway, as the browser's own shared libraries; the declaration lets `mur doctor` name the package when one is missing |
+
+| The capsule still sets | Without it |
+|---|---|
 | `memory_bytes` | The browser dies at start; see [Resources](#resources) |
-| The nine NSS files: `libsoftokn3`, `libfreebl3`, `libfreeblpriv3` and `libnssdbm3`, each `.so` and `.chk`, and `libnssckbi.so` | The first `https` page kills the browser with exit 133. Chrome prints `ERROR:crypto/nss_util.cc:225] Error initializing NSS with a persistent database (…): libsoftokn3.so: cannot open shared object file: No such file or directory`, then `FATAL:crypto/nss_util.cc:115] nss_error=-5925, os_error=0`, and the call answers `tool-browser: chromium exited with 133 during Page.navigate: <that FATAL line>; Chrome loads NSS's modules with dlopen, so granting chromium does not grant them: add …`. NSS opens these modules with `dlopen`, so they are not in the shared-library closure murmur derives from the granted binary. Each `.chk` is its module's integrity file, which NSS reads beside it |
-| `libsqlite3.so.0` | The same exit and line, with `libsqlite3.so.0: cannot open shared object file` in Chrome's ERROR line: `libsoftokn3.so` links it, and Chrome does not. It is a link to `libsqlite3.so.0.8.6`; granting the link was enough on both tiers |
 | `network.allow` | `open https://<host>/ failed: net::ERR_NAME_NOT_RESOLVED; if <host> is outside the capsule, add it to capabilities.network.allow`. Every `https` host a page loads from must be listed |
 
 The tool adds no launch flag for the capsule. Each of `--disable-software-rasterizer`,
 `--use-gl=disabled`, `--use-angle=swiftshader`, `--in-process-gpu` and `--disable-features=Vulkan`
-was tried and none was needed: Chrome's GPU process starts and stays up on both tiers with the
-grants above.
+was tried and none was needed: Chrome's GPU process starts and stays up on both tiers with what
+tool-browser declares.
 
-The NSS and SQLite paths are those of Ubuntu and Debian on x86_64, from the `libnss3` and
-`libsqlite3-0` packages; on the measuring host each NSS file is a regular file. On aarch64 the
-multiarch directory is `/usr/lib/aarch64-linux-gnu`, which is not measured.
+### Preparing a host
 
-`interpreter_runtime` fires `W-SEC-009` at launch, because the directories tie the capsule to this
-host's layout.
+The browser must live **outside the home folder**: murmur never grants a path beneath the `HOME`
+of the `mur` that runs the capsule. `npx @puppeteer/browsers` and Playwright install under
+`~/.cache` by default, so install `chrome-headless-shell` elsewhere, link it as `chromium` **inside
+its own folder**, and put that folder first on `PATH`:
+
+```bash
+sudo npx @puppeteer/browsers install chrome-headless-shell@stable --path /opt/chrome-headless-shell
+HS=$(dirname /opt/chrome-headless-shell/chrome-headless-shell/linux-*/chrome-headless-shell-linux64/chrome-headless-shell)
+sudo ln -s chrome-headless-shell "$HS/chromium"
+export PATH="$HS:$PATH"   # in the shell that runs `mur run`
+```
+
+On `sealed` the composed root binds the folder the granted binary resolves to, so a link kept in
+another folder is not on `PATH` inside it. On `scoped` a link anywhere on `PATH` works.
+
+A browser under `$HOME` gets this from `mur doctor`, and dies at start with the ICU line above,
+because its folder is not granted:
+
+```text
+warning[W-RUN-011]: local/tool-browser declares program_folder . for chromium, and it is not granted: resolved to /home/you/.cache/ms-playwright/chromium_headless_shell-1208/chrome-headless-shell-linux64, beneath the home folder /home/you, which no need reaches
+```
+
+The packages a host needs, for a person preparing one by hand on Ubuntu 24.04:
+
+```bash
+sudo apt-get install -y unzip fontconfig fonts-liberation fonts-noto-core libnss3 libnspr4 libatk1.0-0t64 libatk-bridge2.0-0t64 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2t64 libatspi2.0-0t64
+```
 
 ### The `google-chrome` wrapper on `scoped`
 
@@ -277,7 +284,11 @@ as Chrome itself took these grants, measured one refusal at a time with `mur` at
 | Reads under `/proc` refused, then a fatal sandbox check | `/proc`, and Chrome's sandbox off (below) |
 
 Chrome then stops on the ProcessSingleton socket as above, so no manifest makes the wrapper work
-on `scoped` or `sealed`.
+on `scoped` or `sealed`. For a capsule granting `google-chrome`, the declared `program_folder: .`
+resolves to `/opt/google/chrome`: `/usr/bin/google-chrome` is a link to
+`/opt/google/chrome/google-chrome`, and that folder holds both the wrapper and Chrome, with its
+`icudtl.dat`. `mur run --explain-scope` at murmur `b0d4c42e` shows
+`program_folder . -> /opt/google/chrome (list_dir)`.
 
 ### Chrome's sandbox
 
@@ -370,6 +381,26 @@ A start has 30 s to bring Chrome up, through the sandbox retry, and record it in
 | The starting call runs out of the 30 s | `tool-browser: chromium did not finish starting within 30 s, so it was stopped; see .tool-browser/<id>/browser.log` |
 | A waiting call finds a running browser that no `state.json` records for 35 s, because the call starting it died | `tool-browser: the running browser (<handle>) has no state.json under .tool-browser/, so it was stopped; the next call starts a new one` |
 | Chrome exits while starting, and other calls are waiting on that start | Each waiting call makes its own attempt about 1 s after the last one failed, and answers its own `tool-browser: chromium exited with <code> while starting: …` if that fails too |
+
+## Changes in 0.4.0
+
+- `murmur.yaml` declares what Chrome needs from the host under `programs:`, the same list for
+  `chromium`, `chromium-browser`, `google-chrome` and `chrome`: the browser's folder, NSS's modules
+  with their `.chk` files, the fonts, and the libraries Chrome links with their Ubuntu packages.
+- The working manifest shrinks to the artifact, the `chromium` grant, `network.allow` and
+  `resources`. It has no `interpreter_runtime` entry and no host path, so `W-SEC-009` no longer
+  fires. It needs a `mur` at murmur `38988719` or later.
+- The browser must live outside the home folder, because murmur grants no declared need beneath it.
+
+## Changes in 0.3.0
+
+- A browser that exits during a call answers `tool-browser: <name> exited with <code> during
+  <method>: <Chrome's FATAL line>`, plus a hint when the cause is known, such as NSS's modules
+  missing on the first `https` page.
+- Calls sent together share one browser: they wait for the one start, then run one at a time in
+  no set order, with the starting call's action first. A start that does not finish within 30 s is
+  stopped and named.
+- The working manifest grants NSS's modules and `network.allow`, so it opens `https` pages.
 
 ## Breaking in 0.2.0
 

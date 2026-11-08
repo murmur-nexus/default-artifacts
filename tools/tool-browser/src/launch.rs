@@ -89,16 +89,15 @@ pub const NSS_SIGNATURES: &[&str] = &[
     "libnssckbi",
 ];
 
-/// The NSS hint for a browser granted as `name`. murmur grants the shared-library closure of a
-/// granted binary; NSS opens these modules, and reads each `.chk` beside its module, at run time,
-/// and `libsoftokn3.so` needs `libsqlite3.so.0`, which Chrome does not link.
+/// The NSS hint for a browser granted as `name`. NSS opens its modules with `dlopen`, and reads
+/// each `.chk` beside its module, at run time, so they are not in the shared-library closure
+/// murmur grants for a granted binary; tool-browser's `programs:` declares them instead.
 pub fn nss_hint(name: &str) -> String {
     format!(
-        "; Chrome loads NSS's modules with dlopen, so granting {name} does not grant them: add \
-         libsoftokn3.so, libsoftokn3.chk, libfreebl3.so, libfreebl3.chk, libfreeblpriv3.so, \
-         libfreeblpriv3.chk, libnssdbm3.so, libnssdbm3.chk, libnssckbi.so and libsqlite3.so.0, \
-         which libsoftokn3.so links, to the capabilities.shell.interpreter_runtime dirs of \
-         {name}, as tool-browser's README lists"
+        "; Chrome loads NSS's modules with dlopen: tool-browser declares them for {name} under \
+         programs: in its murmur.yaml, and they reach the browser only on a mur that reads \
+         programs: and when the capsule pins tool-browser with mur install; mur doctor names a \
+         missing one and its package"
     )
 }
 
@@ -398,7 +397,7 @@ mod tests {
         );
         assert_eq!(
             nss_hint("chromium"),
-            "; Chrome loads NSS's modules with dlopen, so granting chromium does not grant them: add libsoftokn3.so, libsoftokn3.chk, libfreebl3.so, libfreebl3.chk, libfreeblpriv3.so, libfreeblpriv3.chk, libnssdbm3.so, libnssdbm3.chk, libnssckbi.so and libsqlite3.so.0, which libsoftokn3.so links, to the capabilities.shell.interpreter_runtime dirs of chromium, as tool-browser's README lists"
+            "; Chrome loads NSS's modules with dlopen: tool-browser declares them for chromium under programs: in its murmur.yaml, and they reach the browser only on a mur that reads programs: and when the capsule pins tool-browser with mur install; mur doctor names a missing one and its package"
         );
     }
 

@@ -2775,6 +2775,7 @@ dependencies = [
  "murmur-process-test-host",
  "serde",
  "serde_json",
+ "serde_norway",
  "sha1",
  "tempfile",
  "wasip2",

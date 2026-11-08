@@ -23,7 +23,9 @@ wasip2 = "1.0.4"
 
 # Host-target-only. murmur-process-test-host runs the compiled wasm32-wasip2 component in
 # tests/common, with a test host for `murmur:process` that starts the real browser; tempfile
-# gives every suite its scratch folders. A `[dev-dependencies]` entry never reaches the cdylib.
+# gives every suite its scratch folders; serde_norway parses murmur.yaml as `mur` does, anchors
+# and aliases included. A `[dev-dependencies]` entry never reaches the cdylib.
 [dev-dependencies]
 murmur-process-test-host = { path = "../../libs/murmur-process-test-host" }
+serde_norway = "0.9.42"
 tempfile = "3"

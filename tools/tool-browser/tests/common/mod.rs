@@ -105,7 +105,7 @@ pub fn fixture_server() -> u16 {
 
 /// The hint a call names when Chrome could not load NSS's modules, for a browser granted as
 /// `chromium`.
-pub const NSS_HINT: &str = "; Chrome loads NSS's modules with dlopen, so granting chromium does not grant them: add libsoftokn3.so, libsoftokn3.chk, libfreebl3.so, libfreebl3.chk, libfreeblpriv3.so, libfreeblpriv3.chk, libnssdbm3.so, libnssdbm3.chk, libnssckbi.so and libsqlite3.so.0, which libsoftokn3.so links, to the capabilities.shell.interpreter_runtime dirs of chromium, as tool-browser's README lists";
+pub const NSS_HINT: &str = "; Chrome loads NSS's modules with dlopen: tool-browser declares them for chromium under programs: in its murmur.yaml, and they reach the browser only on a mur that reads programs: and when the capsule pins tool-browser with mur install; mur doctor names a missing one and its package";
 
 /// The lines of the first ```yaml block after the line `heading` in the tool's README.
 pub fn readme_yaml(heading: &str) -> String {
