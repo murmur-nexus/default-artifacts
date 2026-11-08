@@ -217,7 +217,9 @@ fn drain_output(procs: &mut dyn Processes, handle: &str, dir: &StateDir) -> Stri
     String::from_utf8_lossy(&stderr).into_owned()
 }
 
-/// The last [`LOG_TAIL_BYTES`] of `browser.log`.
+/// The last [`LOG_TAIL_BYTES`] of `browser.log`, from the browser's DevTools line on when the tail
+/// holds it: the sandbox retry starts Chrome again in the same folder, so what precedes that line
+/// can be an earlier attempt's output, its FATAL line included.
 fn log_tail(dir: &StateDir) -> String {
     use std::io::{Read as _, Seek as _, SeekFrom};
     let Ok(mut f) = fs::File::open(dir.file("browser.log")) else {
@@ -231,7 +233,9 @@ fn log_tail(dir: &StateDir) -> String {
     {
         return String::new();
     }
-    String::from_utf8_lossy(&bytes).into_owned()
+    let tail = String::from_utf8_lossy(&bytes);
+    let from = tail.rfind(launch::DEVTOOLS_LINE).unwrap_or(0);
+    tail[from..].to_string()
 }
 
 /// A call that failed on an attached browser.
@@ -1052,6 +1056,30 @@ mod tests {
         assert!(
             line.contains("during Page.navigate: [1107/150512.2:FATAL:crypto/nss_util.cc:146] nss_error=-5925; Chrome loads NSS"),
             "{line}"
+        );
+    }
+
+    /// The sandbox retry starts Chrome again in the same folder, so `browser.log` opens with the
+    /// first attempt's FATAL line; a later death that prints nothing must not quote it.
+    #[test]
+    fn a_fatal_line_from_before_devtools_opened_is_not_quoted() {
+        let (_d, work, _) = folders(&[]);
+        let dir = StateDir::new(&work, "00");
+        fs::create_dir_all(&dir.root).unwrap();
+        let sandbox = "[1108/205352.595302:FATAL:content/browser/zygote_host/zygote_host_impl_linux.cc:128] No usable sandbox!";
+        fs::write(
+            dir.file("browser.log"),
+            format!("{sandbox}\n\nDevTools listening on ws://127.0.0.1:39275/devtools/browser/x\n[1108/205353.1:WARNING:x.cc] later\n"),
+        )
+        .unwrap();
+        let mut procs = FakeProcs {
+            exit: 137,
+            ..FakeProcs::default()
+        };
+        let (line, _) = explain(&mut procs, &work, 90_000, closed_failure(Some("click")));
+        assert_eq!(
+            line,
+            "tool-browser: chromium exited with 137 during click: [1108/205353.1:WARNING:x.cc] later"
         );
     }
 

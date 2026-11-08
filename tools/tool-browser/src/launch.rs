@@ -62,12 +62,13 @@ pub fn sandbox_failed(stderr: &str) -> bool {
     SANDBOX_SIGNATURES.iter().any(|s| stderr.contains(s))
 }
 
+/// How Chrome's line announcing its DevTools port begins.
+pub const DEVTOOLS_LINE: &str = "DevTools listening on ws://127.0.0.1:";
+
 /// `DevTools listening on ws://127.0.0.1:<port><path>` → `(port, path)`.
 pub fn parse_devtools_line(stderr: &str) -> Option<(u16, String)> {
     stderr.lines().find_map(|line| {
-        let rest = line
-            .trim()
-            .strip_prefix("DevTools listening on ws://127.0.0.1:")?;
+        let rest = line.trim().strip_prefix(DEVTOOLS_LINE)?;
         let slash = rest.find('/')?;
         let port: u16 = rest[..slash].parse().ok()?;
         let path = rest[slash..].trim();

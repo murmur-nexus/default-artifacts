@@ -521,21 +521,17 @@ fn remote_object_text(arg: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{state::tests::FakeClock, ws::tests::upgraded, ws::tests::FakeConn};
-
-    /// An unmasked server frame: `opcode` with a payload under 126 bytes.
-    fn frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
-        let mut f = vec![0x80 | opcode, payload.len() as u8];
-        f.extend_from_slice(payload);
-        f
-    }
+    use crate::{
+        state::tests::FakeClock,
+        ws::tests::{server_frame, upgraded, FakeConn},
+    };
 
     #[test]
     fn the_method_in_flight_is_kept_when_the_connection_closes_on_its_answer() {
         let conn = FakeConn::default();
         let clock = FakeClock::default();
         let mut cdp = Cdp::new(
-            upgraded(&conn, &frame(0x8, &[])),
+            upgraded(&conn, &server_frame(true, 0x8, &[])),
             &clock,
             90_000,
             PageLog::default(),
@@ -557,8 +553,8 @@ mod tests {
     fn a_close_during_the_load_wait_is_charged_to_the_navigation() {
         let conn = FakeConn::default();
         let clock = FakeClock::default();
-        let mut early = frame(0x1, br#"{"id":1,"result":{"loaderId":"L"}}"#);
-        early.extend(frame(0x8, &[]));
+        let mut early = server_frame(true, 0x1, br#"{"id":1,"result":{"loaderId":"L"}}"#);
+        early.extend(server_frame(true, 0x8, &[]));
         let mut cdp = Cdp::new(upgraded(&conn, &early), &clock, 90_000, PageLog::default());
         cdp.ev.page_session = Some("S".into());
         assert!(cdp.page("Page.navigate", json!({"url": "x"})).is_ok());

@@ -777,7 +777,6 @@ fn dialog_opened_between_calls_is_dismissed() {
 const NSS_ERROR_LINE: &str = "[1108/204147.929516:ERROR:crypto/nss_util.cc:225] Error initializing NSS with a persistent database (sql:/space/scratch/5c8f-tmp/.tmpo8Xhdo/.murmur/records/space/scratch/5c8f-tmp/.tmpgqpwtE/work-nss-withheld/ses_01a1bce54dc876329c9d777f73288751/home/.pki/nssdb): libsoftokn3.so: cannot open shared object file: No such file or directory";
 const NSS_FATAL_LINE: &str =
     "[1108/204147.929598:FATAL:crypto/nss_util.cc:115] nss_error=-5925, os_error=0";
-const NSS_HINT: &str = "; Chrome loads NSS's modules with dlopen, so granting chromium does not grant them: add libsoftokn3.so, libsoftokn3.chk, libfreebl3.so, libfreebl3.chk, libfreeblpriv3.so, libfreeblpriv3.chk, libnssdbm3.so, libnssdbm3.chk, libnssckbi.so and libsqlite3.so.0, which libsoftokn3.so links, to the capabilities.shell.interpreter_runtime dirs of chromium, as tool-browser's README lists";
 
 /// A Chrome that dies while a navigation is in flight is reported by its exit code, the DevTools
 /// method in flight and its FATAL line, with the NSS hint; the next call replaces it.
@@ -822,7 +821,10 @@ fn chrome_dying_during_navigation_names_its_fatal_line() {
     assert_eq!(r["status"], "error", "{r}");
     assert_eq!(
         data(&r),
-        format!("tool-browser: chromium exited with 133 during Page.navigate: {NSS_FATAL_LINE}{NSS_HINT}")
+        format!(
+            "tool-browser: chromium exited with 133 during Page.navigate: {NSS_FATAL_LINE}{}",
+            common::NSS_HINT
+        )
     );
     let log = fs::read_to_string(env.state().join("browser.log")).unwrap();
     assert!(

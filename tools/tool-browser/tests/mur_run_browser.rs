@@ -485,20 +485,12 @@ const README_BROWSER_DIR: &str =
 const README_HEADING: &str = "### A working manifest on `scoped` and `sealed`";
 const HTTPS_URL: &str = "https://example.com/";
 const HTTPS_PAGE_LINE: &str = "page: Example Domain — https://example.com/";
-const NSS_HINT: &str = "; Chrome loads NSS's modules with dlopen, so granting chromium does not grant them: add libsoftokn3.so, libsoftokn3.chk, libfreebl3.so, libfreebl3.chk, libfreeblpriv3.so, libfreeblpriv3.chk, libnssdbm3.so, libnssdbm3.chk, libnssckbi.so and libsqlite3.so.0, which libsoftokn3.so links, to the capabilities.shell.interpreter_runtime dirs of chromium, as tool-browser's README lists";
 
 /// The README's working manifest for `tier`: the lines under its `capabilities:`, with only the
 /// browser's directory and the `containment:` value replaced.
 fn granted_capabilities(staging: &Staging, tier: &str) -> String {
-    let readme =
-        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md")).unwrap();
-    let block: Vec<&str> = readme
-        .lines()
-        .skip_while(|l| *l != README_HEADING)
-        .skip_while(|l| *l != "```yaml")
-        .skip(1)
-        .take_while(|l| *l != "```")
-        .collect();
+    let yaml = common::readme_yaml(README_HEADING);
+    let block: Vec<&str> = yaml.lines().collect();
     assert_eq!(
         block.first(),
         Some(&"capabilities:"),
@@ -765,7 +757,7 @@ fn nss_withheld_session(staging: &Staging) {
         line.contains("FATAL:crypto/nss_util.cc") && line.contains("nss_error="),
         "{line}"
     );
-    assert!(line.ends_with(NSS_HINT), "{line}");
+    assert!(line.ends_with(common::NSS_HINT), "{line}");
 
     let trace = staging.trace(&workdir);
     let starts = browser_events(&trace, "process_start");

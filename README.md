@@ -211,8 +211,8 @@ needs one has to detect the refusal itself and say so.
 `wit/guest/` also holds `murmur:process@0.1.0`, from murmur `6750b5f9` on `main` (murmur
 `f9d4a1f8`, #390, added it), and `world tool` imports it. It lets a tool start programs that live
 for the whole session and connect to their loopback ports, or run one to completion and read its
-output. A `mur` serves it from WIT level 4 on, and no murmur release does yet: v0.9.0, the newest
-tag, serves level 3.
+output. A `mur` serves it from WIT level 4 on, and murmur v0.10.0 is the first release that does;
+v0.9.0 serves level 3.
 
 A component's level follows the interfaces it actually imports and exports, not the world it was
 built from. `tool-browser` 0.3.0, `tool-git` 0.7.0 and `tool-computer` 0.2.0 are the only artifacts
