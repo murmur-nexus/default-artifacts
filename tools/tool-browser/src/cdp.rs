@@ -38,6 +38,8 @@ pub struct Events {
     pub dialogs: Vec<String>,
     /// Why the connection ended, once it has.
     pub closed: Option<String>,
+    /// The DevTools method the tool had last sent when it first found the connection closed.
+    pub closed_during: Option<String>,
     pub log: PageLog,
     /// `requestId` → `(method, url)` for requests seen starting in this call.
     requests: HashMap<String, (String, String)>,
@@ -59,6 +61,8 @@ pub struct Cdp<'a> {
     /// The call's end, on `clock`.
     deadline_ms: u64,
     responses: HashMap<u64, Result<Value, String>>,
+    /// The method of the last command sent.
+    last_method: Option<String>,
     pub ev: Events,
 }
 
@@ -72,12 +76,25 @@ impl<'a> Cdp<'a> {
             next_id: 1,
             deadline_ms,
             responses: HashMap::new(),
+            last_method: None,
             ev: Events::new(log),
         }
     }
 
     pub fn clock(&self) -> &'a dyn Clock {
         self.clock
+    }
+
+    /// The call's end, on the clock.
+    pub fn deadline_ms(&self) -> u64 {
+        self.deadline_ms
+    }
+
+    /// Record the method in flight the first time the connection is seen closed.
+    fn note_closed(&mut self) {
+        if self.ev.closed.is_some() && self.ev.closed_during.is_none() {
+            self.ev.closed_during = self.last_method.clone();
+        }
     }
 
     /// Whether the call's time is up: every command then answers [`OUT_OF_TIME`] unsent.
@@ -108,6 +125,7 @@ impl<'a> Cdp<'a> {
         }
         if let Err(e) = self.ws.send_text(&message.to_string()) {
             self.ev.closed = Some(e.to_string());
+            self.note_closed();
             return Err(format!("the browser connection is closed ({e})"));
         }
         Ok(id)
@@ -122,6 +140,9 @@ impl<'a> Cdp<'a> {
     ) -> Result<Value, String> {
         if self.out_of_time() {
             return Err(OUT_OF_TIME.into());
+        }
+        if self.ev.closed.is_none() {
+            self.last_method = Some(method.to_string());
         }
         let id = self.send(session, method, params)?;
         let until = self.clock.now_ms() + timeout_ms;
@@ -174,6 +195,11 @@ impl<'a> Cdp<'a> {
 
     /// Read and handle at most one message, waiting up to `wait_ms`.
     fn read_one(&mut self, wait_ms: u64) {
+        self.read_message(wait_ms);
+        self.note_closed();
+    }
+
+    fn read_message(&mut self, wait_ms: u64) {
         match self.ws.poll(wait_ms.clamp(1, 1_000) as u32) {
             Ok(None) | Ok(Some(Message::Binary(_))) => {}
             Ok(Some(Message::Text(text))) => {
@@ -495,6 +521,48 @@ fn remote_object_text(arg: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        state::tests::FakeClock,
+        ws::tests::{server_frame, upgraded, FakeConn},
+    };
+
+    #[test]
+    fn the_method_in_flight_is_kept_when_the_connection_closes_on_its_answer() {
+        let conn = FakeConn::default();
+        let clock = FakeClock::default();
+        let mut cdp = Cdp::new(
+            upgraded(&conn, &server_frame(true, 0x8, &[])),
+            &clock,
+            90_000,
+            PageLog::default(),
+        );
+        cdp.ev.page_session = Some("S".into());
+        let e = cdp
+            .page("Page.navigate", json!({"url": "https://example.com/"}))
+            .unwrap_err();
+        assert!(
+            e.starts_with("the browser connection closed during Page.navigate ("),
+            "{e}"
+        );
+        let e = cdp.page("Runtime.evaluate", json!({})).unwrap_err();
+        assert!(e.starts_with("the browser connection is closed ("), "{e}");
+        assert_eq!(cdp.ev.closed_during.as_deref(), Some("Page.navigate"));
+    }
+
+    #[test]
+    fn a_close_during_the_load_wait_is_charged_to_the_navigation() {
+        let conn = FakeConn::default();
+        let clock = FakeClock::default();
+        let mut early = server_frame(true, 0x1, br#"{"id":1,"result":{"loaderId":"L"}}"#);
+        early.extend(server_frame(true, 0x8, &[]));
+        let mut cdp = Cdp::new(upgraded(&conn, &early), &clock, 90_000, PageLog::default());
+        cdp.ev.page_session = Some("S".into());
+        assert!(cdp.page("Page.navigate", json!({"url": "x"})).is_ok());
+        assert_eq!(cdp.ev.closed_during, None);
+        assert!(!cdp.wait_until(30_000, |s| s.load_events > 0));
+        assert!(cdp.page("DOM.getDocument", json!({})).is_err());
+        assert_eq!(cdp.ev.closed_during.as_deref(), Some("Page.navigate"));
+    }
 
     fn page_events() -> Events {
         Events {

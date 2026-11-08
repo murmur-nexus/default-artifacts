@@ -337,7 +337,8 @@ pub(crate) mod tests {
         vec![0; n]
     }
 
-    fn server_frame(fin: bool, opcode: u8, payload: &[u8]) -> Vec<u8> {
+    /// An unmasked server frame.
+    pub(crate) fn server_frame(fin: bool, opcode: u8, payload: &[u8]) -> Vec<u8> {
         let mut f = vec![if fin { 0x80 } else { 0 } | opcode];
         match payload.len() {
             n if n < 126 => f.push(n as u8),

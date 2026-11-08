@@ -17,6 +17,12 @@
 //! The page is a file in the work folder rather than a loopback server: Chrome runs in the
 //! session's network namespace, whose loopback is not the host's.
 //!
+//! The granted capsules take their capabilities from the README's working manifest, copied as is
+//! but for the browser's directory and the tier, so the run proves that manifest. Where the host
+//! reaches `example.com:443`, each also opens `https://example.com/`, and one more capsule on
+//! `scoped` withholds the NSS files to show the line a model gets; elsewhere both print a skip
+//! line.
+//!
 //! `#[ignore]`d because the default `cargo test --workspace` has no `mur` to launch.
 //! `MUR_BIN=<level-4 mur> TOOL_BROWSER_TEST_CHROME=<chrome-headless-shell> cargo test -p
 //! tool-browser --test mur_run_browser -- --ignored --nocapture` runs it.
@@ -473,21 +479,58 @@ fn result_of<'a>(results: &'a [(String, String)], id: &str) -> &'a str {
 
 const FENCE_OPEN: &str = "<untrusted-content source=tool:tool-browser>";
 
-/// What `capabilities.containment: <tier>` grants a browser: `chromium` in `shell.allow`, the
-/// README's `interpreter_runtime` dirs (its own directory, `/proc`, the fonts) and resources.
+/// The browser directory the README's working manifest names as its example.
+const README_BROWSER_DIR: &str =
+    "/home/you/.cache/ms-playwright/chromium_headless_shell-1208/chrome-headless-shell-linux64";
+const README_HEADING: &str = "### A working manifest on `scoped` and `sealed`";
+const HTTPS_URL: &str = "https://example.com/";
+const HTTPS_PAGE_LINE: &str = "page: Example Domain — https://example.com/";
+
+/// The README's working manifest for `tier`: the lines under its `capabilities:`, with only the
+/// browser's directory and the `containment:` value replaced.
 fn granted_capabilities(staging: &Staging, tier: &str) -> String {
-    let dirs: String = [
-        staging.browser_dir.display().to_string().as_str(),
-        "/proc",
-        "/etc/fonts",
-        "/usr/share/fonts",
-    ]
-    .iter()
-    .map(|d| format!("          - path: {d}\n            list_dir: true\n"))
-    .collect();
-    format!(
-        "  containment: {tier}\n  shell:\n    allow:\n      - chromium\n    interpreter_runtime:\n      - binary: chromium\n        dirs:\n{dirs}{RESOURCES}"
-    )
+    let yaml = common::readme_yaml(README_HEADING);
+    let block: Vec<&str> = yaml.lines().collect();
+    assert_eq!(
+        block.first(),
+        Some(&"capabilities:"),
+        "the README's working manifest starts with capabilities:"
+    );
+    let (mut containment, mut dir) = (0, 0);
+    let caps: String = block[1..]
+        .iter()
+        .map(|l| {
+            if l.trim_start().starts_with("containment:") {
+                containment += 1;
+                format!("  containment: {tier}\n")
+            } else if l.contains(README_BROWSER_DIR) {
+                dir += 1;
+                format!(
+                    "{}\n",
+                    l.replace(
+                        README_BROWSER_DIR,
+                        &staging.browser_dir.display().to_string()
+                    )
+                )
+            } else {
+                format!("{l}\n")
+            }
+        })
+        .collect();
+    assert_eq!(
+        (containment, dir),
+        (1, 1),
+        "the README's manifest has one containment: line and names {README_BROWSER_DIR}"
+    );
+    caps
+}
+
+/// The trace's `event` lines (`process_start`, `process_exit`) for the process `browser`.
+fn browser_events<'t>(trace: &'t [Value], event: &str) -> Vec<&'t Value> {
+    trace
+        .iter()
+        .filter(|l| l["event_type"] == event && l["name"] == "browser")
+        .collect()
 }
 
 /// Print the tail of every `browser.log`; with `TOOL_BROWSER_KEEP_LOGS=<dir>`, copy each there.
@@ -525,9 +568,13 @@ fn print_browser_logs(workdir: &Path) {
 
 /// One granted session on `tier`: open → console → screenshot, all inside the fence, the image
 /// in the next request, the browser a session process murmur kills at the session's end.
-fn granted_session(staging: &Staging, tier: &str) {
+fn granted_session(staging: &Staging, tier: &str, https: bool) {
     let name = format!("granted-{tier}");
-    let provider = Provider::start(scripted_calls());
+    let mut calls = scripted_calls();
+    if https {
+        calls.push(json!({"action": "open", "url": HTTPS_URL}));
+    }
+    let provider = Provider::start(calls);
     staging.write_manifest(
         &name,
         &provider.endpoint,
@@ -591,12 +638,17 @@ fn granted_session(staging: &Staging, tier: &str) {
         last.contains("data:image/png;base64,"),
         "the request after the screenshot carries the image"
     );
+    if https {
+        let opened = result_of(&results, "call_4");
+        assert!(opened.contains(FENCE_OPEN), "open is fenced: {opened}");
+        assert!(
+            opened.lines().any(|l| l == HTTPS_PAGE_LINE),
+            "the https page opens on {tier}: {opened}"
+        );
+    }
 
     let trace = staging.trace(&workdir);
-    let starts: Vec<&Value> = trace
-        .iter()
-        .filter(|l| l["event_type"] == "process_start" && l["name"] == "browser")
-        .collect();
+    let starts = browser_events(&trace, "process_start");
     // Two when Chrome's own sandbox could not start and it ran again with --no-sandbox.
     assert!(
         (1..=2).contains(&starts.len()),
@@ -605,10 +657,19 @@ fn granted_session(staging: &Staging, tier: &str) {
     for start in &starts {
         println!("process_start: {start}");
     }
-    let exits: Vec<&Value> = trace
-        .iter()
-        .filter(|l| l["event_type"] == "process_exit" && l["name"] == "browser")
-        .collect();
+    let exits = browser_events(&trace, "process_exit");
+    // Only the start that could not use Chrome's own sandbox ends before the session: no browser
+    // died during a call, the https page's included.
+    for exit in exits.iter().filter(|l| l["reason"] != "session_end") {
+        let start = starts
+            .iter()
+            .find(|s| s["process_id"] == exit["process_id"])
+            .unwrap_or_else(|| panic!("a start for {exit}"));
+        assert!(
+            !start.to_string().contains("--no-sandbox"),
+            "only the sandboxed first start exits early on {tier}: {exit}"
+        );
+    }
     assert!(
         exits.iter().any(|l| l["reason"] == "session_end"),
         "process_exit with reason session_end on {tier}: {exits:?}"
@@ -644,14 +705,97 @@ fn granted_session(staging: &Staging, tier: &str) {
     );
 }
 
-/// A granted capsule runs the browser on `scoped` and on `sealed`; a capsule without the grant
-/// gets the one no-grant line, fenced.
+/// The nine NSS files the README's manifest grants, each a module or its `.chk`.
+const NSS_MODULES: [&str; 5] = [
+    "libsoftokn3.",
+    "libfreebl3.",
+    "libfreeblpriv3.",
+    "libnssdbm3.",
+    "libnssckbi.so",
+];
+
+/// The README's manifest without its nine NSS lines, on `scoped`: the https page kills Chrome,
+/// and the call names Chrome's exit, the navigation and its FATAL line, with the NSS hint.
+fn nss_withheld_session(staging: &Staging) {
+    let name = "nss-withheld";
+    let provider = Provider::start(vec![json!({"action": "open", "url": HTTPS_URL})]);
+    let caps: String = granted_capabilities(staging, "scoped")
+        .lines()
+        .filter(|l| !(l.contains("path: ") && NSS_MODULES.iter().any(|m| l.contains(m))))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let granted = |file: &str| {
+        caps.lines()
+            .any(|l| l.contains("path: ") && l.contains(file))
+    };
+    assert!(
+        !granted("libsoftokn3") && granted("libsqlite3.so.0"),
+        "{caps}"
+    );
+    staging.write_manifest(name, &provider.endpoint, &caps);
+    let workdir = staging.workdir(name);
+    fs::create_dir_all(&workdir).unwrap();
+    let output = staging.run(name, &[]);
+    let text = combined(&output);
+    println!("--- NSS withheld run ---\n{text}");
+    let results = tool_results(&provider.last_request());
+    print_browser_logs(&workdir);
+    let died = result_of(&results, "call_1");
+    println!("call_1: {died}");
+    let inside = &died[died.find(FENCE_OPEN).expect("fenced") + FENCE_OPEN.len()..];
+    let line = inside
+        .split("</untrusted-content>")
+        .next()
+        .unwrap_or("")
+        .trim();
+    let line = line.lines().last().unwrap_or("");
+    assert!(
+        line.starts_with("tool-browser: chromium exited with 133 during Page.navigate:"),
+        "{line}"
+    );
+    assert!(
+        line.contains("FATAL:crypto/nss_util.cc") && line.contains("nss_error="),
+        "{line}"
+    );
+    assert!(line.ends_with(common::NSS_HINT), "{line}");
+
+    let trace = staging.trace(&workdir);
+    let starts = browser_events(&trace, "process_start");
+    let exits = browser_events(&trace, "process_exit");
+    for event in starts.iter().chain(&exits) {
+        println!("{event}");
+    }
+    let last = starts.last().expect("a process_start for browser");
+    let died = exits
+        .iter()
+        .find(|e| e["process_id"] == last["process_id"])
+        .unwrap_or_else(|| panic!("a process_exit for the browser that ran: {exits:?}"));
+    assert_eq!(
+        (died["exit_code"].as_i64(), died["reason"].as_str()),
+        (Some(133), Some("exited")),
+        "{died}"
+    );
+}
+
+/// A granted capsule, the README's manifest, runs the browser on `scoped` and on `sealed` and
+/// opens an https page where the host reaches one; without the NSS files that page kills Chrome
+/// with a line naming why; a capsule without the grant gets the one no-grant line, fenced.
 #[test]
 #[ignore = "launches the real mur binary; run with --ignored"]
 fn browser_runs_on_scoped_and_sealed_and_ungranted_gets_one_line() {
     let staging = stage();
+    let https = match common::reachable("example.com") {
+        Ok(()) => true,
+        Err(why) => {
+            println!("skipped the https page and the NSS-withheld capsule: {why}");
+            false
+        }
+    };
     for tier in ["scoped", "sealed"] {
-        granted_session(&staging, tier);
+        granted_session(&staging, tier, https);
+    }
+    if https {
+        nss_withheld_session(&staging);
     }
 
     // Without the grant: exactly the one line, fenced, and nothing in the work folder.

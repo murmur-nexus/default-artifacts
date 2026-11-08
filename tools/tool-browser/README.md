@@ -9,15 +9,15 @@ it as a session process through `murmur:process`, later calls reuse it, and it r
 or the session's end, when murmur kills it with its process group. Nothing runs at capsule launch.
 
 ```bash
-mur install -g murmur/tool-browser@0.2.0
+mur install -g murmur/tool-browser@0.3.0
 ```
 
 The tool is a WASM component that imports `murmur:process`. It needs a `mur` whose `mur version`
-reports WIT level 4 or higher: murmur `f9d4a1f8` (#390) or later, which no murmur release holds yet.
+reports WIT level 4 or higher: murmur v0.10.0 is the first release that serves level 4.
 An older `mur` installs the zip, then refuses the capsule at launch:
 
 ```text
-error[E-WIT-LEVEL-001]: artifact 'local/tool-browser@0.2.0' does not fit WIT level 3, the level this mur serves: it imports murmur:process/process@0.1.0, and level 3 has no version of murmur:process
+error[E-WIT-LEVEL-001]: artifact 'local/tool-browser@0.3.0' does not fit WIT level 3, the level this mur serves: it imports murmur:process/process@0.1.0, and level 3 has no version of murmur:process
 ```
 
 ## Actions
@@ -163,8 +163,9 @@ The tool never uses your own Chrome profile: each browser gets an empty profile 
 
 ### Which browser runs on which tier
 
-Measured on Ubuntu 24.04.5, Linux 7.0.0-28-generic, x86_64, with `mur` 0.10.0-dev at murmur
-`6750b5f9`.
+Measured on Ubuntu 24.04.5, Linux 7.0.0-28-generic, x86_64. `chrome-headless-shell` 145.0.7632.6
+(Playwright's build 1208) with `mur` 0.11.0-dev at murmur `b0d4c42e`, opening a work-folder page and
+`https://example.com/` on both tiers; the full browsers with `mur` 0.10.0-dev at murmur `6750b5f9`.
 
 | Browser | `scoped` and `sealed` | Outside a capsule |
 |---|---|---|
@@ -219,6 +220,22 @@ capabilities:
             list_dir: true
           - path: /usr/share/fonts
             list_dir: true
+          # NSS's modules and their .chk integrity files, which Chrome opens with dlopen for
+          # https, and the libsqlite3 libsoftokn3 links: without them the first https page
+          # kills the browser
+          - { path: /usr/lib/x86_64-linux-gnu/libsoftokn3.so, list_dir: false }
+          - { path: /usr/lib/x86_64-linux-gnu/libsoftokn3.chk, list_dir: false }
+          - { path: /usr/lib/x86_64-linux-gnu/libfreebl3.so, list_dir: false }
+          - { path: /usr/lib/x86_64-linux-gnu/libfreebl3.chk, list_dir: false }
+          - { path: /usr/lib/x86_64-linux-gnu/libfreeblpriv3.so, list_dir: false }
+          - { path: /usr/lib/x86_64-linux-gnu/libfreeblpriv3.chk, list_dir: false }
+          - { path: /usr/lib/x86_64-linux-gnu/libnssdbm3.so, list_dir: false }
+          - { path: /usr/lib/x86_64-linux-gnu/libnssdbm3.chk, list_dir: false }
+          - { path: /usr/lib/x86_64-linux-gnu/libnssckbi.so, list_dir: false }
+          - { path: /usr/lib/x86_64-linux-gnu/libsqlite3.so.0, list_dir: false }
+  network:
+    # every https host a page loads, its subresources' hosts included
+    allow: ["https://example.com"]
   resources:
     memory_bytes: 274877906944
     cgroup_pids_max: 1024
@@ -231,11 +248,18 @@ capabilities:
 | `/proc` | `GPU process launch failed: error_code=1002`, then a fatal GPU process error |
 | `/etc/fonts`, `/usr/share/fonts` | The browser starts, but the page never renders and the first snapshot times out |
 | `memory_bytes` | The browser dies at start; see [Resources](#resources) |
+| The nine NSS files: `libsoftokn3`, `libfreebl3`, `libfreeblpriv3` and `libnssdbm3`, each `.so` and `.chk`, and `libnssckbi.so` | The first `https` page kills the browser with exit 133. Chrome prints `ERROR:crypto/nss_util.cc:225] Error initializing NSS with a persistent database (…): libsoftokn3.so: cannot open shared object file: No such file or directory`, then `FATAL:crypto/nss_util.cc:115] nss_error=-5925, os_error=0`, and the call answers `tool-browser: chromium exited with 133 during Page.navigate: <that FATAL line>; Chrome loads NSS's modules with dlopen, so granting chromium does not grant them: add …`. NSS opens these modules with `dlopen`, so they are not in the shared-library closure murmur derives from the granted binary. Each `.chk` is its module's integrity file, which NSS reads beside it |
+| `libsqlite3.so.0` | The same exit and line, with `libsqlite3.so.0: cannot open shared object file` in Chrome's ERROR line: `libsoftokn3.so` links it, and Chrome does not. It is a link to `libsqlite3.so.0.8.6`; granting the link was enough on both tiers |
+| `network.allow` | `open https://<host>/ failed: net::ERR_NAME_NOT_RESOLVED; if <host> is outside the capsule, add it to capabilities.network.allow`. Every `https` host a page loads from must be listed |
 
 The tool adds no launch flag for the capsule. Each of `--disable-software-rasterizer`,
 `--use-gl=disabled`, `--use-angle=swiftshader`, `--in-process-gpu` and `--disable-features=Vulkan`
 was tried and none was needed: Chrome's GPU process starts and stays up on both tiers with the
 grants above.
+
+The NSS and SQLite paths are those of Ubuntu and Debian on x86_64, from the `libnss3` and
+`libsqlite3-0` packages; on the measuring host each NSS file is a regular file. On aarch64 the
+multiarch directory is `/usr/lib/aarch64-linux-gnu`, which is not measured.
 
 `interpreter_runtime` fires `W-SEC-009` at launch, because the directories tie the capsule to this
 host's layout.
@@ -331,7 +355,7 @@ folder of another live session from one of an ended session, so the tool removes
 | First browser call | The tool checks the grant, starts Chrome as the session process `browser` and answers with the banner |
 | Each later call | The same Chrome, one call at a time; each opens its own DevTools connection, which closes when the call returns. A call is bounded at 90 s, counted from when it began, including any wait for another call to finish; a call that reaches it, a long `wait` included, answers `tool-browser: the call ran out of its 90 s` |
 | `close` | Chrome stops and its profile is removed; the next call starts a new one |
-| Chrome exits on its own | The next call starts a new one, and its first result says so: `browser: the previous browser exited with <code>; this is a new one and refs start again at e1` |
+| Chrome exits on its own | A call it exits during answers `tool-browser: <name> exited with <code> during <the DevTools method in flight, else the action>: <Chrome's last FATAL line, else its last line>`, plus a hint when the cause is known. The next call starts a new one, and its first result says so: `browser: the previous browser exited with <code>; this is a new one and refs start again at e1` |
 | Session end | murmur kills Chrome with its process group, on every platform, and the trace records `process_exit` with `reason: session_end` |
 
 ## Breaking in 0.2.0

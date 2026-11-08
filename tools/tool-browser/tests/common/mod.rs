@@ -9,7 +9,8 @@
 //! process group it started with `SIGKILL`, as murmur does at the session's end.
 
 // Each test binary compiles this module on its own and uses only part of it: `mur_run_browser`
-// takes the browser lookup and the fixture page, `browser` the rest. Every item is used by one.
+// takes the browser lookup, the fixture page, the NSS hint and the README's yaml, `manifest` the
+// README's yaml, `browser` the rest. Every item is used by one.
 #![allow(dead_code)]
 
 use std::{
@@ -102,6 +103,24 @@ pub fn fixture_server() -> u16 {
     serve_page(FIXTURE_PAGE)
 }
 
+/// The hint a call names when Chrome could not load NSS's modules, for a browser granted as
+/// `chromium`.
+pub const NSS_HINT: &str = "; Chrome loads NSS's modules with dlopen, so granting chromium does not grant them: add libsoftokn3.so, libsoftokn3.chk, libfreebl3.so, libfreebl3.chk, libfreeblpriv3.so, libfreeblpriv3.chk, libnssdbm3.so, libnssdbm3.chk, libnssckbi.so and libsqlite3.so.0, which libsoftokn3.so links, to the capabilities.shell.interpreter_runtime dirs of chromium, as tool-browser's README lists";
+
+/// The lines of the first ```yaml block after the line `heading` in the tool's README.
+pub fn readme_yaml(heading: &str) -> String {
+    let readme =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md")).unwrap();
+    readme
+        .lines()
+        .skip_while(|l| *l != heading)
+        .skip_while(|l| *l != "```yaml")
+        .skip(1)
+        .take_while(|l| *l != "```")
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn serve_page(page: &'static str) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -135,6 +154,20 @@ pub fn serve_page(page: &'static str) -> u16 {
         }
     });
     port
+}
+
+/// Whether `host:443` answers a TCP connect within 5 s; the reason when not. The https checks
+/// skip, saying why, where it does not.
+pub fn reachable(host: &str) -> Result<(), String> {
+    use std::net::{TcpStream, ToSocketAddrs};
+    let addr = (host, 443)
+        .to_socket_addrs()
+        .map_err(|e| format!("{host} does not resolve: {e}"))?
+        .next()
+        .ok_or_else(|| format!("{host} resolves to no address"))?;
+    TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(5))
+        .map(drop)
+        .map_err(|e| format!("{host}:443 is not reachable: {e}"))
 }
 
 // ── a session ────────────────────────────────────────────────────────────────
