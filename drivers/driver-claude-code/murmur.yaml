@@ -54,7 +54,7 @@ description: |
   An image in a tool result is reported in the feed as `[image: <media type>, <n> bytes]`, never
   as its bytes; whether the model saw it is up to `claude`.
 
-  Run it as a normal user: as root, `claude` refuses the permission mode a capsule with tools
-  needs, and the error says so.
+  Run it as a normal user: as root, `claude` refuses the permission mode the driver starts it
+  in, so every turn fails, and the error says so.
 requires_files:
   - driver_claude_code.wasm

@@ -165,6 +165,10 @@ Whenever a capsule has tools, the driver starts `claude` with
 `--permission-mode bypassPermissions`. The tool bridge already enforces the capsule's
 capabilities on every tool call, and an approval prompt would hang a headless turn.
 
+Every capsule has tools. murmur gives every agent capsule its own `session-status` tool, so
+even a capsule that lists no tool artifact gets the bridge and that permission mode. This
+applies from mur v0.10.0 on.
+
 `claude` refuses that mode under root or sudo. It exits `1` in under half a second, before the
 turn starts, and prints this (claude 2.1.319, observed 2026-11-07):
 
@@ -180,8 +184,10 @@ error[E-RUN-033]: the harness turn failed (harness-error): claude exited with co
 run the capsule as a normal user, not root: claude refuses to bypass its permission prompts as root, which a capsule with tools needs
 ```
 
+A capsule that lists no tool artifact is refused the same way. This was observed on 2026-11-08
+with claude 2.1.319, as uid 0 in a user namespace.
+
 The driver never sets `IS_SANDBOX`, the variable that switches Claude Code's root guard off.
-Whether a capsule with no tools runs as root was not measured.
 
 ## The argv this driver produces
 
