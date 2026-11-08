@@ -780,12 +780,24 @@ const NSS_FATAL_LINE: &str =
 
 /// A Chrome that dies while a navigation is in flight is reported by its exit code, the DevTools
 /// method in flight and its FATAL line, with the NSS hint; the next call replaces it.
+///
+/// The process the tool starts as `chromium` is a script that runs the test browser as its
+/// child and, on `SIGUSR1`, kills it and exits with 133, the code of Chrome's own `FATAL`
+/// (`SIGTRAP`). A `SIGTRAP` sent to the browser itself does not serve: on the CI runner the
+/// browser was still running when `Page.navigate`'s 30 s ran out.
 #[test]
 fn chrome_dying_during_navigation_names_its_fatal_line() {
     use std::{io::Write as _, net::TcpListener, process::Command, sync::mpsc};
 
     let env = Env::new();
     let _guard = Guard(&env);
+    env.script_on_path(
+        "chromium",
+        &format!(
+            "#!/bin/sh\n\"{}\" \"$@\" &\nchild=$!\ntrap 'kill -KILL \"$child\"; wait \"$child\"; exit 133' USR1\nwait \"$child\"\n",
+            common::test_browser().display()
+        ),
+    );
     open_fixture(&env);
     let pid = env.browser_pid().unwrap();
     let stall = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -812,7 +824,7 @@ fn chrome_dying_during_navigation_names_its_fatal_line() {
         writeln!(stderr, "{NSS_ERROR_LINE}\n{NSS_FATAL_LINE}").unwrap();
         drop(stderr);
         let killed = Command::new("kill")
-            .args(["-TRAP", &pid.to_string()])
+            .args(["-USR1", &pid.to_string()])
             .status()
             .unwrap();
         assert!(killed.success());
