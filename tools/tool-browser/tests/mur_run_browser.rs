@@ -731,7 +731,10 @@ fn pinned_download() -> (String, String, String) {
         fs::read_to_string(workspace_root().join("tools/tool-browser/murmur.yaml")).unwrap();
     let doc: serde_norway::Value = serde_norway::from_str(&manifest).unwrap();
     let entry = &doc["programs"]["chromium"]["download"]["linux-x86_64"];
-    let url = entry["url"].as_str().expect("a linux-x86_64 url").to_string();
+    let url = entry["url"]
+        .as_str()
+        .expect("a linux-x86_64 url")
+        .to_string();
     let sha256 = entry["sha256"]
         .as_str()
         .expect("a linux-x86_64 sha256")
@@ -885,8 +888,9 @@ fn granted_session(staging: &Staging, tier: &str, https: bool, path: &str, copy:
             );
             let folder = pin.run_file().parent().unwrap().to_path_buf();
             assert!(
-                declared.iter().any(|l| l
-                    .contains(&format!("program_folder . -> {}", folder.display()))),
+                declared
+                    .iter()
+                    .any(|l| l.contains(&format!("program_folder . -> {}", folder.display()))),
                 "program_folder . resolves into the store on {tier}:\n{scope_text}"
             );
             folder
@@ -938,10 +942,8 @@ fn granted_session(staging: &Staging, tier: &str, https: bool, path: &str, copy:
         );
     }
     let console = result_of(&results, "call_2");
-    assert!(console.contains(FENCE_OPEN), "console is fenced: {console}");
-    let inside = &console[console.find(FENCE_OPEN).unwrap() + FENCE_OPEN.len()..];
     assert!(
-        inside.contains("[error] boom-load"),
+        fenced(console).contains("[error] boom-load"),
         "the fence wraps the boom-load console error: {console}"
     );
     let shot = result_of(&results, "call_3");
@@ -1115,7 +1117,8 @@ fn pinned_copy_runs_without_a_browser_on_path_and_host_chromium_wins() {
         println!("--- mur install (again) ---\n{again_text}");
         assert!(again.status.success(), "the second mur install succeeds");
         assert!(
-            again_text.contains("chromium for linux-x86_64 (local/tool-browser): already in the store"),
+            again_text
+                .contains("chromium for linux-x86_64 (local/tool-browser): already in the store"),
             "the second mur install fetches nothing:\n{again_text}"
         );
         assert!(!again_text.contains("fetched "), "{again_text}");
@@ -1159,7 +1162,9 @@ fn pinned_copy_runs_without_a_browser_on_path_and_host_chromium_wins() {
         let line = report
             .lines()
             .map(str::trim)
-            .find(|l| l.starts_with("\u{2713}  local/tool-browser (chromium): pinned copy present; runs "))
+            .find(|l| {
+                l.starts_with("\u{2713}  local/tool-browser (chromium): pinned copy present; runs ")
+            })
             .unwrap_or_else(|| panic!("a present, running pinned copy in mur doctor:\n{report}"));
         assert!(line.ends_with(" (pinned)"), "the pinned copy runs: {line}");
         for code in ["W-RUN-011", "W-RUN-012"] {
@@ -1175,7 +1180,8 @@ fn pinned_copy_runs_without_a_browser_on_path_and_host_chromium_wins() {
     // Phase 4: the store entry removed, nothing runs and the call says how to get a copy.
     if let Some(pin) = &pin {
         assert!(
-            pin.entry.starts_with(staging.home.path().canonicalize().unwrap()),
+            pin.entry
+                .starts_with(staging.home.path().canonicalize().unwrap()),
             "the store entry lies in the scratch HOME: {}",
             pin.entry.display()
         );
@@ -1294,7 +1300,10 @@ fn without_download(manifest: &str) -> String {
         !out.contains("    download:\n") && !out.contains("sha256:"),
         "the copy pins no download"
     );
-    assert!(out.contains("  chromium-browser:\n"), "the copy keeps programs:");
+    assert!(
+        out.contains("  chromium-browser:\n"),
+        "the copy keeps programs:"
+    );
     out
 }
 
@@ -1339,13 +1348,7 @@ fn https_page_kills_chrome_when_the_nss_needs_are_withheld() {
     let opened = result_of(&results, "call_1");
     println!("call_1: {opened}");
     print_browser_logs(&workdir);
-    let inside = &opened[opened.find(FENCE_OPEN).expect("fenced") + FENCE_OPEN.len()..];
-    let line = inside
-        .split("</untrusted-content>")
-        .next()
-        .unwrap_or("")
-        .trim();
-    let line = line.lines().last().unwrap_or("");
+    let line = fenced(opened).lines().last().unwrap_or("");
     assert!(
         line.starts_with("tool-browser: chromium exited with 133 during Page.navigate:"),
         "Chrome goes during the navigation to the https page: {line}"

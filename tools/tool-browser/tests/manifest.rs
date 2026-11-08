@@ -1,8 +1,9 @@
 //! The tool's published interface: `murmur.yaml` declares a WASM tool with its component, the
 //! twelve actions, only scalar top-level properties, what Chrome needs from the host under
 //! `programs:`, and the chrome-headless-shell pinned for `chromium` on each platform; and the
-//! README's working manifest grants only the name, the hosts and the resources. Read by line scan from `CARGO_MANIFEST_DIR`, and `programs:` parsed with
-//! `serde_norway` as `mur` parses it, so the anchor and its aliases are resolved.
+//! README's working manifest grants only the name, the hosts and the resources. Read by line scan
+//! from `CARGO_MANIFEST_DIR`, and `programs:` parsed with `serde_norway` as `mur` parses it, so
+//! the anchor and its aliases are resolved.
 
 use std::path::PathBuf;
 
@@ -378,7 +379,9 @@ fn pins_chrome_headless_shell_for_chromium_per_platform() {
         assert_eq!(keys, ["needs"], "{name} has no download");
         assert_eq!(programs[*name]["needs"], programs["chromium"]["needs"]);
     }
-    let chromium = programs["chromium"].as_mapping().expect("programs.chromium");
+    let chromium = programs["chromium"]
+        .as_mapping()
+        .expect("programs.chromium");
     let keys: Vec<&str> = chromium.keys().map(str_of).collect();
     assert_eq!(keys, ["needs", "download"]);
     assert_eq!(
@@ -386,7 +389,9 @@ fn pins_chrome_headless_shell_for_chromium_per_platform() {
         Some(CHROME_NEEDS.len())
     );
 
-    let download = chromium["download"].as_mapping().expect("download is a map");
+    let download = chromium["download"]
+        .as_mapping()
+        .expect("download is a map");
     let platforms: Vec<&str> = download.keys().map(str_of).collect();
     assert_eq!(
         platforms,
