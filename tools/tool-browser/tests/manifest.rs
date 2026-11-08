@@ -1,8 +1,9 @@
 //! The tool's published interface: `murmur.yaml` declares a WASM tool with its component, the
-//! twelve actions, only scalar top-level properties, and what Chrome needs from the host under
-//! `programs:`; and the README's working manifest grants only the name, the hosts and the
-//! resources. Read by line scan from `CARGO_MANIFEST_DIR`, and `programs:` parsed with
-//! `serde_norway` as `mur` parses it, so the anchor and its aliases are resolved.
+//! twelve actions, only scalar top-level properties, what Chrome needs from the host under
+//! `programs:`, and the chrome-headless-shell pinned for `chromium` on each platform; and the
+//! README's working manifest grants only the name, the hosts and the resources. Read by line scan
+//! from `CARGO_MANIFEST_DIR`, and `programs:` parsed with `serde_norway` as `mur` parses it, so
+//! the anchor and its aliases are resolved.
 
 use std::path::PathBuf;
 
@@ -31,7 +32,7 @@ fn declares_a_wasm_tool_with_its_component() {
     let m = manifest();
     for line in [
         "name: tool-browser",
-        "version: 0.4.0",
+        "version: 0.5.0",
         "runtime: tool",
         "implementation: wasm",
     ] {
@@ -282,7 +283,12 @@ fn declares_what_chrome_needs_for_every_browser_name() {
         let name = str_of(name);
         let program = program.as_mapping().expect("a program is a map");
         let keys: Vec<&str> = program.keys().map(str_of).collect();
-        assert_eq!(keys, ["needs"], "{name} holds only needs: no download:");
+        let want_keys: &[&str] = if name == "chromium" {
+            &["needs", "download"]
+        } else {
+            &["needs"]
+        };
+        assert_eq!(keys, want_keys, "{name}'s keys");
         let needs = program["needs"].as_sequence().expect("needs is a list");
         let got: Vec<(String, String, Option<String>, Option<String>)> = needs
             .iter()
@@ -339,4 +345,112 @@ fn declares_what_chrome_needs_for_every_browser_name() {
             "nothing under /proc: {s}"
         );
     }
+}
+
+/// murmur's platform names for the pinned downloads, beside Chrome for Testing's.
+const PINNED_PLATFORMS: [(&str, &str); 3] = [
+    ("linux-x86_64", "linux64"),
+    ("linux-aarch64", "linux-arm64"),
+    ("darwin-aarch64", "mac-arm64"),
+];
+
+const CFT_BUCKET: &str = "https://storage.googleapis.com/chrome-for-testing-public/";
+
+/// A Chrome for Testing build: four dot-separated integers.
+fn is_build(text: &str) -> bool {
+    let parts: Vec<&str> = text.split('.').collect();
+    parts.len() == 4
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+#[test]
+fn pins_chrome_headless_shell_for_chromium_per_platform() {
+    let doc: Value = serde_norway::from_str(&manifest()).expect("murmur.yaml parses");
+    let programs = &doc["programs"];
+    for name in &BROWSER_NAMES[1..] {
+        let keys: Vec<&str> = programs[*name]
+            .as_mapping()
+            .unwrap_or_else(|| panic!("programs.{name} is a map"))
+            .keys()
+            .map(str_of)
+            .collect();
+        assert_eq!(keys, ["needs"], "{name} has no download");
+        assert_eq!(programs[*name]["needs"], programs["chromium"]["needs"]);
+    }
+    let chromium = programs["chromium"]
+        .as_mapping()
+        .expect("programs.chromium");
+    let keys: Vec<&str> = chromium.keys().map(str_of).collect();
+    assert_eq!(keys, ["needs", "download"]);
+    assert_eq!(
+        chromium["needs"].as_sequence().map(Vec::len),
+        Some(CHROME_NEEDS.len())
+    );
+
+    let download = chromium["download"]
+        .as_mapping()
+        .expect("download is a map");
+    let platforms: Vec<&str> = download.keys().map(str_of).collect();
+    assert_eq!(
+        platforms,
+        PINNED_PLATFORMS.map(|(platform, _)| platform),
+        "the pinned platforms"
+    );
+
+    let mut builds = Vec::new();
+    let mut hashes = Vec::new();
+    for (platform, cft) in PINNED_PLATFORMS {
+        let entry = download[platform]
+            .as_mapping()
+            .unwrap_or_else(|| panic!("{platform} is a map"));
+        let keys: Vec<&str> = entry.keys().map(str_of).collect();
+        assert_eq!(keys, ["url", "sha256", "run"], "{platform}'s keys");
+
+        let url = str_of(&entry["url"]);
+        let rest = url
+            .strip_prefix(CFT_BUCKET)
+            .unwrap_or_else(|| panic!("{platform}: {url} is not in the Chrome for Testing bucket"));
+        let (build, file) = rest
+            .split_once('/')
+            .unwrap_or_else(|| panic!("{platform}: {url}"));
+        assert!(is_build(build), "{platform}: build {build} in {url}");
+        assert_eq!(
+            file,
+            format!("{cft}/chrome-headless-shell-{cft}.zip"),
+            "{platform}: {url}"
+        );
+        builds.push(build.to_string());
+
+        let sha256 = str_of(&entry["sha256"]);
+        assert!(
+            sha256.len() == 64
+                && sha256
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "{platform}: sha256 {sha256} is 64 lowercase hex digits"
+        );
+        hashes.push(sha256.to_string());
+
+        assert_eq!(
+            str_of(&entry["run"]),
+            format!("chrome-headless-shell-{cft}/chrome-headless-shell"),
+            "{platform}'s run"
+        );
+    }
+    builds.dedup();
+    assert_eq!(builds.len(), 1, "one build for every platform: {builds:?}");
+    hashes.sort();
+    hashes.dedup();
+    assert_eq!(hashes.len(), 3, "three different zips");
+
+    let readme =
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md"))
+            .unwrap();
+    assert!(
+        readme.contains(&builds[0]),
+        "README.md names the pinned build {}",
+        builds[0]
+    );
 }

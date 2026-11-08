@@ -54,12 +54,21 @@ pub fn granted_names(runtime_dir: &Path) -> Vec<&'static str> {
         .collect()
 }
 
+/// The answer when every granted name failed to start because it was not found. tool-browser
+/// pins a download only for `chromium`, so a grant that includes it points at `mur install`, and
+/// one without it points at granting `chromium`.
 pub fn not_installed_line(granted: &[&str]) -> String {
-    format!(
-        "tool-browser: capabilities.shell.allow grants {}, but no {} is on PATH; install Chrome or Chromium on this host first (mur deploy run does not upload host programs)",
-        crate::util::join_words(granted, "and"),
-        crate::util::join_words(granted, "or"),
-    )
+    let names = crate::util::join_words(granted, "and");
+    let missing = crate::util::join_words(granted, "or");
+    if granted.contains(&"chromium") {
+        format!(
+            "tool-browser: capabilities.shell.allow grants {names}, but no {missing} is on PATH and no pinned copy is in place; run mur install in the capsule's project to fetch the chrome-headless-shell tool-browser pins for chromium, or install Chrome or Chromium on this host; mur doctor names what is missing"
+        )
+    } else {
+        format!(
+            "tool-browser: capabilities.shell.allow grants {names}, but no {missing} is on PATH; grant chromium, for which tool-browser pins a chrome-headless-shell that mur install fetches, or install Chrome or Chromium on this host"
+        )
+    }
 }
 
 pub use murmur_process_host::is_not_found;
@@ -102,9 +111,21 @@ mod tests {
     fn missing_program_line_names_every_grant() {
         assert_eq!(
             not_installed_line(&["chromium"]),
-            "tool-browser: capabilities.shell.allow grants chromium, but no chromium is on PATH; install Chrome or Chromium on this host first (mur deploy run does not upload host programs)"
+            "tool-browser: capabilities.shell.allow grants chromium, but no chromium is on PATH and no pinned copy is in place; run mur install in the capsule's project to fetch the chrome-headless-shell tool-browser pins for chromium, or install Chrome or Chromium on this host; mur doctor names what is missing"
         );
-        assert!(not_installed_line(&["chromium", "chrome"])
-            .contains("grants chromium and chrome, but no chromium or chrome is on PATH"));
+        assert_eq!(
+            not_installed_line(&["google-chrome"]),
+            "tool-browser: capabilities.shell.allow grants google-chrome, but no google-chrome is on PATH; grant chromium, for which tool-browser pins a chrome-headless-shell that mur install fetches, or install Chrome or Chromium on this host"
+        );
+        let both = not_installed_line(&["chromium", "chrome"]);
+        assert!(
+            both.starts_with("tool-browser: capabilities.shell.allow grants chromium and chrome, but no chromium or chrome is on PATH and no pinned copy is in place; run mur install"),
+            "{both}"
+        );
+        let others = not_installed_line(&["google-chrome", "chrome"]);
+        assert!(
+            others.contains("grants google-chrome and chrome, but no google-chrome or chrome is on PATH; grant chromium,"),
+            "{others}"
+        );
     }
 }

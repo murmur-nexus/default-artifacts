@@ -4,27 +4,43 @@ Drives a headless Chrome or Chromium from a capsule, one action per tool call: o
 as text, click, type, press keys, choose options, wait, go back, read the console and failed
 requests, and save screenshots.
 
-The browser is a Chrome or Chromium on the host the capsule runs on. The first browser call starts
-it as a session process through `murmur:process`, later calls reuse it, and it runs until `close`
-or the session's end, when murmur kills it with its process group. Nothing runs at capsule launch.
+The browser is a Chrome or Chromium on the host the capsule runs on: the host's own `chromium`, or
+the `chrome-headless-shell` tool-browser pins for `chromium`, which `mur install` fetches. The
+first browser call starts it as a session process through `murmur:process`, later calls reuse it,
+and it runs until `close` or the session's end, when murmur kills it with its process group.
+Nothing runs at capsule launch.
 
 ```bash
-mur install -g murmur/tool-browser@0.4.0
+mur install -g murmur/tool-browser@0.5.0
 ```
+
+`mur install` also fetches the pinned `chrome-headless-shell` for `chromium`, about 128 MB, once
+per host, and checks its SHA-256:
+
+```text
+  fetched chromium for linux-x86_64 (murmur/tool-browser): 128 MB, sha256 verified
+```
+
+A later `mur install` on the same host prints
+`chromium for linux-x86_64 (murmur/tool-browser): already in the store` and fetches nothing.
 
 The tool is a WASM component that imports `murmur:process`. It needs a `mur` whose `mur version`
 reports WIT level 4 or higher: murmur v0.10.0 is the first release that serves level 4.
 An older `mur` installs the zip, then refuses the capsule at launch:
 
 ```text
-error[E-WIT-LEVEL-001]: artifact 'local/tool-browser@0.4.0' does not fit WIT level 3, the level this mur serves: it imports murmur:process/process@0.1.0, and level 3 has no version of murmur:process
+error[E-WIT-LEVEL-001]: artifact 'local/tool-browser@0.5.0' does not fit WIT level 3, the level this mur serves: it imports murmur:process/process@0.1.0, and level 3 has no version of murmur:process
 ```
 
-What Chrome needs from the host is declared in the tool's own `programs:` block (see
-[What the capsule must grant](#what-the-capsule-must-grant)). A `mur` reads it from murmur
-`38988719` (#399) on, and no murmur release holds that yet. An older `mur` ignores the block, so
-the browser's folder is not granted and Chrome dies at start with `Invalid file descriptor to ICU
-data received`.
+What Chrome needs from the host, and the pinned download, are declared in the tool's own
+`programs:` block (see [What the capsule must grant](#what-the-capsule-must-grant)). murmur
+`b0d4c42e` (#406) is the first `mur` that reads `programs.chromium.download`, and no murmur
+release holds it yet. Older `mur`s:
+
+| `mur` | What it does with this manifest |
+|---|---|
+| v0.10.0 and earlier | Ignores `programs:`: nothing is fetched, the browser's folder is not granted, and Chrome dies at start with `Invalid file descriptor to ICU data received` |
+| A dev `mur` from murmur `38988719` up to the commit before `b0d4c42e` | Refuses the manifest with `E-RUN-062` at launch (`E-BLD-008` at build), naming `programs.chromium.download`: `is not a key of a program; a program holds needs` |
 
 ## Actions
 
@@ -153,29 +169,48 @@ browser: chromium 145.0.7632.6, local, headless; Chrome sandbox off (Chrome coul
 
 Grant one of `chromium`, `chromium-browser`, `google-chrome` or `chrome` in
 `capabilities.shell.allow`. The tool reads which ones are granted from the manifests murmur stages
-in the session's runtime directory. It tries them in that order and starts the first one that
-resolves on the `PATH` `mur run` starts with. A program is always the bare granted name: to run a
-browser that is not on `PATH`, such as a macOS app bundle, put a link with the granted name on
-`PATH`.
+in the session's runtime directory. It tries them in that order, `chromium` first, and starts the
+first one that runs. A program is always the bare granted name: to run a browser that is not on
+`PATH`, such as a macOS app bundle, put a link with the granted name on `PATH`.
 
 | The capsule… | The call answers |
 |---|---|
 | Grants none of the four | `tool-browser needs a browser: add one of chromium, chromium-browser, google-chrome or chrome to capabilities.shell.allow` |
-| Grants a name that is not on `PATH` | `tool-browser: capabilities.shell.allow grants chromium, but no chromium is on PATH; install Chrome or Chromium on this host first (mur deploy run does not upload host programs)` |
+| Grants `chromium`, and neither the host nor the store has a copy | `tool-browser: capabilities.shell.allow grants chromium, but no chromium is on PATH and no pinned copy is in place; run mur install in the capsule's project to fetch the chrome-headless-shell tool-browser pins for chromium, or install Chrome or Chromium on this host; mur doctor names what is missing` |
+| Grants only other names, none on `PATH` | `tool-browser: capabilities.shell.allow grants google-chrome, but no google-chrome is on PATH; grant chromium, for which tool-browser pins a chrome-headless-shell that mur install fetches, or install Chrome or Chromium on this host` |
 | Declares `capabilities.filesystem.scope` on the tool's entry | `tool-browser cannot see which programs capabilities.shell.allow grants, because its entry declares capabilities.filesystem.scope; tool-browser runs only from an entry without one`. Such an entry gets no runtime directory |
 | Refuses the start by a rule, such as an `on-shell` hook | `tool-browser: murmur refused to start chromium: <rule>: <reason>` |
 
 The tool never uses your own Chrome profile: each browser gets an empty profile in the work folder.
 
+### Which copy runs
+
+Only `chromium` has a pinned download. For a capsule that grants it:
+
+| When | The `chromium` that runs | `mur doctor` and `--explain-scope` say |
+|---|---|---|
+| A `chromium` is on the host's `PATH` | The host's | `runs <path> (host)`, `host <path>` |
+| Otherwise, the capsule pins tool-browser with `mur install` and this platform is pinned (see [Pinned build](#pinned-build)) | The store's copy, `~/.murmur/programs/<sha256>/` | `runs <path> (pinned)`, `pinned <path> (sha256 …, from <url>)` |
+| Otherwise | None: the call answers the not-on-`PATH` line above | `warning[W-RUN-012]: <artifact> pins chromium for <platform>, and the store holds no copy; run mur install` |
+
+murmur grants the store's copy and its declared needs, though the store lies under the home
+folder. A tool installed by a pull at run time gets no download and no grant.
+
+`chromium` is tried before `chromium-browser`, `google-chrome` and `chrome`. So a capsule that
+grants `chromium` and another name, on a host whose only browser is the other one, starts the
+pinned headless shell. A capsule that wants the host's own Chrome grants only that name.
+
 ### Which browser runs on which tier
 
-Measured on Ubuntu 24.04.5, Linux 7.0.0-28-generic, x86_64. `chrome-headless-shell` 145.0.7632.6
-(Playwright's build 1208) with `mur` 0.11.0-dev at murmur `b0d4c42e`, opening a work-folder page and
-`https://example.com/` on both tiers; the full browsers with `mur` 0.10.0-dev at murmur `6750b5f9`.
+Measured on Ubuntu 24.04.5, Linux 7.0.0-28-generic, x86_64. The pinned `chrome-headless-shell`
+157.0.8103.38 and Playwright's `chrome-headless-shell` 145.0.7632.6 (build 1208) with `mur`
+0.11.0-dev at murmur `b0d4c42e`, opening a work-folder page and `https://example.com/` on both
+tiers; the full browsers with `mur` 0.10.0-dev at murmur `6750b5f9`.
 
 | Browser | `scoped` and `sealed` | Outside a capsule |
 |---|---|---|
-| `chrome-headless-shell` (Chrome for Testing 145) | Runs, with what tool-browser declares | Runs |
+| The pinned `chrome-headless-shell` 157.0.8103.38, from the store | Runs, with what tool-browser declares | Not measured |
+| `chrome-headless-shell` (Chrome for Testing 145) on `PATH` as `chromium` | Runs, with what tool-browser declares | Runs |
 | Google Chrome 156, `/opt/google/chrome/chrome` or its `google-chrome` wrapper | Does not start | Runs; `cargo test -p tool-browser` uses it |
 | Playwright's full Chromium 1208 | Does not start | Runs |
 | Ubuntu's snap `chromium-browser`, Debian's `chromium` wrapper | Not measured: neither is installed on the measuring host. Both are full Chromium, so they meet the refusal below | Not measured |
@@ -199,7 +234,7 @@ instead`. `chrome-headless-shell` has no ProcessSingleton, so it is the browser 
 ```yaml
 artifacts:
   - name: murmur/tool-browser
-    version: 0.4.0
+    version: 0.5.0
     runtime: tool
 capabilities:
   containment: sealed  # or scoped
@@ -213,6 +248,15 @@ capabilities:
     cgroup_memory_bytes: 4294967296
 ```
 
+In the capsule's project, on a host with no browser:
+
+```bash
+mur install
+```
+
+It installs tool-browser and fetches the pinned `chrome-headless-shell` for `chromium`, and the
+capsule runs that copy.
+
 The capsule names no host path. tool-browser's `murmur.yaml` declares, under `programs:`, what
 Chrome needs from the host, by name, and the same list for each of `chromium`, `chromium-browser`,
 `google-chrome` and `chrome`. murmur grants it, read-only, when both hold:
@@ -222,7 +266,8 @@ Chrome needs from the host, by name, and the same list for each of `chromium`, `
 
 `mur run --explain-scope` lists what it granted under `declared needs:`, one line per need, such as
 `local/tool-browser (chromium): file libsoftokn3.chk beside libsoftokn3.so -> /usr/lib/x86_64-linux-gnu/libsoftokn3.chk`.
-`mur doctor` names a need this host lacks, with the Ubuntu package that provides it.
+`mur doctor` names a need this host lacks, with the Ubuntu package that provides it. For the
+pinned copy, the needs resolve against the copy, so `program_folder .` is its folder in the store.
 
 | What tool-browser declares | Without it |
 |---|---|
@@ -243,10 +288,62 @@ tool-browser declares.
 
 ### Preparing a host
 
-The browser must live **outside the home folder**: murmur grants no declared need that resolves
-beneath the `HOME` of the `mur` that runs the capsule. `npx @puppeteer/browsers` and Playwright install under
-`~/.cache` by default, so install `chrome-headless-shell` elsewhere, link it as `chromium` **inside
-its own folder**, and put that folder first on `PATH`:
+`mur install` in the capsule's project fetches the browser. The pinned zip does not carry the
+system libraries Chrome links, NSS's modules or the fonts, so on Ubuntu 24.04 a host needs these
+packages:
+
+```bash
+sudo apt-get install -y unzip fontconfig fonts-liberation fonts-noto-core libnss3 libnspr4 libatk1.0-0t64 libatk-bridge2.0-0t64 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2t64 libatspi2.0-0t64
+```
+
+`mur doctor` names any that is missing.
+
+### Pinned build
+
+`programs.chromium.download` pins Chrome for Testing's `chrome-headless-shell`, one build for every
+platform:
+
+| Platform | Chrome for Testing build | Measured |
+|---|---|---|
+| `linux-x86_64` | 157.0.8103.38 (`linux64`) | Yes, on `scoped` and `sealed` |
+| `linux-aarch64` | 157.0.8103.38 (`linux-arm64`) | No: pinned and checked, not run under containment |
+| `darwin-aarch64` | 157.0.8103.38 (`mac-arm64`) | No: pinned and checked, not run under containment |
+| Any other | None | No download: a host program named `chromium` runs |
+
+The copy comes from Google's Chrome for Testing bucket, `storage.googleapis.com/chrome-for-testing-public`,
+under Google's terms; the zip's `ABOUT` points at Chrome's Terms of Service. Neither tool-browser
+nor mur keeps a copy. `mur install` stores it in `~/.murmur/programs/<sha256>/`, where every project
+on the host shares it, and only a person removes it. `mur doctor` re-verifies it.
+
+### Keeping the pinned build current
+
+1. Read Stable's `chrome-headless-shell` URLs from
+   `https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json`,
+   under `channels.Stable.downloads["chrome-headless-shell"]`.
+2. For each of `linux64`, `linux-arm64` and `mac-arm64`, in a new, empty folder:
+
+   ```bash
+   curl -fsSLO https://storage.googleapis.com/chrome-for-testing-public/<build>/<cft>/chrome-headless-shell-<cft>.zip
+   sha256sum chrome-headless-shell-<cft>.zip
+   zipinfo chrome-headless-shell-<cft>.zip | grep -c '^l'   # symlinks: must print 0
+   ```
+
+3. In one edit of `murmur.yaml`, replace the build in all three `url`s and the three `sha256`s.
+4. Bump tool-browser's minor version.
+5. Run `cargo test -p tool-browser --test manifest`. It checks that every entry uses one build and
+   that this README names it, so update the build in [Pinned build](#pinned-build) and in
+   [Which browser runs on which tier](#which-browser-runs-on-which-tier).
+6. Run the `mur_run_browser` test (see BUILD.md).
+
+### Your own browser instead
+
+A `chromium` on the host's `PATH` runs instead of the pinned copy. A full Chromium named `chromium`
+takes precedence too, and it does not start on `scoped` or `sealed` (see the ProcessSingleton
+refusal above). To run a `chrome-headless-shell` of your own, keep it **outside the home folder**:
+murmur grants no declared need of a host program that resolves beneath the `HOME` of the `mur`
+that runs the capsule. `npx @puppeteer/browsers` and Playwright install under `~/.cache` by
+default, so install `chrome-headless-shell` elsewhere, link it as `chromium` **inside its own
+folder**, and put that folder first on `PATH`:
 
 ```bash
 sudo npx @puppeteer/browsers install chrome-headless-shell@stable --path /opt/chrome-headless-shell
@@ -263,12 +360,6 @@ because its folder is not granted:
 
 ```text
 warning[W-RUN-011]: local/tool-browser declares program_folder . for chromium, and it is not granted: resolved to /home/you/.cache/ms-playwright/chromium_headless_shell-1208/chrome-headless-shell-linux64, beneath the home folder /home/you, which no need reaches
-```
-
-The packages a host needs, for a person preparing one by hand on Ubuntu 24.04:
-
-```bash
-sudo apt-get install -y unzip fontconfig fonts-liberation fonts-noto-core libnss3 libnspr4 libatk1.0-0t64 libatk-bridge2.0-0t64 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2t64 libatspi2.0-0t64
 ```
 
 ### The `google-chrome` wrapper on `scoped`
@@ -335,9 +426,10 @@ example 274877906944`.
 
 ## A laptop and a VM
 
-The tool runs the browser on the host the capsule runs on. `mur deploy run` uploads no host
-programs, so on a VM Chrome or Chromium must be installed there first. A VM without it answers the
-first browser call with the not-on-`PATH` line above, which names the missing program.
+The tool runs the browser on the host the capsule runs on. `mur install` fetches the pinned copy on
+each host, and `mur deploy run` uploads no host programs, so on a VM run `mur install` there, or
+install a browser there. A VM with neither answers the first browser call with the not-on-`PATH`
+line above, which says how to get a copy.
 
 ## Files in the work folder
 
@@ -381,6 +473,18 @@ A start has 30 s to bring Chrome up, through the sandbox retry, and record it in
 | The starting call runs out of the 30 s | `tool-browser: chromium did not finish starting within 30 s, so it was stopped; see .tool-browser/<id>/browser.log` |
 | A waiting call finds a running browser that no `state.json` records for 35 s, because the call starting it died | `tool-browser: the running browser (<handle>) has no state.json under .tool-browser/, so it was stopped; the next call starts a new one` |
 | Chrome exits while starting, and other calls are waiting on that start | Each waiting call makes its own attempt about 1 s after the last one failed, and answers its own `tool-browser: chromium exited with <code> while starting: …` if that fails too |
+
+## Changes in 0.5.0
+
+- `murmur.yaml` pins Chrome for Testing's `chrome-headless-shell` 157.0.8103.38 as the download of
+  `chromium` for `linux-x86_64`, `linux-aarch64` and `darwin-aarch64`. `mur install` fetches it
+  once per host, and a capsule granting `chromium` runs it when no `chromium` is on `PATH`. It
+  needs a `mur` at murmur `b0d4c42e` or later; a dev `mur` from `38988719` before that refuses the
+  manifest with `E-RUN-062`.
+- A capsule granting `chromium` and another name, on a host whose only browser is the other one,
+  now starts the pinned headless shell. Grant only the other name to keep the host's browser.
+- When no copy can run, the call says to run `mur install` in the capsule's project, or, for a
+  capsule that grants only other names, that granting `chromium` gets the pinned copy.
 
 ## Changes in 0.4.0
 
