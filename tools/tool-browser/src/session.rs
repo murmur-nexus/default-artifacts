@@ -975,23 +975,9 @@ mod tests {
         hang: Option<Rc<Cell<u64>>>,
     }
 
-    /// A clock the test and a [`HangingConn`] share; it moves only when slept on or read from.
-    struct SharedClock(Rc<Cell<u64>>);
-
-    impl Clock for SharedClock {
-        fn now_ms(&self) -> u64 {
-            self.0.get()
-        }
-        fn sleep_ms(&self, ms: u64) {
-            self.0.set(self.0.get() + ms);
-        }
-        fn unix_secs(&self) -> u64 {
-            crate::util::unix_now()
-        }
-    }
-
     /// A DevTools port that completes the WebSocket upgrade for the key sixteen zero bytes
-    /// make, then never answers; every read waits out its timeout on the shared clock.
+    /// make, then never answers; every read waits out its timeout on the [`FakeClock`] whose
+    /// `now` it shares.
     struct HangingConn {
         clock: Rc<Cell<u64>>,
         upgraded: bool,
@@ -1000,15 +986,7 @@ mod tests {
     impl Conn for HangingConn {
         fn read(&mut self, _max: u32, timeout_ms: u32) -> Result<Vec<u8>, ProcError> {
             if !std::mem::replace(&mut self.upgraded, true) {
-                use base64::Engine as _;
-                use sha1::Digest as _;
-                let mut sha = sha1::Sha1::new();
-                sha.update(b"AAAAAAAAAAAAAAAAAAAAAA==258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
-                let accept = base64::engine::general_purpose::STANDARD.encode(sha.finalize());
-                return Ok(format!(
-                    "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
-                )
-                .into_bytes());
+                return Ok(crate::ws::tests::upgrade_response());
             }
             self.clock.set(self.clock.get() + u64::from(timeout_ms));
             Err(ProcError::TimedOut)
@@ -1345,17 +1323,17 @@ mod tests {
     #[test]
     fn a_start_that_outruns_its_limit_stops_its_browser() {
         let (_d, work, runtime) = folders(&["chromium"]);
-        let clock = Rc::new(Cell::new(0));
+        let clock = FakeClock::default();
         let mut procs = FakeProcs {
             starts: VecDeque::from([Ok(())]),
             stderr: b"DevTools listening on ws://127.0.0.1:9222/devtools/browser/x\n".to_vec(),
             running: true,
-            hang: Some(clock.clone()),
+            hang: Some(clock.now.clone()),
             ..FakeProcs::default()
         };
         let r = run_on(
             &mut procs,
-            &SharedClock(clock.clone()),
+            &clock,
             &work,
             &runtime,
             r#"{"action":"snapshot"}"#,
@@ -1369,9 +1347,9 @@ mod tests {
         );
         assert_eq!(procs.stopped, ["prc_01"]);
         assert!(
-            (launch::START_LIMIT_MS..launch::START_LIMIT_MS + 2_000).contains(&clock.get()),
+            (launch::START_LIMIT_MS..launch::START_LIMIT_MS + 2_000).contains(&clock.now_ms()),
             "the start ends at its own limit, not the call's: {} ms",
-            clock.get()
+            clock.now_ms()
         );
         assert!(!work
             .join(".tool-browser/0000000000000000/state.json")

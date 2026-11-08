@@ -363,6 +363,14 @@ turn's calls at once; they find the browser through `murmur:process`, wait for t
 then run one at a time in no set order, with the starting call's action first. A model that needs
 an order sends each call after the last one answers.
 
+A start has 30 s to bring Chrome up, through the sandbox retry, and record it in `state.json`:
+
+| When | The call answers |
+|---|---|
+| The starting call runs out of the 30 s | `tool-browser: chromium did not finish starting within 30 s, so it was stopped; see .tool-browser/<id>/browser.log` |
+| A waiting call finds a running browser that no `state.json` records for 35 s, because the call starting it died | `tool-browser: the running browser (<handle>) has no state.json under .tool-browser/, so it was stopped; the next call starts a new one` |
+| Chrome exits while starting, and other calls are waiting on that start | Each waiting call makes its own attempt about 1 s after the last one failed, and answers its own `tool-browser: chromium exited with <code> while starting: …` if that fails too |
+
 ## Breaking in 0.2.0
 
 - The tool is a WASM component, one zip for every platform. It needs a `mur` reporting WIT level 4

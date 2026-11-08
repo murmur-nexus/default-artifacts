@@ -355,13 +355,17 @@ pub(crate) mod tests {
         f
     }
 
-    /// A client that has completed its upgrade on `conn`, with `extra` already received.
-    pub(crate) fn upgraded(conn: &FakeConn, extra: &[u8]) -> WebSocket<'static> {
+    /// The server's answer to the upgrade of a client whose key came from sixteen zero bytes.
+    pub(crate) fn upgrade_response() -> Vec<u8> {
         // The key from sixteen zero bytes is AAAAAAAAAAAAAAAAAAAAAA==.
         let accept = accept_key("AAAAAAAAAAAAAAAAAAAAAA==");
-        let mut response =
-            format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\n\r\n")
-                .into_bytes();
+        format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\n\r\n")
+            .into_bytes()
+    }
+
+    /// A client that has completed its upgrade on `conn`, with `extra` already received.
+    pub(crate) fn upgraded(conn: &FakeConn, extra: &[u8]) -> WebSocket<'static> {
+        let mut response = upgrade_response();
         response.extend_from_slice(extra);
         conn.reads.lock().unwrap().push_back(Some(response));
         WebSocket::handshake(

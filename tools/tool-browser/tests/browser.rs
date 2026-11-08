@@ -611,7 +611,15 @@ fn close_during_a_start_waits_for_it() {
         });
         (open.join().unwrap(), close.join().unwrap())
     });
+    // The open ran its action on the browser the close then stopped: with two starts in all,
+    // no browser came up for it after the close.
     assert_eq!(opened["status"], "passed", "{opened}");
+    assert!(
+        data(&opened)
+            .lines()
+            .any(|l| l.starts_with("page: Fixture Page — ")),
+        "{opened}"
+    );
     assert_eq!(
         (closed["status"].as_str(), data(&closed)),
         (Some("passed"), "browser closed"),
@@ -837,7 +845,7 @@ fn sandbox_failure_restarts_without_the_sandbox() {
     env.script_on_path(
         "chromium",
         &format!(
-            "#!/bin/sh\nif [ ! -e '{m}' ]; then\n  : > '{m}'\n  echo '[1:1:1105/120000.000000:FATAL:content/browser/zygote_host/zygote_host_impl_linux.cc:132] No usable sandbox! If you want to live dangerously and need an immediate workaround, you can try using --no-sandbox.' >&2\n  exit 133\nfi\nexec '{b}' \"$@\"\n",
+            "#!/bin/sh\nif [ ! -e '{m}' ]; then\n  : > '{m}'\n  echo '{NO_SANDBOX_FATAL}' >&2\n  exit 133\nfi\nexec '{b}' \"$@\"\n",
             m = marker.display(),
             b = common::test_browser().display()
         ),
