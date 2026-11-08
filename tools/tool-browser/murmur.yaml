@@ -1,5 +1,5 @@
 name: tool-browser
-version: 0.3.0
+version: 0.4.0
 runtime: tool
 implementation: wasm
 description: |
@@ -59,11 +59,74 @@ input_schema:
   required:
     - action
 
+programs:
+  # What Chrome needs from the host, by name, never by host path: mur grants it read-only to the
+  # granted name when the capsule pins tool-browser with `mur install` (an operator lock origin).
+  # packages: names the Ubuntu 24.04 package mur doctor suggests when a need is missing. The
+  # linked libraries from libnss3.so on are in the browser's own DT_NEEDED closure, which mur
+  # grants anyway; they are listed so that mur doctor names the package when one is missing.
+  chromium:
+    needs: &chrome-needs
+      - program_folder: .
+      - library: libsoftokn3.so
+        packages: { ubuntu: libnss3 }
+      - file: libsoftokn3.chk
+        beside: libsoftokn3.so
+      - library: libfreebl3.so
+        packages: { ubuntu: libnss3 }
+      - file: libfreebl3.chk
+        beside: libfreebl3.so
+      - library: libfreeblpriv3.so
+        packages: { ubuntu: libnss3 }
+      - file: libfreeblpriv3.chk
+        beside: libfreeblpriv3.so
+      - library: libnssdbm3.so
+        packages: { ubuntu: libnss3 }
+      - file: libnssdbm3.chk
+        beside: libnssdbm3.so
+      - library: libnssckbi.so
+        packages: { ubuntu: libnss3 }
+      - library: libnss3.so
+        packages: { ubuntu: libnss3 }
+      - library: libnssutil3.so
+        packages: { ubuntu: libnss3 }
+      - library: libnspr4.so
+        packages: { ubuntu: libnspr4 }
+      - library: libatk-1.0.so.0
+        packages: { ubuntu: libatk1.0-0t64 }
+      - library: libatk-bridge-2.0.so.0
+        packages: { ubuntu: libatk-bridge2.0-0t64 }
+      - library: libatspi.so.0
+        packages: { ubuntu: libatspi2.0-0t64 }
+      - library: libXcomposite.so.1
+        packages: { ubuntu: libxcomposite1 }
+      - library: libXdamage.so.1
+        packages: { ubuntu: libxdamage1 }
+      - library: libXfixes.so.3
+        packages: { ubuntu: libxfixes3 }
+      - library: libXrandr.so.2
+        packages: { ubuntu: libxrandr2 }
+      - library: libgbm.so.1
+        packages: { ubuntu: libgbm1 }
+      - library: libasound.so.2
+        packages: { ubuntu: libasound2t64 }
+      - system: fonts
+        packages: { ubuntu: fonts-liberation }
+      - etc: fonts/fonts.conf
+        packages: { ubuntu: fontconfig }
+  chromium-browser:
+    needs: *chrome-needs
+  google-chrome:
+    needs: *chrome-needs
+  chrome:
+    needs: *chrome-needs
+
 capabilities:
   # Documentary: the runtime does not read this block. The capsule must grant any ONE of these
   # in its own capabilities.shell.allow, because murmur:process refuses a program it does not
   # list and the tool finds its grant through the manifest murmur stages for each shell.allow
-  # entry. The README lists the capabilities.resources values Chrome needs.
+  # entry. programs: above carries what Chrome needs from the host for each name; the README
+  # lists the capabilities.resources values Chrome needs.
   shell:
     allow:
       - chromium

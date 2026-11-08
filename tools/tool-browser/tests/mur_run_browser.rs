@@ -1,30 +1,41 @@
 //! `tool-browser` under a real `mur run`: the grant, Chrome started as a session process inside
 //! the capsule's containment on the `scoped` and `sealed` tiers, the fence murmur puts around
-//! every result, the screenshot reaching the model, and nothing left running after the session.
+//! every result, the screenshot reaching the model, an `https` page, and nothing left running
+//! after the session.
+//!
+//! The capsule grants `chromium` and names no host path: what Chrome needs from the host comes
+//! from the `programs:` block of tool-browser's own `murmur.yaml`, which murmur grants because the
+//! capsule pins the tool with `mur install` (an `operator` lock origin) and grants the name. The
+//! session's `session_start.effective_grants.declared_needs` must show it. A second staging packs
+//! a copy of the tool whose `programs:` withholds NSS's modules, and its first `https` page kills
+//! Chrome.
 //!
 //! The test drives the real `mur` binary as a subprocess with `HOME` pointed at a scratch
 //! directory, against a loopback fake Chat Completions provider that scripts the model's tool
 //! calls and records every request body. `driver-openai` and `tool-browser` (both
 //! wasm32-wasip2) are built out of this workspace and packed by `scripts/package-artifact.sh`
 //! on every run. `mur` comes from `MUR_BIN` and must report WIT level 4 or higher, the first
-//! with `murmur:process`; a run without one fails rather than skipping.
+//! with `murmur:process`, and must read `programs:` (murmur `38988719` or later); a run without
+//! one fails rather than skipping.
 //!
 //! The browser is `TOOL_BROWSER_TEST_CHROME`, which must be `chrome-headless-shell`: full Chrome
 //! and Chromium cannot start on the scoped and sealed tiers. The test links it as `chromium` in
 //! its own directory (the sealed tier's composed root binds only the resolved binary's
-//! directory) and puts that directory first on `PATH`.
+//! directory) and puts that directory first on `PATH`. It must lie outside the scratch `HOME`
+//! the test gives `mur`, because murmur grants no declared need beneath the home folder.
 //!
-//! The page is a file in the work folder rather than a loopback server: Chrome runs in the
-//! session's network namespace, whose loopback is not the host's.
+//! The fixture page is a file in the work folder rather than a loopback server: Chrome runs in
+//! the session's network namespace, whose loopback is not the host's. The `https` page is
+//! `https://example.com/`; when the test process cannot reach it, the `https` steps are skipped
+//! with one line saying why.
 //!
 //! The granted capsules take their capabilities from the README's working manifest, copied as is
-//! but for the browser's directory and the tier, so the run proves that manifest. Where the host
-//! reaches `example.com:443`, each also opens `https://example.com/`, and one more capsule on
-//! `scoped` withholds the NSS files to show the line a model gets; elsewhere both print a skip
-//! line.
+//! but for the tier, so the run proves that manifest. On `scoped`, the NSS-withheld copy answers
+//! its `https` page with the line a model gets: Chrome's exit during `Page.navigate` and the NSS
+//! hint.
 //!
 //! `#[ignore]`d because the default `cargo test --workspace` has no `mur` to launch.
-//! `MUR_BIN=<level-4 mur> TOOL_BROWSER_TEST_CHROME=<chrome-headless-shell> cargo test -p
+//! `MUR_BIN=<mur at murmur 38988719 or later> TOOL_BROWSER_TEST_CHROME=<chrome-headless-shell> cargo test -p
 //! tool-browser --test mur_run_browser -- --ignored --nocapture` runs it.
 
 #![cfg(target_os = "linux")]
@@ -38,7 +49,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Output},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
     thread,
     time::Duration,
 };
@@ -50,6 +61,31 @@ use tempfile::TempDir;
 const RESOURCES: &str = "  resources:\n    memory_bytes: 274877906944\n    cgroup_pids_max: 1024\n    cgroup_memory_bytes: 4294967296\n";
 
 const NO_GRANT_LINE: &str = "tool-browser needs a browser: add one of chromium, chromium-browser, google-chrome or chrome to capabilities.shell.allow";
+
+/// The `https` page every `https` step opens, and the host `network.allow` grants.
+const HTTPS_PAGE: &str = "https://example.com/";
+
+/// The `programs:` needs the NSS-withheld copy drops: NSS's modules and their `.chk` files.
+const NSS_NEEDS: [&str; 11] = [
+    "library: libsoftokn3.so",
+    "file: libsoftokn3.chk",
+    "library: libfreebl3.so",
+    "file: libfreebl3.chk",
+    "library: libfreeblpriv3.so",
+    "file: libfreeblpriv3.chk",
+    "library: libnssdbm3.so",
+    "file: libnssdbm3.chk",
+    "library: libnssckbi.so",
+    "library: libnss3.so",
+    "library: libnssutil3.so",
+];
+
+/// Both tests start Chrome and check that no browser is left afterwards, which is a host-wide
+/// look, so they take turns.
+fn one_at_a_time() -> MutexGuard<'static, ()> {
+    static TURN: Mutex<()> = Mutex::new(());
+    TURN.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 // ── the runtime under test ───────────────────────────────────────────────────
 
@@ -122,8 +158,9 @@ fn path_with_mur() -> String {
     )
 }
 
-/// Build the wasm artifact at `crate_dir` and pack it; returns its version and zip.
-fn pack(crate_dir: &str, out_dir: &Path) -> (String, PathBuf) {
+/// Build the wasm artifact whose `murmur.yaml` is in `crate_dir` (relative to the workspace, or
+/// absolute) and pack it; returns its version and zip.
+fn pack(crate_dir: &Path, out_dir: &Path) -> (String, PathBuf) {
     let crate_path = workspace_root().join(crate_dir);
     let manifest = fs::read_to_string(crate_path.join("murmur.yaml")).unwrap();
     let name = manifest_field(&manifest, "name");
@@ -285,10 +322,12 @@ impl Staging {
     }
 }
 
-fn stage() -> Staging {
+/// A scratch `HOME` and project with `driver-openai` and the tool in `tool_dir` installed with
+/// `mur install`, so the tool's lock origin is `operator`.
+fn stage(tool_dir: &Path) -> Staging {
     let artifacts = tempfile::tempdir().unwrap();
-    let (driver_version, driver_zip) = pack("drivers/driver-openai", artifacts.path());
-    let (tool_version, tool_zip) = pack("tools/tool-browser", artifacts.path());
+    let (driver_version, driver_zip) = pack(Path::new("drivers/driver-openai"), artifacts.path());
+    let (tool_version, tool_zip) = pack(tool_dir, artifacts.path());
     let browser_dir = browser_dir();
     let path = format!(
         "{}:{}",
@@ -330,12 +369,17 @@ fn combined(output: &Output) -> String {
 
 // ── the fake provider ────────────────────────────────────────────────────────
 
-fn scripted_calls() -> Vec<Value> {
-    vec![
+/// open → console → screenshot, then the `https` page when `https` is set.
+fn scripted_calls(https: bool) -> Vec<Value> {
+    let mut calls = vec![
         json!({"action": "open", "url": "page.html"}),
         json!({"action": "console"}),
         json!({"action": "screenshot"}),
-    ]
+    ];
+    if https {
+        calls.push(json!({"action": "open", "url": HTTPS_PAGE}));
+    }
+    calls
 }
 
 fn chat_chunk(delta: Value, finish_reason: Option<&str>) -> String {
@@ -479,48 +523,39 @@ fn result_of<'a>(results: &'a [(String, String)], id: &str) -> &'a str {
 
 const FENCE_OPEN: &str = "<untrusted-content source=tool:tool-browser>";
 
-/// The browser directory the README's working manifest names as its example.
-const README_BROWSER_DIR: &str =
-    "/home/you/.cache/ms-playwright/chromium_headless_shell-1208/chrome-headless-shell-linux64";
 const README_HEADING: &str = "### A working manifest on `scoped` and `sealed`";
-const HTTPS_URL: &str = "https://example.com/";
 const HTTPS_PAGE_LINE: &str = "page: Example Domain — https://example.com/";
 
 /// The README's working manifest for `tier`: the lines under its `capabilities:`, with only the
-/// browser's directory and the `containment:` value replaced.
-fn granted_capabilities(staging: &Staging, tier: &str) -> String {
+/// `containment:` value replaced. It grants `chromium`, the `https` host and the resources, and
+/// names no host path: tool-browser's `programs:` carries the rest.
+fn granted_capabilities(tier: &str) -> String {
     let yaml = common::readme_yaml(README_HEADING);
-    let block: Vec<&str> = yaml.lines().collect();
-    assert_eq!(
-        block.first(),
-        Some(&"capabilities:"),
-        "the README's working manifest starts with capabilities:"
+    let block: Vec<&str> = yaml
+        .lines()
+        .skip_while(|l| *l != "capabilities:")
+        .skip(1)
+        .take_while(|l| l.is_empty() || l.starts_with(' '))
+        .collect();
+    assert!(
+        !block.is_empty(),
+        "the README's working manifest has a capabilities: block: {yaml}"
     );
-    let (mut containment, mut dir) = (0, 0);
-    let caps: String = block[1..]
+    let mut containment = 0;
+    let caps: String = block
         .iter()
         .map(|l| {
             if l.trim_start().starts_with("containment:") {
                 containment += 1;
                 format!("  containment: {tier}\n")
-            } else if l.contains(README_BROWSER_DIR) {
-                dir += 1;
-                format!(
-                    "{}\n",
-                    l.replace(
-                        README_BROWSER_DIR,
-                        &staging.browser_dir.display().to_string()
-                    )
-                )
             } else {
                 format!("{l}\n")
             }
         })
         .collect();
     assert_eq!(
-        (containment, dir),
-        (1, 1),
-        "the README's manifest has one containment: line and names {README_BROWSER_DIR}"
+        containment, 1,
+        "the README's manifest has one containment: line"
     );
     caps
 }
@@ -530,6 +565,52 @@ fn browser_events<'t>(trace: &'t [Value], event: &str) -> Vec<&'t Value> {
     trace
         .iter()
         .filter(|l| l["event_type"] == event && l["name"] == "browser")
+        .collect()
+}
+
+/// Every `browser.log` in the work folder, joined.
+fn browser_logs(workdir: &Path) -> String {
+    fs::read_dir(workdir.join(".tool-browser"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| fs::read_to_string(e.path().join("browser.log")).ok())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The `effective_grants.declared_needs` entry of `local/tool-browser` for `chromium` in the
+/// session's `session_start` line.
+fn declared_needs_entry(trace: &[Value]) -> Value {
+    let start = trace
+        .iter()
+        .find(|l| l["event_type"] == "session_start")
+        .expect("a session_start line");
+    let needs = start["effective_grants"]["declared_needs"]
+        .as_array()
+        .unwrap_or_else(|| panic!("session_start.effective_grants.declared_needs: {start}"));
+    needs
+        .iter()
+        .find(|e| e["artifact"] == "local/tool-browser" && e["program"] == "chromium")
+        .cloned()
+        .unwrap_or_else(|| {
+            panic!("no declared_needs entry for local/tool-browser (chromium): {needs:?}")
+        })
+}
+
+/// The paths of the granted need labelled `need` in a `declared_needs` entry.
+fn granted_paths(entry: &Value, need: &str) -> Vec<String> {
+    entry["granted"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|g| g["need"] == need)
+        .unwrap_or_else(|| panic!("no granted `{need}` in {entry}"))["paths"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
         .collect()
 }
 
@@ -567,19 +648,13 @@ fn print_browser_logs(workdir: &Path) {
 }
 
 /// One granted session on `tier`: open → console → screenshot, all inside the fence, the image
-/// in the next request, the browser a session process murmur kills at the session's end.
+/// in the next request, then the `https` page when `https` is set; Chrome's declared needs in
+/// `session_start`, its GPU process up without `/proc` named, and the browser a session process
+/// murmur kills at the session's end.
 fn granted_session(staging: &Staging, tier: &str, https: bool) {
     let name = format!("granted-{tier}");
-    let mut calls = scripted_calls();
-    if https {
-        calls.push(json!({"action": "open", "url": HTTPS_URL}));
-    }
-    let provider = Provider::start(calls);
-    staging.write_manifest(
-        &name,
-        &provider.endpoint,
-        &granted_capabilities(staging, tier),
-    );
+    let provider = Provider::start(scripted_calls(https));
+    staging.write_manifest(&name, &provider.endpoint, &granted_capabilities(tier));
     let workdir = staging.workdir(&name);
     fs::create_dir_all(&workdir).unwrap();
     fs::write(workdir.join("page.html"), common::FIXTURE_PAGE).unwrap();
@@ -597,6 +672,22 @@ fn granted_session(staging: &Staging, tier: &str, https: bool) {
     for line in &achieved {
         println!("{line}");
     }
+    let declared: Vec<&str> = scope_text
+        .lines()
+        .filter(|l| l.contains("local/tool-browser (chromium):"))
+        .collect();
+    println!("--- {tier}: mur run --explain-scope (declared needs) ---");
+    for line in &declared {
+        println!("{line}");
+    }
+    assert!(
+        declared.iter().any(|l| l.contains("program_folder . -> ")),
+        "--explain-scope lists tool-browser's declared needs on {tier}:\n{scope_text}"
+    );
+    assert!(
+        !declared.iter().any(|l| l.contains("-> missing")),
+        "no declared need is missing on {tier}:\n{scope_text}"
+    );
 
     let output = staging.run(&name, &[]);
     let text = combined(&output);
@@ -639,15 +730,46 @@ fn granted_session(staging: &Staging, tier: &str, https: bool) {
         "the request after the screenshot carries the image"
     );
     if https {
-        let opened = result_of(&results, "call_4");
-        assert!(opened.contains(FENCE_OPEN), "open is fenced: {opened}");
+        let page = result_of(&results, "call_4");
         assert!(
-            opened.lines().any(|l| l == HTTPS_PAGE_LINE),
-            "the https page opens on {tier}: {opened}"
+            page.contains(FENCE_OPEN),
+            "the https page is fenced: {page}"
+        );
+        assert!(
+            page.lines().any(|l| l == HTTPS_PAGE_LINE),
+            "the https page opens on {tier}: {page}"
         );
     }
+    let logs = browser_logs(&workdir);
+    assert!(
+        !logs.contains("GPU process launch failed: error_code=1002"),
+        "the GPU process starts on {tier} without /proc named in the capsule"
+    );
 
     let trace = staging.trace(&workdir);
+    let entry = declared_needs_entry(&trace);
+    println!("--- {tier}: session_start.effective_grants.declared_needs (tool-browser, chromium) ---\n{entry}");
+    let folder = granted_paths(&entry, "program_folder .");
+    let want = staging.browser_dir.canonicalize().unwrap();
+    assert_eq!(
+        folder
+            .iter()
+            .map(|p| PathBuf::from(p.trim_end_matches(" (list_dir)")))
+            .collect::<Vec<_>>(),
+        vec![want],
+        "program_folder . is the browser's own folder on {tier}"
+    );
+    assert!(
+        granted_paths(&entry, "library libsoftokn3.so")
+            .iter()
+            .any(|p| p.contains("libsoftokn3.so")),
+        "libsoftokn3.so is granted on {tier}: {entry}"
+    );
+    assert_eq!(
+        entry["missing"],
+        json!([]),
+        "no declared need is missing on {tier}: {entry}"
+    );
     let starts = browser_events(&trace, "process_start");
     // Two when Chrome's own sandbox could not start and it ran again with --no-sandbox.
     assert!(
@@ -705,97 +827,23 @@ fn granted_session(staging: &Staging, tier: &str, https: bool) {
     );
 }
 
-/// The nine NSS files the README's manifest grants, each a module or its `.chk`.
-const NSS_MODULES: [&str; 5] = [
-    "libsoftokn3.",
-    "libfreebl3.",
-    "libfreeblpriv3.",
-    "libnssdbm3.",
-    "libnssckbi.so",
-];
-
-/// The README's manifest without its nine NSS lines, on `scoped`: the https page kills Chrome,
-/// and the call names Chrome's exit, the navigation and its FATAL line, with the NSS hint.
-fn nss_withheld_session(staging: &Staging) {
-    let name = "nss-withheld";
-    let provider = Provider::start(vec![json!({"action": "open", "url": HTTPS_URL})]);
-    let caps: String = granted_capabilities(staging, "scoped")
-        .lines()
-        .filter(|l| !(l.contains("path: ") && NSS_MODULES.iter().any(|m| l.contains(m))))
-        .map(|l| format!("{l}\n"))
-        .collect();
-    let granted = |file: &str| {
-        caps.lines()
-            .any(|l| l.contains("path: ") && l.contains(file))
-    };
-    assert!(
-        !granted("libsoftokn3") && granted("libsqlite3.so.0"),
-        "{caps}"
-    );
-    staging.write_manifest(name, &provider.endpoint, &caps);
-    let workdir = staging.workdir(name);
-    fs::create_dir_all(&workdir).unwrap();
-    let output = staging.run(name, &[]);
-    let text = combined(&output);
-    println!("--- NSS withheld run ---\n{text}");
-    let results = tool_results(&provider.last_request());
-    print_browser_logs(&workdir);
-    let died = result_of(&results, "call_1");
-    println!("call_1: {died}");
-    let inside = &died[died.find(FENCE_OPEN).expect("fenced") + FENCE_OPEN.len()..];
-    let line = inside
-        .split("</untrusted-content>")
-        .next()
-        .unwrap_or("")
-        .trim();
-    let line = line.lines().last().unwrap_or("");
-    assert!(
-        line.starts_with("tool-browser: chromium exited with 133 during Page.navigate:"),
-        "{line}"
-    );
-    assert!(
-        line.contains("FATAL:crypto/nss_util.cc") && line.contains("nss_error="),
-        "{line}"
-    );
-    assert!(line.ends_with(common::NSS_HINT), "{line}");
-
-    let trace = staging.trace(&workdir);
-    let starts = browser_events(&trace, "process_start");
-    let exits = browser_events(&trace, "process_exit");
-    for event in starts.iter().chain(&exits) {
-        println!("{event}");
-    }
-    let last = starts.last().expect("a process_start for browser");
-    let died = exits
-        .iter()
-        .find(|e| e["process_id"] == last["process_id"])
-        .unwrap_or_else(|| panic!("a process_exit for the browser that ran: {exits:?}"));
-    assert_eq!(
-        (died["exit_code"].as_i64(), died["reason"].as_str()),
-        (Some(133), Some("exited")),
-        "{died}"
-    );
-}
-
-/// A granted capsule, the README's manifest, runs the browser on `scoped` and on `sealed` and
-/// opens an https page where the host reaches one; without the NSS files that page kills Chrome
-/// with a line naming why; a capsule without the grant gets the one no-grant line, fenced.
+/// A capsule with the README's manifest, granting only `chromium`, runs the browser on `scoped`
+/// and on `sealed`, an `https` page included; a capsule without the grant gets the one no-grant
+/// line, fenced.
 #[test]
 #[ignore = "launches the real mur binary; run with --ignored"]
 fn browser_runs_on_scoped_and_sealed_and_ungranted_gets_one_line() {
-    let staging = stage();
+    let _turn = one_at_a_time();
     let https = match common::reachable("example.com") {
         Ok(()) => true,
         Err(why) => {
-            println!("skipped the https page and the NSS-withheld capsule: {why}");
+            println!("skipping the https step: {why}");
             false
         }
     };
+    let staging = stage(Path::new("tools/tool-browser"));
     for tier in ["scoped", "sealed"] {
         granted_session(&staging, tier, https);
-    }
-    if https {
-        nss_withheld_session(&staging);
     }
 
     // Without the grant: exactly the one line, fenced, and nothing in the work folder.
@@ -827,5 +875,105 @@ fn browser_runs_on_scoped_and_sealed_and_ungranted_gets_one_line() {
     assert!(
         !workdir.join(".tool-browser").exists(),
         "nothing is created without the grant"
+    );
+}
+
+/// tool-browser's `murmur.yaml` with the needs in [`NSS_NEEDS`] dropped from `programs:`.
+fn without_nss_needs(manifest: &str) -> String {
+    let mut out = String::new();
+    let mut dropping = false;
+    for line in manifest.lines() {
+        let item = line.trim_start().strip_prefix("- ");
+        if let Some(item) = item {
+            dropping = NSS_NEEDS.contains(&item);
+        } else if !line.starts_with("        ") {
+            dropping = false;
+        }
+        if !dropping {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    for need in NSS_NEEDS {
+        assert!(!out.contains(need), "the copy still declares `{need}`");
+    }
+    assert!(
+        out.contains("- library: libnspr4.so"),
+        "the copy keeps the needs after NSS's"
+    );
+    out
+}
+
+/// A copy of tool-browser whose `programs:` withholds NSS's modules, same name and version, in
+/// its own `HOME` and project: Chrome starts and renders a file, and the first `https` page kills
+/// it in NSS's start-up check.
+#[test]
+#[ignore = "launches the real mur binary; run with --ignored"]
+fn https_page_kills_chrome_when_the_nss_needs_are_withheld() {
+    let _turn = one_at_a_time();
+    if let Err(why) = common::reachable("example.com") {
+        println!("skipping the NSS-withheld https run: {why}");
+        return;
+    }
+    let copy = tempfile::tempdir().unwrap();
+    let tool_dir = copy.path().join("tool-browser");
+    fs::create_dir_all(&tool_dir).unwrap();
+    let manifest =
+        fs::read_to_string(workspace_root().join("tools/tool-browser/murmur.yaml")).unwrap();
+    fs::write(tool_dir.join("murmur.yaml"), without_nss_needs(&manifest)).unwrap();
+    let staging = stage(&tool_dir);
+
+    let name = "nss-withheld";
+    let provider = Provider::start(vec![json!({"action": "open", "url": HTTPS_PAGE})]);
+    staging.write_manifest(name, &provider.endpoint, &granted_capabilities("scoped"));
+    let workdir = staging.workdir(name);
+    fs::create_dir_all(&workdir).unwrap();
+
+    let output = staging.run(name, &[]);
+    let text = combined(&output);
+    println!("--- NSS withheld: run ---\n{text}");
+    let results = tool_results(&provider.last_request());
+    let opened = result_of(&results, "call_1");
+    println!("call_1: {opened}");
+    print_browser_logs(&workdir);
+    let inside = &opened[opened.find(FENCE_OPEN).expect("fenced") + FENCE_OPEN.len()..];
+    let line = inside
+        .split("</untrusted-content>")
+        .next()
+        .unwrap_or("")
+        .trim();
+    let line = line.lines().last().unwrap_or("");
+    assert!(
+        line.starts_with("tool-browser: chromium exited with 133 during Page.navigate:"),
+        "Chrome goes during the navigation to the https page: {line}"
+    );
+    assert!(
+        line.contains("FATAL:crypto/nss_util.cc") && line.contains("nss_error="),
+        "the line carries NSS's FATAL line: {line}"
+    );
+    assert!(
+        line.ends_with(common::NSS_HINT),
+        "the line ends with the NSS hint: {line}"
+    );
+
+    let trace = staging.trace(&workdir);
+    let entry = declared_needs_entry(&trace);
+    assert!(
+        !entry.to_string().contains("libsoftokn3"),
+        "the copy declares no NSS module: {entry}"
+    );
+    let starts = browser_events(&trace, "process_start");
+    let last = starts.last().expect("a process_start for browser");
+    let exit = browser_events(&trace, "process_exit")
+        .into_iter()
+        .find(|l| l["process_id"] == last["process_id"])
+        .unwrap_or_else(|| panic!("a process_exit for {last}"));
+    println!("process_exit: {exit}");
+    assert_eq!(exit["exit_code"], 133, "Chrome dies with SIGTRAP: {exit}");
+    assert_eq!(exit["reason"], "exited", "Chrome died on its own: {exit}");
+    let logs = browser_logs(&workdir);
+    assert!(
+        logs.contains("FATAL:crypto/nss_util.cc") && logs.contains("nss_error="),
+        "browser.log names NSS's failed start-up"
     );
 }
