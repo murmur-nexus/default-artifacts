@@ -243,8 +243,8 @@ tool-browser declares.
 
 ### Preparing a host
 
-The browser must live **outside the home folder**: murmur never grants a path beneath the `HOME`
-of the `mur` that runs the capsule. `npx @puppeteer/browsers` and Playwright install under
+The browser must live **outside the home folder**: murmur grants no declared need that resolves
+beneath the `HOME` of the `mur` that runs the capsule. `npx @puppeteer/browsers` and Playwright install under
 `~/.cache` by default, so install `chrome-headless-shell` elsewhere, link it as `chromium` **inside
 its own folder**, and put that folder first on `PATH`:
 
