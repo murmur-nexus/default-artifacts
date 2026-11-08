@@ -61,7 +61,7 @@ capabilities:
 artifacts:
   - name: murmur/driver-claude-code
     runtime: driver
-    version: "0.9.0"
+    version: "0.10.0"
 ```
 
 The harness starts from an **empty** environment and sees exactly the variables
@@ -156,6 +156,38 @@ for the mistake in the wrong place:
 So `ANTHROPIC_AUTH_TOKEN` is the one that can quietly move a run onto API billing; `W-SEC-024`
 is the only thing that says so. Declaring it together with `ANTHROPIC_BASE_URL` is also how to
 point a turn at a mock endpoint for testing, which is how this driver was exercised end to end.
+
+## Run it as a normal user, not root
+
+Run capsules on this driver as a normal user, not as root.
+
+Whenever a capsule has tools, the driver starts `claude` with
+`--permission-mode bypassPermissions`. The tool bridge already enforces the capsule's
+capabilities on every tool call, and an approval prompt would hang a headless turn.
+
+Every capsule has tools. murmur gives every agent capsule its own `session-status` tool, so
+even a capsule that lists no tool artifact gets the bridge and that permission mode. This
+applies from mur v0.10.0 on.
+
+`claude` refuses that mode under root or sudo. It exits `1` in under half a second, before the
+turn starts, and prints this (claude 2.1.319, observed 2026-11-07):
+
+```
+--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons
+```
+
+[`classify-exit`](#classify-exit) adds one line under that message, so murmur's `E-RUN-033`
+reads:
+
+```
+error[E-RUN-033]: the harness turn failed (harness-error): claude exited with code 1: --dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons
+run the capsule as a normal user, not root: claude refuses to bypass its permission prompts as root, which a capsule with tools needs
+```
+
+A capsule that lists no tool artifact is refused the same way. This was observed on 2026-11-08
+with claude 2.1.319, as uid 0 in a user namespace.
+
+The driver never sets `IS_SANDBOX`, the variable that switches Claude Code's root guard off.
 
 ## The argv this driver produces
 
@@ -541,6 +573,7 @@ ever answers `turn-failed`:
 | `interrupted` and no terminal event | `canceled`, `claude was interrupted before it reported a result` |
 | exit code `0` and no terminal event | `harness-error`, `claude exited without a result` |
 | anything else | `harness-error`, `claude exited with code <n>` / `claude was killed by signal <n>` / `claude exited without a status`, with a non-empty stderr tail appended after `": "` |
+| anything else, with a stderr tail containing `cannot be used with root/sudo privileges` | the same `harness-error` message, then a second line: `run the capsule as a normal user, not root: claude refuses to bypass its permission prompts as root, which a capsule with tools needs` |
 
 The interrupt is checked before the exit code is read at all, which is the rule the interface
 holds every driver to: `claude` exits `0` on a turn stopped by SIGINT, so the code cannot tell a
@@ -557,7 +590,20 @@ stderr and its exit code:
 | `11-subscription-rate-limit` | 2.1.314, a real subscription turn on `--model haiku` | subscription | no bridge, `prompt_suggestions: true` |
 | `12-bridge-image-result` | 2.1.316, against a mock endpoint and a mock bridge that answers with murmur's text item, then an MCP `image` item | API key | the bridge `claude_bridge`, no config |
 
-`tests/golden.rs` asserts the **complete** event list for every one. It also asserts, across
+The driver reports these `claude` versions as tested, each on this evidence:
+
+| claude | Evidence |
+|---|---|
+| 2.1.277 | run when the driver was built |
+| 2.1.278 | recordings `01` to `10` |
+| 2.1.314 | recording `11` |
+| 2.1.316 | recording `12`, and a live subscription turn |
+| 2.1.319 | a smoke test of capsules run as a normal user on 2026-11-07, and a re-recording of the image mock, not committed, whose line shapes match recording `12` and which parses with no `note` |
+
+A `claude` not in this list still runs: murmur prints `W-RUN-002` naming the version and the
+tested list, and refuses nothing.
+
+`tests/golden.rs` asserts the **complete** event list for every recording. It also asserts, across
 every recording:
 
 - no recording produces a `note`;

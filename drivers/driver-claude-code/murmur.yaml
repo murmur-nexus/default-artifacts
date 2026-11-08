@@ -1,5 +1,5 @@
 name: driver-claude-code
-version: 0.9.0
+version: 0.10.0
 runtime: driver
 description: |
   Process driver for Claude Code. It tells a `transport: process` capsule how to drive the
@@ -53,5 +53,8 @@ description: |
 
   An image in a tool result is reported in the feed as `[image: <media type>, <n> bytes]`, never
   as its bytes; whether the model saw it is up to `claude`.
+
+  Run it as a normal user: as root, `claude` refuses the permission mode the driver starts it
+  in, so every turn fails, and the error says so.
 requires_files:
   - driver_claude_code.wasm

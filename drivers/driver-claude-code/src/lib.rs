@@ -27,7 +27,15 @@ const VERSION_ARGS: &[&str] = &["--version"];
 /// The `claude` releases this driver release was tested against. An untested version is a
 /// warning at run time, never a refusal, so this list documents what was measured rather than
 /// gating anything.
-const TESTED_VERSIONS: &[&str] = &["2.1.277", "2.1.278", "2.1.314"];
+const TESTED_VERSIONS: &[&str] = &["2.1.277", "2.1.278", "2.1.314", "2.1.316", "2.1.319"];
+
+/// The words `claude` uses when it refuses to bypass its permission prompts as root or under
+/// sudo. Matched rather than the flag it names, which is not the one the driver passes.
+const ROOT_REFUSAL: &str = "cannot be used with root/sudo privileges";
+
+/// The line [`classify_exit`] adds under `claude`'s own message when that message is the root
+/// refusal, telling the operator what to change.
+const RUN_AS_NORMAL_USER: &str = "run the capsule as a normal user, not root: claude refuses to bypass its permission prompts as root, which a capsule with tools needs";
 
 /// The variables `claude` cannot run without, each of which the capsule must declare in
 /// `capabilities.env.allow` or be refused at load.
@@ -1526,14 +1534,14 @@ pub fn classify_exit(exit: ExitStatus) -> Event {
         (None, None) => format!("{BINARY} exited without a status"),
     };
     let tail = exit.stderr_tail.trim();
-    failed(
-        FailureKind::HarnessError,
-        if tail.is_empty() {
-            what
-        } else {
-            format!("{what}: {tail}")
-        },
-    )
+    let message = if tail.is_empty() {
+        what
+    } else if tail.contains(ROOT_REFUSAL) {
+        format!("{what}: {tail}\n{RUN_AS_NORMAL_USER}")
+    } else {
+        format!("{what}: {tail}")
+    };
+    failed(FailureKind::HarnessError, message)
 }
 
 /// A `turn-failed` event.
@@ -1830,7 +1838,9 @@ mod tests {
             vec![
                 "2.1.277".to_string(),
                 "2.1.278".to_string(),
-                "2.1.314".to_string()
+                "2.1.314".to_string(),
+                "2.1.316".to_string(),
+                "2.1.319".to_string()
             ]
         );
         assert_eq!(description.interrupt, InterruptMethod::StdinMessage);
@@ -2900,6 +2910,111 @@ mod tests {
                 ..exit()
             }),
             "claude exited without a status: weird"
+        );
+    }
+
+    /// What `claude` 2.1.319 prints to stderr when started as root with its prompts bypassed.
+    const ROOT_REFUSAL_LINE: &str =
+        "--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons";
+
+    #[test]
+    fn a_root_refusal_adds_the_line_that_says_to_run_as_a_normal_user() {
+        assert_eq!(
+            classified(ExitStatus {
+                code: Some(1),
+                stderr_tail: format!("{ROOT_REFUSAL_LINE}\n"),
+                ..exit()
+            }),
+            TurnFailure {
+                kind: FailureKind::HarnessError,
+                message: "claude exited with code 1: --dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons\nrun the capsule as a normal user, not root: claude refuses to bypass its permission prompts as root, which a capsule with tools needs".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_root_refusal_inside_a_longer_tail_keeps_the_whole_tail_and_adds_the_line_once() {
+        let tail = format!("starting up\n{ROOT_REFUSAL_LINE}\n{ROOT_REFUSAL_LINE}\nbye\n");
+        let message = classified(ExitStatus {
+            code: Some(1),
+            stderr_tail: tail.clone(),
+            ..exit()
+        })
+        .message;
+
+        assert_eq!(
+            message,
+            format!(
+                "claude exited with code 1: {}\n{RUN_AS_NORMAL_USER}",
+                tail.trim()
+            )
+        );
+        assert_eq!(message.matches(RUN_AS_NORMAL_USER).count(), 1);
+    }
+
+    #[test]
+    fn a_root_refusal_does_not_change_an_interrupted_run_or_a_clean_exit() {
+        let refused = ExitStatus {
+            stderr_tail: format!("{ROOT_REFUSAL_LINE}\n"),
+            ..exit()
+        };
+
+        assert_eq!(
+            classified(ExitStatus {
+                interrupted: true,
+                code: Some(1),
+                ..refused.clone()
+            }),
+            TurnFailure {
+                kind: FailureKind::Canceled,
+                message: "claude was interrupted before it reported a result".to_string(),
+            }
+        );
+        assert_eq!(
+            classified(refused),
+            TurnFailure {
+                kind: FailureKind::HarnessError,
+                message: "claude exited without a result".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_tail_without_the_root_refusal_gains_no_line() {
+        for tail in ["boom", "permission denied", "running as root"] {
+            assert_eq!(
+                classified(ExitStatus {
+                    code: Some(1),
+                    stderr_tail: tail.to_string(),
+                    ..exit()
+                }),
+                TurnFailure {
+                    kind: FailureKind::HarnessError,
+                    message: format!("claude exited with code 1: {tail}"),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_signal_or_no_status_exit_with_the_root_refusal_adds_the_line_too() {
+        let refused = ExitStatus {
+            code: None,
+            stderr_tail: format!("{ROOT_REFUSAL_LINE}\n"),
+            ..exit()
+        };
+
+        assert_eq!(
+            classified(ExitStatus {
+                signal: Some(9),
+                ..refused.clone()
+            })
+            .message,
+            format!("claude was killed by signal 9: {ROOT_REFUSAL_LINE}\n{RUN_AS_NORMAL_USER}")
+        );
+        assert_eq!(
+            classified(refused).message,
+            format!("claude exited without a status: {ROOT_REFUSAL_LINE}\n{RUN_AS_NORMAL_USER}")
         );
     }
 
