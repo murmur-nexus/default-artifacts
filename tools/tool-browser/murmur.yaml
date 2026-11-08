@@ -4,6 +4,7 @@ runtime: tool
 implementation: wasm
 description: |
   Drives a headless Chrome or Chromium, one action per call. The first call starts the browser; it stays until close or the session's end.
+  Calls run one at a time; two sent together run in no set order, so send the next after the last answers.
   open url (http, https, file, about:blank, or a work-folder path) returns the page as text: `page: <title> — <url>`, then an indented accessibility tree, one `- role "name" [states] [ref=eN]` per node. Pass a ref to act on that node.
   click/type/press/select/wait/back answer with what changed (`changed: +A -R lines`, then `+`/`-` lines) or the new page.
   snapshot (ref for one part), console and network (new errors and failed requests since the last look), screenshot (PNG; full_page or ref), close.

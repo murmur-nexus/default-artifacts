@@ -117,6 +117,20 @@ fn input_schema_lists_the_twelve_actions_and_scalar_properties() {
 }
 
 #[test]
+fn description_says_calls_run_one_at_a_time() {
+    let m = manifest();
+    let description: String = m
+        .lines()
+        .skip_while(|l| *l != "description: |")
+        .skip(1)
+        .take_while(|l| l.starts_with("  "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(description.contains("one at a time"), "{description}");
+    assert!(description.contains("no set order"), "{description}");
+}
+
+#[test]
 fn documents_the_browser_grant() {
     let m = manifest();
     let caps = block(&m, "capabilities").join("\n");

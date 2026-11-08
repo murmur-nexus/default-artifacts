@@ -439,6 +439,193 @@ fn concurrent_first_calls_start_one_browser() {
     assert!(profiles.contains(&u64::from(env.browser_pid().unwrap())));
 }
 
+/// The `FATAL` line a Chrome that cannot start its own sandbox prints before it exits 133.
+const NO_SANDBOX_FATAL: &str = "[1:1:1105/120000.000000:FATAL:content/browser/zygote_host/zygote_host_impl_linux.cc:132] No usable sandbox! If you want to live dangerously and need an immediate workaround, you can try using --no-sandbox.";
+
+/// Two `open`s sent together, one result each.
+fn two_opens(env: &Env, ports: [u16; 2]) -> Vec<Value> {
+    std::thread::scope(|s| {
+        let calls: Vec<_> = ports
+            .iter()
+            .map(|port| {
+                s.spawn(move || {
+                    env.call(json!({"action": "open", "url": format!("http://127.0.0.1:{port}/")}))
+                })
+            })
+            .collect();
+        calls.into_iter().map(|c| c.join().unwrap()).collect()
+    })
+}
+
+/// Every entry under `.tool-browser/`, with or without a `state.json`.
+fn state_entries(env: &Env) -> Vec<std::path::PathBuf> {
+    fs::read_dir(env.work.join(".tool-browser"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .collect()
+}
+
+/// How many Chrome browser processes run in `env`'s work folder: its main process, the one
+/// carrying the DevTools port argument and no `--type=` of a helper process.
+fn running_browsers(env: &Env) -> usize {
+    let work = env.work.canonicalize().unwrap();
+    murmur_process_test_host::pids_mentioning("--remote-debugging-port=")
+        .into_iter()
+        .filter(|pid| fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|cwd| cwd == work))
+        .filter(|pid| {
+            fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|c| !String::from_utf8_lossy(&c).contains("--type="))
+        })
+        .count()
+}
+
+/// What every round of two concurrent opens on one browser must show.
+fn assert_one_shared_browser(env: &Env, results: &[Value], titles: [&str; 2]) {
+    for (r, title) in results.iter().zip(titles) {
+        assert_eq!(r["status"], "passed", "{r}");
+        assert!(
+            data(r)
+                .lines()
+                .any(|l| l.starts_with(&format!("page: {title} — "))),
+            "{r}"
+        );
+        assert!(r["took_ms"].as_u64().unwrap() < 20_000, "{r}");
+        assert!(!data(r).contains("the previous browser exited"), "{r}");
+    }
+    let banners = results
+        .iter()
+        .filter(|r| data(r).starts_with(BANNER_PREFIX))
+        .count();
+    assert_eq!(banners, 1, "one browser, one banner: {results:?}");
+    let entries = state_entries(env);
+    assert_eq!(
+        entries.len(),
+        1,
+        "one folder under .tool-browser/: {entries:?}"
+    );
+    assert!(entries[0].join("state.json").is_file(), "{entries:?}");
+    assert!(
+        !entries[0].join("call.lock").exists(),
+        "the lock is released"
+    );
+    assert_eq!(running_browsers(env), 1, "one browser process runs");
+}
+
+/// Two `open`s sent together share one browser, and both answer.
+#[test]
+fn concurrent_opens_share_one_browser() {
+    let env = Env::new();
+    let _guard = Guard(&env);
+    let other = common::serve_page(
+        "<!doctype html><html><head><title>Other Page</title><link rel=\"icon\" href=\"data:,\"></head><body><p>other</p></body></html>",
+    );
+    let results = two_opens(&env, [common::fixture_server(), other]);
+    assert_one_shared_browser(&env, &results, ["Fixture Page", "Other Page"]);
+    assert_eq!(env.starts(), 1, "one browser process started");
+}
+
+/// Two `open`s sent together share one browser on a host where Chrome's own sandbox fails, so
+/// every start is a sandbox attempt that exits 133 and a `--no-sandbox` retry.
+#[test]
+fn concurrent_opens_share_one_browser_through_a_sandbox_retry() {
+    for round in 1..=3 {
+        let env = Env::new();
+        let _guard = Guard(&env);
+        env.script_on_path(
+            "chromium",
+            &format!(
+                "#!/bin/sh\ncase \" $* \" in\n  *' --no-sandbox '*) exec '{b}' \"$@\" ;;\nesac\nsleep 0.3\necho '{NO_SANDBOX_FATAL}' >&2\nexit 133\n",
+                b = common::test_browser().display()
+            ),
+        );
+        let port = common::fixture_server();
+        let results = two_opens(&env, [port, port]);
+        assert_one_shared_browser(&env, &results, ["Fixture Page", "Fixture Page"]);
+        let banner = results
+            .iter()
+            .map(data)
+            .find(|d| d.starts_with(BANNER_PREFIX))
+            .unwrap();
+        assert!(
+            banner
+                .lines()
+                .next()
+                .unwrap()
+                .contains("Chrome sandbox off"),
+            "round {round}: {banner}"
+        );
+        let pid = u64::from(env.browser_pid().unwrap());
+        assert!(
+            murmur_process_test_host::pids_mentioning(&format!("{}/profile", env.state_rel()))
+                .contains(&pid),
+            "round {round}: the running browser is the recorded one"
+        );
+    }
+}
+
+/// Two calls sent together both answer a start that fails, each with the exit line.
+#[test]
+fn concurrent_calls_both_answer_a_failed_start() {
+    let env = Env::new();
+    env.script_on_path(
+        "chromium",
+        "#!/bin/sh\necho '[0101/000000.000000:FATAL:x.cc:1] boom' >&2\nexit 1\n",
+    );
+    let results: Vec<_> = std::thread::scope(|s| {
+        let a = s.spawn(|| env.call(json!({"action": "snapshot"})));
+        let b = s.spawn(|| env.call(json!({"action": "snapshot"})));
+        vec![a.join().unwrap(), b.join().unwrap()]
+    });
+    for r in &results {
+        assert_eq!(r["status"], "error", "{r}");
+        assert!(
+            data(r).starts_with("tool-browser: chromium exited with 1 while starting:"),
+            "{r}"
+        );
+        assert!(r["took_ms"].as_u64().unwrap() < 10_000, "{r}");
+        assert!(!data(r).contains("another tool-browser call"), "{r}");
+        assert!(!data(r).contains("has no state.json"), "{r}");
+    }
+    assert!(env.state_dirs().is_empty(), "{:?}", env.state_dirs());
+}
+
+/// A `close` sent while another call is starting the browser waits for that start, then closes
+/// the browser it made.
+#[test]
+fn close_during_a_start_waits_for_it() {
+    let env = Env::new();
+    let _guard = Guard(&env);
+    let port = common::fixture_server();
+    let (opened, closed) = std::thread::scope(|s| {
+        let open = s.spawn(|| {
+            env.call(json!({"action": "open", "url": format!("http://127.0.0.1:{port}/")}))
+        });
+        let close = s.spawn(|| {
+            let until = std::time::Instant::now() + Duration::from_secs(20);
+            while env.session.starts_of("browser") < 1 && std::time::Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            env.call(json!({"action": "close"}))
+        });
+        (open.join().unwrap(), close.join().unwrap())
+    });
+    assert_eq!(opened["status"], "passed", "{opened}");
+    assert_eq!(
+        (closed["status"].as_str(), data(&closed)),
+        (Some("passed"), "browser closed"),
+        "{closed}"
+    );
+    assert_eq!(running_browsers(&env), 0, "no browser runs");
+    assert_eq!(env.info().unwrap()["closed"], true);
+    let s = env.call(json!({"action": "snapshot"}));
+    assert_eq!(s["status"], "passed", "{s}");
+    assert!(data(&s).starts_with(BANNER_PREFIX), "{s}");
+    assert!(!data(&s).contains("previous browser exited"), "{s}");
+    assert_eq!(env.starts(), 2);
+}
+
 /// Any `config:` key refuses the call, `endpoint` included, and starts nothing.
 #[test]
 fn config_endpoint_is_refused() {
