@@ -339,16 +339,16 @@ fn no_grant_gives_exactly_one_line_and_starts_nothing() {
     assert_eq!(env.starts(), 0, "no browser process");
 }
 
-/// Scenario 11: granted but not installed names the program and `mur deploy run`.
+/// Scenario 11: granted but not installed names the program and `mur install`.
 #[test]
-fn granted_but_missing_names_chromium_and_mur_deploy_run() {
+fn granted_but_missing_names_chromium_and_mur_install() {
     let env = Env::new().without_browser_on_path();
     let r = env.call(json!({"action": "snapshot"}));
     assert_eq!(r["status"], "error");
     let line = data(&r);
     assert_eq!(
         line,
-        "tool-browser: capabilities.shell.allow grants chromium, but no chromium is on PATH; install Chrome or Chromium on this host first (mur deploy run does not upload host programs)"
+        "tool-browser: capabilities.shell.allow grants chromium, but no chromium is on PATH and no pinned copy is in place; run mur install in the capsule's project to fetch the chrome-headless-shell tool-browser pins for chromium, or install Chrome or Chromium on this host; mur doctor names what is missing"
     );
     assert!(!env.work.join(".tool-browser").exists());
 }

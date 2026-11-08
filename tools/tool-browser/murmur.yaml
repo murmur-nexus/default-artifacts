@@ -1,5 +1,5 @@
 name: tool-browser
-version: 0.4.0
+version: 0.5.0
 runtime: tool
 implementation: wasm
 description: |
@@ -65,6 +65,9 @@ programs:
   # packages: names the Ubuntu 24.04 package mur doctor suggests when a need is missing. The
   # linked libraries from libnss3.so on are in the browser's own DT_NEEDED closure, which mur
   # grants anyway; they are listed so that mur doctor names the package when one is missing.
+  # chromium's download: pins Chrome for Testing's chrome-headless-shell per platform, fetched by
+  # `mur install` into ~/.murmur/programs/<sha256>/ and run only when no chromium is on PATH; its
+  # needs then resolve against that copy. README.md says how to move the build.
   chromium:
     needs: &chrome-needs
       - program_folder: .
@@ -114,6 +117,19 @@ programs:
         packages: { ubuntu: fonts-liberation }
       - etc: fonts/fonts.conf
         packages: { ubuntu: fontconfig }
+    download:
+      linux-x86_64:
+        url: https://storage.googleapis.com/chrome-for-testing-public/157.0.8103.38/linux64/chrome-headless-shell-linux64.zip
+        sha256: deafffa74660b34853a4119c361fd427ac8c9fcb62db51ddb8a797cd83a4ba2d
+        run: chrome-headless-shell-linux64/chrome-headless-shell
+      linux-aarch64:
+        url: https://storage.googleapis.com/chrome-for-testing-public/157.0.8103.38/linux-arm64/chrome-headless-shell-linux-arm64.zip
+        sha256: b9b910a57b2a15eb3e55000a2339f93a973934a413ebfc6e585a50ec6c42fd6c
+        run: chrome-headless-shell-linux-arm64/chrome-headless-shell
+      darwin-aarch64:
+        url: https://storage.googleapis.com/chrome-for-testing-public/157.0.8103.38/mac-arm64/chrome-headless-shell-mac-arm64.zip
+        sha256: e6a6b13551aa12f951d0891d79282606b13742837c8fa0505e1272bae116ce82
+        run: chrome-headless-shell-mac-arm64/chrome-headless-shell
   chromium-browser:
     needs: *chrome-needs
   google-chrome:
@@ -125,8 +141,10 @@ capabilities:
   # Documentary: the runtime does not read this block. The capsule must grant any ONE of these
   # in its own capabilities.shell.allow, because murmur:process refuses a program it does not
   # list and the tool finds its grant through the manifest murmur stages for each shell.allow
-  # entry. programs: above carries what Chrome needs from the host for each name; the README
-  # lists the capabilities.resources values Chrome needs.
+  # entry. programs: above carries what Chrome needs from the host for each name, and
+  # programs.chromium.download pins the chrome-headless-shell that `mur install` fetches; a
+  # chromium on the host's PATH runs instead of it. The README lists the capabilities.resources
+  # values Chrome needs.
   shell:
     allow:
       - chromium

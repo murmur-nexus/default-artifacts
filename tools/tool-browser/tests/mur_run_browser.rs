@@ -15,14 +15,29 @@
 //! calls and records every request body. `driver-openai` and `tool-browser` (both
 //! wasm32-wasip2) are built out of this workspace and packed by `scripts/package-artifact.sh`
 //! on every run. `mur` comes from `MUR_BIN` and must report WIT level 4 or higher, the first
-//! with `murmur:process`, and must read `programs:` (murmur `38988719` or later); a run without
-//! one fails rather than skipping.
+//! with `murmur:process`, and must read `programs.<program>.download` (murmur `b0d4c42e` or
+//! later); a run without one fails rather than skipping.
 //!
-//! The browser is `TOOL_BROWSER_TEST_CHROME`, which must be `chrome-headless-shell`: full Chrome
-//! and Chromium cannot start on the scoped and sealed tiers. The test links it as `chromium` in
-//! its own directory (the sealed tier's composed root binds only the resolved binary's
-//! directory) and puts that directory first on `PATH`. It must lie outside the scratch `HOME`
-//! the test gives `mur`, because murmur grants no declared need beneath the home folder.
+//! The main test runs one copy of `chromium` after another:
+//!
+//! | Phase | `PATH` | The copy that runs |
+//! |---|---|---|
+//! | pinned | the inherited `PATH` without any directory holding a `chromium` | the `chrome-headless-shell` `mur install` fetched for `programs.chromium.download.linux-x86_64` |
+//! | host | `TOOL_BROWSER_TEST_CHROME`, linked as `chromium`, first | that binary |
+//! | store removed | as for pinned, with the store entry deleted | none: the call answers the not-installed line |
+//!
+//! The pinned copy is about 128 MB from `storage.googleapis.com`, fetched once per run into
+//! `<scratch HOME>/.murmur/programs/<sha256>/`, where murmur grants it though it lies beneath the
+//! home folder. When `storage.googleapis.com:443` does not answer within 5 s, the test prints one
+//! line saying the pinned phases are skipped and why, accepts `mur install` failing with
+//! `E-REG-013`, and runs only the host phase and the ungranted session.
+//!
+//! The host browser is `TOOL_BROWSER_TEST_CHROME`, which must be `chrome-headless-shell`: full
+//! Chrome and Chromium cannot start on the scoped and sealed tiers. The test links it as
+//! `chromium` in its own directory (the sealed tier's composed root binds only the resolved
+//! binary's directory) and puts that directory first on `PATH`. It must lie outside the scratch
+//! `HOME` the test gives `mur`, because murmur grants no declared need of a host program beneath
+//! the home folder.
 //!
 //! The fixture page is a file in the work folder rather than a loopback server: Chrome runs in
 //! the session's network namespace, whose loopback is not the host's. The `https` page is
@@ -32,11 +47,11 @@
 //! The granted capsules take their capabilities from the README's working manifest, copied as is
 //! but for the tier, so the run proves that manifest. On `scoped`, the NSS-withheld copy answers
 //! its `https` page with the line a model gets: Chrome's exit during `Page.navigate` and the NSS
-//! hint.
+//! hint. That copy pins no download, so it runs the host browser and fetches nothing.
 //!
 //! `#[ignore]`d because the default `cargo test --workspace` has no `mur` to launch.
-//! `MUR_BIN=<mur at murmur 38988719 or later> TOOL_BROWSER_TEST_CHROME=<chrome-headless-shell> cargo test -p
-//! tool-browser --test mur_run_browser -- --ignored --nocapture` runs it.
+//! `MUR_BIN=<mur at murmur b0d4c42e or later> TOOL_BROWSER_TEST_CHROME=<chrome-headless-shell>
+//! cargo test -p tool-browser --test mur_run_browser -- --ignored --nocapture` runs it.
 
 #![cfg(target_os = "linux")]
 
@@ -61,6 +76,15 @@ use tempfile::TempDir;
 const RESOURCES: &str = "  resources:\n    memory_bytes: 274877906944\n    cgroup_pids_max: 1024\n    cgroup_memory_bytes: 4294967296\n";
 
 const NO_GRANT_LINE: &str = "tool-browser needs a browser: add one of chromium, chromium-browser, google-chrome or chrome to capabilities.shell.allow";
+
+/// The answer when `chromium` is granted and neither the host nor the program store has a copy.
+const NOT_INSTALLED_LINE: &str = "tool-browser: capabilities.shell.allow grants chromium, but no chromium is on PATH and no pinned copy is in place; run mur install in the capsule's project to fetch the chrome-headless-shell tool-browser pins for chromium, or install Chrome or Chromium on this host; mur doctor names what is missing";
+
+/// The host that serves the pinned `chrome-headless-shell`.
+const DOWNLOAD_HOST: &str = "storage.googleapis.com";
+
+/// Where the pinned zip unpacks the file `bin/chromium` links to, inside a store entry.
+const PINNED_RUN: &str = "files/chrome-headless-shell-linux64/chrome-headless-shell";
 
 /// The `https` page every `https` step opens, and the host `network.allow` grants.
 const HTTPS_PAGE: &str = "https://example.com/";
@@ -92,7 +116,8 @@ fn one_at_a_time() -> MutexGuard<'static, ()> {
 fn mur_binary() -> PathBuf {
     let path = PathBuf::from(std::env::var_os("MUR_BIN").unwrap_or_else(|| {
         panic!(
-            "set MUR_BIN to a mur whose `mur version` reports WIT level 4 or higher. This test \
+            "set MUR_BIN to a mur at murmur b0d4c42e or later, whose `mur version` reports WIT \
+             level 4 or higher. This test \
              launches the runtime as a subprocess, so a missing binary is a failure rather than a \
              skip."
         )
@@ -111,7 +136,8 @@ fn mur_binary() -> PathBuf {
         .unwrap_or(0);
     assert!(
         level >= 4,
-        "MUR_BIN must report WIT level 4 or higher (murmur:process); it reports:\n{text}"
+        "MUR_BIN must report WIT level 4 or higher (murmur:process), at murmur b0d4c42e or later \
+         (programs.<program>.download); it reports:\n{text}"
     );
     path
 }
@@ -253,11 +279,21 @@ impl Staging {
     }
 
     fn mur(&self) -> Command {
+        self.mur_on(&self.path)
+    }
+
+    /// `mur` with the scratch `HOME` and `path` as its `PATH`.
+    fn mur_on(&self, path: &str) -> Command {
         let mut command = Command::new(mur_binary());
+        command.env("HOME", self.home.path()).env("PATH", path);
         command
-            .env("HOME", self.home.path())
-            .env("PATH", &self.path);
-        command
+    }
+
+    /// `mur <args>` in the project, on `path`.
+    fn mur_in_project(&self, path: &str, args: &[&str]) -> Output {
+        let mut command = self.mur_on(path);
+        command.current_dir(self.project.path()).args(args);
+        command.output().expect("spawning `mur`")
     }
 
     /// A capsule manifest; `capabilities` is the YAML under `capabilities:`.
@@ -280,7 +316,11 @@ impl Staging {
     }
 
     fn run(&self, name: &str, extra: &[&str]) -> Output {
-        let mut command = self.mur();
+        self.run_on(&self.path, name, extra)
+    }
+
+    fn run_on(&self, path: &str, name: &str, extra: &[&str]) -> Output {
+        let mut command = self.mur_on(path);
         command.current_dir(self.project.path()).args([
             "run",
             "--manifest",
@@ -323,8 +363,9 @@ impl Staging {
 }
 
 /// A scratch `HOME` and project with `driver-openai` and the tool in `tool_dir` installed with
-/// `mur install`, so the tool's lock origin is `operator`.
-fn stage(tool_dir: &Path) -> Staging {
+/// `mur install`, so the tool's lock origin is `operator`. Returns the staging and the output of
+/// the tool's `mur install`, which the caller judges: it fetches the tool's pinned downloads.
+fn stage(tool_dir: &Path) -> (Staging, Output) {
     let artifacts = tempfile::tempdir().unwrap();
     let (driver_version, driver_zip) = pack(Path::new("drivers/driver-openai"), artifacts.path());
     let (tool_version, tool_zip) = pack(tool_dir, artifacts.path());
@@ -349,14 +390,16 @@ fn stage(tool_dir: &Path) -> Staging {
         let mut publish = staging.mur();
         publish.arg("publish").arg(zip);
         run_to_success(publish, &format!("publishing {what}"));
-        let mut install = staging.mur();
-        install
-            .current_dir(staging.project.path())
-            .arg("install")
-            .arg(zip);
-        run_to_success(install, &format!("installing {what}"));
     }
-    staging
+    let mut install = staging.mur();
+    install
+        .current_dir(staging.project.path())
+        .arg("install")
+        .arg(&driver_zip);
+    run_to_success(install, "installing driver-openai");
+    let tool_install =
+        staging.mur_in_project(&staging.path, &["install", tool_zip.to_str().unwrap()]);
+    (staging, tool_install)
 }
 
 fn combined(output: &Output) -> String {
@@ -647,19 +690,157 @@ fn print_browser_logs(workdir: &Path) {
     }
 }
 
-/// One granted session on `tier`: open → console → screenshot, all inside the fence, the image
-/// in the next request, then the `https` page when `https` is set; Chrome's declared needs in
-/// `session_start`, its GPU process up without `/proc` named, and the browser a session process
-/// murmur kills at the session's end.
-fn granted_session(staging: &Staging, tier: &str, https: bool) {
-    let name = format!("granted-{tier}");
+/// The `chromium` a granted session expects to run.
+enum Chromium<'a> {
+    /// The program store's copy of `programs.chromium.download.linux-x86_64`.
+    Pinned(&'a Pin),
+    /// `TOOL_BROWSER_TEST_CHROME`, linked as `chromium` first on `PATH`.
+    Host,
+}
+
+impl Chromium<'_> {
+    fn label(&self) -> &'static str {
+        match self {
+            Chromium::Pinned(_) => "pinned",
+            Chromium::Host => "host",
+        }
+    }
+}
+
+/// tool-browser's `programs.chromium.download.linux-x86_64`, and its store entry once installed.
+struct Pin {
+    url: String,
+    sha256: String,
+    /// The Chrome for Testing build in `url`.
+    build: String,
+    /// `<scratch HOME>/.murmur/programs/<sha256>`, canonical.
+    entry: PathBuf,
+}
+
+impl Pin {
+    /// The file `bin/chromium` links to.
+    fn run_file(&self) -> PathBuf {
+        self.entry.join(PINNED_RUN)
+    }
+}
+
+/// `programs.chromium.download.linux-x86_64`'s `url`, `sha256` and build, from tool-browser's
+/// `murmur.yaml`.
+fn pinned_download() -> (String, String, String) {
+    let manifest =
+        fs::read_to_string(workspace_root().join("tools/tool-browser/murmur.yaml")).unwrap();
+    let doc: serde_norway::Value = serde_norway::from_str(&manifest).unwrap();
+    let entry = &doc["programs"]["chromium"]["download"]["linux-x86_64"];
+    let url = entry["url"].as_str().expect("a linux-x86_64 url").to_string();
+    let sha256 = entry["sha256"]
+        .as_str()
+        .expect("a linux-x86_64 sha256")
+        .to_string();
+    let build = url
+        .strip_prefix("https://storage.googleapis.com/chrome-for-testing-public/")
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or_else(|| panic!("no Chrome for Testing build in {url}"))
+        .to_string();
+    (url, sha256, build)
+}
+
+/// The one store entry under `<home>/.murmur/programs/`: the directory named by 64 hex digits.
+fn store_entry(home: &Path) -> PathBuf {
+    let entries: Vec<PathBuf> = fs::read_dir(home.join(".murmur/programs"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_dir()
+                && p.file_name().is_some_and(|n| {
+                    let n = n.to_string_lossy();
+                    n.len() == 64 && n.bytes().all(|b| b.is_ascii_hexdigit())
+                })
+        })
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "one store entry under {}/.murmur/programs: {entries:?}",
+        home.display()
+    );
+    entries[0].canonicalize().unwrap()
+}
+
+/// The inherited `PATH` without any directory that holds an executable `chromium`.
+fn path_without_chromium() -> String {
+    let inherited = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+    let kept: Vec<&str> = inherited
+        .split(':')
+        .filter(|dir| !dir.is_empty() && !is_executable(&Path::new(dir).join("chromium")))
+        .collect();
+    let path = kept.join(":");
+    for dir in path.split(':') {
+        assert!(
+            !Path::new(dir).join("chromium").exists(),
+            "chromium resolves in {dir}, on the pinned phase's PATH"
+        );
+    }
+    path
+}
+
+/// The `--explain-scope` line under `pinned programs:` for `local/tool-browser (chromium)`,
+/// without its `- `.
+fn pinned_programs_line(scope_text: &str) -> String {
+    scope_text
+        .lines()
+        .map(|l| l.trim().trim_start_matches("- "))
+        .find(|l| {
+            ["pinned ", "host ", "missing "]
+                .iter()
+                .any(|source| l.starts_with(&format!("local/tool-browser (chromium): {source}")))
+        })
+        .unwrap_or_else(|| {
+            panic!("no pinned programs: line for local/tool-browser (chromium):\n{scope_text}")
+        })
+        .to_string()
+}
+
+/// The `effective_grants.pinned_programs` entry of `local/tool-browser` for `chromium` in the
+/// session's `session_start` line.
+fn pinned_programs_entry(trace: &[Value]) -> Value {
+    let start = trace
+        .iter()
+        .find(|l| l["event_type"] == "session_start")
+        .expect("a session_start line");
+    let pinned = start["effective_grants"]["pinned_programs"]
+        .as_array()
+        .unwrap_or_else(|| panic!("session_start.effective_grants.pinned_programs: {start}"));
+    pinned
+        .iter()
+        .find(|e| e["artifact"] == "local/tool-browser" && e["program"] == "chromium")
+        .cloned()
+        .unwrap_or_else(|| {
+            panic!("no pinned_programs entry for local/tool-browser (chromium): {pinned:?}")
+        })
+}
+
+/// `mur doctor` in the project, with `capabilities` in its `murmur.yaml`, on `path`.
+fn doctor(staging: &Staging, path: &str, capabilities: &str) -> String {
+    staging.write_manifest("murmur", "http://127.0.0.1:1/v1", capabilities);
+    combined(&staging.mur_in_project(path, &["doctor"]))
+}
+
+/// One granted session on `tier`, on `path`, with `copy` as the `chromium` that runs: open →
+/// console → screenshot, all inside the fence, the image in the next request, then the `https`
+/// page when `https` is set; which copy runs in `--explain-scope` and in `session_start`,
+/// Chrome's declared needs resolved against that copy, its GPU process up without `/proc` named,
+/// and the browser a session process murmur kills at the session's end.
+fn granted_session(staging: &Staging, tier: &str, https: bool, path: &str, copy: &Chromium) {
+    let name = format!("{}-{tier}", copy.label());
     let provider = Provider::start(scripted_calls(https));
     staging.write_manifest(&name, &provider.endpoint, &granted_capabilities(tier));
     let workdir = staging.workdir(&name);
     fs::create_dir_all(&workdir).unwrap();
     fs::write(workdir.join("page.html"), common::FIXTURE_PAGE).unwrap();
 
-    let scope = staging.run(&name, &["--explain-scope"]);
+    let scope = staging.run_on(path, &name, &["--explain-scope"]);
     let scope_text = combined(&scope);
     let achieved: Vec<&str> = scope_text
         .lines()
@@ -674,7 +855,7 @@ fn granted_session(staging: &Staging, tier: &str, https: bool) {
     }
     let declared: Vec<&str> = scope_text
         .lines()
-        .filter(|l| l.contains("local/tool-browser (chromium):"))
+        .filter(|l| l.contains("local/tool-browser (chromium):") && l.contains(" -> "))
         .collect();
     println!("--- {tier}: mur run --explain-scope (declared needs) ---");
     for line in &declared {
@@ -688,8 +869,45 @@ fn granted_session(staging: &Staging, tier: &str, https: bool) {
         !declared.iter().any(|l| l.contains("-> missing")),
         "no declared need is missing on {tier}:\n{scope_text}"
     );
+    let pinned_line = pinned_programs_line(&scope_text);
+    println!("--- {tier}: mur run --explain-scope (pinned programs) ---\n- {pinned_line}");
+    let want_folder = match copy {
+        Chromium::Pinned(pin) => {
+            assert_eq!(
+                pinned_line,
+                format!(
+                    "local/tool-browser (chromium): pinned {} (sha256 {}, from {})",
+                    pin.run_file().display(),
+                    pin.sha256,
+                    pin.url
+                ),
+                "the store's copy runs on {tier}"
+            );
+            let folder = pin.run_file().parent().unwrap().to_path_buf();
+            assert!(
+                declared.iter().any(|l| l
+                    .contains(&format!("program_folder . -> {}", folder.display()))),
+                "program_folder . resolves into the store on {tier}:\n{scope_text}"
+            );
+            folder
+        }
+        Chromium::Host => {
+            let host = pinned_line
+                .strip_prefix("local/tool-browser (chromium): host ")
+                .unwrap_or_else(|| panic!("the host's chromium runs on {tier}: {pinned_line}"));
+            let want = PathBuf::from(std::env::var_os("TOOL_BROWSER_TEST_CHROME").unwrap())
+                .canonicalize()
+                .unwrap();
+            assert_eq!(
+                Path::new(host).canonicalize().unwrap(),
+                want,
+                "the host copy is TOOL_BROWSER_TEST_CHROME on {tier}"
+            );
+            staging.browser_dir.canonicalize().unwrap()
+        }
+    };
 
-    let output = staging.run(&name, &[]);
+    let output = staging.run_on(path, &name, &[]);
     let text = combined(&output);
     println!("--- {tier}: granted run ---\n{text}");
     let results = tool_results(&provider.last_request());
@@ -712,6 +930,13 @@ fn granted_session(staging: &Staging, tier: &str, https: bool) {
             && opened.contains(", local, headless; Chrome sandbox "),
         "open carries the banner: {opened}"
     );
+    if let Chromium::Pinned(pin) = copy {
+        assert!(
+            opened.contains(&format!("browser: chromium {}, local, headless", pin.build)),
+            "the banner names the pinned build {}: {opened}",
+            pin.build
+        );
+    }
     let console = result_of(&results, "call_2");
     assert!(console.contains(FENCE_OPEN), "console is fenced: {console}");
     let inside = &console[console.find(FENCE_OPEN).unwrap() + FENCE_OPEN.len()..];
@@ -750,14 +975,21 @@ fn granted_session(staging: &Staging, tier: &str, https: bool) {
     let entry = declared_needs_entry(&trace);
     println!("--- {tier}: session_start.effective_grants.declared_needs (tool-browser, chromium) ---\n{entry}");
     let folder = granted_paths(&entry, "program_folder .");
-    let want = staging.browser_dir.canonicalize().unwrap();
     assert_eq!(
         folder
             .iter()
             .map(|p| PathBuf::from(p.trim_end_matches(" (list_dir)")))
             .collect::<Vec<_>>(),
-        vec![want],
-        "program_folder . is the browser's own folder on {tier}"
+        vec![want_folder],
+        "program_folder . is the running copy's own folder on {tier}"
+    );
+    let pinned = pinned_programs_entry(&trace);
+    println!("--- {tier}: session_start.effective_grants.pinned_programs (tool-browser, chromium) ---\n{pinned}");
+    assert_eq!(pinned["platform"], "linux-x86_64", "{pinned}");
+    assert_eq!(
+        pinned["source"],
+        copy.label(),
+        "the trace records which copy ran on {tier}: {pinned}"
     );
     assert!(
         granted_paths(&entry, "library libsoftokn3.so")
@@ -827,12 +1059,14 @@ fn granted_session(staging: &Staging, tier: &str, https: bool) {
     );
 }
 
-/// A capsule with the README's manifest, granting only `chromium`, runs the browser on `scoped`
-/// and on `sealed`, an `https` page included; a capsule without the grant gets the one no-grant
-/// line, fenced.
+/// The capsule in the README, granting only `chromium`: `mur install` fetches the pinned
+/// `chrome-headless-shell` once, which runs on `scoped` and `sealed` when no `chromium` is on
+/// `PATH`; a `chromium` on `PATH` runs instead; with the store entry gone the call answers the
+/// not-installed line and `mur doctor` warns; and a capsule without the grant gets the one
+/// no-grant line, fenced.
 #[test]
-#[ignore = "launches the real mur binary; run with --ignored"]
-fn browser_runs_on_scoped_and_sealed_and_ungranted_gets_one_line() {
+#[ignore = "launches the real mur binary and fetches about 128 MB; run with --ignored"]
+fn pinned_copy_runs_without_a_browser_on_path_and_host_chromium_wins() {
     let _turn = one_at_a_time();
     let https = match common::reachable("example.com") {
         Ok(()) => true,
@@ -841,12 +1075,146 @@ fn browser_runs_on_scoped_and_sealed_and_ungranted_gets_one_line() {
             false
         }
     };
-    let staging = stage(Path::new("tools/tool-browser"));
-    for tier in ["scoped", "sealed"] {
-        granted_session(&staging, tier, https);
+    let online = match common::reachable(DOWNLOAD_HOST) {
+        Ok(()) => true,
+        Err(why) => {
+            println!(
+                "skipping the pinned phases (install fetch, pinned copy, store removed): {why}"
+            );
+            false
+        }
+    };
+    let (url, sha256, build) = pinned_download();
+    let (staging, install) = stage(Path::new("tools/tool-browser"));
+    let installed = combined(&install);
+    println!("--- mur install <tool-browser zip> ---\n{installed}");
+
+    // Phase 1: the install fetches chromium's download for this platform, and nothing else.
+    let pin = if online {
+        assert!(
+            install.status.success(),
+            "mur install of tool-browser succeeds:\n{installed}"
+        );
+        let fetched: Vec<&str> = installed
+            .lines()
+            .filter(|l| l.trim_start().starts_with("fetched "))
+            .collect();
+        assert_eq!(
+            fetched.len(),
+            1,
+            "mur install fetches one program; a mur before murmur b0d4c42e fetches none:\n{installed}"
+        );
+        assert!(
+            fetched[0].contains("fetched chromium for linux-x86_64 (local/tool-browser): ")
+                && fetched[0].ends_with("sha256 verified"),
+            "the fetch line names chromium: {}",
+            fetched[0]
+        );
+        let again = staging.mur_in_project(&staging.path, &["install"]);
+        let again_text = combined(&again);
+        println!("--- mur install (again) ---\n{again_text}");
+        assert!(again.status.success(), "the second mur install succeeds");
+        assert!(
+            again_text.contains("chromium for linux-x86_64 (local/tool-browser): already in the store"),
+            "the second mur install fetches nothing:\n{again_text}"
+        );
+        assert!(!again_text.contains("fetched "), "{again_text}");
+
+        let entry = store_entry(staging.home.path());
+        assert_eq!(
+            entry.file_name().unwrap().to_string_lossy(),
+            sha256,
+            "the store entry is named by the pinned sha256"
+        );
+        let pin = Pin {
+            url,
+            sha256,
+            build,
+            entry,
+        };
+        assert_eq!(
+            pin.entry.join("bin/chromium").canonicalize().unwrap(),
+            pin.run_file().canonicalize().unwrap(),
+            "bin/chromium links to the pinned run file"
+        );
+        println!("store entry: {}", pin.entry.display());
+        Some(pin)
+    } else {
+        assert!(
+            install.status.success() || installed.contains("E-REG-013"),
+            "offline, mur install fails only on the fetch (E-REG-013):\n{installed}"
+        );
+        None
+    };
+
+    // Phase 2: no chromium on PATH, so the store's copy runs.
+    let bare_path = path_without_chromium();
+    if let Some(pin) = &pin {
+        for tier in ["scoped", "sealed"] {
+            granted_session(&staging, tier, https, &bare_path, &Chromium::Pinned(pin));
+        }
+        let report = doctor(&staging, &bare_path, &granted_capabilities("scoped"));
+        println!("--- mur doctor (pinned) ---\n{report}");
+        assert!(report.contains("Pinned programs:"), "{report}");
+        let line = report
+            .lines()
+            .map(str::trim)
+            .find(|l| l.starts_with("\u{2713}  local/tool-browser (chromium): pinned copy present; runs "))
+            .unwrap_or_else(|| panic!("a present, running pinned copy in mur doctor:\n{report}"));
+        assert!(line.ends_with(" (pinned)"), "the pinned copy runs: {line}");
+        for code in ["W-RUN-011", "W-RUN-012"] {
+            assert!(!report.contains(code), "no {code} in mur doctor:\n{report}");
+        }
     }
 
-    // Without the grant: exactly the one line, fenced, and nothing in the work folder.
+    // Phase 3: the host's chromium comes first on PATH, and it runs.
+    for tier in ["scoped", "sealed"] {
+        granted_session(&staging, tier, https, &staging.path, &Chromium::Host);
+    }
+
+    // Phase 4: the store entry removed, nothing runs and the call says how to get a copy.
+    if let Some(pin) = &pin {
+        assert!(
+            pin.entry.starts_with(staging.home.path().canonicalize().unwrap()),
+            "the store entry lies in the scratch HOME: {}",
+            pin.entry.display()
+        );
+        fs::remove_dir_all(&pin.entry).unwrap();
+        let name = "store-removed";
+        let provider = Provider::start(vec![json!({"action": "open", "url": "page.html"})]);
+        staging.write_manifest(name, &provider.endpoint, &granted_capabilities("scoped"));
+        let workdir = staging.workdir(name);
+        fs::create_dir_all(&workdir).unwrap();
+        fs::write(workdir.join("page.html"), common::FIXTURE_PAGE).unwrap();
+        let output = staging.run_on(&bare_path, name, &[]);
+        println!("--- store removed: run ---\n{}", combined(&output));
+        let results = tool_results(&provider.last_request());
+        let answer = result_of(&results, "call_1");
+        println!("call_1: {answer}");
+        assert_eq!(
+            fenced(answer),
+            NOT_INSTALLED_LINE,
+            "the fence holds exactly the not-installed line"
+        );
+        let browsers: Vec<PathBuf> = fs::read_dir(workdir.join(".tool-browser"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        assert!(browsers.is_empty(), "no browser folder: {browsers:?}");
+
+        let report = doctor(&staging, &bare_path, &granted_capabilities("scoped"));
+        println!("--- mur doctor (store removed) ---\n{report}");
+        assert!(
+            report.contains(
+                "warning[W-RUN-012]: local/tool-browser pins chromium for linux-x86_64, and the store holds no copy; run mur install"
+            ),
+            "mur doctor warns that the store holds no copy:\n{report}"
+        );
+    }
+
+    // Phase 5: without the grant, exactly the one line, fenced, and nothing in the work folder.
     let provider = Provider::start(vec![json!({"action": "open", "url": "page.html"})]);
     staging.write_manifest("ungranted", &provider.endpoint, RESOURCES);
     let workdir = staging.workdir("ungranted");
@@ -858,24 +1226,27 @@ fn browser_runs_on_scoped_and_sealed_and_ungranted_gets_one_line() {
     let results = tool_results(&provider.last_request());
     let refused = result_of(&results, "call_1");
     println!("call_1: {refused}");
-    assert!(
-        refused.contains(FENCE_OPEN),
-        "the refusal is fenced: {refused}"
-    );
-    let inside = &refused[refused.find(FENCE_OPEN).unwrap() + FENCE_OPEN.len()..];
-    let inside = inside
-        .split("</untrusted-content>")
-        .next()
-        .unwrap_or("")
-        .trim();
     assert_eq!(
-        inside, NO_GRANT_LINE,
+        fenced(refused),
+        NO_GRANT_LINE,
         "the fence holds exactly the no-grant line"
     );
     assert!(
         !workdir.join(".tool-browser").exists(),
         "nothing is created without the grant"
     );
+}
+
+/// The text inside the tool-browser fence of a tool result, trimmed.
+fn fenced(result: &str) -> &str {
+    let start = result
+        .find(FENCE_OPEN)
+        .unwrap_or_else(|| panic!("the result is fenced: {result}"));
+    result[start + FENCE_OPEN.len()..]
+        .split("</untrusted-content>")
+        .next()
+        .unwrap_or("")
+        .trim()
 }
 
 /// tool-browser's `murmur.yaml` with the needs in [`NSS_NEEDS`] dropped from `programs:`.
@@ -904,9 +1275,32 @@ fn without_nss_needs(manifest: &str) -> String {
     out
 }
 
-/// A copy of tool-browser whose `programs:` withholds NSS's modules, same name and version, in
-/// its own `HOME` and project: Chrome starts and renders a file, and the first `https` page kills
-/// it in NSS's start-up check.
+/// `manifest` without `programs.chromium.download`, so installing it fetches nothing.
+fn without_download(manifest: &str) -> String {
+    let mut out = String::new();
+    let mut dropping = false;
+    for line in manifest.lines() {
+        if line == "    download:" {
+            dropping = true;
+        } else if dropping && !line.starts_with("      ") {
+            dropping = false;
+        }
+        if !dropping {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    assert!(
+        !out.contains("    download:\n") && !out.contains("sha256:"),
+        "the copy pins no download"
+    );
+    assert!(out.contains("  chromium-browser:\n"), "the copy keeps programs:");
+    out
+}
+
+/// A copy of tool-browser whose `programs:` withholds NSS's modules and pins no download, same
+/// name and version, in its own `HOME` and project: the host's Chrome starts and renders a file,
+/// and the first `https` page kills it in NSS's start-up check.
 #[test]
 #[ignore = "launches the real mur binary; run with --ignored"]
 fn https_page_kills_chrome_when_the_nss_needs_are_withheld() {
@@ -920,8 +1314,17 @@ fn https_page_kills_chrome_when_the_nss_needs_are_withheld() {
     fs::create_dir_all(&tool_dir).unwrap();
     let manifest =
         fs::read_to_string(workspace_root().join("tools/tool-browser/murmur.yaml")).unwrap();
-    fs::write(tool_dir.join("murmur.yaml"), without_nss_needs(&manifest)).unwrap();
-    let staging = stage(&tool_dir);
+    fs::write(
+        tool_dir.join("murmur.yaml"),
+        without_download(&without_nss_needs(&manifest)),
+    )
+    .unwrap();
+    let (staging, install) = stage(&tool_dir);
+    assert!(
+        install.status.success(),
+        "installing the NSS-withheld copy:\n{}",
+        combined(&install)
+    );
 
     let name = "nss-withheld";
     let provider = Provider::start(vec![json!({"action": "open", "url": HTTPS_PAGE})]);
