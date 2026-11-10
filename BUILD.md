@@ -140,6 +140,7 @@ agrees with the driver's README and with any `SUPPORTED_MODELS` or `MODEL_ROUTES
 | `driver-baseten` | a `SUPPORTED_MODELS` entry with its limits and a `models:` entry; its README states the limits under "Model scope" |
 | `driver-openai` | a `MODEL_ROUTES` row with its endpoint, a `models:` entry, a "Model limits" row and an "Endpoints" row |
 | `driver-deepseek` | the id in `SUPPORTED_MODELS`, a `models:` entry and a "Model limits" row |
+| `driver-huggingface` | a `SUPPORTED_MODELS` entry with its limits, reasoning field, effort values and replay support, and a quoted `models:` entry; its README states the limits under "Model scope" |
 | `driver-moonshotai` | a `SUPPORTED_MODELS` entry with its limits and its `ThinkingControl`, a `models:` entry and a "Model limits" row |
 | `driver-zai` | a `SUPPORTED_MODELS` entry with its limits and a `models:` entry; its README states the limits under "Model scope" |
 

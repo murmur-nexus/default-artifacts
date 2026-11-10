@@ -4,6 +4,7 @@ members = [
   "drivers/driver-baseten",
   "drivers/driver-claude-code",
   "drivers/driver-deepseek",
+  "drivers/driver-huggingface",
   "drivers/driver-moonshotai",
   "drivers/driver-openai",
   "drivers/driver-zai",

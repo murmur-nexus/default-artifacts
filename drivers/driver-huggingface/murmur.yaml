@@ -1,0 +1,20 @@
+name: driver-huggingface
+version: 0.1.0
+runtime: driver
+description: "Hugging Face Inference Providers router driver — open models pinned to one backend each as <org>/<model>:<provider>, on the Chat Completions surface, with reasoning_effort and replay_reasoning config keys where the backend documents them"
+requires_files:
+  - driver_huggingface.wasm
+
+# How this provider expects the inference credential to be presented; the runtime substitutes {key}.
+upstream_auth:
+  header: Authorization
+  value: "Bearer {key}"
+
+# The limits of each model this driver serves; src/lib.rs's SUPPORTED_MODELS holds the same numbers.
+models:
+  "openai/gpt-oss-120b:groq":
+    max_output_tokens: 65536
+    context_window: 131072
+  "Qwen/Qwen3.8-27B:cerebras":
+    max_output_tokens: 32768
+    context_window: 65536
