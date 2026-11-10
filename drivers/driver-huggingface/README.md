@@ -96,6 +96,15 @@ match. Three kinds of id are refused, each with its own message under
 | a name with a router policy, `:fastest`, `:cheapest` or `:preferred` | the policy picks the backend by throughput, price or the account's preference order at the time of the call, so two runs of one capsule can reach two backends |
 | any other id, `openai/gpt-oss-120b:cerebras` included | the driver has no limits or reasoning facts for it |
 
+Which message a capsule sees depends on `inference.max_tokens`:
+
+| Capsule | Result |
+|---|---|
+| sets no `inference.max_tokens` | murmur refuses the launch with `E-RUN-052`, because `models:` declares no output cap for the id. The driver never runs |
+| sets `inference.max_tokens` | the launch goes ahead, and the driver refuses the id with its own message on the first inference call |
+
+Neither case sends a request to the router.
+
 The limits live in one table, `SUPPORTED_MODELS` in `src/lib.rs`, and
 `murmur.yaml` declares the same numbers under `models:`. A test fails if the two
 disagree, or if a row above loses either number.
