@@ -1,0 +1,41 @@
+name: tool-transit-board-relay
+version: 0.1.0
+runtime: tool
+implementation: wasm
+description: |
+  Act on the Transit board this capsule is granted: list, show and add cards, and whatever else the grant allows. Call {"verb": "help"} first; it lists the verbs this capsule holds and the fields each takes. Every verb that changes the board needs "reason": one sentence on why, recorded with the change under this capsule's name.
+
+  Input is {"verb": "...", "reason"?: "...", ...the verb's fields}. The result is nexus's answer as JSON: {"ok": true, "verb", "effect", "result", "output", "logged"}, or {"ok": false, "verb", "effect": "none", "error": {"code", "message"}}. A refused verb changed nothing. A line starting "tool-transit-board-relay:" means the call never reached the board; it says what the capsule's operator must fix.
+
+  Operators: the grant is this entry's config: block (board, verbs, protect), and the key is the entry's gateway.api_key, attached by the runtime and never held by the tool:
+
+      - name: murmur/tool-transit-board-relay
+        runtime: tool
+        gateway:
+          endpoint: http://127.0.0.1:<port of nexus transit serve>
+          api_key: ${NEXUS_TRANSIT_TOOL_KEY}
+        config:
+          board: /abs/path/to/the/project
+          verbs: [ls, show, add, dep]
+          protect: [Plan, Design, Done]
+
+upstream_auth:
+  header: Authorization
+  value: "Bearer {key}"
+
+input_schema:
+  type: object
+  format: murmur-opaque
+  murmur-destinations: []
+  properties:
+    verb:
+      type: string
+      description: "The board verb to run. Call help first: it lists the verbs this capsule holds and the fields each takes."
+    reason:
+      type: string
+      description: "Why, in one sentence. Required by every verb that changes the board; recorded with the change."
+  required: [verb]
+  additionalProperties: true
+
+requires_files:
+  - tool_transit_board_relay.wasm

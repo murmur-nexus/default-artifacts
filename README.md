@@ -150,6 +150,7 @@ component (`wasm32-wasip2`, exporting `murmur:tool/run`), shipped as one zip for
 | `tool-registry-search` | `tools/tool-registry-search/` | Searches a Murmur artifact index for artifacts, listing every published version of each `scope/name`. Fetches the index over `wasi:http`, so the capsule's `capabilities.network.allow` must list `https://github.com` and `https://release-assets.githubusercontent.com` for the default index; see its [README](./tools/tool-registry-search/README.md) |
 | `tool-request-input` | `tools/tool-request-input/` | HITL pause gate — suspends the agent loop and waits for human input via `SendMessage` |
 | `tool-tavily` | `tools/tool-tavily/` | Web search through Tavily, returning a bounded plain-text result; the Tavily key is bound on the entry as `gateway.api_key` and attached by the runtime, never held by the tool, and every cost- and size-bearing lever is in the entry's `config:` block |
+| `tool-transit-board-relay` | `tools/tool-transit-board-relay/` | Acts on a Transit board through the board tool `nexus transit serve` answers: lists, shows and adds cards and whatever else the grant allows, one verb per call, `help` first. A thin relay that knows the envelope and never the verbs, so a new verb needs no relay release. The grant is the entry's `config:` block (`board`, `verbs`, `protect`), checked by nexus on every call; serve's key is bound on the entry as `gateway.api_key: ${NEXUS_TRANSIT_TOOL_KEY}` and attached by the runtime, never held by the tool; see its [README](./tools/tool-transit-board-relay/README.md) |
 | `tool-test-report` | `tools/tool-test-report/` | Parses raw test-runner output (cargo, pytest, go, jest) into a structured failure list; `input_path` and `repo_path` are relative to the work folder or absolute inside a host folder the session opened; see its [README](./tools/tool-test-report/README.md) |
 | `tool-code-graph` | `tools/tool-code-graph/` | Indexes a Rust and/or Python repo into a SQLite symbol/edge graph at `<repo_path>/.murmur/code-graph.db`; structured queries over stable symbol identities. `repo_path` is relative to the work folder or absolute inside a host folder the session opened, read-write to index; see its [README](./tools/tool-code-graph/README.md) |
 | `tool-git` | `tools/tool-git/` | Git operations (clone, checkout, status, diff, commit, push, worktree, and more), each git command run through `murmur:process`, so it needs a `mur` at WIT level 4 or higher and `git` in `capabilities.shell.allow`; on-shell hooks and the `read_only` check judge every git command it runs; see its [README](./tools/tool-git/README.md) |
@@ -257,6 +258,7 @@ serves level 3. Hooks and process drivers did not move.
 | `tool-report` | 0.7.0 |
 | `tool-request-input` | 0.7.0 |
 | `tool-tavily` | 0.8.0 |
+| `tool-transit-board-relay` | 0.1.0 |
 | `tool-test-report` | 0.6.0 |
 | `tool-code-coverage` | 0.6.0 |
 | `tool-write` | 0.2.0 |

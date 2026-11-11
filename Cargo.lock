@@ -2999,6 +2999,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tool-transit-board-relay"
+version = "0.0.0"
+dependencies = [
+ "murmur-wasi-http",
+ "serde_json",
+ "tempfile",
+ "wasip2",
+ "wasmtime",
+ "wasmtime-wasi",
+ "wasmtime-wasi-http",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
 name = "tool-write"
 version = "0.0.0"
 dependencies = [

@@ -46,6 +46,7 @@ members = [
   "tools/tool-report",
   "tools/tool-request-input",
   "tools/tool-tavily",
+  "tools/tool-transit-board-relay",
   "tools/tool-browser",
 ]
 resolver = "2"
