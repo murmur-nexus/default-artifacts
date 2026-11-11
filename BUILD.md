@@ -281,13 +281,14 @@ CI runs both, formatting first. The workspace uses rustfmt's defaults (there is 
 run `cargo fmt --all` before committing.
 
 The suites below are `#[ignore]`d because they need something the default run does not have. The
-twelve that drive a real `mur` read it from `MUR_BIN`, else `PATH`, and fail rather than skip without
+thirteen that drive a real `mur` read it from `MUR_BIN`, else `PATH`, and fail rather than skip without
 one:
 
 ```bash
 MUR_BIN=$MUR_BIN cargo test -p tool-corpus --test mur_run_state -- --ignored         # 4 tests
 MUR_BIN=$MUR_BIN cargo test -p tool-tavily --test mur_run_gateway -- --ignored       # 2 tests
 MUR_BIN=$MUR_BIN cargo test -p tool-github --test mur_run_gateway -- --ignored       # 2 tests
+MUR_BIN=$MUR_BIN cargo test -p tool-transit-board-relay --test mur_run_gateway -- --ignored  # 2 tests
 MUR_BIN=$MUR_BIN cargo test -p tool-create --test mur_manifest_shape -- --ignored    # 2 tests
 MUR_BIN=$MUR_BIN cargo test -p tool-test-report --test mur_run_stable_id -- --ignored  # 2 tests
 MUR_BIN=$MUR_BIN cargo test -p tool-code-coverage --test mur_run_localize -- --ignored  # 2 tests
@@ -305,6 +306,7 @@ cargo test -p tool-create --test scaffolded_hook_tests -- --ignored  # needs a c
 | `mur_run_state` | the corpus reaches a durable store under a real `mur run`; the `corpus-state` workflow runs it nightly against murmur's default branch |
 | `mur_run_gateway` (tool-tavily) | the runtime attaches the Tavily key to the tool's request and it appears nowhere in the session |
 | `mur_run_gateway` (tool-github) | the runtime attaches the GitHub token to the tool's requests and it appears nowhere in the session |
+| `mur_run_gateway` (tool-transit-board-relay) | the runtime readdresses the relay's one request to a fake `nexus transit serve` at `http://127.0.0.1:<port>` with the stored key as `Authorization: Bearer <key>`, exactly once; the envelope carries the manifest's `name` as `capsule`, the trace's session id as `session` and the entry's `config:` as `config`; serve's answer reaches the model's next request unchanged inside the `<untrusted-content>` fence, and the key appears nowhere in the session. Without `gateway:` the model gets the relay's no-gateway line and serve receives nothing |
 | `mur_manifest_shape` | an unedited scaffold packs and publishes as the kind its author asked for |
 | `mur_run_stable_id` | under a real `mur run`, a code-graph database written into the work folder between two calls of one session gives the next call its `stable_id`, and one in a `read` host path resolves through an absolute `repo_path` with no lock file beside it |
 | `mur_run_localize` | under a real `mur run`, scores one call of a session writes into a work-folder code-graph database are reset and rewritten by the next, leaving no lock or journal file beside it, and an absolute `repo_path` in a `read-write` host path writes the scores into that host database |

@@ -140,7 +140,7 @@ validate_one() {
       expected_export="murmur:driver/process"
       expected_version="$process_driver_version"
       ;;
-    driver-*|tool-request-input|tool-create|tool-read|tool-write|tool-edit|tool-find|tool-corpus|tool-report|tool-tavily|tool-github|tool-registry-search|tool-test-report|tool-browser|tool-git|tool-code-coverage|tool-code-graph|tool-computer|murmur-fake-computer)
+    driver-*|tool-request-input|tool-create|tool-read|tool-write|tool-edit|tool-find|tool-corpus|tool-report|tool-tavily|tool-transit-board-relay|tool-github|tool-registry-search|tool-test-report|tool-browser|tool-git|tool-code-coverage|tool-code-graph|tool-computer|murmur-fake-computer)
       category="tool"
       expected_export="murmur:tool/run"
       expected_version="$tool_version"
