@@ -145,7 +145,7 @@ cargo build -p tool-code-graph --target wasm32-wasip2 --release
 ./scripts/validate-component.sh target/wasm32-wasip2/release/tool_code_graph.wasm
 cargo test -p tool-code-graph                                      # behaviour, 0.6.0 parity, SQLite and host paths, against the component
 MUR_BIN=$(command -v mur) cargo test -p tool-code-graph --test mur_run_code_graph -- --ignored
-./scripts/package-artifact.sh tools/tool-code-graph release/       # → release/tool-code-graph-0.7.0.mur.zip
+./scripts/package-artifact.sh tools/tool-code-graph release/       # → release/tool-code-graph-0.8.0.mur.zip
 ```
 
 `tests/fixtures/README.md` names the tool-code-graph 0.6.0 build that recorded the frozen results the

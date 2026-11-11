@@ -94,7 +94,7 @@ A tool crate that drops its feature does not compile: its module is absent from 
 ```bash
 cargo build -p tool-read --target wasm32-wasip2 --release
 ./scripts/validate-component.sh target/wasm32-wasip2/release/tool_read.wasm
-./scripts/package-artifact.sh tools/tool-read release/         # → release/tool-read-0.4.0.mur.zip
+./scripts/package-artifact.sh tools/tool-read release/         # → release/tool-read-0.5.0.mur.zip
 ./scripts/local-install.sh tool-read /path/to/capsule-folder
 ```
 

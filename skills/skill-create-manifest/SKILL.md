@@ -2,7 +2,7 @@
 name: skill-create-manifest
 description: "Write, review or fix a murmur.yaml for a Murmur capsule or for a Murmur tool, driver or hook artifact, from a plain-language description: the complete manifest schema (artifacts, capabilities, lifecycle, context, inference, observability, deploy), worked examples, least-privilege guidance and the catalog of Murmur's default artifacts with what each entry needs. Use when creating or editing a murmur.yaml, choosing artifacts or capability grants for a capsule, or fixing a manifest that mur refuses."
 metadata:
-  version: "0.16.0"
+  version: "0.17.0"
 ---
 # Murmur Manifest (`murmur.yaml`) — Complete Schema Reference
 
@@ -122,20 +122,20 @@ entry into the project store.
 ```yaml
 artifacts:
   - name: murmur/tool-read
-    version: "0.4.0"
+    version: "0.5.0"
     runtime: tool
   - name: murmur/tool-write
-    version: "0.4.0"
+    version: "0.5.0"
     runtime: tool
   - name: murmur/tool-edit
-    version: "0.4.0"
+    version: "0.5.0"
     runtime: tool
   - name: murmur/tool-find
-    version: "0.4.0"
+    version: "0.5.0"
     runtime: tool
 
   - name: murmur/driver-anthropic
-    version: "0.20.0"
+    version: "0.21.0"
     runtime: driver
 
   - name: murmur/hook-debug
@@ -393,7 +393,7 @@ so the driver never sees it.
 ```yaml
 artifacts:
   - name: murmur/driver-anthropic
-    version: "0.20.0"
+    version: "0.21.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
@@ -439,7 +439,7 @@ cannot.
 ```yaml
 artifacts:
   - name: murmur/driver-openai
-    version: "0.20.0"
+    version: "0.21.0"
     runtime: driver
     gateway:
       endpoint: https://api.openai.com/v1
@@ -529,19 +529,19 @@ description: "Simple file editing capsule — reads and writes files, exits on c
 
 artifacts:
   - name: murmur/tool-read
-    version: "0.4.0"
+    version: "0.5.0"
     runtime: tool
   - name: murmur/tool-write
-    version: "0.4.0"
+    version: "0.5.0"
     runtime: tool
   - name: murmur/tool-edit
-    version: "0.4.0"
+    version: "0.5.0"
     runtime: tool
   - name: murmur/tool-find
-    version: "0.4.0"
+    version: "0.5.0"
     runtime: tool
   - name: murmur/driver-anthropic
-    version: "0.20.0"
+    version: "0.21.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
@@ -572,22 +572,22 @@ description: "Coding agent with shell, git operations, and file editing"
 
 artifacts:
   - name: murmur/tool-git
-    version: "0.7.0"
+    version: "0.8.0"
     runtime: tool
   - name: murmur/tool-read
-    version: "0.4.0"
+    version: "0.5.0"
     runtime: tool
   - name: murmur/tool-write
-    version: "0.4.0"
+    version: "0.5.0"
     runtime: tool
   - name: murmur/tool-edit
-    version: "0.4.0"
+    version: "0.5.0"
     runtime: tool
   - name: murmur/tool-find
-    version: "0.4.0"
+    version: "0.5.0"
     runtime: tool
   - name: murmur/driver-anthropic
-    version: "0.20.0"
+    version: "0.21.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
@@ -629,13 +629,13 @@ description: "Orchestrator that spawns sub-capsules for parallel task execution"
 
 artifacts:
   - name: murmur/tool-read
-    version: "0.4.0"
+    version: "0.5.0"
     runtime: tool
   - name: murmur/tool-find
-    version: "0.4.0"
+    version: "0.5.0"
     runtime: tool
   - name: murmur/driver-anthropic
-    version: "0.20.0"
+    version: "0.21.0"
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
@@ -736,7 +736,7 @@ name its `artifacts:` entry uses. For live discovery, use `mur search <keyword>`
 ```yaml
 artifacts:
   - name: murmur/tool-git
-    version: "0.7.0"
+    version: "0.8.0"
     runtime: tool
   - name: murmur/hook-debug
     version: "0.10.0"
