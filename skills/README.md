@@ -22,7 +22,7 @@ like any other artifact:
 ```yaml
 artifacts:
   - name: murmur/skill-create-manifest
-    version: "0.16.0"
+    version: "0.17.0"
     runtime: skill
 ```
 
