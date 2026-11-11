@@ -94,6 +94,23 @@ if ! "$MUR" index "$RELEASE_DIR" --repo "$REPO" --release "$TAG" ${merge[@]+"${m
     exit 1
 fi
 
+# `mur index --merge` reads a previous asset that carries `platform` (a native tool's
+# per-platform zip, `<name>-<version>-<platform>.mur.zip`) and writes it back without
+# the key, and the same `mur` then refuses the index it wrote: an untagged asset must be
+# named `<name>-<version>.mur.zip`. Restore `platform` on every carried-forward asset
+# whose file name carries one, so the index stays installable. The bytes gate compares
+# file and sha256 only, so it is unaffected.
+tagged="$WORK/tagged.json"
+jq --indent 2 '
+    .artifacts |= map(. as $a | .versions |= map(. as $v
+        | ("\($a.name)-\($v.version)") as $stem
+        | .assets |= map(
+            if (.file | startswith($stem + "-")) and (.file | endswith(".mur.zip"))
+            then { file, platform: (.file | ltrimstr($stem + "-") | rtrimstr(".mur.zip")), sha256 }
+            else . end)))
+' "$INDEX" > "$tagged"
+cp "$tagged" "$INDEX"
+
 # The file an artifact's version is written in, for the fix the gate names: a
 # skill's SKILL.md front block, any other artifact's murmur.yaml, told apart by
 # list-artifacts.sh's runtime column. Falls back to a bare name when the artifact
