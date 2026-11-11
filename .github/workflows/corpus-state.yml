@@ -93,6 +93,17 @@ jobs:
         working-directory: murmur
         run: cargo build -p murmur-cli
 
+      # murmur runs every WASM guest in a worker process inside the session's network namespace,
+      # so a capsule with a WASM tool and a network.allow needs unprivileged user namespaces.
+      # Ubuntu 24.04 restricts them with AppArmor to profiled binaries, and this checkout build of
+      # mur has none, so it refuses with E-CAP-005. Lift the restriction for this job, as
+      # murmur's own CI and ci.yml here do.
+      - name: Allow unprivileged user namespaces for mur
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
       - name: Run the corpus state tests
         working-directory: default-artifacts
         env:
