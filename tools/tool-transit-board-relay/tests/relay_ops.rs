@@ -166,17 +166,35 @@ fn the_url_trims_a_trailing_slash_and_keeps_an_endpoint_path() {
 }
 
 #[test]
-fn an_absent_config_is_sent_as_null() {
-    let mut fake = Fake::answering(200, help_answer());
+fn an_absent_config_is_sent_as_null_and_nexus_judges_it() {
+    let bad_grant = json!({
+        "ok": false, "verb": "help", "effect": "none",
+        "error": {"code": "bad-grant", "message": "nexus transit tool: the entry carries no grant"}
+    })
+    .to_string();
+    let mut fake = Fake::answering(200, bad_grant.clone());
     let mut env = env();
     env.artifact_config = None;
-    run_with(&env, Some(r#"{"verb":"help"}"#), &mut fake);
+    let response = run_with(&env, Some(r#"{"verb":"help"}"#), &mut fake);
+
+    assert_eq!(
+        fake.sent.len(),
+        1,
+        "the relay never judges the grant itself"
+    );
     assert_eq!(fake.sent[0].json()["config"], Value::Null);
     assert!(fake.sent[0]
         .json()
         .as_object()
         .unwrap()
         .contains_key("config"));
+    assert_eq!(response.status, OpStatus::Failed);
+    assert_eq!(response.data, bad_grant);
+    assert_eq!(
+        response.summary,
+        "transit help: refused bad-grant: nexus transit tool: the entry carries no grant"
+    );
+    assert!(response.metadata.is_empty());
 }
 
 #[test]

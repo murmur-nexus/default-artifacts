@@ -10,8 +10,12 @@ The relay holds no verb list and no board logic, so a new verb needs a nexus rel
 relay release. It holds no key either: the runtime attaches it.
 
 WASM component (`wasm32-wasip2`), exporting `murmur:tool/run` and importing no `murmur:*`
-interface. It needs a `mur` with the per-entry credential gateway and `upstream_auth:`, which
-the murmur commit this repository pins has.
+interface.
+
+| Needs | Version |
+|---|---|
+| `mur` | v0.10.0 or later: the per-entry credential gateway, `upstream_auth:`, a plain-`http` loopback `gateway.endpoint`, and `MURMUR_CAPSULE_NAME`/`MURMUR_SESSION_ID` in every tool's environment |
+| `nexus` | A build with `nexus transit serve` (murmur-nexus `main` from `ebbbed0`; no nexus release has it yet). `nexus transit operator init` writes this relay as `murmur/tool-transit-board-relay` from murmur-nexus `cfd0719` on; an older build writes `murmur/tool-transit`, which no registry publishes, so rename that entry by hand |
 
 ## The manifest entry
 

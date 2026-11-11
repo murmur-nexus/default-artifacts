@@ -294,13 +294,23 @@ fn help_is_one_post_carrying_the_envelope_and_no_credential() {
         "{}",
         request.request_line
     );
-    assert!(
-        !request
-            .headers
-            .iter()
-            .any(|(name, _)| name == "authorization"),
-        "the relay must send no authorization header: {:?}",
-        request.headers
+    // The HTTP client adds `host` itself; every other header is the relay's own.
+    let mut sent: Vec<(String, String)> = request
+        .headers
+        .iter()
+        .filter(|(name, _)| name != "host")
+        .cloned()
+        .collect();
+    sent.sort();
+    let body_len = serde_json::to_vec(&request.body).unwrap().len().to_string();
+    assert_eq!(
+        sent,
+        vec![
+            ("accept".to_string(), "application/json".to_string()),
+            ("content-length".to_string(), body_len),
+            ("content-type".to_string(), "application/json".to_string()),
+        ],
+        "exactly the three body headers, and no authorization header"
     );
     assert_eq!(
         request.body,
@@ -312,6 +322,33 @@ fn help_is_one_post_carrying_the_envelope_and_no_credential() {
             "input": {"verb": "help"},
         })
     );
+}
+
+#[test]
+fn a_write_passes_with_state_effect_mutate_and_its_input_unchanged() {
+    let body = json!({
+        "ok": true, "verb": "add", "effect": "mutate",
+        "result": {"card": {"number": 2, "title": "x", "stage": "Backlog"}},
+        "output": null, "logged": [{"actor": "capsule board-fixer"}]
+    })
+    .to_string();
+    let serve = FakeServe::start(200, body.clone());
+    let input = json!({
+        "verb": "add", "reason": "split S3", "title": "x", "stage": "Backlog",
+        "a_field_the_relay_never_heard_of": {"kept": [1, 2]}
+    });
+    let result = run_component(&GuestEnv::full(&serve.endpoint), &input.to_string());
+
+    assert!(matches!(result.status, Status::Passed));
+    assert_eq!(result.data.as_deref(), Some(body.as_str()));
+    assert_eq!(result.summary.as_deref(), Some("transit add: ok (mutate)"));
+    assert_eq!(
+        result.metadata,
+        vec![("state_effect".to_string(), "mutate".to_string())]
+    );
+    let requests = serve.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["input"], input);
 }
 
 #[test]
@@ -345,18 +382,11 @@ fn a_401_gives_the_key_line() {
     );
     let result = run_component(&GuestEnv::full(&serve.endpoint), r#"{"verb":"help"}"#);
     assert!(matches!(result.status, Status::Error));
-    let summary = result.summary.unwrap();
-    assert!(
-        summary.starts_with(&format!(
-            "{PREFIX}nexus transit serve refused this entry's key (401): "
-        )),
-        "{summary}"
+    let expected = format!(
+        r#"{PREFIX}nexus transit serve refused this entry's key (401): store the key from ~/.nexus/transit/tool.key on the host running serve with mur config set -g credentials.NEXUS_TRANSIT_TOOL_KEY "$(cat ~/.nexus/transit/tool.key)" and name it on this entry as gateway.api_key: ${{NEXUS_TRANSIT_TOOL_KEY}}; the next call uses the stored key"#
     );
-    assert!(
-        summary.contains("credentials.NEXUS_TRANSIT_TOOL_KEY"),
-        "{summary}"
-    );
-    assert_eq!(result.data.as_deref(), Some(summary.as_str()));
+    assert_eq!(result.summary.as_deref(), Some(expected.as_str()));
+    assert_eq!(result.data.as_deref(), Some(expected.as_str()));
     assert_eq!(serve.requests().len(), 1, "one request, no retry");
 }
 
@@ -370,11 +400,18 @@ fn an_unset_or_empty_gateway_is_refused_with_nothing_sent() {
         };
         let result = run_component(&env, r#"{"verb":"help"}"#);
         assert!(matches!(result.status, Status::Error), "{gateway:?}");
-        let summary = result.summary.unwrap();
-        assert!(
-            summary.starts_with(&format!("{PREFIX}this entry has no gateway")),
-            "{summary}"
+        let expected = format!(
+            "{PREFIX}this entry has no gateway, so there is no board tool to call: add gateway: \
+             {{ endpoint: http://127.0.0.1:<port>, api_key: ${{NEXUS_TRANSIT_TOOL_KEY}} }} to the \
+             murmur/tool-transit-board-relay entry in the capsule manifest, with the port nexus \
+             transit serve printed"
         );
+        assert_eq!(
+            result.data.as_deref(),
+            Some(expected.as_str()),
+            "{gateway:?}"
+        );
+        assert_eq!(result.summary.as_deref(), Some(expected.as_str()));
     }
     assert!(serve.requests().is_empty(), "nothing may reach serve");
 }
