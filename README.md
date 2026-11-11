@@ -177,6 +177,7 @@ later). [skills/README.md](./skills/README.md) holds each skill's release histor
 |---|---|---|
 | `skill-create-manifest` | `skills/skill-create-manifest/` | Write, review or fix a `murmur.yaml` for a Murmur capsule or for a tool, driver or hook artifact: the complete schema, worked examples, least-privilege guidance and the default artifact catalog |
 | `skill-investigation-checkpoint` | `skills/skill-investigation-checkpoint/` | Record and reuse the verdicts of a debugging or root-cause investigation in `checkpoints/decisions.json`, so leads already settled are not re-checked after a compaction or handoff |
+| `skill-publish-artifact` | `skills/skill-publish-artifact/` | Make a GitHub repository ready for MAP (`map.murmur.nexus`) to list its `.mur.zip` artifacts: work out the situation, check MAP's minimum requirements and the ideal layout, and write a readiness report before changing anything, handing the person every command that changes GitHub |
 
 ## WIT
 

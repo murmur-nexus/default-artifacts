@@ -118,3 +118,22 @@ verdicts (ruled-out / confirmed / uncertain) across a session instead of re-deri
 
 The Murmur runtime does not create `checkpoints/`, and no runtime component reads or writes the
 file.
+
+## skill-publish-artifact
+
+Make a GitHub repository ready for MAP (`map.murmur.nexus`) to list its Murmur `.mur.zip`
+artifacts — work out the situation, check MAP's minimum requirements and the ideal layout, and
+write a readiness report before changing anything.
+
+0.1.0 is the first release. It teaches:
+
+| What | Why it matters |
+|---|---|
+| Four situations, told apart with `git`, `ls` and a search for manifests and build scripts: (a) no publishing repo yet, (b) a project repo that builds artifacts on the side, (c) an existing `murmur-artifacts` repo, (d) a new version of an artifact the latest index lists | Each needs different work, and (b) leaves the project repository untouched |
+| MAP's minimum requirements R1–R7 in `references/requirements.md`: a public repo owned by the scope owner, named `murmur-artifacts`, with the `murmur-artifacts` topic, the index on the latest release, one release per version holding its file, the same version in file name, packed manifest and `<name>-v<version>` tag, and unique names. Each with its read-only command and pass condition | MAP lists nothing from a repository until all seven pass. R6 is the one place the tag convention is written |
+| The ideal layout L1–L9 in `references/layout.md`: one folder per artifact, standard `SKILL.md` skill folders, `main` equal to the last release, one release workflow, draft-then-publish releases, release immutability on before the first release, a licence, no secrets | Immutability turned on late leaves every earlier release without an attestation, so MAP lists it as mutable |
+| A readiness report as the agent's first output: R1–R7 and L1–L9 each `in place`, `missing` or `cannot check`, with evidence and a numbered change, and nothing changed until the person agrees | The person sees the whole gap before anything moves |
+| The agent never changes GitHub: repo creation, pushes, tags, topics, settings and releases are commands it hands the person verbatim | Nothing is published on the person's behalf |
+| `assets/release.yml`, a release workflow to copy: on a `<name>-v<version>` tag it builds the artifact with a pinned, checksummed `mur`, refuses a tag and manifest that differ, writes the index merged over the previous latest release's, and creates the release as a draft, uploads, then publishes it as the latest | `mur install` reads only the latest release's index, and an immutable release can gain no file once published |
+| The checks the person runs to confirm the listing: `gh release verify`, `mur search` on the latest index, `mur install`, `npx skills add --list`, and MAP after the next nightly crawl | The person can tell the release worked without waiting on MAP |
+| `assets/release.yml` installs `mur` 0.11.0 (`MUR_VERSION`), the first version that builds `SKILL.md` folders. Until murmur publishes v0.11.0, its "Install mur" step fails on a download error; set `MUR_VERSION` to a later release once one exists | An older `mur` packs a skill folder wrong without refusing it, so the pin is not lowered |

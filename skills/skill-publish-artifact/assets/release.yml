@@ -1,0 +1,181 @@
+# Release one artifact version when its tag is pushed.
+#
+# Copy this file to .github/workflows/release.yml in <owner>/murmur-artifacts.
+# Push one tag per artifact version, in the form requirements.md R6 defines:
+#
+#   git tag tool-weather-v0.7.0 && git push origin tool-weather-v0.7.0
+#
+# The workflow builds that artifact's folder into release/<name>-<version>.mur.zip,
+# writes release/artifacts-index.json merged with the previous latest release's
+# index, creates the release as a draft, uploads both files, and publishes it as
+# the latest release.
+#
+# Placeholders are written <like-this>. With the layout of references/layout.md
+# (situation (a) or (c)), none need filling. For situation (b), where the artifact
+# is built from a separate project repository, fill in and uncomment the two blocks
+# marked SITUATION (b).
+#
+# Push tags one at a time: GitHub starts no workflow for a push of more than three
+# tags at once.
+
+name: release
+
+on:
+  push:
+    tags: ['*-v*']
+
+permissions:
+  contents: write
+
+# Each release merges the previous latest release's index, so two releases must not
+# run at once: the second would merge an index that lacks the first one's version.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # A mur that builds Agent Skills (SKILL.md) folders: 0.11.0 or later.
+      MUR_VERSION: "0.11.0"
+      # Space-separated folders two levels above each artifact folder: "." finds
+      # tools/<name>/ and skills/<name>/. SITUATION (b): add the folder two levels
+      # above the artifact folder in the project checkout, for example ". project"
+      # for project/tools/<name>/.
+      ARTIFACT_ROOTS: "."
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@v4
+
+      # SITUATION (b): check out the project repository at a pinned tag or commit,
+      # so a release always builds the same sources.
+      # - name: Check out the project repository
+      #   uses: actions/checkout@v4
+      #   with:
+      #     repository: <owner>/<project-repo>
+      #     ref: <tag-or-full-commit-sha>
+      #     path: project
+
+      # SITUATION (b), and any tool, driver or hook whose murmur.yaml packs a built
+      # component: build it here, before mur build packs it. See
+      # https://docs.murmur.nexus/language-guides/python/ for a WASM tool.
+      # - name: Build the component
+      #   working-directory: project
+      #   run: <the project's own build command>
+
+      - name: Install mur ${{ env.MUR_VERSION }}
+        run: |
+          set -euo pipefail
+          file="mur-${MUR_VERSION}-linux-x86_64"
+          base="https://github.com/murmur-nexus/murmur/releases/download/v${MUR_VERSION}"
+          cd "$RUNNER_TEMP"
+          curl -fsSLO "$base/$file"
+          curl -fsSLO "$base/checksums.txt"
+          grep -E "^[0-9a-f]{64}  ${file}\$" checksums.txt | sha256sum -c -
+          sudo install -m 755 "$file" /usr/local/bin/mur
+          mur version
+
+      - name: Read the artifact name and version from the tag
+        run: |
+          set -euo pipefail
+          # <name>-v<version>, as requirements.md R6 defines. The name may itself hold
+          # "-v" (tool-validate-v1.0.0 is tool-validate at 1.0.0), because the version
+          # holds no letter before its first dot.
+          re='^([a-z0-9-]+)-v([0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]*)?)$'
+          if [[ ! "$GITHUB_REF_NAME" =~ $re ]]; then
+            echo "::error::tag '$GITHUB_REF_NAME' is not an artifact name, '-v' and a semantic version, for example tool-weather-v0.7.0"
+            exit 1
+          fi
+          echo "NAME=${BASH_REMATCH[1]}" >> "$GITHUB_ENV"
+          echo "VERSION=${BASH_REMATCH[2]}" >> "$GITHUB_ENV"
+          echo "artifact ${BASH_REMATCH[1]}, version ${BASH_REMATCH[2]}"
+
+      - name: Find the artifact's folder
+        run: |
+          set -euo pipefail
+          found=()
+          for root in $ARTIFACT_ROOTS; do
+            while IFS= read -r dir; do
+              if [ -f "$dir/murmur.yaml" ] || [ -f "$dir/SKILL.md" ]; then
+                found+=("$dir")
+              fi
+            done < <(find "$root" -mindepth 2 -maxdepth 2 -type d -name "$NAME" -not -path '*/.git/*')
+          done
+          if [ "${#found[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one folder */$NAME/ holding murmur.yaml or SKILL.md under '$ARTIFACT_ROOTS', found ${#found[@]}: ${found[*]:-none}"
+            exit 1
+          fi
+          echo "FOLDER=${found[0]}" >> "$GITHUB_ENV"
+          echo "folder ${found[0]}"
+
+      - name: Build the artifact
+        run: |
+          set -euo pipefail
+          mkdir release
+          mur build "$FOLDER" --output release/
+          # The file name carries the version packed in the manifest. Anything but
+          # exactly the tag's name and version means the tag and the manifest differ.
+          want="release/${NAME}-${VERSION}.mur.zip"
+          shopt -s nullglob
+          built=(release/*.mur.zip)
+          if [ "${#built[@]}" -ne 1 ] || [ "${built[0]}" != "$want" ]; then
+            echo "::error::tag $GITHUB_REF_NAME names $NAME $VERSION, but $FOLDER built ${built[*]:-nothing}; set the version in the artifact's manifest or push the matching tag"
+            exit 1
+          fi
+
+      - name: Download the previous latest release's index
+        run: |
+          set -euo pipefail
+          # Tell "no release yet" (HTTP 404) apart from any other failure.
+          if latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2> latest.err); then
+            echo "previous latest release: $latest"
+            if gh release download "$latest" --repo "$GITHUB_REPOSITORY" --pattern artifacts-index.json --dir previous 2> download.err; then
+              echo "MERGE=previous/artifacts-index.json" >> "$GITHUB_ENV"
+            elif grep -q 'no assets match' download.err; then
+              # A latest release made without this workflow: start the index here.
+              echo "::warning::the latest release $latest carries no artifacts-index.json, so this release's index lists only this version"
+              echo "MERGE=" >> "$GITHUB_ENV"
+            else
+              cat download.err >&2
+              echo "::error::could not download artifacts-index.json from the latest release $latest"
+              exit 1
+            fi
+          elif grep -q 'HTTP 404' latest.err; then
+            echo "no release yet: this is the first release"
+            echo "MERGE=" >> "$GITHUB_ENV"
+          else
+            cat latest.err >&2
+            echo "::error::could not read the latest release"
+            exit 1
+          fi
+
+      - name: Write the index
+        run: |
+          set -euo pipefail
+          # mur install reads artifacts-index.json from the latest release only, so this
+          # release's index also lists every version the previous one listed.
+          merge=()
+          if [ -n "$MERGE" ]; then
+            merge=(--merge "$MERGE")
+          fi
+          mur index release --repo "$GITHUB_REPOSITORY" --release "$GITHUB_REF_NAME" "${merge[@]}" -o release/artifacts-index.json
+          mur search "" --index release/artifacts-index.json --limit 1000
+
+      # With release immutability on, a published release can never gain or change a
+      # file, and GitHub writes the release attestation when it is published. So the
+      # release is created as a draft, filled, and only then published.
+      - name: Create the release as a draft
+        run: |
+          set -euo pipefail
+          scope="${GITHUB_REPOSITORY_OWNER,,}"
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+            --title "$NAME $VERSION" \
+            --notes "Install with: mur install $scope/$NAME@$VERSION"
+
+      - name: Upload the files
+        run: gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" release/*
+
+      - name: Publish the release as the latest
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
