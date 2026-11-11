@@ -131,8 +131,17 @@ jobs:
           # Tell "no release yet" (HTTP 404) apart from any other failure.
           if latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2> latest.err); then
             echo "previous latest release: $latest"
-            gh release download "$latest" --repo "$GITHUB_REPOSITORY" --pattern artifacts-index.json --dir previous
-            echo "MERGE=previous/artifacts-index.json" >> "$GITHUB_ENV"
+            if gh release download "$latest" --repo "$GITHUB_REPOSITORY" --pattern artifacts-index.json --dir previous 2> download.err; then
+              echo "MERGE=previous/artifacts-index.json" >> "$GITHUB_ENV"
+            elif grep -q 'no assets match' download.err; then
+              # A latest release made without this workflow: start the index here.
+              echo "::warning::the latest release $latest carries no artifacts-index.json, so this release's index lists only this version"
+              echo "MERGE=" >> "$GITHUB_ENV"
+            else
+              cat download.err >&2
+              echo "::error::could not download artifacts-index.json from the latest release $latest"
+              exit 1
+            fi
           elif grep -q 'HTTP 404' latest.err; then
             echo "no release yet: this is the first release"
             echo "MERGE=" >> "$GITHUB_ENV"

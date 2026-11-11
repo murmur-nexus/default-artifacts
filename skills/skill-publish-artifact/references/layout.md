@@ -80,7 +80,9 @@ mur build skills/<name> --output "$WORK/"
 **Pass.** It exits 0 and writes `$WORK/<name>-<version>.mur.zip`. A broken folder is refused with
 `E-BLD-009`, naming the rule it breaks: a front block that does not parse, a `name` that differs
 from the folder, a `murmur.yaml` beside `SKILL.md`, a `SKILL.md` spelled any other way. This needs
-a `mur` that builds `SKILL.md` folders (0.11.0 or later); an older one refuses every such folder.
+a `mur` that builds `SKILL.md` folders (0.11.0 or later). `mur` 0.10.0 refuses nothing: it packs
+`SKILL.md` under a lowercase name at version `0.1.0`, whatever the front block says, so its pass
+means nothing.
 
 **Fix.** The change `E-BLD-009` names. For the folder itself, see
 `https://docs.murmur.nexus/how-to/package-skill-artifact/`.

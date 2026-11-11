@@ -23,7 +23,7 @@ setup of situation (a) in `SKILL.md`.
 
 **Rule.** The repository is public, and its owner's login, lowercased, is the scope its artifacts
 install under. The scope is neither `murmur` nor `local`: both are reserved, and `mur` refuses them
-for any other source (`E-REG-007`).
+for any other source (`mur index` with `E-IDX-003`, `mur install github:…` with `E-REG-007`).
 
 **Check.**
 
@@ -103,7 +103,8 @@ pattern` means the latest release carries no index: R4 is `missing`.
 
 **Fix.** Release through `assets/release.yml`, copied to `.github/workflows/release.yml` (layout L5),
 and **you run** the tag push R6 names. A latest release with no index is never edited: the next
-release, made by the workflow, carries the index.
+release, made by the workflow, carries an index that starts with its own version. Versions released
+before it are in no index, so MAP does not list them; release each again at a new version to list it.
 
 ## R5 — one release per artifact version, holding its file
 
