@@ -19,7 +19,8 @@
 #   1. its root holds no regular file named exactly SKILL.md, or holds another
 #      casing of skill.md (compared by exact directory entry, as a case-insensitive
 #      filesystem would otherwise answer for both);
-#   2. its root holds a murmur.yaml;
+#   2. its root holds a murmur.yaml in any casing, or a murmur-build.json, which
+#      `mur build` writes itself;
 #   3. SKILL.md's first line is not exactly `---`, or no later line closes the block;
 #   4. `name` is missing, is not 1-64 of a-z0-9-, starts or ends with `-`, holds
 #      `--`, differs from the folder name, or starts with `murmur-`;

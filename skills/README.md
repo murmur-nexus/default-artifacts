@@ -40,7 +40,8 @@ against the standard, and `./scripts/list-artifacts.sh` and `./scripts/package-a
 same checks before anything is listed or packed. A folder is refused when:
 
 - its root holds no file named exactly `SKILL.md`, or holds `skill.md`, `Skill.md` or another casing;
-- its root holds a `murmur.yaml`;
+- its root holds a `murmur.yaml` in any casing, or a `murmur-build.json`, which `mur build` writes
+  itself;
 - `SKILL.md` does not open with a `---` line closed by a later `---` line;
 - `name` is missing, is not 1–64 of `a-z0-9-`, starts or ends with `-`, holds `--`, differs from the
   folder name, or starts with `murmur-`;
@@ -65,7 +66,7 @@ capsule manifests from plain-language task descriptions.
 | The folder is `SKILL.md` with a front block (`name`, `description`, `metadata.version`) and no `murmur.yaml`; the lowercase `skill.md` is gone | Building or installing it needs a `mur` containing murmur `35653488`. That `mur` refuses an artifact of this skill built by an earlier `mur`, 0.15.0 and before included, with `E-REG-017` |
 | The description says what the skill does and when to use it | It is what `npx skills` and the model see first |
 | The body makes sense in any agent, and everything that needs a Murmur capsule (MURMUR.md, `## Installed Tools` / `## Installed Skills`, the runtime directory) is in its last section, `## In a Murmur capsule` | An agent outside Murmur can skip that section |
-| §2 `skill` teaches the standard: a `SKILL.md` folder with a front block and no `murmur.yaml`, packed by `mur build <folder>`, refused with `E-BLD-009` or `E-REG-017`, and returning its body without the front block when called. The intro no longer says a skill's manifest needs `name`, `version` and `runtime` in a `murmur.yaml` | §2, intro |
+| §2 `skill` teaches the standard: a `SKILL.md` folder with a front block and no `murmur.yaml`, packed by `mur build <folder>`, refused with `E-BLD-009` or `E-REG-017`, and returning its body without the front block when called. The intro no longer says a skill's manifest needs `name`, `version` and `runtime` in a `murmur.yaml` | A manifest written from §2 and the intro matches what `mur build` packs and refuses |
 
 0.2.0 also teaches the records layout of `mur` 0.7.0 or later:
 

@@ -112,6 +112,14 @@ valid_skill_md manifest-beside | fixture manifest-beside
 printf 'name: manifest-beside\nversion: 1.0.0\nruntime: skill\n' > "$WORK/manifest-beside/murmur.yaml"
 expect "murmur.yaml beside SKILL.md" 1 "a skill folder holds no murmur.yaml" manifest-beside
 
+valid_skill_md manifest-casing "Murmur.yaml is named here, so only the casing rule refuses it." | fixture manifest-casing
+printf 'name: manifest-casing\n' > "$WORK/manifest-casing/Murmur.yaml"
+expect "Murmur.yaml beside SKILL.md" 1 "Murmur.yaml: a skill folder holds no murmur.yaml" manifest-casing
+
+valid_skill_md build-info "murmur-build.json is named here, so only the reserved-name rule refuses it." | fixture build-info
+echo '{}' > "$WORK/build-info/murmur-build.json"
+expect "murmur-build.json in the folder" 1 "murmur-build.json: mur build writes this file itself" build-info
+
 valid_skill_md unreferenced | fixture unreferenced
 echo notes > "$WORK/unreferenced/notes.md"
 expect "unreferenced notes.md" 1 "notes.md is not named in the SKILL.md body" unreferenced

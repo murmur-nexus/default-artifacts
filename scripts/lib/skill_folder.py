@@ -349,8 +349,14 @@ def check_folder(path):
             errors.append(f"{e}: the skill file is named SKILL.md, exactly; delete {e}, the folder already holds SKILL.md")
         else:
             errors.append(f"{e}: the skill file is named SKILL.md, exactly; rename it: git mv {e} SKILL.md")
-    if "murmur.yaml" in entries:
-        errors.append("a skill folder holds no murmur.yaml; its name, description and version go in the SKILL.md front block")
+    # `mur build` refuses a root murmur.yaml in any casing, and a root murmur-build.json,
+    # which it writes itself.
+    manifests = sorted(e for e in entries if e.lower() == "murmur.yaml")
+    for e in manifests:
+        errors.append(f"{e}: a skill folder holds no murmur.yaml; its name, description and version go in the SKILL.md front block")
+    reserved = ["murmur-build.json"] if "murmur-build.json" in entries else []
+    if reserved:
+        errors.append("murmur-build.json: mur build writes this file itself; delete it from the skill folder")
 
     symlinks = []
     for dirpath, dirnames, filenames in os.walk(path):
@@ -382,7 +388,7 @@ def check_folder(path):
     name, version, body, more = check_skill_md_text(text, folder_name)
     errors.extend(more)
 
-    already = {"murmur.yaml", *misspelled}
+    already = {*manifests, *reserved, *misspelled}
     unreferenced = []
     for dirpath, dirnames, filenames in os.walk(path):
         dirnames[:] = sorted(d for d in dirnames if not os.path.islink(os.path.join(dirpath, d)))
