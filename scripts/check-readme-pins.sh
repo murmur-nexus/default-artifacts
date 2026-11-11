@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Check that every artifact version a doc pins is that artifact's current version.
 #
-# An artifact's version is written once, in the `version:` of its own murmur.yaml.
+# An artifact's version is written once: in the `version:` of a driver's, hook's or
+# tool's own murmur.yaml, or in the `metadata.version` of a skill's SKILL.md front block.
 # READMEs, skills and BUILD.md copy it into install lines and example manifests, and a
 # copy left behind by a bump tells the reader to install a version that is not the
 # one documented beside it. This holds every copy to `./scripts/list-artifacts.sh`.
@@ -27,10 +28,11 @@
 #
 # Output, one line per offending pin:
 #   <file>:<line>: murmur/<name> pinned at <v>, its murmur.yaml says <v'>
+#   <file>:<line>: murmur/<name> pinned at <v>, its SKILL.md says <v'>     (a skill)
 #   <file>:<line>: murmur/<name> names no artifact in this repository
 #
 # Exit codes:
-#   0 — every pin matches (prints `OK: <n> pins in <m> files match their murmur.yaml version`)
+#   0 — every pin matches (prints `OK: <n> pins in <m> files match their artifact's version`)
 #   1 — a stale or unknown pin
 #   2 — usage error, a missing file, or list-artifacts.sh failed
 set -euo pipefail
@@ -80,9 +82,11 @@ import re
 import sys
 
 expected = {}
+version_file = {}
 for row in sys.argv[1].splitlines():
     cols = row.split("\t")
     expected[cols[1]] = cols[2]
+    version_file[cols[1]] = "SKILL.md" if cols[3] == "skill" else "murmur.yaml"
 files = sys.argv[2:]
 
 VERSION = r"\d+\.\d+\.\d+"
@@ -112,7 +116,7 @@ def check(path, lineno, name, version, unknown_is_error=True):
     pins += 1
     pinned_files.add(path)
     if version != want:
-        findings.append((path, lineno, f"murmur/{name} pinned at {version}, its murmur.yaml says {want}"))
+        findings.append((path, lineno, f"murmur/{name} pinned at {version}, its {version_file[name]} says {want}"))
 
 
 def key_line(line):
@@ -201,5 +205,5 @@ if findings:
     sys.stdout.flush()
     print(f"error: {len(findings)} stale or unknown pin(s)", file=sys.stderr)
     sys.exit(1)
-print(f"OK: {pins} pins in {len(pinned_files)} files match their murmur.yaml version")
+print(f"OK: {pins} pins in {len(pinned_files)} files match their artifact's version")
 PY

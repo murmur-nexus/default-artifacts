@@ -73,6 +73,20 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
+      # The first start of the runner's Chromium builds its font cache and profile, which takes
+      # longer than the 20 s tool-browser waits for a DevTools port, so the first browser tests
+      # to run in parallel failed on it while later ones passed. Pay that cost once here.
+      - name: Warm the runner's Chromium
+        timeout-minutes: 3
+        run: |
+          for name in chromium chromium-browser google-chrome chrome; do
+            if command -v "$name" >/dev/null; then
+              "$name" --headless --no-sandbox --disable-gpu --dump-dom about:blank >/dev/null 2>&1 || true
+              echo "warmed $name"
+              break
+            fi
+          done
+
       # Pinned WASI C toolchain (wasi-sdk.toml) beside wasm-tools: the wasm32-wasip2 C
       # compiler that .cargo/config.toml names, for C sources compiled into a component
       # (the bundled SQLite of tool-test-report, tool-code-coverage and tool-code-graph, and

@@ -1,4 +1,0 @@
-name: skill-create-manifest
-version: 0.15.0
-runtime: skill
-description: "Skill artifact: complete knowledge for generating valid murmur manifest files"
