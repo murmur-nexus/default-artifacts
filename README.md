@@ -159,17 +159,23 @@ component (`wasm32-wasip2`, exporting `murmur:tool/run`), shipped as one zip for
 
 ## Skills
 
-Documentation artifacts (`runtime: skill`). No binary or WASM component — each contains a
-`skill.md` guidance file the runtime installs to `tools/<name>/skill.md` in the session's
-runtime directory (`$MURMUR_RUNTIME_DIR`, read-only to the capsule) before the agent loop
-starts. The agent reads the file voluntarily; content is never injected into the system prompt.
-That is the layout of `mur` 0.7.0 or later; `mur` v0.6.0 and earlier install the file into the
-capsule workdir instead.
+Documentation artifacts, each a standard [Agent Skills](https://agentskills.io/specification)
+folder holding one `SKILL.md`. No binary or WASM component. Install them into Claude Code, Cursor or
+any other agent that reads the standard with:
+
+```bash
+npx skills add murmur-nexus/default-artifacts
+```
+
+or into a Murmur capsule as `murmur/<name>` artifacts with `runtime: skill`, which the runtime
+installs as `tools/<name>/SKILL.md` in the session's runtime directory, read-only to the capsule.
+Building or installing them through `mur` needs a `mur` containing murmur `35653488` (v0.11.0 or
+later). [skills/README.md](./skills/README.md) holds each skill's release history.
 
 | Artifact | Location | Description |
 |---|---|---|
-| `skill-create-manifest` | `skills/skill-create-manifest/` | Complete `murmur.yaml` schema reference — enables an agent to generate valid capsule manifests from plain-language task descriptions |
-| `skill-investigation-checkpoint` | `skills/skill-investigation-checkpoint/` | The investigations convention for `checkpoints/decisions.json` — record and reuse investigative verdicts across a session |
+| `skill-create-manifest` | `skills/skill-create-manifest/` | Write, review or fix a `murmur.yaml` for a Murmur capsule or for a tool, driver or hook artifact: the complete schema, worked examples, least-privilege guidance and the default artifact catalog |
+| `skill-investigation-checkpoint` | `skills/skill-investigation-checkpoint/` | Record and reuse the verdicts of a debugging or root-cause investigation in `checkpoints/decisions.json`, so leads already settled are not re-checked after a compaction or handoff |
 
 ## WIT
 

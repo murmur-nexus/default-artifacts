@@ -34,16 +34,27 @@ export MUR_BIN=$PWD/../murmur/target/debug/mur
 
 ## Layout
 
-An artifact is a directory `<category>/<name>/` holding a `murmur.yaml`, where the category is
-`drivers`, `hooks`, `tools` or `skills`. The directory is named after the artifact, and its
-`murmur.yaml` is the only place its name and version are written. Every artifact installs as
-`murmur/<name>`. `./scripts/list-artifacts.sh` lists them, and refuses a directory that differs
-from its `name:` or a name with a `murmur-` prefix.
+An artifact is a directory `<category>/<name>/`, where the category is `drivers`, `hooks`, `tools`
+or `skills`, named after the artifact. A driver, hook or tool holds a `murmur.yaml`, the only place
+its name and version are written. A skill is `skills/<name>/SKILL.md`, a standard Agent Skills
+folder whose front block holds its name, description and `metadata.version`, the only place its
+name and version are written; it holds no `murmur.yaml`, and `mur build` generates the zip's from
+the front block. Every artifact installs as `murmur/<name>`. `./scripts/list-artifacts.sh` lists
+them, and refuses a directory that differs from its `name:` or a name with a `murmur-` prefix.
 
 | Kind | Declared by | Payload | Built by |
 |---|---|---|---|
 | wasm | `implementation: wasm`, or none (drivers, hooks) | `<name with - as _>.wasm` | `./scripts/build-wasm.sh` |
-| skill | `runtime: skill` | `skill.md` | nothing to compile |
+| skill | `skills/<name>/SKILL.md` front block | `SKILL.md` and the files it names | nothing to compile |
+
+`./scripts/check-skill-folders.sh` holds every skill folder to the standard: `SKILL.md` spelled
+exactly so, `name` equal to the folder's name, a `description` of at most 1024 characters, a
+semver `metadata.version`, no `murmur.yaml`, no symlink, and every other file named in the body.
+`list-artifacts.sh` and `package-artifact.sh` run the same checks, and
+`./scripts/test-check-skill-folders.sh` tests them. Because the folders follow the standard,
+`npx skills add murmur-nexus/default-artifacts` installs them into any agent that reads it;
+`npx skills` reads the default branch. [skills/README.md](./skills/README.md) holds each skill's
+release history, outside every skill folder, so neither `npx skills` nor `mur build` packs it.
 
 Every tool is a `wasm32-wasip2` component, packed as one zip for every platform. A tool runs a
 program through `murmur:process`, under `capabilities.shell.allow`, as `tool-git` runs `git`,
@@ -162,8 +173,8 @@ The driver's README lists each provider error it marks under `## Transient failu
 
 ## Release
 
-1. Bump `version:` in the `murmur.yaml` of every artifact whose payload changed — a minor bump
-   below 1.0, `0.5.0` → `0.6.0`. `./scripts/check-version-drift.sh` names any you missed; CI runs
+1. Bump `version:` in the `murmur.yaml` of every artifact whose payload changed, or
+   `metadata.version` in a skill's `SKILL.md` — a minor bump below 1.0, `0.5.0` → `0.6.0`. `./scripts/check-version-drift.sh` names any you missed; CI runs
    it on every push.
 2. Bump `[workspace.package] version` in `Cargo.toml` to the next minor. It names the release
    only: every crate pins `version = "0.0.0"`, so neither `Cargo.lock` nor any artifact's bytes
@@ -172,6 +183,9 @@ The driver's README lists each provider error it marks under `## Transient failu
    `./scripts/murmur-pin.sh --set <commit>` (see [WIT mirror](#wit-mirror)). It rewrites the
    `MURMUR_REV` line in `build.yml`, re-mirrors the WIT and lists the artifacts that need a bump.
    Bump those, and commit the `MURMUR_REV` line, the mirror and the bumps together.
+   `MURMUR_REV` must reach a murmur containing `35653488` before a release packs the skills: an
+   earlier `mur` cannot build a `SKILL.md` folder, and `package-artifact.sh` refuses a zip whose
+   packed name or version differs from the front block.
 4. Merge, then tag the merge commit `v<workspace version>` and push the tag.
 5. The `build` workflow runs. `verify` checks that the tag is `v` + the workspace version and the
    newest `v*` tag, and that no artifact drifted. `release` builds `mur` at `MURMUR_REV` and the
@@ -187,7 +201,7 @@ The driver's README lists each provider error it marks under `## Transient failu
 
 **Docs pin the current version.** READMEs, skills and this page copy artifact versions into
 install lines and example manifests. `./scripts/check-readme-pins.sh` holds every copy to the
-artifact's `murmur.yaml`, and CI runs it on every push. `skills/skill-create-manifest/skill.md`
+artifact's version, and CI runs it on every push. `skills/skill-create-manifest/SKILL.md`
 pins artifacts too, and it is that skill's payload: bumping an artifact it pins means updating the
 pin, which changes the skill, so the skill needs a bump as well unless it has already moved since
 the last tag.
@@ -228,7 +242,7 @@ packs identical bytes, and a re-run over one commit writes the same index.
 
 | Class | Inputs |
 |---|---|
-| `own tree` | the artifact's `murmur.yaml`, `Cargo.toml`, `src/`, `skill.md` |
+| `own tree` | a crate's `murmur.yaml`, `Cargo.toml` and `src/`; a skill's whole folder, every file `mur build` packs (all but dot-names and `*.mur.zip`) |
 | `path deps` | each `libs/*` it links, transitively |
 | `wit mirror` | the `wit/` subtree its bindgen `path:` names |
 | `workspace` | `[workspace.package]` minus its version (with it, for a crate that inherits `version.workspace = true`), the `[workspace.dependencies]` it declares, its resolved third-party versions in `Cargo.lock`, `rust-toolchain.toml`, and `wasi-sdk.toml` for a wasm artifact linking `libsqlite3-sys`, `tree-sitter`, `tree-sitter-rust` or `tree-sitter-python` (the crates in `WASM_C_CRATES`) |

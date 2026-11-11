@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Check that no artifact's published bytes changed while the `version:` in its
-# murmur.yaml stayed put.
+# Check that no artifact's published bytes changed while its version stayed put:
+# the `version:` in a driver's, hook's or tool's murmur.yaml, or the
+# `metadata.version` in a skill's SKILL.md front block.
 #
 # A `.mur.zip` is served by name and version alone. `mur install` writes the
 # payload's sha256 into the consumer's murmur.lock, so re-publishing different
@@ -12,15 +13,26 @@
 #
 # So the rule this enforces is the one BUILD.md states as "a version is a
 # promise about bytes", applied to every input: if a change alters what an artifact
-# ships, the `version:` in its murmur.yaml moves in the same commit.
+# ships, its version moves in the same commit.
+#
+# Which artifacts exist at a ref is read from that ref: drivers, hooks and tools
+# from `<category>/<name>/murmur.yaml`, skills only from `skills/<name>/SKILL.md`,
+# through the front-block reader in scripts/lib/skill_folder.py. A skill's
+# murmur.yaml is never read, so at a tag from before skills became SKILL.md
+# folders (v0.37.0 and earlier) no skill appears: a comparison against such a tag
+# skips the skills, and --audit covers a skill only from the first tag that ships
+# its SKILL.md.
 #
 # What counts as an input to an artifact's bytes:
 #
 #   own tree        Everything under the artifact's path that is packaged or
-#                   compiled — murmur.yaml, src/, skill.md.
+#                   compiled. For a crate: murmur.yaml, Cargo.toml, src/;
 #                   README.md, tests/, benches/, examples/ and nested crates are
-#                   excluded: none of them reach the zip. A nested crate that is
-#                   genuinely linked in comes back through `path deps` below.
+#                   excluded, as none of them reach the zip, and a nested crate
+#                   that is genuinely linked in comes back through `path deps`
+#                   below. For a skill: every file in its folder but dot-names and
+#                   *.mur.zip, which is what `mur build` packs, a README.md
+#                   included.
 #
 #   path deps       Each `path = "../../libs/x"` dependency, transitively. These
 #                   are compiled into the dependent component, so changing one
@@ -135,6 +147,12 @@ import sys
 
 repo, mode, base_ref, head_ref = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
+# The repository's one reader of a SKILL.md front block, from this checkout's
+# scripts/lib whatever ref is being read.
+sys.dont_write_bytecode = True
+sys.path.insert(0, f"{repo}/scripts/lib")
+from skill_folder import parse_front_block  # noqa: E402
+
 # --------------------------------------------------------------------------
 # git plumbing, with the two caches that make --audit finish in seconds: a ref
 # is read many times over, and a blob that did not change between two tags is
@@ -186,7 +204,8 @@ def show(ref, path):
 # same manifests, with the versions their release shipped, so one reader serves
 # every ref.
 # --------------------------------------------------------------------------
-MANIFEST_PATH = re.compile(r"^(drivers|hooks|tools|skills)/[^/]+/murmur\.yaml$")
+MANIFEST_PATH = re.compile(r"^(drivers|hooks|tools)/[^/]+/murmur\.yaml$")
+SKILL_PATH = re.compile(r"^skills/[^/]+/SKILL\.md$")
 TOP_LEVEL = re.compile(r"""^(name|version|implementation):\s*["']?([^"'#\s]+)""")
 
 
@@ -196,13 +215,26 @@ def read_artifacts(ref):
         return {}
     artifacts = {}
     for path in out.stdout.splitlines():
-        if not MANIFEST_PATH.match(path):
+        if MANIFEST_PATH.match(path):
+            entry = {"path": path.rsplit("/", 1)[0], "version_file": path}
+            for line in (show(ref, path) or "").splitlines():
+                match = TOP_LEVEL.match(line)
+                if match and match.group(1) not in entry:
+                    entry[match.group(1)] = match.group(2)
+        elif SKILL_PATH.match(path):
+            fields, _body, _errors = parse_front_block(show(ref, path) or "")
+            metadata = fields.get("metadata")
+            entry = {
+                "path": path.rsplit("/", 1)[0],
+                "version_file": f"{path} (metadata.version)",
+                "skill": True,
+                "name": fields.get("name"),
+                "version": metadata.get("version") if isinstance(metadata, dict) else None,
+            }
+            if not all(isinstance(entry[k], str) for k in ("name", "version")):
+                continue
+        else:
             continue
-        entry = {"path": path.rsplit("/", 1)[0]}
-        for line in (show(ref, path) or "").splitlines():
-            match = TOP_LEVEL.match(line)
-            if match and match.group(1) not in entry:
-                entry[match.group(1)] = match.group(2)
         if entry.get("name") and entry.get("version"):
             artifacts[entry["name"]] = entry
     return artifacts
@@ -227,6 +259,17 @@ def normalise(path):
             continue
         parts.append(part)
     return "/".join(parts)
+
+
+def skill_tree(ref, root):
+    """A skill folder's blobs as `mur build` packs them: all but dot-names and *.mur.zip."""
+    kept = {}
+    for name, sha in ls_tree(ref, root).items():
+        rest = name[len(root) + 1:]
+        if any(part.startswith(".") for part in rest.split("/")) or rest.endswith(".mur.zip"):
+            continue
+        kept[name] = sha
+    return kept
 
 
 def own_tree(ref, root):
@@ -450,6 +493,12 @@ def inherits_workspace_version(entries):
 def fingerprint(ref, artifact):
     """A digest per input class, so a mismatch names what moved."""
     root = normalise(artifact["path"])
+    if artifact.get("skill"):
+        own = skill_tree(ref, root)
+        if not own:
+            return None
+        joined = "\n".join(f"{sha} {name}" for name, sha in sorted(own.items()))
+        return {"own tree": hashlib.sha256(joined.encode()).hexdigest()}
     own = own_tree(ref, root)
     if not own:
         return None
@@ -496,10 +545,10 @@ def compare(base, head):
     base_artifacts = read_artifacts(base)
     head_artifacts = read_artifacts(head)
     if not head_artifacts:
-        print(f"error: no <category>/<name>/murmur.yaml at {head}", file=sys.stderr)
+        print(f"error: no <category>/<name>/murmur.yaml and no skills/<name>/SKILL.md at {head}", file=sys.stderr)
         return 2
 
-    drifted, checked = [], 0
+    drifted, checked, skills_checked = [], 0, 0
     for name, entry in sorted(head_artifacts.items()):
         was = base_artifacts.get(name)
         if was is None:
@@ -510,11 +559,12 @@ def compare(base, head):
         if before is None or after is None:
             continue
         checked += 1
+        skills_checked += 1 if entry.get("skill") else 0
         changed = [k for k in after if before.get(k) != after[k]]
         if changed:
             drifted.append((name, entry["version"], changed))
 
-    print(f"Compared {checked} artifact(s) held at the same version since {base}.")
+    print(f"Compared {checked} artifact(s) held at the same version since {base}, {skills_checked} of them skill(s).")
     if not drifted:
         print("No drift: every artifact whose inputs changed also changed version.")
         return 0
@@ -524,9 +574,10 @@ def compare(base, head):
     for name, version, changed in drifted:
         print(f"  {name}@{version} — changed: {', '.join(changed)}")
     print("")
-    print("Bump `version:` (minor, below 1.0) in each one's murmur.yaml:")
+    print("Bump the version (minor, below 1.0) of each one: `version:` in a murmur.yaml,")
+    print("`metadata.version` in a skill's SKILL.md front block:")
     for name, _version, _changed in drifted:
-        print(f"  {head_artifacts[name]['path']}/murmur.yaml")
+        print(f"  {head_artifacts[name]['version_file']}")
     print("and commit the result before tagging. Re-publishing different bytes at a")
     print("version consumers already resolved breaks their murmur.lock sha256 pin.")
     return 1

@@ -16,7 +16,8 @@
 #   bytes gate      every name@version in both the previous index and the new one
 #                   must carry the identical asset set — each file and its sha256.
 #                   A mismatch is the artifact's payload changing at an unchanged
-#                   version; the fix is to bump `version:` in its murmur.yaml.
+#                   version; the fix is to bump its version: `version:` in its
+#                   murmur.yaml, or `metadata.version` in a skill's SKILL.md.
 #   level gate      every version must carry `built_at_level`. A version without
 #                   one fits no WIT level of the `mur` that indexed it, and an
 #                   explicit `mur install` of it is refused.
@@ -93,11 +94,14 @@ if ! "$MUR" index "$RELEASE_DIR" --repo "$REPO" --release "$TAG" ${merge[@]+"${m
     exit 1
 fi
 
-# The directory an artifact lives in, for the fix the gate names. Falls back to a
-# bare name when the artifact is not in this checkout (one only an older release
-# carried, say).
-artifact_dir() {
-    bash "$SCRIPT_DIR/list-artifacts.sh" 2>/dev/null | awk -F'\t' -v n="$1" '$2 == n { print $1; found = 1 } END { if (!found) print "<category>/" n }'
+# The file an artifact's version is written in, for the fix the gate names: a
+# skill's SKILL.md front block, any other artifact's murmur.yaml, told apart by
+# list-artifacts.sh's runtime column. Falls back to a bare name when the artifact
+# is not in this checkout (one only an older release carried, say).
+version_file() {
+    bash "$SCRIPT_DIR/list-artifacts.sh" 2>/dev/null | awk -F'\t' -v n="$1" '
+        $2 == n { print $1 ($4 == "skill" ? "/SKILL.md (metadata.version)" : "/murmur.yaml"); found = 1 }
+        END { if (!found) print "<category>/" n "/murmur.yaml" }'
 }
 
 fail=0
@@ -128,13 +132,13 @@ if [ -n "$PREVIOUS" ]; then
         last=""
         while IFS=$'\t' read -r name version file old new; do
             if [ "$name@$version" != "$last" ]; then
-                [ -z "$last" ] || echo "    bump its version in $(artifact_dir "${last%@*}")/murmur.yaml" >&2
+                [ -z "$last" ] || echo "    bump its version in $(version_file "${last%@*}")" >&2
                 echo "  $name@$version" >&2
                 last="$name@$version"
             fi
             echo "    $file: published sha256 $old, new sha256 $new" >&2
         done <<< "$mismatches"
-        echo "    bump its version in $(artifact_dir "${last%@*}")/murmur.yaml" >&2
+        echo "    bump its version in $(version_file "${last%@*}")" >&2
     fi
 fi
 

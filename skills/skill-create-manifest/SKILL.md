@@ -1,12 +1,21 @@
+---
+name: skill-create-manifest
+description: "Write, review or fix a murmur.yaml for a Murmur capsule or for a Murmur tool, driver or hook artifact, from a plain-language description: the complete manifest schema (artifacts, capabilities, lifecycle, context, inference, observability, deploy), worked examples, least-privilege guidance and the catalog of Murmur's default artifacts with what each entry needs. Use when creating or editing a murmur.yaml, choosing artifacts or capability grants for a capsule, or fixing a manifest that mur refuses."
+metadata:
+  version: "0.16.0"
+---
 # Murmur Manifest (`murmur.yaml`) — Complete Schema Reference
 
-This skill teaches you to generate a valid `murmur.yaml` for any murmur capsule or artifact
-from a plain-language task description.
+This skill is for any agent asked to write, review or fix a Murmur `murmur.yaml`: Claude Code,
+Cursor, an agent inside a Murmur capsule, or any other agent that reads Agent Skills. It teaches
+you to generate a valid `murmur.yaml` for a Murmur capsule, or for a Murmur tool, driver or hook
+artifact, from a plain-language task description.
 
 `murmur.yaml` has two contexts:
 
-- **Artifact manifest** — used by `mur build` to package a `.mur.zip` artifact (tool, driver, hook,
-  or skill). Requires `name`, `version`, and `runtime` at the top level.
+- **Artifact manifest** — used by `mur build` to package a tool, driver or hook into a `.mur.zip`
+  artifact. Requires `name`, `version`, and `runtime` at the top level. A skill artifact has no
+  `murmur.yaml`: its name, description and version are in its `SKILL.md` front block (§2).
 - **Capsule manifest** — used by `mur run` to launch an agent session. Requires only `name` and
   `version`; the `runtime` field is optional at the capsule level but include `runtime: tool` so
   that `mur build` can also validate the manifest.
@@ -38,8 +47,7 @@ The `runtime:` field declares how the artifact behaves at runtime.
 
 ### `tool`
 
-Agent-callable tool. Appears in the LLM tool inventory and in MURMUR.md `## Installed Tools`.
-Every tool is a WASM component; the artifact's own `murmur.yaml` declares
+Agent-callable tool. Appears in the model's tool inventory. Every tool is a WASM component; the artifact's own `murmur.yaml` declares
 `implementation: wasm`.
 
 In the **capsule `artifacts:` block**, always use `runtime: tool` for tools. Any other value is
@@ -62,17 +70,46 @@ the agent. Declared in the capsule `artifacts:` block with `runtime: hook`.
 
 ### `skill`
 
-Documentation artifact — no binary or WASM component. Its `skill.md` is installed to
-`tools/<name>/skill.md` in the session's runtime directory before the agent loop starts. That
-directory is read-only: the agent can read the file there and cannot change it. MURMUR.md is in
-the same directory. MURMUR.md's `- Runtime directory:` entry gives the directory's path and the
-name each of the session's tools opens it by, and its `## Installed Skills` section lists each
-skill.
+Documentation artifact — no binary or WASM component. A skill follows the Agent Skills standard
+(agentskills.io): a folder named for the skill, holding a file named exactly `SKILL.md` that opens
+with a front block, then the body the agent receives:
+
+```markdown
+---
+name: code-review-conventions
+description: "Project PR review conventions: what to check and how to report it. Use when reviewing a pull request."
+metadata:
+  version: "1.0.0"
+---
+# Code Review Conventions
+
+Group findings by severity — see references/severity-levels.md.
+```
+
+| Front block key | Rule | Used for |
+|---|---|---|
+| `name` | 1–64 lowercase letters, digits and `-`; no `-` at the start or end, no `--`; equal to the folder's name | The artifact name |
+| `description` | Non-empty, at most 1024 characters | The skill's summary to the model |
+| `metadata.version` | A semver string, quoted: `"1.0.0"` | The artifact version; needed by `mur build` only |
+
+Every other key (`license`, `compatibility`, `allowed-tools`, other `metadata` entries) is left
+untouched. The front block is YAML: quote a value that holds `: `, or the build refuses the block
+as invalid YAML. Files beside `SKILL.md`, such as `references/severity-levels.md`, are packed at
+their path relative to the folder. **A skill folder holds no `murmur.yaml`**: the front block is
+where the skill's name, description and version live.
+
+`mur build <folder>` packs the folder. The artifact holds the folder's files plus a `murmur.yaml`
+generated from the front block (`name`, `version`, `runtime: skill`, `description`) and
+`murmur-build.json`. A root `skill.md`, `Skill.md` or any other casing of `SKILL.md`, a
+`murmur.yaml` beside `SKILL.md`, or a broken front block rule is refused with `E-BLD-009`, and no
+artifact is written. A skill artifact built by an earlier `mur`, holding a lowercase `skill.md`, is
+refused by `mur install`, `mur publish` and a launch with `E-REG-017`; rebuild it from a `SKILL.md`
+folder.
 
 Every skill is also offered to the model as a tool with no input parameters: calling it by name
-returns its `skill.md`. The one exception is the skill named in `inference.system_prompt_artifact`
-(§7): its content is read once at launch, bound as the system prompt, and not offered as a tool.
-No other skill content enters the system prompt.
+returns the body of its `SKILL.md`, without the front block. The one exception is the skill named
+in `inference.system_prompt_artifact` (§7): its body is read once at launch, bound as the system
+prompt, and not offered as a tool. No other skill content enters the system prompt.
 
 ---
 
@@ -109,7 +146,7 @@ artifacts:
         records: true          # hook-debug.jsonl goes in the records directory (§4.3a)
 
   - name: murmur/skill-create-manifest
-    version: "0.15.0"
+    version: "0.16.0"
     runtime: skill
 ```
 
@@ -692,7 +729,7 @@ name its `artifacts:` entry uses. For live discovery, use `mur search <keyword>`
 | `murmur/tool-test-report` | tool | WASM component. Parses a test-runner output file the agent already captured (`cargo_test`, `pytest`, `go_test`, `jest`, or `auto`) into a structured failure list; never runs tests. `input_path` and `repo_path` are relative to the work folder, or absolute inside a host folder the session opened. |
 | `murmur/tool-write` | tool | Creates or replaces a file and any missing directories: `path`, `content`. Its `path` is a declared write destination, so `filesystem.read_only` refuses a write under a read-only entry. |
 | `murmur/skill-create-manifest` | skill | This artifact. Provides complete manifest generation guidance. |
-| `murmur/skill-investigation-checkpoint` | skill | The investigations convention for `checkpoints/decisions.json`: record and reuse investigative verdicts (ruled-out, confirmed, uncertain) across a session instead of re-deriving them. |
+| `murmur/skill-investigation-checkpoint` | skill | Records and reuses the verdicts of a debugging or root-cause investigation in `checkpoints/decisions.json` — each lead's `stable_id`, verdict (ruled-out, confirmed, uncertain), 0.0–1.0 confidence and rationale — so leads already settled are not re-checked after a compaction or handoff. |
 
 **Using artifacts in a capsule manifest:**
 
@@ -711,3 +748,17 @@ artifacts:
 
 Always specify an exact `version`. Run `mur list` to see which versions are installed locally, or
 `mur install -g murmur/<name>@<version>` to fetch a specific version.
+
+---
+
+## In a Murmur capsule
+
+This section applies only when this skill runs inside a Murmur capsule; an agent anywhere else can
+skip it.
+
+Before the agent loop starts, the runtime installs each skill folder to `tools/<name>/` in the
+session's runtime directory, with its `SKILL.md` inside. That directory is read-only: the agent
+can read the files there and cannot change them. MURMUR.md is in the same directory. MURMUR.md's
+`- Runtime directory:` entry gives the directory's path and the name each of the session's tools
+opens it by. Its `## Installed Tools` section lists each tool artifact (§2 `tool`), and its
+`## Installed Skills` section lists each skill (§2 `skill`).
