@@ -1075,3 +1075,54 @@ fn no_line_but_a_result_line_reports_a_count() {
         }
     }
 }
+
+fn login_output(exit_code: Option<i32>, stdout: &str) -> driver_claude_code::LoginOutput {
+    driver_claude_code::LoginOutput {
+        exit_code,
+        stdout: stdout.to_string(),
+        stderr: String::new(),
+    }
+}
+
+#[test]
+fn the_login_check_reads_claudes_logged_in_field() {
+    use driver_claude_code::{read_login, LoginState};
+
+    assert_eq!(
+        read_login(&login_output(
+            Some(0),
+            r#"{"loggedIn":true,"email":"a@b.c"}"#
+        )),
+        LoginState::LoggedIn
+    );
+    assert!(matches!(
+        read_login(&login_output(Some(1), r#"{"loggedIn":false}"#)),
+        LoginState::LoggedOut(reason) if reason.contains("claude auth login") && !reason.contains('{')
+    ));
+    assert!(matches!(
+        read_login(&login_output(Some(1), "not json")),
+        LoginState::Unknown(_)
+    ));
+    assert!(matches!(
+        read_login(&login_output(Some(0), "{}")),
+        LoginState::Unknown(_)
+    ));
+}
+
+#[test]
+fn the_driver_declares_its_login_command_and_needs() {
+    use driver_claude_code::{LoginCheck, PathAccess};
+
+    let description = describe();
+    assert_eq!(
+        description.login_check,
+        LoginCheck::Command(vec!["auth".to_string(), "status".to_string()])
+    );
+    assert_eq!(description.harness_needs.paths.len(), 1);
+    assert_eq!(description.harness_needs.paths[0].path, "~/.claude");
+    assert_eq!(
+        description.harness_needs.paths[0].access,
+        PathAccess::ReadWrite
+    );
+    assert_eq!(description.harness_needs.hosts, ["api.anthropic.com"]);
+}

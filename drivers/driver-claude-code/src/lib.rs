@@ -52,6 +52,19 @@ const STREAMS_TEXT: bool = true;
 /// reported and `inference.max_session_tokens` can be weighed against them.
 const REPORTS_USAGE: bool = true;
 
+/// The arguments that make `claude` print its sign-in state as JSON and exit, spending no turn.
+const LOGIN_CHECK_ARGS: &[&str] = &["auth", "status"];
+
+/// What a logged-out reason tells the person to run.
+const SIGN_IN_HINT: &str = "run `claude auth login` as the user mur runs as";
+
+/// The directory holding `claude`'s login store and session state. A subscription run reads its
+/// credential from here and writes session files and refreshed tokens back.
+const CLAUDE_DIR: &str = "~/.claude";
+
+/// The host `claude` calls for inference and for refreshing a subscription login.
+const API_HOST: &str = "api.anthropic.com";
+
 // ── Launch constants ──────────────────────────────────────────────────────────
 
 /// The name of the MCP config file the driver asks the runtime to write, and points
@@ -91,6 +104,52 @@ pub struct Description {
     pub required_env: Vec<String>,
     pub streams_text: bool,
     pub reports_usage: bool,
+    pub login_check: LoginCheck,
+    pub harness_needs: HarnessNeeds,
+}
+
+/// How the runtime asks `claude` whether it is signed in, without spending a turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginCheck {
+    Command(Vec<String>),
+    Unavailable(String),
+}
+
+/// What a harness need may do with a host path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathAccess {
+    Read,
+    ReadWrite,
+}
+
+/// A host directory `claude` needs beyond what the capsule's class gives every command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathNeed {
+    pub path: String,
+    pub access: PathAccess,
+}
+
+/// What `claude` needs beyond the capsule's own grants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessNeeds {
+    pub paths: Vec<PathNeed>,
+    pub hosts: Vec<String>,
+}
+
+/// What the login command printed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginOutput {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Whether `claude` is signed in, as [`read_login`] reads the login command's output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginState {
+    LoggedIn,
+    LoggedOut(String),
+    Unknown(String),
 }
 
 /// The endpoint through which the harness calls the capsule's tools.
@@ -451,6 +510,32 @@ pub fn describe() -> Description {
         required_env: REQUIRED_ENV.iter().map(|s| s.to_string()).collect(),
         streams_text: STREAMS_TEXT,
         reports_usage: REPORTS_USAGE,
+        login_check: LoginCheck::Command(LOGIN_CHECK_ARGS.iter().map(|s| s.to_string()).collect()),
+        harness_needs: HarnessNeeds {
+            paths: vec![PathNeed {
+                path: CLAUDE_DIR.to_string(),
+                access: PathAccess::ReadWrite,
+            }],
+            hosts: vec![API_HOST.to_string()],
+        },
+    }
+}
+
+/// Reads what `claude auth status` printed into whether `claude` is signed in.
+///
+/// The verdict is the `loggedIn` boolean of the JSON object on stdout. No reason echoes the
+/// output, which also names the account.
+pub fn read_login(output: &LoginOutput) -> LoginState {
+    let Ok(status) = serde_json::from_str::<Value>(output.stdout.trim()) else {
+        return LoginState::Unknown(match output.exit_code {
+            Some(code) => format!("`claude auth status` exited {code} without printing JSON"),
+            None => "`claude auth status` was ended by a signal without printing JSON".to_string(),
+        });
+    };
+    match status.get("loggedIn").and_then(Value::as_bool) {
+        Some(true) => LoginState::LoggedIn,
+        Some(false) => LoginState::LoggedOut(format!("claude is not signed in: {SIGN_IN_HINT}")),
+        None => LoginState::Unknown("`claude auth status` printed no `loggedIn` field".to_string()),
     }
 }
 
@@ -1582,8 +1667,9 @@ mod wasm_driver {
     }
 
     use exports::murmur::driver::process::{
-        Bridge, Description, DriverFile, Event, ExitStatus, FailureKind, Guest, InterruptMethod,
-        LaunchPlan, LaunchRequest, QuotaState, QuotaWindow, RetryInfo, Session, SessionInfo,
+        Bridge, Description, DriverFile, Event, ExitStatus, FailureKind, Guest, HarnessNeeds,
+        InterruptMethod, LaunchPlan, LaunchRequest, LoginCheck, LoginOutput, LoginState,
+        PathAccess, PathNeed, QuotaState, QuotaWindow, RetryInfo, Session, SessionInfo,
         SessionMode, ToolCallInfo, ToolCallProgress, ToolCallStart, ToolResultInfo, TurnFailure,
         Usage,
     };
@@ -1620,6 +1706,18 @@ mod wasm_driver {
         fn classify_exit(exit: ExitStatus) -> Event {
             from_event(super::classify_exit(to_exit(exit)))
         }
+
+        fn read_login(output: LoginOutput) -> LoginState {
+            match super::read_login(&super::LoginOutput {
+                exit_code: output.exit_code,
+                stdout: output.stdout,
+                stderr: output.stderr,
+            }) {
+                super::LoginState::LoggedIn => LoginState::LoggedIn,
+                super::LoginState::LoggedOut(reason) => LoginState::LoggedOut(reason),
+                super::LoginState::Unknown(reason) => LoginState::Unknown(reason),
+            }
+        }
     }
 
     fn from_description(description: super::Description) -> Description {
@@ -1636,6 +1734,25 @@ mod wasm_driver {
             required_env: description.required_env,
             streams_text: description.streams_text,
             reports_usage: description.reports_usage,
+            login_check: match description.login_check {
+                super::LoginCheck::Command(args) => LoginCheck::Command(args),
+                super::LoginCheck::Unavailable(reason) => LoginCheck::Unavailable(reason),
+            },
+            harness_needs: HarnessNeeds {
+                paths: description
+                    .harness_needs
+                    .paths
+                    .into_iter()
+                    .map(|need| PathNeed {
+                        path: need.path,
+                        access: match need.access {
+                            super::PathAccess::Read => PathAccess::Read,
+                            super::PathAccess::ReadWrite => PathAccess::ReadWrite,
+                        },
+                    })
+                    .collect(),
+                hosts: description.harness_needs.hosts,
+            },
         }
     }
 

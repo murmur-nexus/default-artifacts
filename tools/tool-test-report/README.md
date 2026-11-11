@@ -101,7 +101,7 @@ cargo build -p tool-test-report --target wasm32-wasip2 --release
 ./scripts/validate-component.sh target/wasm32-wasip2/release/tool_test_report.wasm
 cargo test -p tool-test-report                                     # behaviour, 0.5.0 parity, stable_id and host paths, against the component
 MUR_BIN=$(command -v mur) cargo test -p tool-test-report --test mur_run_stable_id -- --ignored
-./scripts/package-artifact.sh tools/tool-test-report release/      # → release/tool-test-report-0.6.0.mur.zip
+./scripts/package-artifact.sh tools/tool-test-report release/      # → release/tool-test-report-0.7.0.mur.zip
 ```
 
 `tests/fixtures/README.md` names the tool-test-report 0.5.0 build that recorded the frozen results the

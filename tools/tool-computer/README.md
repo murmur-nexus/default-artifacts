@@ -7,7 +7,7 @@ scrolls, types, presses keys, waits and zooms. Every action returns the cursor p
 screenshot as an attachment, so a model that reads images sees the screen.
 
 ```bash
-mur install -g murmur/tool-computer@0.2.0
+mur install -g murmur/tool-computer@0.3.0
 ```
 
 The tool is a WASM component that imports `murmur:process`. Xvfb, the window manager and every
@@ -23,7 +23,7 @@ the tool as its provider's own computer tool and rescale coordinates to this siz
 
 | Requirement | Why |
 |---|---|
-| A `mur` whose `mur version` reports WIT level 4 or higher: murmur `f9d4a1f8` (#390) or later, which no murmur release holds yet | The tool imports `murmur:process`. An older `mur` installs the zip, then refuses the capsule at launch with `error[E-WIT-LEVEL-001]: artifact 'murmur/tool-computer@0.2.0' does not fit WIT level 3, the level this mur serves: it imports murmur:process/process@0.1.0, and level 3 has no version of murmur:process` |
+| A `mur` whose `mur version` reports WIT level 4 or higher: murmur `f9d4a1f8` (#390) or later, which no murmur release holds yet | The tool imports `murmur:process`. An older `mur` installs the zip, then refuses the capsule at launch with `error[E-WIT-LEVEL-001]: artifact 'murmur/tool-computer@0.3.0' does not fit WIT level 3, the level this mur serves: it imports murmur:process/process@0.1.0, and level 3 has no version of murmur:process` |
 | A Linux host with Xvfb | The display is Xvfb, started on the host the capsule runs on |
 | `capabilities.containment: sealed` | murmur runs a tool declaring `provider_tool:` only under `sealed`, and refuses anything weaker with `E-CAP-003`. Under `sealed` the X server listens inside the session's own network namespace, so it is reachable by the tool, its programs and the capsule's shell commands, and by nothing outside. A host that refuses unprivileged user namespaces (many container hosts) cannot give `sealed` |
 | A model with `vision: true` on the driver | A `transport: http` model the driver marks `vision: false` is refused with `E-RUN-057` |
@@ -186,13 +186,13 @@ name: desktop-form
 version: 0.1.0
 artifacts:
   - name: murmur/driver-anthropic
-    version: 0.20.0
+    version: 0.21.0
     runtime: driver
     gateway:
       endpoint: https://api.anthropic.com
       api_key: ${ANTHROPIC_API_KEY}
   - name: murmur/tool-computer
-    version: 0.2.0
+    version: 0.3.0
     runtime: tool
     config:
       launch:

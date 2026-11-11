@@ -103,7 +103,7 @@ capabilities:
       - "https://release-assets.githubusercontent.com"
 artifacts:
   - name: murmur/tool-registry-search
-    version: "0.6.0"
+    version: "0.7.0"
     runtime: tool
     capabilities:            # optional: this tool reaches only these two hosts
       network:

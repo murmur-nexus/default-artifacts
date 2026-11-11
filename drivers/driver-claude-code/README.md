@@ -61,7 +61,7 @@ capabilities:
 artifacts:
   - name: murmur/driver-claude-code
     runtime: driver
-    version: "0.10.0"
+    version: "0.11.0"
 ```
 
 The harness starts from an **empty** environment and sees exactly the variables
@@ -102,6 +102,20 @@ lost. In the three recorded runs, `claude` exited 823 ms, 1,883 ms and 2,003 ms 
   never gets one;
 - when the prompt cache is cold;
 - when the model answers with no suggestion at all.
+
+## Login check and harness needs
+
+`describe()` names how the runtime asks `claude` whether it is signed in, without spending a turn,
+and what `claude` needs beyond the capsule's own grants:
+
+| Field | Value |
+|---|---|
+| `login-check` | `command(["auth", "status"])`; `read-login` reads the `loggedIn` boolean of the JSON it prints. The reason for a logged-out or unreadable answer never echoes the output, which names the account |
+| `harness-needs.paths` | `~/.claude`, `read-write`: the login store and session state |
+| `harness-needs.hosts` | `api.anthropic.com` |
+
+A capsule allows these with `capabilities.harness.paths` and `capabilities.network.allow`, or the
+launch is refused with `E-CAP-021`.
 
 ## Required variables, and why each one stays
 

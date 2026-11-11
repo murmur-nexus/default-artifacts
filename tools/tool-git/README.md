@@ -15,7 +15,7 @@ the capsule's decision point exactly as it puts a shell `git` command: the
 operations outside its scope, `bash` in the shell allowlist serves as the escape hatch.
 
 ```bash
-mur install -g murmur/tool-git@0.7.0
+mur install -g murmur/tool-git@0.8.0
 ```
 
 The tool imports `murmur:process/process@0.1.0`, so it needs a `mur` whose `mur version` reports
@@ -236,7 +236,7 @@ version: 0.1.0
 
 artifacts:
   - name: murmur/tool-git
-    version: "0.7.0"
+    version: "0.8.0"
 
 capabilities:
   shell:
@@ -288,7 +288,7 @@ cargo build -p tool-git --target wasm32-wasip2 --release
 ```
 
 The component is `target/wasm32-wasip2/release/tool_git.wasm`; the zip is
-`dist/tool-git-0.7.0.mur.zip`.
+`dist/tool-git-0.8.0.mur.zip`.
 
 ## Tests
 

@@ -1,5 +1,5 @@
 name: driver-openai
-version: 0.20.0
+version: 0.21.0
 runtime: driver
 description: OpenAI inference driver for Murmur agent capsules — routes each listed OpenAI model to the Responses or Chat Completions endpoint its model page lists, and refuses any other model. Reads store, thinking, reasoning_effort and verbosity from inference.driver.config and rejects any other key; store grants server-side retention and with it stateful continuation via previous_response_id. Sizes every image to the model's dimension and patch limits before sending it, places a tool's image in its function_call_output (Responses) or in a user message after the tool messages (Chat Completions), and reports what it sent in the response's images list. A tool declaring a computer provider_tool block, such as murmur/tool-computer, goes to every Responses model whose page lists computer_use as OpenAI's own computer tool, each computer_call running as an ordered group of tool calls answered by one computer_call_output.
 requires_files:
