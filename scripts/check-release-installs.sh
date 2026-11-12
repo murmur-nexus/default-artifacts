@@ -24,7 +24,17 @@
 # published are not installed: their assets are on that release, not in this
 # directory.
 #
+# A bundle named <payload file>.sigstore.json beside a zip is served as an asset too,
+# so `mur install` verifies it. Without --require-attestation that is not asserted: a
+# release with no bundles installs with mur's unattested warning, as it always has.
+# With it, each install must print `attested by <signer>`, must not print the
+# unattested warning (W-REG-005), and must keep the bundle in the store.
+#
 # Usage:   scripts/check-release-installs.sh <release-dir> --release <tag>
+#                                            [--require-attestation <signer>]
+#            --require-attestation  the signer mur must report, the workflow URL without
+#                                   its @<ref>:
+#                                   https://github.com/<owner>/<repo>/.github/workflows/<file>
 # Output:  one line per install.
 # Exit:    0 — every version installed
 #          1 — an install failed; mur's output is shown. With no
@@ -44,14 +54,15 @@ OWNER_ID=190196424
 REPO="murmur-nexus/default-artifacts"
 
 usage() {
-    echo "usage: $0 <release-dir> --release <tag>" >&2
+    echo "usage: $0 <release-dir> --release <tag> [--require-attestation <signer>]" >&2
     exit 2
 }
 
-RELEASE_DIR="" TAG=""
+RELEASE_DIR="" TAG="" SIGNER=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --release) [ $# -ge 2 ] || usage; TAG="$2"; shift 2 ;;
+        --require-attestation) [ $# -ge 2 ] || usage; SIGNER="$2"; shift 2 ;;
         -*) echo "error: unknown option '$1'" >&2; usage ;;
         *) [ -z "$RELEASE_DIR" ] || usage; RELEASE_DIR="$1"; shift ;;
     esac
@@ -182,6 +193,14 @@ for key in $(printf '%s\n' "$plan" | awk -F'\t' '{ print $1 "@" $2 }' | LC_ALL=C
             exit 1
         fi
     done < <(printf '%s\n' "$plan" | awk -F'\t' -v n="$name" -v v="$version" '$1 == n && $2 == v')
+    if [ -n "$SIGNER" ]; then
+        if ! grep -qF "attested by $SIGNER" <<< "$output" || grep -q 'W-REG-005' <<< "$output" ||
+            [ ! -f "$store/$name-$version.sigstore.json" ]; then
+            echo "FAIL  murmur/$name@$version — expected it attested by $SIGNER. mur printed:" >&2
+            printf '%s\n' "$output" | sed 's/^/    /' >&2
+            exit 1
+        fi
+    fi
     files="$(printf '%s\n' "$plan" | awk -F'\t' -v n="$name" -v v="$version" '$1 == n && $2 == v { printf "%s%s", sep, $3; sep = ", " }')"
     echo "ok    murmur/$name@$version ($files)"
     count=$((count + 1))

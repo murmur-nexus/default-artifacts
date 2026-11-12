@@ -194,9 +194,11 @@ The driver's README lists each provider error it marks under `## Transient failu
    `./scripts/package-release.sh --previous`, and writes `artifacts-index.json` with
    `./scripts/index-release.sh`, merged with the latest release's index. A version an earlier
    release published stays on that release with its entry carried forward: repacked by a newer
-   `mur`, its zip would record a different WIT level in `murmur-build.json` and change bytes. Then
-   `./scripts/check-release-installs.sh` installs every new version through `mur` against a
-   loopback copy of the release, and only then is anything uploaded.
+   `mur`, its zip would record a different WIT level in `murmur-build.json` and change bytes.
+   `attest` signs the packed zips (see [Attestation](#attestation)). `publish` then runs
+   `./scripts/check-release-installs.sh`, which installs every new version through `mur` against a
+   loopback copy of the release and requires each to verify its attestation. Only then is anything
+   uploaded.
 6. Afterwards, `mur install -g murmur/<name>@<version>` resolves from the new release.
 
 **Docs pin the current version.** READMEs, skills and this page copy artifact versions into
@@ -246,6 +248,26 @@ packs identical bytes, and a re-run over one commit writes the same index.
 | `path deps` | each `libs/*` it links, transitively |
 | `wit mirror` | the `wit/` subtree its bindgen `path:` names |
 | `workspace` | `[workspace.package]` minus its version (with it, for a crate that inherits `version.workspace = true`), the `[workspace.dependencies]` it declares, its resolved third-party versions in `Cargo.lock`, `rust-toolchain.toml`, and `wasi-sdk.toml` for a wasm artifact linking `libsqlite3-sys`, `tree-sitter`, `tree-sitter-rust` or `tree-sitter-python` (the crates in `WASM_C_CRATES`) |
+
+## Attestation
+
+Every `.mur.zip` a release adds has a build provenance attestation, so `mur install` can say who
+built it.
+
+| What | Value |
+|---|---|
+| Attested | Each `<name>-<version>.mur.zip` the release packs. The index is not attested |
+| Where the bundle lives | The release asset `<name>-<version>.mur.zip.sigstore.json`, beside its zip |
+| Format | A Sigstore bundle written by `actions/attest-build-provenance`. One statement names every zip of the release as a subject, and the same bundle is uploaded under each zip's name |
+| Identity pinned | `https://github.com/murmur-nexus/default-artifacts/.github/workflows/build.yml`, the workflow that ran. `mur install` records it as `signer` in `murmur.lock` |
+
+Only the `attest` job holds `id-token: write` and `attestations: write`. It runs after the zips and
+the index are final and runs no code from this repository, so the bundles cannot change the bytes
+the gate holds. `publish` fails unless every new version installs with `attested by <signer>` and
+without the unattested warning.
+
+A version an earlier release published keeps the zip it was published with. It has a bundle only if
+that release made one. Verification only warns today: an artifact with no bundle still installs.
 
 ## WIT mirror
 

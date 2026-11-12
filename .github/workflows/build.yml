@@ -33,9 +33,12 @@ env:
 # Pipeline:
 #   1. verify   — the tag is the workspace version and the newest v* tag, and no
 #                 artifact changed its payload at an unchanged version.
-#   2. release  — builds the wasm artifacts, packs everything, indexes it against the
-#                 previous release's index, installs every new version through a
-#                 real `mur`, and only then uploads.
+#   2. release  — builds the wasm artifacts, packs everything and indexes it against the
+#                 previous release's index. Uploads nothing to the release.
+#   3. attest   — signs a build provenance attestation over every packed zip and names
+#                 a `<zip>.sigstore.json` bundle for each. The only job with id-token.
+#   4. publish  — installs every new version through a real `mur`, requiring each to
+#                 verify its attestation, and only then uploads zips, bundles and index.
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -98,9 +101,11 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     env:
       MUR_BIN: ${{ github.workspace }}/murmur/target/debug/mur
+    outputs:
+      payloads: ${{ steps.payloads.outputs.count }}
     steps:
       # Both repositories nest under $GITHUB_WORKSPACE: actions/checkout rejects a path
       # that escapes it, so this is the sibling layout that passes its validation.
@@ -215,9 +220,133 @@ jobs:
           PREVIOUS: ${{ steps.previous.outputs.path }}
         run: ./scripts/index-release.sh "$GITHUB_WORKSPACE/release" --release "$TAG" ${PREVIOUS:+--previous "$PREVIOUS"}
 
+      - name: List release assets
+        run: ls -l release
+
+      # A release that adds no version packs no zip, so there is nothing to attest.
+      - name: Count the payloads
+        id: payloads
+        run: echo "count=$(find release -maxdepth 1 -name '*.mur.zip' | wc -l)" >> "$GITHUB_OUTPUT"
+
+      # Hands the packed payloads, the index and the `mur` that built them to the next
+      # two jobs. Nothing is uploaded to the release from here.
+      - name: Keep the release directory
+        uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: release
+          if-no-files-found: error
+
+      - name: Keep mur
+        uses: actions/upload-artifact@v4
+        with:
+          name: mur
+          path: murmur/target/debug/mur
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Step 3: attest every payload
+  # ---------------------------------------------------------------------------
+  # The one job that may mint a signing identity. It runs no build and no code from the
+  # repository: it reads the zips step 2 packed and signs their digests. The bundles
+  # never enter the gated bytes, because the index and the zips are final before this job
+  # starts.
+  attest:
+    name: Attest the payloads
+    needs: release
+    if: needs.release.outputs.payloads != '0'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - name: Fetch the release directory
+        uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
+
+      # One statement names every zip as a subject, so one bundle covers them all.
+      # `mur install` accepts a bundle when some subject carries the payload's sha256.
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release/*.mur.zip
+
+      # `mur install` looks for `<payload file>.sigstore.json` beside each payload on the
+      # release. The bundle is copied under each zip's name, so no zip is named by hand.
+      - name: Name the bundle beside each payload
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          mkdir bundles
+          count=0
+          for zip in release/*.mur.zip; do
+            cp "$BUNDLE" "bundles/$(basename "$zip").sigstore.json"
+            count=$((count + 1))
+          done
+          echo "Named $count bundle(s)."
+          ls -l bundles
+
+      - name: Keep the bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundles
+          path: bundles
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Step 4: prove the install, then publish
+  # ---------------------------------------------------------------------------
+  # Installs every new version through the `mur` that packed it, with the bundles beside
+  # the zips exactly as the release will hold them, and fails unless each install prints
+  # that it was attested by this workflow. Only then is anything uploaded.
+  publish:
+    name: Create GitHub Release
+    needs: [release, attest]
+    # `attest` is skipped when the release packs no zip; any other outcome but success
+    # stops the publish.
+    if: ${{ !cancelled() && needs.release.result == 'success' && (needs.attest.result == 'success' || needs.attest.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out default-artifacts
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          path: default-artifacts
+
+      - name: Fetch the release directory
+        uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
+
+      - name: Fetch the bundles
+        if: needs.attest.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: bundles
+          path: release
+
+      - name: Fetch mur
+        uses: actions/download-artifact@v4
+        with:
+          name: mur
+          path: mur-bin
+
       - name: Install every new version through mur
         working-directory: default-artifacts
-        run: ./scripts/check-release-installs.sh "$GITHUB_WORKSPACE/release" --release "$TAG"
+        env:
+          MUR_BIN: ${{ github.workspace }}/mur-bin/mur
+        run: |
+          chmod +x "$MUR_BIN"
+          if [ "${{ needs.attest.result }}" = success ]; then
+            set -- --require-attestation "https://github.com/$GITHUB_REPOSITORY/.github/workflows/build.yml"
+          fi
+          ./scripts/check-release-installs.sh "$GITHUB_WORKSPACE/release" --release "$TAG" "$@"
 
       - name: List release assets
         run: ls -l release
