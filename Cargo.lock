@@ -677,6 +677,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "driver-grok-build"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
 name = "driver-huggingface"
 version = "0.0.0"
 dependencies = [
