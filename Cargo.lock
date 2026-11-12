@@ -725,6 +725,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "driver-xai"
+version = "0.0.0"
+dependencies = [
+ "murmur-driver-env",
+ "murmur-driver-stream",
+ "murmur-wasi-http",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "tempfile",
+ "wasip2",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
 name = "driver-zai"
 version = "0.0.0"
 dependencies = [
