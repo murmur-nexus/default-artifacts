@@ -1,0 +1,56 @@
+name: driver-grok-build
+version: 0.1.0
+runtime: driver
+description: |
+  Process driver for Grok Build. It tells a `transport: process` capsule how to drive xAI's
+  `grok` CLI: the argument list for one headless turn, the task file it reads the prompt from,
+  the agent file that points the harness at the capsule's tool bridge, and the environment
+  switches that keep the operator's Claude Code, Cursor and Codex configuration and Grok's own
+  memory out of the turn. A turn is interrupted with SIGINT.
+
+  Unlike an HTTP driver, it holds no credential and makes no request — the harness authenticates
+  itself, which is the point of process transport: a turn spends the SuperGrok subscription
+  `grok` is logged into rather than an API key. The driver is granted nothing at all: no network,
+  no filesystem, no environment.
+
+  The capsule must allow what the harness cannot run without:
+
+      inference:
+        transport: process
+        driver:
+          artifact: murmur/driver-grok-build
+      capabilities:
+        env:
+          allow: [HOME, PATH]
+        harness:
+          paths:
+            - path: ~/.grok
+              access: read-write
+        network:
+          allow: [api.x.ai, auth.x.ai]
+        shell:
+          allow: [cat]
+
+  The `shell.allow` entry is what makes murmur grant a contained harness the host's TLS trust
+  store; without it `grok` cannot build its MCP client and the capsule's tools never reach the
+  model.
+
+  The model reaches the capsule's tools only through Grok's two MCP meta-tools, `search_tool` and
+  `use_tool`, and the driver reports each bridged call under its bare tool name. A call to any
+  tool that is not the capsule's is noted in the trace, and `grok` refuses to run one from an
+  MCP server the turn did not allow.
+
+  It reads the harness's `streaming-messages-json` output back into the runtime's events: the
+  session, streamed text and thinking, bridged tool calls and their unwrapped results, the
+  input, output, cache-read and cache-creation token counts `grok` reports for the run, and a
+  turn that ended or failed. A failing turn's kind is read from `grok`'s stop reason and the text
+  of its errors.
+
+  Setting `reasoning_effort` under `inference.driver.config` to one of `none`, `minimal`, `low`,
+  `medium`, `high`, `xhigh` or `max` starts `grok` with `--reasoning-effort <level>`. Any other
+  key or value refuses the turn with a message naming it.
+
+  An image in a tool result is reported in the feed as `[image: <media type>, <n> bytes]`, never
+  as its bytes.
+requires_files:
+  - driver_grok_build.wasm

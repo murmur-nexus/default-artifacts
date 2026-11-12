@@ -5,6 +5,7 @@ members = [
   "drivers/driver-claude-code",
   "drivers/driver-codex-cli",
   "drivers/driver-deepseek",
+  "drivers/driver-grok-build",
   "drivers/driver-huggingface",
   "drivers/driver-moonshotai",
   "drivers/driver-openai",
