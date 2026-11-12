@@ -44,23 +44,33 @@ streaming-messages-json --include-partial-messages --agent <agent file>
 
 ## Recording 12
 
+The fixture was recorded on 2026-11-12, after the agent file's body became the system prompt,
+with `S=/space/scratch/sp101a`, the mock on 28731 and the bridge on 28732 (token
+`rec12-bridge-token`):
+
 ```bash
-cargo run -q -p driver-grok-build --example write_plan -- \
+cargo build -q -p driver-grok-build --example write_plan
+./target/debug/examples/write_plan \
   $S/rec12/files $S/rec12/plan.json murmur http://127.0.0.1:28732/mcp rec12-bridge-token \
   echo_tool,session-status,image_tool new 019a7c3e-5b10-7a4c-9e21-3f6d2b8a1c05 \
   '{"reasoning_effort":"low"}' - '- You are a Murmur capsule. Answer briefly.' \
   'CALL_TOOL=use_tool:murmur__image_tool'
-python3 -I $L/run_plan.py $S/rec12/plan.json $S/bin/grok $S/rec12/home2 /usr/bin:/bin \
-  http://127.0.0.1:28731/v1 $S/rec12/work $S/rec12/final/12-bridge-image-result
+python3 -I $L/run_plan.py $S/rec12/plan.json /space/scratch/grok-101a/bin/grok $S/rec12/home \
+  /usr/bin:/bin http://127.0.0.1:28731/v1 $S/rec12/work $S/rec12/12-bridge-image-result
 ```
+
+The first recording, on 2026-11-11 under `/space/scratch/grok-101a/rec12`, ran the same plan with
+the agent body a fixed line, `You are a Murmur capsule.`. On a new session the override replaces
+the body, and the two streams are the same line for line once `uuid`, `cwd`, message ids and
+durations are set aside.
 
 The plan's argv, with `{files_dir}` replaced:
 
 ```
---prompt-file /space/scratch/grok-101a/rec12/files/task.md
+--prompt-file /space/scratch/sp101a/rec12/files/task.md
 --output-format streaming-messages-json
 --include-partial-messages
---agent /space/scratch/grok-101a/rec12/files/capsule-agent.md
+--agent /space/scratch/sp101a/rec12/files/capsule-agent.md
 --system-prompt-override=- You are a Murmur capsule. Answer briefly.
 --allow MCPTool(murmur__*)
 --no-auto-update
@@ -84,7 +94,7 @@ mcpServers:
       headers:
         Authorization: "Bearer rec12-bridge-token"
 ---
-You are a Murmur capsule.
+- You are a Murmur capsule. Answer briefly.
 ```
 
 `grok` accepted every flag. It exited `0` with an empty stderr.
@@ -136,6 +146,56 @@ The `HOME`-dropped turn ran as `unshare -rm sh -c 'mount -t tmpfs none ~/.grok &
 none /root && exec env -i PATH=/usr/bin:/bin XAI_API_KEY=xai-test GROK_XAI_API_BASE_URL=… <switches>
 grok …'`, so whatever home `grok` fell back to was an empty folder and the operator's login could
 not be read.
+
+## The system prompt on a resumed turn
+
+Measured on 2026-11-12 with `grok` 1.0.77, each case a new session (`-s`) then a resume (`-r`) of
+the same id in the same work folder, the driver's flags and 18 switches, and the mock logging every
+request body (`FULLBODY`). The scripts, kept outside the repo under `/space/scratch/sp101a/scripts/`,
+are `turn.sh` (one turn from `env -i` with a scratch `HOME`, given an agent file, an override
+text and extra args) and `two_turns.sh` (`examples/write_plan` for a new and a resume plan, each run
+by `run_plan.py`). "Custom model" means a scratch `~/.grok/config.toml` holding:
+
+```toml
+[model.mock]
+model = "mock-model"
+base_url = "http://127.0.0.1:28941/v1"
+api_backend = "responses"
+api_key = "xai-test"
+```
+
+and `-m mock`. "Built-in model" means `grok-4.6` through `GROK_XAI_API_BASE_URL`, with no `-m` or
+with `-m grok-4.6`.
+
+| Case | Override | Agent body | New session's system message | Resumed session's system message |
+|---|---|---|---|---|
+| built-in, no `-m` (`runs/b`) | `PROMPT-LINE-A override only.` | `PROMPT-LINE-B body only.` | the override alone (28 chars) | the override alone (28 chars) |
+| built-in, `-m grok-4.6` (`runs/d`) | the same | the same | the override alone | the override alone |
+| custom, `-m mock` (`runs/c`) | the same | the same | the override alone | **`grok`'s own prompt ("You are Grok released by xAI. …"), then the body** (3,452 chars); the override is absent |
+| custom, the driver's plan (`runs/e`): a prompt starting `---`, holding `tools: read_file, run_command`, `mcpServers: []` and a later `---` line | the prompt | the prompt | the prompt alone, byte for byte | `grok`'s own prompt, then the prompt byte for byte at the end |
+| built-in, the driver's plan (`runs/g`) | `- CAPSULE-PROMPT for a built-in model.` | the same | the prompt alone | the prompt alone, once |
+| custom, the driver's plan with an empty prompt (`runs/f`) | empty | empty | `grok`'s own prompt | `grok`'s own prompt |
+
+In every case `init.tools` was `search_tool`, `use_tool` and, with the driver's plan, `init` listed
+the `murmur` server and the MCP reminder said `murmur (3 tools)`: a body holding `---` lines and
+frontmatter-looking keys leaves the real frontmatter in force. The session's `prompt_context.json`
+records `"prompt_mode": "extend"` and the body as `prompt_body`, and its `system_prompt_label` is
+`Grok 4.6` on the built-in model and `Grok` on the custom one.
+
+So the driver writes the system prompt as the agent file's body as well as passing the override:
+the model gets the capsule's prompt on every turn, alone wherever the override holds, and after
+`grok`'s own prompt on a resumed custom-model session. The review of this card also measured
+`--system-prompt=<p>` (the same as the override on resume) and agent frontmatter
+`prompt_mode: replace`, `full` and `override` (no effect); none removes `grok`'s prompt there.
+
+### Side model calls
+
+`batch.sh base 20` ran 20 two-turn custom-model sessions under the driver's switches and counted
+the mock's requests: every session made exactly three, a forced-tool `session_title` call on the new
+session and one model request per turn. None made a title refresh or a "dashboard line" call. The
+review of this card saw both, in 2 of about 10 runs. `GROK_TITLE_REFRESH=false` and
+`GROK_SESSION_RECAP=false` were not added to the driver's switches: with no extra call to suppress,
+no effect could be measured.
 
 ## The guest run
 
@@ -263,6 +323,45 @@ What it took to get there, each one measured:
 | the scratch `HOME` above, whose `config.toml` gives `mock` an inline key | ``⚠ warning[W-RUN-013]: login not checked — `grok models` printed a first line this driver does not recognise`` (the line is `Model 'mock' is using its own API key.`) |
 | the operator's own `HOME` (`mur doctor` with no `HOME` override; runs only `grok version` and `grok models`) | `✓ login logged in`, `✓ version grok 1.0.77 (50ca579fa996) [stable], tested` |
 
+### The guest run again, with the prompt in the agent body
+
+Repeated on 2026-11-12 after the agent file's body became the system prompt, with the same capsule
+and `config.toml` in a fresh `G=/space/scratch/sp101a/guest` (the mock on 28731, its log
+`/space/scratch/sp101a/logs12/mock.log`), on **`scoped`**:
+
+```bash
+/space/scratch/sp101a/scripts/install.sh      # the two local-install.sh commands above, HOME=$G/home
+cd $G/capsule
+HOME=$G/home mur run --containment scoped --workdir $G/work --context grok-guest-fix --task $G/task1.md
+HOME=$G/home mur run --containment scoped --workdir $G/work --context grok-guest-fix --task $G/task2.md
+HOME=$G/home mur trace show ses_01a1cfc988797ab188f010088ed40d96
+HOME=$G/home-empty mur doctor     # $G/home-empty/.grok is empty
+mur doctor                        # the operator's HOME: grok version and grok models only
+```
+
+| Record | First task (`ses_01a1cfc980377303bb524c78d75d3fb0`) | Second task (`ses_01a1cfc988797ab188f010088ed40d96`) |
+|---|---|---|
+| status | `ok` | `ok` |
+| `harness_start` | `harness: grok`, `binary: /space/scratch/grok-101a/bin/grok`, `version_tested: true`, `session_mode: new`, `harness_session_id: 01a1cfc9-829b-7c63-ab36-a9af7db194a7`, `files: [task.md, capsule-agent.md]`, `system_prompt_sha256: 3dc471456c53…` | the same with `session_mode: resume`, the same id and the same `system_prompt_sha256` |
+| `harness_session` | `auth: api-key`, `model: mock`, `W-SEC-031` | the same |
+| `tool_call` | `tool_name: tool-read`, `input: {"path":"hello.txt"}`, `status: ok` | none |
+| usage | `inference` turn 1: 200/30, cached 40; `task_end` 200/30 | `inference` turn 0: 100/15, cached 20 |
+
+`harness-session.json` holds `01a1cfc9-829b-7c63-ab36-a9af7db194a7`, the id `init` reported. No
+`E-RUN-032`, `E-RUN-036`, `E-CAP-019` or `E-CAP-021` appeared.
+
+The mock received four requests: a `session_title` side call, the tool turn, the turn after the
+tool result, and the second task. **The system message of the second task's request is 4,131
+characters: `grok`'s own prompt, then the 703 characters of murmur's prompt** (sha256 prefix
+`3dc471456c53`, the `system_prompt_sha256` murmur traced), ending the message and appearing once.
+murmur's prompt includes the capsule's `- You are a Murmur capsule under test. Answer briefly.`
+The first task's requests carried murmur's prompt alone. Before this change the second task's
+system message was `grok`'s own prompt alone, with the capsule prompt absent.
+
+`mur doctor`: `✗ error[E-RUN-064]: grok is not logged in for this user: grok is not signed in: run
+\`grok login\` as the user mur runs as` with the empty scratch `HOME`, and `✓ login logged in`,
+`✓ version grok 1.0.77 (50ca579fa996) [stable], tested` with the operator's.
+
 ## Handoff: a live SuperGrok run
 
 This card made no subscription turn. To check the driver on a real SuperGrok login:
@@ -348,6 +447,10 @@ mur trace show @1
 - A `tool_call` with `tool_name: tool-read` and `status: ok` in the first and third tasks, under
   the bare name.
 - `inference` records with input and output token counts for each turn, and `task_end` totals.
+- After the second task, `system_prompt.txt` in that session's folder under
+  `~/.grok/sessions/<url-encoded work folder>/<session id>/` holds murmur's prompt for the capsule
+  (it starts `Work folder:` and includes the manifest's `system_prompt`), not `grok`'s own `You are
+  Grok released by xAI. …`. That is what a built-in model keeps on a resume.
 
 **How to spot a host the harness needed but the capsule did not allow.** murmur's resolver
 answers a name outside `capabilities.network.allow` with DNS `REFUSED` and writes no trace record.
@@ -369,3 +472,6 @@ answers a name outside `capabilities.network.allow` with DNS `REFUSED` and write
    `~/.grok/logs/unified.jsonl`, or a `grok reports the capsule's tool bridge as …` note.
 4. The `harness_session` `auth` and `model`, and the per-turn token counts, so the README's
    subscription reading is measured rather than inferred.
+5. The first line of the resumed session's `system_prompt.txt` after the second task: murmur's
+   prompt, or `grok`'s own. If it is `grok`'s own, the model `grok` chose behaves like a custom
+   model on resume, and the capsule's prompt reaches it only after `grok`'s.

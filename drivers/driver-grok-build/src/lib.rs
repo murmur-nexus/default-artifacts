@@ -89,6 +89,11 @@ const OUTPUT_FORMAT: &str = "streaming-messages-json";
 
 /// The flag that replaces `grok`'s own system prompt with the runtime's, written in its `=` form
 /// so a prompt that starts with `-` is never read as a flag.
+///
+/// `grok` honours it on every turn of a session on one of its built-in models. On a resumed
+/// session on a custom model (a `[model.<id>]` entry in its config) it ignores it and sends its own
+/// built-in prompt followed by the agent file's body, which is why the body carries the same
+/// prompt. An empty value replaces nothing: `grok` keeps its own prompt.
 const SYSTEM_PROMPT_FLAG: &str = "--system-prompt-override=";
 
 /// The permission rule kind that allows every tool of one MCP server without asking, as
@@ -105,10 +110,6 @@ const AGENT_DESCRIPTION: &str = "Murmur capsule";
 /// The agent's `tools` frontmatter: exactly `grok`'s two MCP meta-tools and none of its built-in
 /// tools, so the model reaches a tool only through the bridge.
 const AGENT_TOOLS: &str = "search_tool, use_tool";
-
-/// The agent file's body. `--system-prompt-override` replaces it, so it is never sent; `grok`
-/// still requires a definition to have one.
-const AGENT_BODY: &str = "You are a Murmur capsule.";
 
 /// The variables the driver sets in `grok`'s environment, in order, and their values.
 ///
@@ -907,7 +908,7 @@ pub fn launch(request: LaunchRequest) -> Result<Launched, String> {
             },
             DriverFile {
                 name: AGENT_FILE_NAME.to_string(),
-                contents: agent_file(request.bridge.as_ref()),
+                contents: agent_file(request.bridge.as_ref(), &request.system_prompt),
             },
         ],
         // Headless `grok` reads its prompt from `--prompt-file` and never reads stdin, so there
@@ -957,10 +958,11 @@ fn check_bridge_names(bridge: &Bridge) -> Result<(), String> {
         .next()
         .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
         && server.chars().all(is_catalog_char)
+        && !server.contains(TOOL_DELIMITER)
         && !server.ends_with('_');
     if !server_ok {
         return Err(format!(
-            "driver: grok cannot admit the tool bridge's server name {}: it must start with an ASCII letter or '_', use only ASCII letters, digits, '_' and '-', and not end with '_'; {CONSEQUENCE}",
+            "driver: grok cannot admit the tool bridge's server name {}: it must start with an ASCII letter or '_', use only ASCII letters, digits, '_' and '-', hold no '__', and not end with '_'; {CONSEQUENCE}",
             Value::from(server.as_str())
         ));
     }
@@ -1046,15 +1048,21 @@ pub fn tool_name_prefix(server_name: &str) -> String {
     format!("{server_name}{TOOL_DELIMITER}")
 }
 
-/// The agent definition `--agent` points `grok` at: the two meta-tools and, with a bridge, the
-/// bridge as its one MCP server.
+/// The agent definition `--agent` points `grok` at: the two meta-tools, with a bridge the bridge
+/// as its one MCP server, and the runtime's system prompt as its body.
+///
+/// Wherever `--system-prompt-override` takes effect it replaces the body, so the model sees the
+/// prompt once. Where `grok` ignores the override, on a resumed session on a custom model, it sends
+/// its own prompt followed by this body, so the capsule's prompt still reaches the model. The body
+/// is the prompt byte for byte: `grok` reads only the first `---` fenced block as frontmatter, so a
+/// prompt holding `---` lines, or frontmatter-looking keys, stays body text.
 ///
 /// Every value is written as a JSON string, which is a YAML double-quoted scalar, so a URL or
 /// token holding a quote, a colon or a backslash cannot break the frontmatter. The server key
 /// goes bare: [`check_bridge_names`] has held it to letters, digits, `_` and `-`. The bearer
 /// token is in this file, in the runtime's private `0700` directory, and never in argv, where
 /// any process on the host can read it.
-fn agent_file(bridge: Option<&Bridge>) -> String {
+fn agent_file(bridge: Option<&Bridge>, system_prompt: &str) -> String {
     let quoted = |text: &str| Value::from(text).to_string();
     let mut file = format!(
         "---\nname: {}\ndescription: {}\ntools: {AGENT_TOOLS}\n",
@@ -1069,7 +1077,7 @@ fn agent_file(bridge: Option<&Bridge>) -> String {
             quoted(&format!("Bearer {}", bridge.bearer_token)),
         ));
     }
-    file.push_str(&format!("---\n{AGENT_BODY}\n"));
+    file.push_str(&format!("---\n{system_prompt}\n"));
     file
 }
 
@@ -2078,7 +2086,7 @@ mod tests {
     use super::*;
 
     const SESSION_ID: &str = "019a7c3e-5b10-7a4c-9e21-3f6d2b8a1c05";
-    const SYSTEM_PROMPT: &str = "You are a Murmur capsule.";
+    const SYSTEM_PROMPT: &str = "You are the capsule under test.";
     const SERVER: &str = "capsule_srv";
     const TOKEN: &str = "tok-123";
 
@@ -2363,12 +2371,14 @@ mod tests {
 
     #[test]
     fn a_server_name_grok_cannot_admit_is_refused_by_name() {
-        for server in ["", "9srv", "-srv", "srv_", "s.rv", "s rv", "sérv"] {
+        for server in [
+            "", "9srv", "-srv", "srv_", "srv__x", "__srv", "s.rv", "s rv", "sérv",
+        ] {
             let refusal = with_names(server, &["echo_tool"]).expect_err(server);
             assert_eq!(
                 refusal,
                 format!(
-                    "driver: grok cannot admit the tool bridge's server name {}: it must start with an ASCII letter or '_', use only ASCII letters, digits, '_' and '-', and not end with '_'; grok skips tools it cannot admit, so the model would never see them",
+                    "driver: grok cannot admit the tool bridge's server name {}: it must start with an ASCII letter or '_', use only ASCII letters, digits, '_' and '-', hold no '__', and not end with '_'; grok skips tools it cannot admit, so the model would never see them",
                     Value::from(server)
                 )
             );
@@ -2424,7 +2434,7 @@ mod tests {
                 "--include-partial-messages",
                 "--agent",
                 "{files_dir}/capsule-agent.md",
-                "--system-prompt-override=You are a Murmur capsule.",
+                "--system-prompt-override=You are the capsule under test.",
                 "--allow",
                 "MCPTool(capsule_srv__*)",
                 "--no-auto-update",
@@ -2457,7 +2467,7 @@ mod tests {
                 "--include-partial-messages",
                 "--agent",
                 "{files_dir}/capsule-agent.md",
-                "--system-prompt-override=You are a Murmur capsule.",
+                "--system-prompt-override=You are the capsule under test.",
                 "--allow",
                 "MCPTool(capsule_srv__*)",
                 "--no-auto-update",
@@ -2605,7 +2615,7 @@ mod tests {
              tools: search_tool, use_tool\n\
              mcpServers:\n  - capsule_srv:\n      url: \"http://127.0.0.1:8931/mcp\"\n      headers:\n        Authorization: \"Bearer tok-123\"\n\
              ---\n\
-             You are a Murmur capsule.\n"
+             You are the capsule under test.\n"
         );
     }
 
@@ -2613,8 +2623,67 @@ mod tests {
     fn without_a_bridge_the_agent_file_keeps_the_meta_tools_and_names_no_server() {
         assert_eq!(
             file(&plan_of(request()), "capsule-agent.md"),
-            "---\nname: \"murmur-capsule\"\ndescription: \"Murmur capsule\"\ntools: search_tool, use_tool\n---\nYou are a Murmur capsule.\n"
+            "---\nname: \"murmur-capsule\"\ndescription: \"Murmur capsule\"\ntools: search_tool, use_tool\n---\nYou are the capsule under test.\n"
         );
+    }
+
+    /// The frontmatter `launch` writes for [`bridged`], up to and including its closing fence.
+    const BRIDGED_FRONTMATTER: &str = "---\n\
+         name: \"murmur-capsule\"\n\
+         description: \"Murmur capsule\"\n\
+         tools: search_tool, use_tool\n\
+         mcpServers:\n  - capsule_srv:\n      url: \"http://127.0.0.1:8931/mcp\"\n      headers:\n        Authorization: \"Bearer tok-123\"\n\
+         ---\n";
+
+    #[test]
+    fn the_agent_file_body_is_the_system_prompt_on_a_new_turn_and_on_a_resume() {
+        let prompt = "- You are a capsule.\nUse the tools you are given.";
+        for mode in [SessionMode::New, SessionMode::Resume] {
+            let plan = plan_of(LaunchRequest {
+                system_prompt: prompt.to_string(),
+                session: Session {
+                    id: SESSION_ID.to_string(),
+                    mode,
+                },
+                ..bridged()
+            });
+            assert_eq!(
+                file(&plan, "capsule-agent.md"),
+                format!("{BRIDGED_FRONTMATTER}{prompt}\n")
+            );
+            // The override still carries the same prompt on every turn.
+            assert!(plan
+                .args
+                .contains(&format!("--system-prompt-override={prompt}")));
+        }
+    }
+
+    #[test]
+    fn a_system_prompt_holding_a_frontmatter_fence_stays_in_the_body() {
+        let prompt =
+            "---\ntools: read_file, run_command\nmcpServers: []\n---\nInstructions.\n---\nMore.";
+        let agent = file(
+            &plan_of(LaunchRequest {
+                system_prompt: prompt.to_string(),
+                ..bridged()
+            }),
+            "capsule-agent.md",
+        )
+        .to_string();
+        assert_eq!(agent, format!("{BRIDGED_FRONTMATTER}{prompt}\n"));
+    }
+
+    #[test]
+    fn an_empty_system_prompt_leaves_the_agent_file_an_empty_body() {
+        let agent = file(
+            &plan_of(LaunchRequest {
+                system_prompt: String::new(),
+                ..bridged()
+            }),
+            "capsule-agent.md",
+        )
+        .to_string();
+        assert_eq!(agent, format!("{BRIDGED_FRONTMATTER}\n"));
     }
 
     #[test]

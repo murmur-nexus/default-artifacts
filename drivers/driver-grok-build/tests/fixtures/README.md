@@ -35,7 +35,7 @@ each run was not kept.** The files are copied byte for byte from the recordings 
 
 ## 12: recorded for this driver
 
-`12-bridge-image-result` was recorded on 2026-11-11 on the build host, as a normal user, with
+`12-bridge-image-result` was recorded on 2026-11-12 on the build host, as a normal user, with
 `grok` 1.0.77, by the commands in [`../live/README.md`](../live/README.md#recording-12). Its argv,
 environment switches and files are exactly what `launch` planned for a request with bridge server
 `murmur` (tools `echo_tool`, `session-status`, `image_tool`), config `{"reasoning_effort":"low"}`,
@@ -44,7 +44,9 @@ system prompt `- You are a Murmur capsule. Answer briefly.`, no model, task
 written to disk by `examples/write_plan.rs`. The mock is `../live/mock.py` and the bridge
 `../live/bridge.py`, whose `image_tool` answers with a text item and an MCP `image` item holding an
 88-byte PNG. Auth was `XAI_API_KEY=xai-test` with a scratch `HOME` holding no `auth.json`. Paths in
-`init.cwd` are the scratch work folder as recorded; nothing is redacted.
+`init.cwd` are the scratch work folder as recorded; nothing is redacted. The agent file's body is
+that system prompt. A first recording on 2026-11-11, made when the body was a fixed line, is the
+same stream line for line once `uuid`, `cwd`, message ids and durations are set aside.
 
 | Fixture | Source | grok | Auth | What it shows |
 |---|---|---|---|---|

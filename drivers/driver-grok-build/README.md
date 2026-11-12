@@ -188,7 +188,7 @@ Each flag and each value is one argv entry.
 | `--output-format streaming-messages-json` | One JSON line per message, in Claude Code's `stream-json` shape |
 | `--include-partial-messages` | Adds the `stream_event` deltas that make `text-delta`, `thinking-delta` and tool-call progress possible |
 | `--agent {files_dir}/capsule-agent.md` | The agent file below: two meta-tools and the bridge |
-| `--system-prompt-override=<prompt>` | Replaces `grok`'s system prompt with the runtime's. The `=` form keeps a prompt that starts with `-` one value |
+| `--system-prompt-override=<prompt>` | Replaces `grok`'s system prompt with the runtime's on a new session, and on every turn of a session on one of `grok`'s built-in models. On a resumed session on a custom model `grok` ignores it, and the agent file's body carries the prompt instead (below). The `=` form keeps a prompt that starts with `-` one value |
 | `--allow MCPTool(<server>__*)` | Lets the bridge's tools run without asking, which a headless run cannot do. Only with a bridge. Any other MCP tool is refused |
 | `--no-auto-update` | No update check for the turn. grok 1.0.77 accepts it, although `grok --help` does not list it |
 | `--disable-web-search` | No web search or fetch tool |
@@ -214,7 +214,7 @@ mcpServers:
       headers:
         Authorization: "Bearer <bridge token>"
 ---
-You are a Murmur capsule.
+<system prompt>
 ```
 
 - `tools: search_tool, use_tool` leaves the model exactly `grok`'s two MCP meta-tools and none of
@@ -225,7 +225,19 @@ You are a Murmur capsule.
 - Without a bridge, `mcpServers` and `--allow` are left out and the two meta-tools stay, so any MCP
   call is refused. Every murmur from v0.10.0 gives every capsule `session-status`, so a real run
   always has a bridge.
-- The body is never sent: `--system-prompt-override` replaces it.
+- The body is the runtime's system prompt, byte for byte, so the prompt reaches every turn:
+
+  | Turn | What the model's system message holds |
+  |---|---|
+  | New session, any model | the capsule's prompt alone: the override replaces `grok`'s prompt and the body |
+  | Resumed session on a built-in model (`grok-4.6`, with or without `-m`) | the capsule's prompt alone, as on the new session |
+  | Resumed session on a custom model (a `[model.<id>]` entry in `~/.grok/config.toml`) | `grok`'s own built-in prompt, then this body: `grok` ignores the override on such a resume |
+
+  Measured with `grok` 1.0.77 against the mock and under a real `mur` in
+  [`tests/live/README.md`](tests/live/README.md#the-system-prompt-on-a-resumed-turn).
+- `grok` reads only the first `---` fenced block as frontmatter. A prompt holding `---` lines or
+  frontmatter-looking keys such as `tools:` stays body text, and the frontmatter above it still
+  applies. An empty prompt leaves an empty body, and `grok` keeps its own prompt on every turn.
 
 The bearer token is a live credential for an endpoint that runs the capsule's tools, and argv is
 readable by any process on the host through `/proc/<pid>/cmdline`. So it goes only into this file,
@@ -238,7 +250,7 @@ would never see it. `launch` refuses such a bridge instead, naming the server or
 
 | Part | Rule |
 |---|---|
-| Server name | Starts with an ASCII letter or `_`, uses only ASCII letters, digits, `_` and `-`, and does not end with `_` |
+| Server name | Starts with an ASCII letter or `_`, uses only ASCII letters, digits, `_` and `-`, holds no `__`, and does not end with `_` |
 | Tool name | Non-empty, the same characters, no `__`, and does not start with `_` |
 | `<server>__<tool>` | At most 256 characters |
 
@@ -408,8 +420,13 @@ count or a port. The message is the non-empty `errors` joined with `"; "`, else 
   `modelUsage`, `total_cost_usd`, `server_tool_use` or the `duration_*` fields.
 - The reading goes out as the process's running total, immediately before the terminal event. A
   headless `grok` prints one `result` per process, so the total is that line.
-- **Not counted**: the title call `grok` makes once per new session; it is not in `usage`. The
-  per-turn summary call is switched off with `GROK_TURN_SUMMARY=0`.
+- **Not counted**: `grok`'s side calls. Every new session makes one title call. Some runs make
+  more: a title refresh on a resumed turn ("Generate a session title for the conversation
+  above"), and an "ultra-short dashboard line that captures the AGENT'S REPLY" call on a new or a
+  resumed turn, even with `GROK_TURN_SUMMARY=0`. Both were seen in 2 of about 10 headless runs in
+  review, and in none of 20 two-turn sessions and one two-turn guest run since, so they depend on
+  timing. `result.usage` counts none of them. `GROK_TURN_SUMMARY=0` switches off the per-turn
+  summary call `grok` otherwise makes after every turn.
 
 ### `classify-exit`
 
@@ -459,6 +476,13 @@ answers `turn-failed`:
 - **Calling one of the operator's tools ends the turn as `canceled`, `cancelled`.** A headless run
   cannot ask for approval, so `grok` refuses the call and stops. stderr names the tool:
   `permission required: <server>__<tool> was not run, as a headless run cannot ask for approval`.
+- **A resumed turn on a custom model keeps `grok`'s built-in system prompt ahead of the
+  capsule's.** On a resumed session on a `[model.<id>]` model, `grok` ignores
+  `--system-prompt-override` and sends its own prompt ("You are Grok released by xAI. …"), then
+  the agent file's body, which is the capsule's prompt. No flag tried removes it:
+  `--system-prompt-override`, `--system-prompt` and agent frontmatter `prompt_mode: replace`,
+  `full` and `override` were all measured. On `grok`'s built-in models the override holds on
+  every turn.
 - **Grok injects its own context**, which the capsule's system prompt does not replace. It adds a
   `<user_info>` block (OS, shell, work folder, date), a built-in `user_rules` line, a workflow
   reminder (`deep-research`) and an MCP reminder as user messages. Every rule file in
@@ -474,7 +498,9 @@ answers `turn-failed`:
   ends the run with no model turn, and a resumed turn is back in the default permission mode. Don't
   start a task with one of these words.
 - **The operator's own `[permission]` allow rules in `~/.grok/config.toml` still apply.**
-- **One title model call per new session spends subscription and is not counted.**
+- **`grok`'s side model calls spend subscription and are not counted.** One title call per new
+  session; in some runs also a title refresh on a resumed turn and a "dashboard line" call, even
+  with `GROK_TURN_SUMMARY=0`. See [Tokens](#tokens).
 - **No quota windows and no prompt suggestions** are in the stream.
 - **Failure kinds are read from text.**
 - **A missing session makes `grok` try a restore from xAI (`auth.x.ai`) before failing.** murmur
