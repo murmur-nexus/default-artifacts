@@ -1,0 +1,3 @@
+WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir "/tmp" (codex_home: AbsolutePathBuf("/tmp/rec/ch/.codex"))
+2026-11-12T02:32:55.610108Z ERROR codex_core::tools::router: error=patch rejected: writing is blocked by read-only sandbox; rejected by user approval settings
+2026-11-12T02:32:55.644497Z ERROR rmcp::transport::streamable_http_client: fail to delete session: unexpected server response: DELETE returned HTTP 400 session_id="974b0940-824e-4bad-a40e-6c21a6bbe2d0"

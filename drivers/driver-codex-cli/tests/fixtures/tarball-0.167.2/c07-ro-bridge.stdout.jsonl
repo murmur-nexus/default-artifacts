@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"01a1cd99-dee1-7c33-b871-d8ea841f6fae"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `gpt-5.4` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"murmur_bridge","tool":"echo_tool","arguments":{"text":"hi"},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"murmur_bridge","tool":"echo_tool","arguments":{"text":"hi"},"result":null,"error":{"message":"MCP tool call requires approval, but approval policy is never"},"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"MOCKREPLY tool result received"}}
+{"type":"turn.completed","usage":{"input_tokens":240,"cached_input_tokens":40,"cache_write_input_tokens":0,"output_tokens":30,"reasoning_output_tokens":10}}

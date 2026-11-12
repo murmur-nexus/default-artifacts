@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"01a1ce97-039d-75c2-a1ab-156c6359df75"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"mcp_tool_call","server":"murmur","tool":"echo_tool","arguments":{"text":"hi"},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"mcp_tool_call","server":"murmur","tool":"echo_tool","arguments":{"text":"hi"},"result":{"content":[{"type":"text","text":"echoed: hi"}],"structured_content":null},"error":null,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"MOCKREPLY tool result received"}}
+{"type":"turn.completed","usage":{"input_tokens":360,"cached_input_tokens":60,"cache_write_input_tokens":0,"output_tokens":45,"reasoning_output_tokens":15}}

@@ -1,0 +1,2 @@
+WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir "/tmp" (codex_home: AbsolutePathBuf("/tmp/rec/ch/.codex"))
+Error: thread/resume: thread/resume failed: no rollout found for thread id 01a1cd99-0000-7000-8000-000000000000 (code -32600)
