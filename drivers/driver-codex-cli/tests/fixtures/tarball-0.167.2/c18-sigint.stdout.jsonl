@@ -1,0 +1,3 @@
+{"type":"thread.started","thread_id":"01a1cd9b-0167-7693-ab92-400271fd1cd0"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `gpt-5.4` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}

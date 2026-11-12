@@ -654,6 +654,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "driver-codex-cli"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
 name = "driver-deepseek"
 version = "0.0.0"
 dependencies = [

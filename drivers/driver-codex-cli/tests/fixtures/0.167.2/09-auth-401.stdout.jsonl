@@ -1,0 +1,10 @@
+{"type":"thread.started","thread_id":"01a1ce97-2a29-7062-b458-92f14374fe05"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `gpt-5.4` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}
+{"type":"error","message":"Reconnecting... 1/5 (unexpected status 401 Unauthorized: mock 401, url: http://127.0.0.1:18140/v1/responses)"}
+{"type":"error","message":"Reconnecting... 2/5 (unexpected status 401 Unauthorized: mock 401, url: http://127.0.0.1:18140/v1/responses)"}
+{"type":"error","message":"Reconnecting... 3/5 (unexpected status 401 Unauthorized: mock 401, url: http://127.0.0.1:18140/v1/responses)"}
+{"type":"error","message":"Reconnecting... 4/5 (unexpected status 401 Unauthorized: mock 401, url: http://127.0.0.1:18140/v1/responses)"}
+{"type":"error","message":"Reconnecting... 5/5 (unexpected status 401 Unauthorized: mock 401, url: http://127.0.0.1:18140/v1/responses)"}
+{"type":"error","message":"unexpected status 401 Unauthorized: mock 401, url: http://127.0.0.1:18140/v1/responses"}
+{"type":"turn.failed","error":{"message":"unexpected status 401 Unauthorized: mock 401, url: http://127.0.0.1:18140/v1/responses"}}

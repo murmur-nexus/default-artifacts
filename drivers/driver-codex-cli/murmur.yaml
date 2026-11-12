@@ -1,0 +1,49 @@
+name: driver-codex-cli
+version: 0.1.0
+runtime: driver
+description: |
+  Process driver for OpenAI's Codex CLI. It tells a `transport: process` capsule how to drive
+  `codex exec --json`: the argument list for one turn, the system prompt as a private
+  instructions file, the `-c mcp_servers.<server>.*` overrides that point the harness at the
+  capsule's tool bridge, the bridge token as one environment variable, and the task on stdin.
+
+  Unlike an HTTP driver, it holds no credential and makes no request — the harness authenticates
+  itself, which is the point of process transport: a turn spends the ChatGPT subscription
+  `codex` is logged into rather than an API key. The driver is granted nothing at all: no
+  network, no filesystem, no environment.
+
+  The capsule must allow the variables the harness cannot run without, the login store and the
+  hosts a ChatGPT login reaches:
+
+      inference:
+        transport: process
+        driver:
+          artifact: murmur/driver-codex-cli
+      capabilities:
+        env:
+          allow: [HOME, PATH]
+        harness:
+          paths:
+            - path: ~/.codex
+              access: read-write
+        network:
+          allow: [chatgpt.com, auth.openai.com]
+
+  Codex's own shell, patch-writing, web, browser, image, agent and plugin tools are switched off
+  or refused by a read-only sandbox, and the operator's own Codex config and project
+  `AGENTS.md` are kept out. The model is offered the capsule's own tools through the bridge.
+
+  It reads Codex's JSONL back into the runtime's events: the session Codex minted, complete text
+  and reasoning, bridged tool calls by bare name with their results, retries, and a turn that
+  ended or failed. An image in a tool result is reported as `[image: <media type>, <n> bytes]`,
+  never as its bytes. Token counts are reported for a turn that starts a session; a resumed
+  turn's counts are the thread's running total, so none are reported for it. Codex prints no
+  text deltas, no tool progress and no subscription windows, says nothing about how a turn is
+  billed (`auth` is reported as `unknown`), and describes a failure only in text, from which its
+  kind is read.
+
+  `reasoning_effort` and `reasoning_summary` under `inference.driver.config` set Codex's
+  `model_reasoning_effort` and `model_reasoning_summary`. Any other key, or a value Codex does
+  not name, refuses the turn with a message naming it.
+requires_files:
+  - driver_codex_cli.wasm

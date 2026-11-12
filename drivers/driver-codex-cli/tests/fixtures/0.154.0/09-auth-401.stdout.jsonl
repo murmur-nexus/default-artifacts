@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"01a1ce97-1ef6-7672-b52c-cf764de4b748"}
+{"type":"turn.started"}
+{"type":"error","message":"Reconnecting... 1/5 (unexpected status 401 Unauthorized: mock 401, url: http://127.0.0.1:18110/v1/responses)"}
+{"type":"error","message":"Reconnecting... 2/5 (unexpected status 401 Unauthorized: mock 401, url: http://127.0.0.1:18110/v1/responses)"}
+{"type":"error","message":"Reconnecting... 3/5 (unexpected status 401 Unauthorized: mock 401, url: http://127.0.0.1:18110/v1/responses)"}
+{"type":"error","message":"Reconnecting... 4/5 (unexpected status 401 Unauthorized: mock 401, url: http://127.0.0.1:18110/v1/responses)"}
+{"type":"error","message":"Reconnecting... 5/5 (unexpected status 401 Unauthorized: mock 401, url: http://127.0.0.1:18110/v1/responses)"}
+{"type":"error","message":"unexpected status 401 Unauthorized: mock 401, url: http://127.0.0.1:18110/v1/responses"}
+{"type":"turn.failed","error":{"message":"unexpected status 401 Unauthorized: mock 401, url: http://127.0.0.1:18110/v1/responses"}}

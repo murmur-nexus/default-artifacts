@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"01a1ce97-196a-7652-9c1f-6845fd927cdc"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"Thinking about it."}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"MOCKREPLY ok"}}
+{"type":"turn.completed","usage":{"input_tokens":120,"cached_input_tokens":20,"cache_write_input_tokens":0,"output_tokens":15,"reasoning_output_tokens":5}}

@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"01a1ce96-ea62-7a80-8bbb-ce74b0ae4706"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `gpt-5.4` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"MOCKREPLY saw_secret=True"}}
+{"type":"turn.completed","usage":{"input_tokens":360,"cached_input_tokens":60,"cache_write_input_tokens":0,"output_tokens":45,"reasoning_output_tokens":15}}

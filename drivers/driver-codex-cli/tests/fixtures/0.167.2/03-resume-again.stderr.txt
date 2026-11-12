@@ -1,0 +1,1 @@
+2026-11-12T07:09:25.155507Z ERROR rmcp::transport::streamable_http_client: fail to delete session: unexpected server response: DELETE returned HTTP 400 session_id="a4994047-6b32-4faf-a8af-fe6ba8e59b2b"

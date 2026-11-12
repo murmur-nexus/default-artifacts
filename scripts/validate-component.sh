@@ -16,6 +16,7 @@
 #
 #   hook-*                             -> HOOK   category
 #   driver-claude-code                 -> PROCESS-DRIVER category
+#   driver-codex-cli                   -> PROCESS-DRIVER category
 #   driver-*                           -> TOOL   category
 #   tool-{request-input,create,read,   -> TOOL   category (wasm32-wasip2 components
 #     write,edit,find,corpus,report,            that export murmur:tool/run)
@@ -52,8 +53,8 @@
 # name: both are `driver-*` artifacts with `runtime: driver`. So the `driver-*` wildcard below
 # cannot decide between them, and every process driver is listed here by name in its own `case`
 # arm ahead of that wildcard — a `case` takes its first matching arm, so a new process driver
-# added after the wildcard would be validated as an http driver and fail on its export. The
-# second one goes beside `driver-claude-code`.
+# added after the wildcard would be validated as an http driver and fail on its export. A new
+# one goes beside `driver-claude-code` and `driver-codex-cli`.
 #
 # The exported interface's version is read from the vendored WIT that the
 # components are built against ($HOOK_WIT / $TOOL_WIT / $PROCESS_DRIVER_WIT below), never
@@ -135,7 +136,7 @@ validate_one() {
       expected_export="murmur:hook/lifecycle"
       expected_version="$hook_version"
       ;;
-    driver-claude-code)
+    driver-claude-code|driver-codex-cli)
       category="process-driver"
       expected_export="murmur:driver/process"
       expected_version="$process_driver_version"
