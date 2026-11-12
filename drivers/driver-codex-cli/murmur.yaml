@@ -28,6 +28,13 @@ description: |
               access: read-write
         network:
           allow: [chatgpt.com, auth.openai.com]
+        shell:
+          allow: [true]
+
+  The `shell.allow` entry is not a need of the driver: under mur 0.11.0 a process harness reads
+  the host's TLS trust store only when `capabilities.shell.allow` is non-empty, and without it
+  Codex cannot verify chatgpt.com. `true` is the smallest grant; the model is offered it as a
+  tool that does nothing.
 
   Codex's own shell, patch-writing, web, browser, image, agent and plugin tools are switched off
   or refused by a read-only sandbox, and the operator's own Codex config and project

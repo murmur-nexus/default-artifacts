@@ -1203,34 +1203,23 @@ fn is_image_block(value: &Value) -> bool {
 /// where `<n>` is the size of the image the base64 decodes to. It is murmur's trace placeholder
 /// without the hash, which the trace's `tool_call.attachments` entry for the same call carries.
 ///
-/// Reads both shapes an image block arrives in: the MCP one (`mimeType`, `data`), which is what
-/// murmur's bridge sends and `codex` reports, and the Anthropic one (`source.media_type`,
-/// `source.data`). A block with no media type names [`UNKNOWN_MEDIA_TYPE`]; one whose data is
-/// absent, not a string or not valid base64 says [`UNKNOWN_SIZE`].
+/// Reads the MCP image block (`mimeType`, `data`), which is what murmur's bridge sends and the
+/// only shape `codex` reports. A block with no media type names [`UNKNOWN_MEDIA_TYPE`]; one whose
+/// data is absent, not a string or not valid base64 says [`UNKNOWN_SIZE`].
 fn image_reference(block: &Value) -> String {
-    let source = block.get("source").filter(|source| source.is_object());
-    let media_type = [
-        source.and_then(|source| source.get("media_type")),
-        block.get("mimeType"),
-        block.get("media_type"),
-    ]
-    .into_iter()
-    .flatten()
-    .filter_map(Value::as_str)
-    .find(|media_type| !media_type.trim().is_empty())
-    .unwrap_or(UNKNOWN_MEDIA_TYPE);
-    let size = [
-        source.and_then(|source| source.get("data")),
-        block.get("data"),
-    ]
-    .into_iter()
-    .flatten()
-    .find_map(Value::as_str)
-    .and_then(base64_decoded_len)
-    .map_or_else(
-        || UNKNOWN_SIZE.to_string(),
-        |bytes| format!("{bytes} bytes"),
-    );
+    let media_type = block
+        .get("mimeType")
+        .and_then(Value::as_str)
+        .filter(|media_type| !media_type.trim().is_empty())
+        .unwrap_or(UNKNOWN_MEDIA_TYPE);
+    let size = block
+        .get("data")
+        .and_then(Value::as_str)
+        .and_then(base64_decoded_len)
+        .map_or_else(
+            || UNKNOWN_SIZE.to_string(),
+            |bytes| format!("{bytes} bytes"),
+        );
     format!("[image: {media_type}, {size}]")
 }
 
@@ -2656,10 +2645,12 @@ mod tests {
             "[image: unknown media type, size unknown]"
         );
         assert_eq!(
-            image_reference(
-                &json!({"type": "image", "source": {"media_type": "image/jpeg", "data": "QUJD"}})
-            ),
-            "[image: image/jpeg, 3 bytes]"
+            image_reference(&json!({"type": "image", "mimeType": " ", "data": "QUJD"})),
+            "[image: unknown media type, 3 bytes]"
+        );
+        assert_eq!(
+            image_reference(&json!({"type": "image", "mimeType": "image/jpeg", "data": 3})),
+            "[image: image/jpeg, size unknown]"
         );
     }
 
