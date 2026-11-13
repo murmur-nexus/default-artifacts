@@ -124,7 +124,8 @@ None of these changes anything.
 into a protected stage, forward out of one, or past one. That covers `mv`, `skip`, `add`, and an
 `event` that confirms a wait.
 
-- Backward moves are allowed, and so are moves among the stages before a protected one.
+- A backward move is allowed, even past a protected stage, unless it ends in one. So are moves
+  among the stages before a protected one.
 - `add` may place a new card in the first stage even when that stage is protected, but cannot move
   it on.
 - A person's own commands carry no protection.
