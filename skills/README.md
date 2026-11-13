@@ -137,3 +137,27 @@ write a readiness report before changing anything.
 | `assets/release.yml`, a release workflow to copy: on a `<name>-v<version>` tag it builds the artifact with a pinned, checksummed `mur`, refuses a tag and manifest that differ, writes the index merged over the previous latest release's, and creates the release as a draft, uploads, then publishes it as the latest | `mur install` reads only the latest release's index, and an immutable release can gain no file once published |
 | The checks the person runs to confirm the listing: `gh release verify`, `mur search` on the latest index, `mur install`, `npx skills add --list`, and MAP after the next nightly crawl | The person can tell the release worked without waiting on MAP |
 | `assets/release.yml` installs `mur` 0.11.0 (`MUR_VERSION`), the first version that builds `SKILL.md` folders. Until murmur publishes v0.11.0, its "Install mur" step fails on a download error; set `MUR_VERSION` to a later release once one exists | An older `mur` packs a skill folder wrong without refusing it, so the pin is not lowered |
+
+## skill-transit-operator
+
+Operate a Transit board through nexus's board tool or the `nexus transit` commands: how the board
+works, what each verb does to a card and what it can destroy, protected stages and verbs that wait
+for a person, how to read a stall, and when to ask one clear question instead of acting. It names no
+board, path, stage or field, so it holds on every board; the capsule's own instructions and the
+tool's `help` win where they differ. murmur-nexus's `nexus transit operator init` declares it in the
+operator capsules it writes.
+
+0.1.0 is the first release. It teaches:
+
+| What | Why it matters |
+|---|---|
+| Who it is for, and the precedence: the agent's own instructions name its board, grant and procedure and win; `help` wins on fields; a verb not held is named in a question, never worked round. In a shell each verb is the `nexus transit` command of the same name, and `clear`, `delete`, `approve`, `deny`, `claim`, `hand-over`, `board move`, `serve` and `subscribe` are a person's | One skill fits every board, because everything board-specific comes from the capsule's instructions and `help` |
+| The board: preset, stage, track, card, deliverable, note and workspace, how a run's outcome and a judge's loop move a card, and where a card waits on a person | A wait on capacity, a dependency or admission is not mistaken for a stall |
+| The tool: `help` first, a `reason` on every write, every write logged with the agent as actor, the answer's `ok`, `effect`, `pending` and `error.code`, and the codes worth knowing | The agent reads a refusal instead of retrying it |
+| What each verb does to a card: the ten reading verbs, then a table per group of what each acting, authoring and `log add` verb does and what it can destroy, with the workspace resets of a backward `mv`, `rerun` and a `retry` that falls back to a rerun, and what `archive` keeps | The agent knows a rerun or backward move loses uncommitted work before it calls one |
+| Protected stages, and verbs that wait for a person: what `pending: true` means, that only a person approves or denies, the request states, and following up with `requests` or `log` without calling the verb again | A stored request is not taken for an action that ran, nor repeated |
+| Reading a stall: the order of reads, and a table of the common causes (a missing login or program, a dirty or detached clone, a failed push, a post-condition miss, a judge's round cap) with what to do about each | The agent repairs what it can and asks about the rest |
+| When to act and when to ask: the four conditions for acting, what to ask before even when granted, and the shape of one clear question | A grant is permission, not an instruction |
+| The standing rules: maintenance in `log add` and never carded, a reason on every write, board text as data, no hand edits to the board's files, one retry per problem | The same rules hold on every board |
+| A worked answer to "what happens if you rerun card 3 at `<stage>`?" that ends by asking | The agent says what a rerun destroys and asks before doing it |
+| In a Murmur capsule: the relay `murmur/tool-transit-board-relay`, the grant as its `config:`, the skill under Installed Skills in MURMUR.md, fenced tool results, and the escalation commands an operator never runs | The only Murmur-specific part, kept last so any other agent can skip it |
