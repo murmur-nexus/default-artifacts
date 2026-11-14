@@ -12,7 +12,7 @@ supports per-entry credential gateways: the first murmur release after v0.3.0 (m
 ## Install
 
 ```bash
-mur install -g murmur/tool-github@0.6.0
+mur install -g murmur/tool-github@0.7.0
 ```
 
 ## Binding the token
@@ -23,7 +23,7 @@ repo in `config:`:
 ```yaml
 artifacts:
   - name: murmur/tool-github
-    version: 0.6.0
+    version: 0.7.0
     runtime: tool
     gateway:
       endpoint: https://api.github.com
@@ -239,6 +239,22 @@ A failure returns `data` as compact JSON, `{"ok": false, "error_kind": …, "mes
 `invalid_input` has `status: failed`; every other kind has `status: error`. A failure read from
 GitHub's HTTP status (`upstream_*`, `not_found`, `rate_limited`) adds `http_status`, except
 `fetch`'s missing-branch `not_found`.
+
+When GitHub explains a refusal with an `errors` list, a failure that carries `http_status` also
+carries that list, and `message` and the summary name each entry. A pull request whose `head`
+GitHub cannot read reads `GitHub answered HTTP 422: Validation Failed (head: invalid)`, with
+`"errors": [{"code": "invalid", "field": "head", "resource": "PullRequest"}]`. The list never
+changes `error_kind`. The `conflict`, `head_moved` and `not_mergeable` failures carry no list.
+
+| Rule | Behaviour |
+|---|---|
+| Kept from an object entry | `resource`, `field`, `code` and `message`, each only when its value is a string. Every other key is dropped, including `value`, where GitHub can echo a submitted value |
+| Kept from a string entry | The string |
+| Dropped | An object with none of the four keys as a string, and any entry that is neither an object nor a string |
+| Count | The first 10 kept entries. When more are kept, `errors_omitted` holds the count of the rest and the summary ends `; +<count> more` |
+| Length | Each kept string is cut to 200 characters, with `…` appended when cut |
+| How an entry reads | `<label>: <detail>`, or whichever of the two exists. The label is `field`, else `resource`. The detail is `code`, followed by ` (<message>)` when there is a `message`; when the code is `custom` or absent, the detail is `message` |
+| No list | When `errors` is absent, empty, not a list, or has no kept entry, `message` reads `GitHub answered HTTP <status>: <GitHub's message>` and `data` has no `errors` or `errors_omitted` key |
 
 | `error_kind` | When |
 |---|---|

@@ -1317,6 +1317,90 @@ fn upstream_statuses_map_to_their_own_error_kinds() {
 }
 
 #[test]
+fn pr_create_refused_with_an_error_list_names_the_refused_field() {
+    let errors = json!([{"resource": "PullRequest", "field": "head", "code": "invalid"}]);
+    let mut fake = Fake::new(vec![status(
+        422,
+        json!({"message": "Validation Failed", "errors": errors}),
+    )]);
+    let response = run(
+        Some(CONFIG),
+        r#"{"op":"pr_create","title":"t","head":"feature-x","base":"main"}"#,
+        &mut fake,
+        Path::new("."),
+    );
+    assert!(
+        response.summary.contains("head: invalid"),
+        "{:?}",
+        response.summary
+    );
+    let value = data(&response);
+    assert_eq!(value["errors"], errors);
+    assert_eq!(value["error_kind"], json!("upstream_error"));
+    assert_eq!(value["http_status"], json!(422));
+    assert_eq!(fake.requests().len(), 1);
+}
+
+#[test]
+fn pr_create_refusal_never_echoes_the_request() {
+    let mut fake = Fake::new(vec![status(
+        422,
+        json!({"message": "Validation Failed", "errors": [
+            {"resource": "PullRequest", "field": "title", "code": "invalid",
+             "value": "TITLE-MARKER-7f3a"},
+            {"resource": "PullRequest", "code": "custom", "message": "bad",
+             "body": "BODY-MARKER-91c2"},
+        ]}),
+    )]);
+    let response = run(
+        Some(CONFIG),
+        r#"{"op":"pr_create","title":"TITLE-MARKER-7f3a","body":"BODY-MARKER-91c2","head":"feature-x","base":"main"}"#,
+        &mut fake,
+        Path::new("."),
+    );
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 1);
+    let sent = requests[0].body.as_ref().unwrap().to_string();
+    assert!(sent.contains("TITLE-MARKER-7f3a") && sent.contains("BODY-MARKER-91c2"));
+
+    let mut needles = vec![
+        "TITLE-MARKER-7f3a".to_string(),
+        "BODY-MARKER-91c2".to_string(),
+    ];
+    needles.extend(
+        requests[0]
+            .headers
+            .iter()
+            .filter(|(name, _)| !name.eq_ignore_ascii_case("content-length"))
+            .map(|(_, value)| value.clone()),
+    );
+    for needle in &needles {
+        assert!(
+            !response.summary.contains(needle.as_str()),
+            "summary holds {needle:?}"
+        );
+        assert!(
+            !response.data.contains(needle.as_str()),
+            "data holds {needle:?}"
+        );
+    }
+    assert!(
+        response
+            .summary
+            .ends_with("(title: invalid; PullRequest: bad)"),
+        "{:?}",
+        response.summary
+    );
+    assert_eq!(
+        data(&response)["errors"],
+        json!([
+            {"resource": "PullRequest", "field": "title", "code": "invalid"},
+            {"resource": "PullRequest", "code": "custom", "message": "bad"},
+        ])
+    );
+}
+
+#[test]
 fn push_from_a_directory_that_is_not_a_repository_is_repo_unreadable() {
     let dir = tempfile::tempdir().unwrap();
     let mut fake = Fake::new(vec![]);

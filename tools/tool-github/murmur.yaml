@@ -1,5 +1,5 @@
 name: tool-github
-version: 0.6.0
+version: 0.7.0
 runtime: tool
 implementation: wasm
 description: |
@@ -91,6 +91,8 @@ description: |
   repo_unwritable, operation_not_allowed, conflict, not_mergeable, head_moved,
   upstream_unauthorized, upstream_forbidden, not_found, rate_limited, upstream_error,
   transport_error, response_invalid.
+  A refusal GitHub explains with an errors list names each entry in message and adds errors:
+  [{resource, field, code, message}] (at most 10; errors_omitted counts the rest).
 
 upstream_auth:
   header: Authorization
