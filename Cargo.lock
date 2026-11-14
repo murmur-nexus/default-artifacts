@@ -3035,6 +3035,7 @@ version = "0.0.0"
 dependencies = [
  "murmur-wasi-http",
  "serde_json",
+ "serde_norway",
  "tempfile",
  "wasip2",
  "wasmtime",

@@ -385,6 +385,57 @@ mod tests {
     }
 
     #[test]
+    fn manifest_types_fields_and_depends_on() {
+        // nexus refuses `add` when either arrives as JSON text, and `help` names these fields
+        // without their types, so the schema is the only place a model learns their shape.
+        let manifest: serde_json::Value =
+            serde_norway::from_str(include_str!("../murmur.yaml")).expect("murmur.yaml parses");
+        let schema = &manifest["input_schema"];
+        let fields = &schema["properties"]["fields"];
+        let depends_on = &schema["properties"]["dependsOn"];
+
+        assert_eq!(
+            fields["type"], "object",
+            "input_schema.properties.fields.type must be \"object\""
+        );
+        assert_eq!(
+            fields["additionalProperties"]["type"], "string",
+            "input_schema.properties.fields.additionalProperties.type must be \"string\""
+        );
+        assert_eq!(
+            depends_on["type"], "array",
+            "input_schema.properties.dependsOn.type must be \"array\""
+        );
+        assert_eq!(
+            depends_on["items"]["anyOf"],
+            serde_json::json!([{"type": "integer"}, {"type": "string"}]),
+            "input_schema.properties.dependsOn.items.anyOf must be \
+             [{{\"type\":\"integer\"}},{{\"type\":\"string\"}}]"
+        );
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["verb"]),
+            "input_schema.required must be [\"verb\"]"
+        );
+        assert_eq!(
+            schema["additionalProperties"], true,
+            "input_schema.additionalProperties must be true"
+        );
+        for (name, property) in [("fields", fields), ("dependsOn", depends_on)] {
+            assert!(
+                property.get("format").is_none(),
+                "input_schema.properties.{name} must carry no format"
+            );
+            assert!(
+                property["description"]
+                    .as_str()
+                    .is_some_and(|text| !text.trim().is_empty()),
+                "input_schema.properties.{name}.description must be a non-empty string"
+            );
+        }
+    }
+
+    #[test]
     fn manifest_declares_no_capabilities_block() {
         // The relay's only egress is the gateway, which no network grant governs.
         let manifest = include_str!("../murmur.yaml");
