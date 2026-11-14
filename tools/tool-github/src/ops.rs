@@ -213,13 +213,101 @@ fn upstream_error(status: u16, body: &Value) -> Response {
         .get("message")
         .and_then(Value::as_str)
         .unwrap_or("<no message>");
+    let (entries, omitted, rendered) = github_errors(body);
+    let mut summary = format!("GitHub answered HTTP {status}: {message}");
     let mut extra = Map::new();
     extra.insert("http_status".to_string(), json!(status));
-    failure(
-        upstream_kind(status, message),
-        format!("GitHub answered HTTP {status}: {message}"),
-        extra,
-    )
+    if !entries.is_empty() {
+        let mut list = rendered.join("; ");
+        if omitted > 0 {
+            list.push_str(&format!("; +{omitted} more"));
+            extra.insert("errors_omitted".to_string(), json!(omitted));
+        }
+        summary.push_str(&format!(" ({list})"));
+        extra.insert("errors".to_string(), Value::Array(entries));
+    }
+    failure(upstream_kind(status, message), summary, extra)
+}
+
+/// Most entries of GitHub's `errors` list a failure carries; the rest are only counted.
+const MAX_GITHUB_ERRORS: usize = 10;
+/// Most characters kept from one string in GitHub's `errors` list, before the `…` marker.
+const MAX_GITHUB_ERROR_CHARS: usize = 200;
+/// The keys kept from an object entry of GitHub's `errors` list. Every other key is dropped:
+/// `value`, for one, can echo back what the request submitted.
+const GITHUB_ERROR_KEYS: [&str; 4] = ["resource", "field", "code", "message"];
+
+/// GitHub's `errors` list from a refusal body, sanitized: the kept entries (at most
+/// [`MAX_GITHUB_ERRORS`]), how many more survived sanitizing, and each kept entry rendered
+/// for the summary. An absent or non-array `errors` gives no entries.
+fn github_errors(body: &Value) -> (Vec<Value>, usize, Vec<String>) {
+    let Some(list) = body.get("errors").and_then(Value::as_array) else {
+        return (Vec::new(), 0, Vec::new());
+    };
+    let mut surviving = list.iter().filter_map(github_error_entry);
+    let mut entries = Vec::new();
+    let mut rendered = Vec::new();
+    for (entry, text) in surviving.by_ref().take(MAX_GITHUB_ERRORS) {
+        entries.push(entry);
+        rendered.push(text);
+    }
+    (entries, surviving.count(), rendered)
+}
+
+/// One entry of GitHub's `errors` list, sanitized and rendered, or `None` when nothing in it
+/// is kept. A string entry is kept as itself; an object keeps only the string values of
+/// [`GITHUB_ERROR_KEYS`].
+fn github_error_entry(entry: &Value) -> Option<(Value, String)> {
+    match entry {
+        Value::String(text) => {
+            let text = clip(text);
+            Some((json!(text), text))
+        }
+        Value::Object(object) => {
+            let mut kept = Map::new();
+            for key in GITHUB_ERROR_KEYS {
+                if let Some(text) = object.get(key).and_then(Value::as_str) {
+                    kept.insert(key.to_string(), json!(clip(text)));
+                }
+            }
+            if kept.is_empty() {
+                return None;
+            }
+            let text = render_github_error(&kept);
+            Some((Value::Object(kept), text))
+        }
+        _ => None,
+    }
+}
+
+/// `label: detail`, or whichever of the two exists. The label is `field`, else `resource`.
+/// The detail is `code` with ` (<message>)` when `code` is not `custom`, else `message`; a
+/// lone `custom` code with neither label nor message renders as `custom`.
+fn render_github_error(kept: &Map<String, Value>) -> String {
+    let get = |key: &str| kept.get(key).and_then(Value::as_str);
+    let label = get("field").or_else(|| get("resource"));
+    let message = get("message");
+    let detail = match get("code") {
+        Some(code) if code != "custom" => Some(match message {
+            Some(message) => format!("{code} ({message})"),
+            None => code.to_string(),
+        }),
+        _ => message.map(str::to_string),
+    };
+    match (label, detail) {
+        (Some(label), Some(detail)) => format!("{label}: {detail}"),
+        (Some(label), None) => label.to_string(),
+        (None, Some(detail)) => detail,
+        (None, None) => get("code").unwrap_or_default().to_string(),
+    }
+}
+
+/// `text` cut to [`MAX_GITHUB_ERROR_CHARS`] characters, with `…` appended when it was cut.
+fn clip(text: &str) -> String {
+    match text.char_indices().nth(MAX_GITHUB_ERROR_CHARS) {
+        Some((at, _)) => format!("{}…", &text[..at]),
+        None => text.to_string(),
+    }
 }
 
 /// GitHub answers both its primary and its secondary rate limit with a 403 (sometimes a 429)
@@ -1122,5 +1210,234 @@ fn failure(error_kind: &str, message: impl Into<String>, extra: Map<String, Valu
         summary: message,
         data: Value::Object(data).to_string(),
         metadata: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn data(response: &Response) -> Value {
+        serde_json::from_str(&response.data).unwrap()
+    }
+
+    fn validation_failed(errors: Value) -> Response {
+        upstream_error(
+            422,
+            &json!({"message": "Validation Failed", "errors": errors}),
+        )
+    }
+
+    #[test]
+    fn the_observed_422_names_the_refused_field() {
+        let response = validation_failed(
+            json!([{"resource": "PullRequest", "field": "head", "code": "invalid"}]),
+        );
+        assert_eq!(
+            response.summary,
+            "GitHub answered HTTP 422: Validation Failed (head: invalid)"
+        );
+        assert_eq!(response.status, OpStatus::Error);
+        assert!(response.metadata.is_empty());
+        let value = data(&response);
+        assert_eq!(value["ok"], json!(false));
+        assert_eq!(value["error_kind"], json!("upstream_error"));
+        assert_eq!(value["http_status"], json!(422));
+        assert_eq!(value["message"], json!(response.summary));
+        assert_eq!(
+            value["errors"],
+            json!([{"resource": "PullRequest", "field": "head", "code": "invalid"}])
+        );
+        assert!(value.get("errors_omitted").is_none());
+    }
+
+    #[test]
+    fn no_surviving_error_list_gives_the_plain_text() {
+        let cases = [
+            (
+                500,
+                json!({"message": "Server Error"}),
+                "GitHub answered HTTP 500: Server Error",
+            ),
+            (
+                422,
+                json!({"message": "Validation Failed"}),
+                "GitHub answered HTTP 422: Validation Failed",
+            ),
+            (
+                422,
+                json!({"message": "Validation Failed", "errors": []}),
+                "GitHub answered HTTP 422: Validation Failed",
+            ),
+            (
+                422,
+                json!({"message": "Validation Failed", "errors": "nope"}),
+                "GitHub answered HTTP 422: Validation Failed",
+            ),
+            (
+                422,
+                json!({"message": "Validation Failed", "errors": [42, null, {"value": "x"}]}),
+                "GitHub answered HTTP 422: Validation Failed",
+            ),
+            (502, Value::Null, "GitHub answered HTTP 502: <no message>"),
+        ];
+        for (code, body, expected) in cases {
+            let response = upstream_error(code, &body);
+            assert_eq!(response.summary, expected, "{body}");
+            let value = data(&response);
+            assert_eq!(value["message"], json!(expected));
+            assert_eq!(value["http_status"], json!(code));
+            assert!(value.get("errors").is_none(), "{body}");
+            assert!(value.get("errors_omitted").is_none(), "{body}");
+        }
+    }
+
+    #[test]
+    fn each_entry_renders_by_the_label_and_detail_rules() {
+        let cases = [
+            (
+                json!([{"resource": "PullRequest", "code": "custom",
+                        "message": "A pull request already exists for acme:feature-x."}]),
+                "(PullRequest: A pull request already exists for acme:feature-x.)",
+            ),
+            (
+                json!([{"resource": "Issue", "field": "title", "code": "missing_field"},
+                       {"resource": "Issue", "field": "base", "code": "invalid"}]),
+                "(title: missing_field; base: invalid)",
+            ),
+            (
+                json!([{"field": "head", "code": "invalid", "message": "head sha can't be blank"}]),
+                "(head: invalid (head sha can't be blank))",
+            ),
+            (
+                json!(["Head ref must be a branch"]),
+                "(Head ref must be a branch)",
+            ),
+            (json!([{"code": "invalid"}]), "(invalid)"),
+            (
+                json!([{"resource": "PullRequest", "code": "custom"}]),
+                "(PullRequest)",
+            ),
+            (json!([{"code": "custom"}]), "(custom)"),
+        ];
+        for (errors, suffix) in cases {
+            let response = validation_failed(errors.clone());
+            assert!(
+                response
+                    .summary
+                    .ends_with(&format!("Validation Failed {suffix}")),
+                "{errors} gave {:?}",
+                response.summary
+            );
+        }
+    }
+
+    #[test]
+    fn a_string_entry_is_kept_as_that_string() {
+        let value = data(&validation_failed(json!(["Head ref must be a branch"])));
+        assert_eq!(value["errors"], json!(["Head ref must be a branch"]));
+    }
+
+    #[test]
+    fn only_the_four_string_keys_survive_an_object_entry() {
+        let value = data(&validation_failed(json!([
+            {"resource": "PullRequest", "field": "title", "code": "invalid",
+             "value": "submitted", "documentation_url": "https://example.invalid/x"},
+            {"resource": 7, "field": null, "code": ["invalid"], "message": "kept"},
+            {"value": "submitted"},
+        ])));
+        assert_eq!(
+            value["errors"],
+            json!([
+                {"resource": "PullRequest", "field": "title", "code": "invalid"},
+                {"message": "kept"},
+            ])
+        );
+        assert!(!value.to_string().contains("submitted"));
+        assert!(!value.to_string().contains("example.invalid"));
+    }
+
+    #[test]
+    fn more_than_ten_entries_keep_ten_and_count_the_rest() {
+        let errors: Vec<Value> = (0..13)
+            .map(|i| json!({"field": format!("f{i}"), "code": "invalid"}))
+            .collect();
+        let response = validation_failed(Value::Array(errors));
+        assert!(
+            response.summary.ends_with("; f9: invalid; +3 more)"),
+            "{:?}",
+            response.summary
+        );
+        assert!(response
+            .summary
+            .contains("Validation Failed (f0: invalid; f1: invalid;"));
+        let value = data(&response);
+        let expected: Vec<Value> = (0..10)
+            .map(|i| json!({"field": format!("f{i}"), "code": "invalid"}))
+            .collect();
+        assert_eq!(value["errors"], Value::Array(expected));
+        assert_eq!(value["errors_omitted"], json!(3));
+    }
+
+    #[test]
+    fn dropped_entries_do_not_count_toward_the_cap_or_the_omitted_count() {
+        let mut errors: Vec<Value> = vec![json!(42), json!({"value": "x"})];
+        errors.extend((0..11).map(|i| json!({"field": format!("f{i}"), "code": "invalid"})));
+        let value = data(&validation_failed(Value::Array(errors)));
+        assert_eq!(value["errors"].as_array().unwrap().len(), 10);
+        assert_eq!(value["errors"][0]["field"], json!("f0"));
+        assert_eq!(value["errors_omitted"], json!(1));
+    }
+
+    #[test]
+    fn a_long_string_is_cut_to_two_hundred_chars_with_a_marker() {
+        let response = validation_failed(json!([{"code": "custom", "message": "x".repeat(500)}]));
+        let kept = format!("{}…", "x".repeat(200));
+        assert_eq!(
+            response.summary,
+            format!("GitHub answered HTTP 422: Validation Failed ({kept})")
+        );
+        assert_eq!(
+            data(&response)["errors"],
+            json!([{"code": "custom", "message": kept}])
+        );
+    }
+
+    #[test]
+    fn the_cut_counts_chars_and_never_splits_a_multibyte_char() {
+        // 199 ASCII chars, then multi-byte chars straddling the 200-char boundary.
+        let text = format!("{}é€😀tail", "a".repeat(199));
+        let kept = format!("{}é…", "a".repeat(199));
+        let value = data(&validation_failed(json!([text])));
+        assert_eq!(value["errors"], json!([kept]));
+        assert_eq!(clip(&text).chars().count(), 201);
+
+        let exact = format!("{}é", "a".repeat(199));
+        assert_eq!(clip(&exact), exact);
+    }
+
+    #[test]
+    fn the_error_list_never_changes_the_error_kind() {
+        let rate = upstream_error(
+            403,
+            &json!({"message": "API rate limit exceeded for user ID 1.",
+                    "errors": [{"code": "invalid"}]}),
+        );
+        assert_eq!(data(&rate)["error_kind"], json!("rate_limited"));
+        assert!(rate.summary.ends_with(" (invalid)"), "{:?}", rate.summary);
+
+        let unauthorized = upstream_error(
+            401,
+            &json!({"message": "Bad credentials", "errors": [{"code": "invalid"}]}),
+        );
+        assert_eq!(
+            data(&unauthorized)["error_kind"],
+            json!("upstream_unauthorized")
+        );
+        assert!(
+            unauthorized.summary.ends_with(" (invalid)"),
+            "{:?}",
+            unauthorized.summary
+        );
     }
 }

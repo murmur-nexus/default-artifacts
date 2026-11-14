@@ -12,7 +12,7 @@ supports per-entry credential gateways: the first murmur release after v0.3.0 (m
 ## Install
 
 ```bash
-mur install -g murmur/tool-github@0.6.0
+mur install -g murmur/tool-github@0.7.0
 ```
 
 ## Binding the token
@@ -23,7 +23,7 @@ repo in `config:`:
 ```yaml
 artifacts:
   - name: murmur/tool-github
-    version: 0.6.0
+    version: 0.7.0
     runtime: tool
     gateway:
       endpoint: https://api.github.com
@@ -239,6 +239,16 @@ A failure returns `data` as compact JSON, `{"ok": false, "error_kind": …, "mes
 `invalid_input` has `status: failed`; every other kind has `status: error`. A failure read from
 GitHub's HTTP status (`upstream_*`, `not_found`, `rate_limited`) adds `http_status`, except
 `fetch`'s missing-branch `not_found`.
+
+When GitHub explains a refusal with an `errors` list, the failure also carries `errors`: each
+object entry keeps only its `resource`, `field`, `code` and `message`, and only when the value
+is a string, so a submitted value GitHub echoes back never reaches the caller. A string entry
+is kept as that string. At most the first 10 entries are kept, and `errors_omitted` counts the
+rest. Each kept string is cut to 200 characters, with `…` appended when cut. `message` and the
+summary end with the entries in parentheses, each one `field: code` (`resource` when there is
+no `field`; `message` when the code is `custom`), so a pull request whose `head` GitHub cannot
+read reads `GitHub answered HTTP 422: Validation Failed (head: invalid)`. The list never
+changes `error_kind`.
 
 | `error_kind` | When |
 |---|---|
