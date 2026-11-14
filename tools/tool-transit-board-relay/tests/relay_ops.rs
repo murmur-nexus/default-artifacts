@@ -248,6 +248,40 @@ fn unknown_fields_are_forwarded() {
     assert_eq!(fake.sent[0].json()["input"], input);
 }
 
+const ADD_ANSWER: &str =
+    r#"{"ok":true,"verb":"add","effect":"mutate","result":{},"output":"","logged":[]}"#;
+
+#[test]
+fn a_structured_add_keeps_fields_as_an_object_and_depends_on_as_a_list() {
+    let mut fake = Fake::answering(200, ADD_ANSWER);
+    let sent = json!({"verb": "add", "title": "x", "fields": {"kind": "child"}, "dependsOn": [1]});
+    run_with(&env(), Some(&sent.to_string()), &mut fake);
+    assert_eq!(fake.sent.len(), 1);
+    let input = fake.sent[0].json()["input"].clone();
+    assert!(input["fields"].is_object(), "fields: {}", input["fields"]);
+    assert_eq!(input["fields"], json!({"kind": "child"}));
+    assert!(
+        input["dependsOn"].is_array(),
+        "dependsOn: {}",
+        input["dependsOn"]
+    );
+    assert_eq!(input["dependsOn"], json!([1]));
+    assert_eq!(input, sent);
+}
+
+#[test]
+fn a_stringified_fields_or_depends_on_is_forwarded_as_text() {
+    // Accepting JSON text is nexus's side of the seam; the relay never coerces a nested value.
+    let mut fake = Fake::answering(200, ADD_ANSWER);
+    let sent =
+        json!({"verb": "add", "title": "x", "fields": "{\"kind\":\"child\"}", "dependsOn": "[1]"});
+    run_with(&env(), Some(&sent.to_string()), &mut fake);
+    assert_eq!(fake.sent.len(), 1);
+    let input = fake.sent[0].json()["input"].clone();
+    assert_eq!(input["fields"], json!("{\"kind\":\"child\"}"));
+    assert_eq!(input["dependsOn"], json!("[1]"));
+}
+
 // ── answers ──────────────────────────────────────────────────────────────────
 
 #[test]

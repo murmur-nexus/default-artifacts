@@ -1,5 +1,5 @@
 name: tool-transit-board-relay
-version: 0.1.0
+version: 0.2.0
 runtime: tool
 implementation: wasm
 description: |
@@ -34,6 +34,18 @@ input_schema:
     reason:
       type: string
       description: "Why, in one sentence. Required by every verb that changes the board; recorded with the change."
+    fields:
+      type: object
+      additionalProperties:
+        type: string
+      description: "The card's fields, for add and edit: an object of field name to text, such as {\"kind\": \"child\"}. Send an object, never JSON text in a string."
+    dependsOn:
+      type: array
+      items:
+        anyOf:
+          - type: integer
+          - type: string
+      description: "For add: the cards the new card depends on, as a list of card numbers or crd_ ids, such as [12]. Send a list, never JSON text in a string."
   required: [verb]
   additionalProperties: true
 

@@ -22,7 +22,7 @@ interface.
 ```yaml
 artifacts:
   - name: murmur/tool-transit-board-relay
-    version: "0.1.0"
+    version: "0.2.0"
     runtime: tool
     gateway:
       endpoint: http://127.0.0.1:<port of nexus transit serve>
@@ -82,6 +82,21 @@ The model sends `{"verb": "...", "reason"?: "...", ...the verb's fields}`. The t
 description tells it to call `{"verb": "help"}` first. `help` lists only the verbs the grant
 holds, each with its fields, and the protected stages. Every verb that changes the board needs
 `reason`, recorded with the change.
+
+The manifest's `input_schema` types four properties and requires only `verb`. Every other verb
+field (`title`, `card`, `to`, …) passes untyped (`additionalProperties: true`):
+
+| Property | Type | Used by |
+|---|---|---|
+| `verb` | string, required | every call |
+| `reason` | string | every verb that changes the board |
+| `fields` | object of field name to string, such as `{"kind": "child"}` | `add`, `edit` |
+| `dependsOn` | list of card numbers or `crd_` ids, such as `[12]` | `add` |
+
+The types are hints for the model. Neither the runtime nor the relay enforces them; nexus
+checks every field. Both descriptions tell the model to send an object or a list, never JSON
+text in a string: a nexus that does not accept JSON text there refuses `add` with `bad-input`
+when `fields` or `dependsOn` arrives as a string. The relay forwards either form as sent.
 
 The input is forwarded as is. An object encoded twice as a JSON string is unwrapped once; any
 other JSON value goes to nexus, which answers it.

@@ -18,7 +18,8 @@ wasip2 = "1.0.4"
 # Host-target-only. wasmtime, wasmtime-wasi and wasmtime-wasi-http are used solely by
 # tests/wasm_component.rs to instantiate the compiled wasm32-wasip2 component with
 # `wasi:http/outgoing-handler` linked, so its one POST reaches a loopback fake serve for
-# real. tempfile gives tests/mur_run_gateway.rs its scratch directories. Never a build-time
+# real. tempfile gives tests/mur_run_gateway.rs its scratch directories, and serde_norway
+# parses murmur.yaml in the manifest tests in src/lib.rs. Never a build-time
 # dependency of the wasm target itself — a `[dev-dependencies]` entry is excluded from the
 # cdylib the component is built from.
 [dev-dependencies]
@@ -26,3 +27,4 @@ wasmtime = "46"
 wasmtime-wasi = "46"
 wasmtime-wasi-http = "46"
 tempfile = "3"
+serde_norway = "0.9.42"
