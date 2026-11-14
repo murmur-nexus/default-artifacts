@@ -386,8 +386,9 @@ mod tests {
 
     #[test]
     fn manifest_types_fields_and_depends_on() {
-        // nexus refuses `add` when either arrives as JSON text, and `help` names these fields
-        // without their types, so the schema is the only place a model learns their shape.
+        // nexus refuses `add` when either arrives as JSON text, and `help` types these fields
+        // only as nexus's own `cards` and `fields`, which name no JSON shape, so the schema is
+        // the only place a model learns their shape.
         let manifest: serde_json::Value =
             serde_norway::from_str(include_str!("../murmur.yaml")).expect("murmur.yaml parses");
         let schema = &manifest["input_schema"];
