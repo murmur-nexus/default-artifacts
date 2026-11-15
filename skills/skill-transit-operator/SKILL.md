@@ -261,6 +261,8 @@ Then answer:
 > clone now holds `<what git status showed>`. The next pass runs `<stage>` from the start. If
 > nexus cannot reset the clone safely, the rerun refuses and changes nothing. Shall I rerun it?
 
+After that question, the reply ends with what `needs` lists, as in Ending every reply.
+
 ## In a Murmur capsule
 
 This section applies only inside a Murmur capsule.

@@ -177,3 +177,8 @@ operator capsules it writes.
 | The `needs` reading verb: the places where only a person can move a card on, each with one line saying why and the exact commands that clear it | The agent can answer "what is waiting on me" from one list |
 | Ending every reply, the same rule `nexus transit operator init` writes: each item `needs` lists, one per line with its commands, each option of a choice on its own line, or the single line `nothing needs you` | The person never has to guess the next step |
 | A refusal's `to move it:` line passed on as it is, saying who lifts the rule: a command a person runs, or that no one can, and why | A refusal reaches the person as a command they can run, and the agent does not work round it |
+
+The `needs` verb and the `to move it:` line come from nexus, not from this skill. They are in
+murmur-nexus `main` from #218 on, which no nexus release holds yet; an older `nexus` has no
+`needs` (`nexus transit needs` answers `unknown command "needs"`). On such a board `help` lists no
+`needs`, so the agent ends every reply by saying in one line that it cannot read that list.
