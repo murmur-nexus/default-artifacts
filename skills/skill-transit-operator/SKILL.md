@@ -3,7 +3,7 @@ name: skill-transit-operator
 description: "Operate a Transit board safely. Teaches how a board works (preset, stages, tracks, cards, deliverables, notes and each card's workspace), what each board tool verb does to a card and what it can destroy, protected stages and verbs that wait for a person, how to read a stalled card and its common causes, and when to ask a person one clear question instead of acting. Load it before operating, repairing or answering questions about a Transit board or its cards through the board tool or the nexus transit commands."
 compatibility: Needs a Transit board reached through nexus's board tool, or the nexus transit commands in a shell
 metadata:
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 # Operate a Transit board
 
@@ -112,6 +112,13 @@ None of these changes anything.
 | `edit` | Changes a card's title, epic or fields. The next stage works from the new values, so it changes what gets built. A running card keeps what it was briefed with, and shows that it changed while running | The old values |
 | `dep` | Adds or removes a card's dependency on another card, which changes what the card waits on | Nothing |
 
+- Send `fields` as an object and `dependsOn` as a list of cards. A board may also take JSON text of
+  that shape. A refusal that says a value is text that is not JSON, or is the wrong shape, means
+  send the structured value.
+- `dep` is refused on a card that was imported from a card file, because the next import of the
+  file would undo the change. The answer says so. Do not try again: a person changes the file's
+  dependencies and imports it, so name the card and the dependency in your question.
+
 ### log add
 
 | Verb | What it does to the card | What it can destroy |
@@ -172,6 +179,7 @@ Read in this order:
 | A dirty or detached clone | `git status` in the clone shows a detached HEAD, a rebase or merge in progress, unmerged paths, or leftover changes. A rerun may refuse because the files the card entered with were not saved | Repair it within your grant and shell when the repair discards nobody's work, such as switching back to the card's branch. Record it with `log add`, then retry once. Otherwise ask |
 | A failed push | Push-failure events in `logs`. The card starts no further stage, and every pass tries the push again | Ask. Retrying the card does not help; the cause is usually a credential or the remote |
 | A post-condition miss | The run reported success, but an attached file failed the stage's checks: a missing section, or a missing file | Rerun once if a fresh run can fix it. Otherwise ask |
+| A stage that judges old files | The card's workspace, or a clone the stage keeps, is at the commit the card entered with. A `rerun` or `retry` resets to that commit, so a fix that reached the base branch since is not there | Ask first, because it drops what the stage had done. In a shell, `rerun` or `retry` with `--from-main` starts the stage over from the current tip of the base branch |
 | A judge's round cap | The stall reason starts `max_rounds:` or `max_visits:`, and `show` has a `rounds` line | Ask. Do not retry or rerun to get past it: the loop is the finding, and a person decides |
 
 These waits are not stalls. Leave them alone:
