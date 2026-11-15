@@ -408,7 +408,22 @@ jobs:
             exit 1
           fi
           if gh release verify --help 2>/dev/null | grep -qi attestation; then
-            gh release verify "$TAG" --repo "$GITHUB_REPOSITORY"
+            # GitHub writes the release attestation a little after the release is published, so
+            # the first look can come too early (seen in a test: the second look, 15 s later,
+            # passed). Look again for up to three minutes.
+            verified=false
+            for attempt in $(seq 1 12); do
+              if gh release verify "$TAG" --repo "$GITHUB_REPOSITORY"; then
+                verified=true
+                break
+              fi
+              echo "the release attestation is not there yet (try $attempt of 12), waiting 15 s"
+              sleep 15
+            done
+            if [ "$verified" != true ]; then
+              echo "::error::$TAG is published and immutable, but its release attestation did not verify within three minutes."
+              exit 1
+            fi
           else
             echo "::notice::this gh has no 'release verify', so the release attestation was not checked here"
           fi

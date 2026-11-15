@@ -286,7 +286,7 @@ What this changes in the workflow:
 | `publish` creates a draft, uploads every asset, checks the count, then publishes | A published immutable release takes no more assets |
 | `verify` stops when the tag already has a published release | It cannot be repaired or replaced. Bump the version and tag again |
 | `overwrite_files` only ever touches a draft | A run that failed before publishing leaves a draft, and running the same tag again updates it |
-| The last step fails the run if the release is not immutable | Someone may have turned the setting off |
+| The last step fails the run if the release is not immutable, or if `gh release verify` does not pass within three minutes | Someone may have turned the setting off. GitHub writes the release attestation a little after publishing, so the check looks again every 15 seconds |
 
 A mistake in a published release is fixed by the next version, never by editing the release. Releases
 published before the setting was turned on (v0.39.0 and older) stay mutable.
