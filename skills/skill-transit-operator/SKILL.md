@@ -3,7 +3,7 @@ name: skill-transit-operator
 description: "Operate a Transit board safely. Teaches how a board works (preset, stages, tracks, cards, deliverables, notes and each card's workspace), what each board tool verb does to a card and what it can destroy, protected stages and verbs that wait for a person, how to read a stalled card and its common causes, and when to ask a person one clear question instead of acting. Load it before operating, repairing or answering questions about a Transit board or its cards through the board tool or the nexus transit commands."
 compatibility: Needs a Transit board reached through nexus's board tool, or the nexus transit commands in a shell
 metadata:
-  version: "0.1.1"
+  version: "0.2.0"
 ---
 # Operate a Transit board
 
@@ -71,6 +71,14 @@ Refusal codes worth knowing:
 | `no-reason` | A write with no reason, or a blank one |
 | any other code | The command itself refused, with its own code and message. Read the message: it usually names what holds the card |
 
+A refusal a person could lift ends with a line that starts `to move it:`. It says who lifts the
+rule. Pass it on:
+
+- `to move it: a person runs <command>`: give the person the command as it is, word for word, and
+  say that a person runs it. Do not run it yourself, and do not look for another way to the same
+  move.
+- `to move it: no one can; <why>`: tell the person that no one can lift it, and why.
+
 ## What each verb does to a card
 
 ### Reading verbs
@@ -80,6 +88,7 @@ None of these changes anything.
 | Verb | What it shows |
 |---|---|
 | `status` | The cards that need a person, open requests, the cards waiting and the cards running |
+| `needs` | The places where only a person can move a card forward. Each has one line saying why, and the exact command or commands that clear it. An empty list means nothing needs the person |
 | `ls` | One line per card: number, stage, status, title |
 | `show` | Everything about one card: its run, fields, dependencies, deliverables, last report, workspace and recent events |
 | `deliverables` | The files each stage attached to a card, with their versions |
@@ -214,6 +223,18 @@ Ask one clear question: what you saw, what you propose, what it destroys or chan
 yes-or-no question. When the verb is under confirm, calling it is the question: say so, and give
 the request number.
 
+## Ending every reply
+
+**End every reply with what needs the person.** Call `needs` and end your reply with each item it
+lists, one per line with its commands, or with the single line `nothing needs you` when it lists
+none.
+
+- Give each command exactly as `needs` gives it. Never a placeholder.
+- When there is a choice, such as approve or deny, show each option on its own line.
+- When you also ask a question, put it last, just before this block.
+- When you do not hold `needs`, you cannot read that list. End every reply by saying so in one line.
+- Never leave the person to guess the next step.
+
 ## Standing rules
 
 - Board maintenance, such as repairs, retries and moves, is recorded with `log add`. It is never
@@ -239,6 +260,8 @@ Then answer:
 > entered with are put back. Everything made at `<stage>` since, committed or not, is lost; the
 > clone now holds `<what git status showed>`. The next pass runs `<stage>` from the start. If
 > nexus cannot reset the clone safely, the rerun refuses and changes nothing. Shall I rerun it?
+
+After that question, the reply ends with what `needs` lists, as in Ending every reply.
 
 ## In a Murmur capsule
 
