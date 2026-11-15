@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing tag to re-publish (e.g. v0.1.0)'
+        description: 'Existing tag to run again, only while it has no published release (e.g. v0.1.0)'
         required: true
 
 concurrency:
@@ -38,7 +38,11 @@ env:
 #   3. attest   — signs a build provenance attestation over every packed zip and names
 #                 a `<zip>.sigstore.json` bundle for each. The only job with id-token.
 #   4. publish  — installs every new version through a real `mur`, requiring each to
-#                 verify its attestation, and only then uploads zips, bundles and index.
+#                 verify its attestation, and only then uploads zips, bundles and index to a
+#                 DRAFT release, checks the draft holds every asset, publishes it, and checks
+#                 it came out immutable and attested. The repository has immutable releases
+#                 on: a published release can never be changed, so assets must all be there
+#                 before it is published, and a published tag cannot be run again.
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -54,6 +58,20 @@ jobs:
           # Full history and tags: the newest-tag check and check-version-drift.sh
           # below both read every v* tag.
           fetch-depth: 0
+
+      - name: Refuse a tag that already has a published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # With immutable releases on, a published release and its tag can never change, so a
+          # second run could neither repair nor replace it. A draft left by a run that failed
+          # before publishing is fine: the publish job updates it.
+          if draft=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" = false ]; then
+              echo "::error::$TAG already has a published release, which cannot be changed. Bump the version and tag again."
+              exit 1
+            fi
+          fi
 
       - name: Check the tag is the workspace version
         run: |
@@ -351,11 +369,46 @@ jobs:
       - name: List release assets
         run: ls -l release
 
-      - name: Create GitHub Release
+      # Immutable releases take no asset after they are published, so the release is created as a
+      # draft, every asset goes on it, and only then is it published.
+      - name: Create the draft release with every asset
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
           files: release/*
           fail_on_unmatched_files: true
           overwrite_files: true
-          make_latest: true
+          draft: true
+
+      - name: Check the draft holds every asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          want=$(find release -maxdepth 1 -type f | wc -l)
+          have=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')
+          echo "release/ holds $want files, the draft holds $have assets"
+          if [ "$want" != "$have" ]; then
+            echo "::error::the draft holds $have assets but release/ holds $want, so it is not published. Run again for the same tag."
+            exit 1
+          fi
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+
+      - name: Check the release is immutable and attested
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          immutable=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isImmutable --jq .isImmutable)
+          echo "isImmutable=$immutable"
+          if [ "$immutable" != true ]; then
+            echo "::error::$TAG is published but not immutable. Turn on release immutability in the repository settings."
+            exit 1
+          fi
+          if gh release verify --help 2>/dev/null | grep -qi attestation; then
+            gh release verify "$TAG" --repo "$GITHUB_REPOSITORY"
+          else
+            echo "::notice::this gh has no 'release verify', so the release attestation was not checked here"
+          fi
