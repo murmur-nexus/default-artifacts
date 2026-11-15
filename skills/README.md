@@ -169,3 +169,11 @@ operator capsules it writes.
 | `fields` goes as an object and `dependsOn` as a list, and a board may also take JSON text of that shape | A model that guessed text for them was refused three times and a card never got its children |
 | `dep` is refused on a card imported from a card file, and the fix is a person's edit of the file | The agent stops trying and asks, instead of retrying a call that can never work |
 | A stage that judges old files: a rerun or retry resets to the commit the card entered with, and `--from-main` starts from the base branch's current tip | The agent sees why a fix on the base branch was not seen, and asks before dropping the stage's work |
+
+0.2.0 adds what the person needs from every reply:
+
+| What | Why it matters |
+|---|---|
+| The `needs` reading verb: the places where only a person can move a card on, each with one line saying why and the exact commands that clear it | The agent can answer "what is waiting on me" from one list |
+| Ending every reply, the same rule `nexus transit operator init` writes: each item `needs` lists, one per line with its commands, each option of a choice on its own line, or the single line `nothing needs you` | The person never has to guess the next step |
+| A refusal's `to move it:` line passed on as it is, saying who lifts the rule: a command a person runs, or that no one can, and why | A refusal reaches the person as a command they can run, and the agent does not work round it |
