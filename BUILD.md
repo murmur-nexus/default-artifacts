@@ -199,7 +199,8 @@ The driver's README lists each provider error it marks under `## Transient failu
    `attest` signs the packed zips (see [Attestation](#attestation)). `publish` then runs
    `./scripts/check-release-installs.sh`, which installs every new version through `mur` against a
    loopback copy of the release and requires each to verify its attestation. Only then is anything
-   uploaded.
+   uploaded: zips, bundles and index go onto a draft release, the workflow checks the draft holds
+   every file, publishes it, and checks it is immutable and attested.
 6. Afterwards, `mur install -g murmur/<name>@<version>` resolves from the new release.
 
 **Docs pin the current version.** READMEs, skills and this page copy artifact versions into
@@ -269,6 +270,26 @@ without the unattested warning.
 
 A version an earlier release published keeps the zip it was published with. It has a bundle only if
 that release made one. Verification only warns today: an artifact with no bundle still installs.
+
+## Immutable releases
+
+The repository has immutable releases on (Settings, General, Releases). A release published after
+that can never change: its tag and its assets cannot be edited, replaced or deleted, and its version
+number cannot be used again. GitHub also records a release attestation, which `gh release verify`
+checks. MAP calls a release immutable only when GitHub reports it immutable and the artifact has an
+attestation, so both this setting and the [Attestation](#attestation) above are needed.
+
+What this changes in the workflow:
+
+| Step | Why |
+|---|---|
+| `publish` creates a draft, uploads every asset, checks the count, then publishes | A published immutable release takes no more assets |
+| `verify` stops when the tag already has a published release | It cannot be repaired or replaced. Bump the version and tag again |
+| `overwrite_files` only ever touches a draft | A run that failed before publishing leaves a draft, and running the same tag again updates it |
+| The last step fails the run if the release is not immutable | Someone may have turned the setting off |
+
+A mistake in a published release is fixed by the next version, never by editing the release. Releases
+published before the setting was turned on (v0.39.0 and older) stay mutable.
 
 ## WIT mirror
 
