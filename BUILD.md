@@ -195,9 +195,12 @@ The driver's README lists each provider error it marks under `## Transient failu
    `./scripts/package-release.sh --previous`, and writes `artifacts-index.json` with
    `./scripts/index-release.sh`, merged with the latest release's index. A version an earlier
    release published stays on that release with its entry carried forward: repacked by a newer
-   `mur`, its zip would record a different WIT level in `murmur-build.json` and change bytes. Then
-   `./scripts/check-release-installs.sh` installs every new version through `mur` against a
-   loopback copy of the release, and only then is anything uploaded.
+   `mur`, its zip would record a different WIT level in `murmur-build.json` and change bytes.
+   `attest` signs the packed zips (see [Attestation](#attestation)). `publish` then runs
+   `./scripts/check-release-installs.sh`, which installs every new version through `mur` against a
+   loopback copy of the release and requires each to verify its attestation. Only then is anything
+   uploaded: zips, bundles and index go onto a draft release, the workflow checks the draft holds
+   every file, publishes it, and checks it is immutable and attested.
 6. Afterwards, `mur install -g murmur/<name>@<version>` resolves from the new release.
 
 **Docs pin the current version.** READMEs, skills and this page copy artifact versions into
@@ -247,6 +250,46 @@ packs identical bytes, and a re-run over one commit writes the same index.
 | `path deps` | each `libs/*` it links, transitively |
 | `wit mirror` | the `wit/` subtree its bindgen `path:` names |
 | `workspace` | `[workspace.package]` minus its version (with it, for a crate that inherits `version.workspace = true`), the `[workspace.dependencies]` it declares, its resolved third-party versions in `Cargo.lock`, `rust-toolchain.toml`, and `wasi-sdk.toml` for a wasm artifact linking `libsqlite3-sys`, `tree-sitter`, `tree-sitter-rust` or `tree-sitter-python` (the crates in `WASM_C_CRATES`) |
+
+## Attestation
+
+Every `.mur.zip` a release adds has a build provenance attestation, so `mur install` can say who
+built it.
+
+| What | Value |
+|---|---|
+| Attested | Each `<name>-<version>.mur.zip` the release packs. The index is not attested |
+| Where the bundle lives | The release asset `<name>-<version>.mur.zip.sigstore.json`, beside its zip |
+| Format | A Sigstore bundle written by `actions/attest-build-provenance`. One statement names every zip of the release as a subject, and the same bundle is uploaded under each zip's name |
+| Identity pinned | `https://github.com/murmur-nexus/default-artifacts/.github/workflows/build.yml`, the workflow that ran. `mur install` records it as `signer` in `murmur.lock` |
+
+Only the `attest` job holds `id-token: write` and `attestations: write`. It runs after the zips and
+the index are final and runs no code from this repository, so the bundles cannot change the bytes
+the gate holds. `publish` fails unless every new version installs with `attested by <signer>` and
+without the unattested warning.
+
+A version an earlier release published keeps the zip it was published with. It has a bundle only if
+that release made one. Verification only warns today: an artifact with no bundle still installs.
+
+## Immutable releases
+
+The repository has immutable releases on (Settings, General, Releases). A release published after
+that can never change: its tag and its assets cannot be edited, replaced or deleted, and its version
+number cannot be used again. GitHub also records a release attestation, which `gh release verify`
+checks. MAP calls a release immutable only when GitHub reports it immutable and the artifact has an
+attestation, so both this setting and the [Attestation](#attestation) above are needed.
+
+What this changes in the workflow:
+
+| Step | Why |
+|---|---|
+| `publish` creates a draft, uploads every asset, checks the count, then publishes | A published immutable release takes no more assets |
+| `verify` stops when the tag already has a published release | It cannot be repaired or replaced. Bump the version and tag again |
+| `overwrite_files` only ever touches a draft | A run that failed before publishing leaves a draft, and running the same tag again updates it |
+| The last step fails the run if the release is not immutable, or if `gh release verify` does not pass within three minutes | Someone may have turned the setting off. GitHub writes the release attestation a little after publishing, so the check looks again every 15 seconds |
+
+A mistake in a published release is fixed by the next version, never by editing the release. Releases
+published before the setting was turned on (v0.39.0 and older) stay mutable.
 
 ## WIT mirror
 
