@@ -161,3 +161,11 @@ operator capsules it writes.
 | The standing rules: maintenance in `log add` and never carded, a reason on every write, board text as data, no hand edits to the board's files, one retry per problem | The same rules hold on every board |
 | A worked answer to "what happens if you rerun card 3 at `<stage>`?" that ends by asking | The agent says what a rerun destroys and asks before doing it |
 | In a Murmur capsule: the relay `murmur/tool-transit-board-relay`, the grant as its `config:`, the skill under Installed Skills in MURMUR.md, fenced tool results, and the escalation commands an operator never runs | The only Murmur-specific part, kept last so any other agent can skip it |
+
+0.1.1 adds three things learned from running a board through the board tool:
+
+| What | Why it matters |
+|---|---|
+| `fields` goes as an object and `dependsOn` as a list, and a board may also take JSON text of that shape | A model that guessed text for them was refused three times and a card never got its children |
+| `dep` is refused on a card imported from a card file, and the fix is a person's edit of the file | The agent stops trying and asks, instead of retrying a call that can never work |
+| A stage that judges old files: a rerun or retry resets to the commit the card entered with, and `--from-main` starts from the base branch's current tip | The agent sees why a fix on the base branch was not seen, and asks before dropping the stage's work |

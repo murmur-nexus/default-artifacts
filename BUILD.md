@@ -176,7 +176,8 @@ The driver's README lists each provider error it marks under `## Transient failu
 
 1. Bump `version:` in the `murmur.yaml` of every artifact whose payload changed, or
    `metadata.version` in a skill's `SKILL.md` — a minor bump below 1.0, `0.5.0` → `0.6.0`. `./scripts/check-version-drift.sh` names any you missed; CI runs
-   it on every push.
+   it on every push. A release must move at least one artifact version: with none there is nothing
+   to pack, `mur index` refuses it, and `verify` stops the tag before the long build.
 2. Bump `[workspace.package] version` in `Cargo.toml` to the next minor. It names the release
    only: every crate pins `version = "0.0.0"`, so neither `Cargo.lock` nor any artifact's bytes
    change with it.

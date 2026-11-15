@@ -106,6 +106,24 @@ jobs:
       - name: Check no artifact changed its payload at an unchanged version
         run: ./scripts/check-version-drift.sh
 
+      - name: Check the release adds a new artifact version
+        run: |
+          # `mur index` refuses a release that packs no .mur.zip (E-IDX-001), and it does so only
+          # after the long build. A release packs the versions the latest release does not list,
+          # so at least one artifact version must have moved since the last tag. Found when v0.40.0,
+          # which changed only the workflow and the docs, failed there.
+          prev=$(git tag --list 'v*' --sort=-v:refname | grep -vx "$TAG" | head -1)
+          if [ -z "$prev" ]; then
+            echo "no earlier tag, nothing to compare"
+            exit 0
+          fi
+          moved=$(git diff "$prev" "$TAG" -U0 -- '*murmur.yaml' '*SKILL.md' | grep -cE '^\+ *version:' || true)
+          echo "artifact version lines changed since $prev: $moved"
+          if [ "$moved" = 0 ]; then
+            echo "::error::$TAG adds no new artifact version since $prev, so there is nothing to pack, index or attest. Bump the version of an artifact that changed, or do not tag."
+            exit 1
+          fi
+
       - name: List the artifacts to publish
         run: ./scripts/list-artifacts.sh
 
@@ -241,7 +259,8 @@ jobs:
       - name: List release assets
         run: ls -l release
 
-      # A release that adds no version packs no zip, so there is nothing to attest.
+      # `verify` refuses a tag that moves no artifact version, and `mur index` refuses a release with
+      # no zip, so at least one payload is counted here.
       - name: Count the payloads
         id: payloads
         run: echo "count=$(find release -maxdepth 1 -name '*.mur.zip' | wc -l)" >> "$GITHUB_OUTPUT"
@@ -323,8 +342,8 @@ jobs:
   publish:
     name: Create GitHub Release
     needs: [release, attest]
-    # `attest` is skipped when the release packs no zip; any other outcome but success
-    # stops the publish.
+    # `attest` is skipped only if the count above is zero, which `verify` and `mur index` make
+    # unreachable; any other outcome but success stops the publish.
     if: ${{ !cancelled() && needs.release.result == 'success' && (needs.attest.result == 'success' || needs.attest.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
