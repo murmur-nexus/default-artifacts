@@ -22,7 +22,7 @@ interface.
 ```yaml
 artifacts:
   - name: murmur/tool-transit-board-relay
-    version: "0.2.0"
+    version: "0.3.0"
     runtime: tool
     gateway:
       endpoint: http://127.0.0.1:<port of nexus transit serve>

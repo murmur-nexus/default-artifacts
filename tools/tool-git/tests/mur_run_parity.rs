@@ -14,10 +14,10 @@
 //! refusing `git push --force` refuses `push` with `force: true`, and records what a
 //! `capabilities.filesystem.read_only` grant refuses.
 //!
-//! Needs a `mur` at WIT level 4 or later (`MUR_BIN`):
+//! Needs a `mur` at WIT level 7 or later (`MUR_BIN`):
 //!
 //! ```sh
-//! MUR_BIN=<level-4 mur> cargo test -p tool-git --test mur_run_parity -- --ignored --nocapture
+//! MUR_BIN=<level-7 mur> cargo test -p tool-git --test mur_run_parity -- --ignored --nocapture
 //! ```
 
 #![cfg(unix)]
@@ -45,7 +45,7 @@ const FENCE_CLOSE: &str = "</untrusted-content>";
 
 fn mur_binary() -> PathBuf {
     let path = PathBuf::from(std::env::var_os("MUR_BIN").expect(
-        "set MUR_BIN to a mur whose `mur version` reports WIT level 4 or higher (murmur:process)",
+        "set MUR_BIN to a mur whose `mur version` reports WIT level 7 or higher (murmur:process@0.2.0)",
     ));
     let out = Command::new(&path).arg("version").output().unwrap();
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -55,8 +55,8 @@ fn mur_binary() -> PathBuf {
         .and_then(|l| l.trim().parse().ok())
         .unwrap_or(0);
     assert!(
-        level >= 4,
-        "MUR_BIN must report WIT level 4 or higher:\n{text}"
+        level >= 7,
+        "MUR_BIN must report WIT level 7 or higher:\n{text}"
     );
     path
 }
@@ -163,7 +163,10 @@ struct Staging {
     driver_version: String,
 }
 
-const WASM_VERSION: &str = "0.7.0";
+/// The tool-git version this checkout builds, as its `murmur.yaml` says.
+fn wasm_version() -> String {
+    manifest_field("tools/tool-git", "version")
+}
 
 impl Staging {
     /// The project that installs tool-git.
@@ -196,13 +199,14 @@ impl Staging {
                 "name: {name}\nversion: 0.1.0\nartifacts:\n\
                  \x20 - name: local/driver-openai\n    version: {}\n    runtime: driver\n    \
                  gateway:\n      endpoint: {endpoint}\n      api_key: test-key\n\
-                 \x20 - name: local/tool-git\n    version: {WASM_VERSION}\n    runtime: tool\n\
+                 \x20 - name: local/tool-git\n    version: {}\n    runtime: tool\n\
                  {extra}\
                  capabilities:\n{capabilities}\
                  trace:\n  capture: content\n\
                  inference:\n  transport: http\n  model: chat-latest\n  max_tokens: 4000\n  \
                  driver:\n    artifact: local/driver-openai\n",
-                self.driver_version
+                self.driver_version,
+                wasm_version(),
             ),
         )
         .unwrap();
@@ -255,7 +259,6 @@ fn stage(extra_zips: &[PathBuf]) -> Staging {
         driver_version: manifest_field("drivers/driver-openai", "version"),
     };
     fs::create_dir_all(&staging.home).unwrap();
-    assert_eq!(manifest_field("tools/tool-git", "version"), WASM_VERSION);
     let driver = pack("drivers/driver-openai", &artifacts);
     let tool = pack("tools/tool-git", &artifacts);
     let project = staging.project();
@@ -279,11 +282,12 @@ fn stage(extra_zips: &[PathBuf]) -> Staging {
         run_to_success(install, &format!("installing {}", zip.display()));
     }
     let lock = fs::read_to_string(project.join("murmur.lock")).unwrap();
+    let version = wasm_version();
     assert!(
         lock.contains(&format!(
-            "name: local/tool-git\n  resolved_version: {WASM_VERSION}"
+            "name: local/tool-git\n  resolved_version: {version}"
         )),
-        "the project resolves tool-git to {WASM_VERSION}:\n{lock}"
+        "the project resolves tool-git to {version}:\n{lock}"
     );
     staging
 }
@@ -670,7 +674,7 @@ fn decision_point_sees_tool_git_commands() {
         .iter()
         .filter(|l| trace_kind(l) == "call_denied")
         .collect();
-    println!("--- guard, tool-git {WASM_VERSION} ---");
+    println!("--- guard, tool-git {} ---", wasm_version());
     println!("push force: {}", texts[0]);
     println!("push:       {}", texts[1]);
     for d in &denied {
@@ -729,7 +733,7 @@ fn decision_point_sees_tool_git_commands() {
         json!({"operation": "clone", "url": "remote.git", "dest": "repo/src/c"}),
     ];
     let (texts, trace, _) = run_calls(&staging, "readonly", "", &caps, calls.clone());
-    println!("--- read_only [repo/src], tool-git {WASM_VERSION} ---");
+    println!("--- read_only [repo/src], tool-git {} ---", wasm_version());
     for (call, text) in calls.iter().zip(&texts) {
         let short: String = text.chars().take(200).collect();
         println!("{} → {}", call, short.replace('\n', "\\n"));

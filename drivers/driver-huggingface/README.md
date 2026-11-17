@@ -31,7 +31,7 @@ first.
 ```yaml
 artifacts:
   - name: murmur/driver-huggingface
-    version: "0.1.0"
+    version: "0.2.0"
     runtime: driver
     gateway:
       endpoint: https://router.huggingface.co/v1

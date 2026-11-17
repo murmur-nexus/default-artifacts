@@ -8,13 +8,13 @@ Every artifact here is published under scope `murmur`: the artifact in `tools/to
 `murmur/tool-read`, which is how a capsule's `artifacts:` names it and how it installs:
 
 ```bash
-mur install -g murmur/tool-read@0.5.0
+mur install -g murmur/tool-read@0.6.0
 ```
 
 ```yaml
 artifacts:
   - name: murmur/tool-read
-    version: "0.5.0"
+    version: "0.6.0"
 ```
 
 Installing by scoped name needs `mur` 0.7.0 or later. `mur` v0.6.0 and earlier have no
@@ -158,10 +158,11 @@ component (`wasm32-wasip2`, exporting `murmur:tool/run`), shipped as one zip for
 | `tool-transit-board-relay` | `tools/tool-transit-board-relay/` | Acts on a Transit board through the board tool `nexus transit serve` answers: lists, shows and adds cards and whatever else the grant allows, one verb per call, `help` first. A thin relay that knows the envelope and never the verbs, so a new verb needs no relay release. The grant is the entry's `config:` block (`board`, `verbs`, `protect`), checked by nexus on every call; serve's key is bound on the entry as `gateway.api_key: ${NEXUS_TRANSIT_TOOL_KEY}` and attached by the runtime, never held by the tool; see its [README](./tools/tool-transit-board-relay/README.md) |
 | `tool-test-report` | `tools/tool-test-report/` | Parses raw test-runner output (cargo, pytest, go, jest) into a structured failure list; `input_path` and `repo_path` are relative to the work folder or absolute inside a host folder the session opened; see its [README](./tools/tool-test-report/README.md) |
 | `tool-code-graph` | `tools/tool-code-graph/` | Indexes a Rust and/or Python repo into a SQLite symbol/edge graph at `<repo_path>/.murmur/code-graph.db`; structured queries over stable symbol identities. `repo_path` is relative to the work folder or absolute inside a host folder the session opened, read-write to index; see its [README](./tools/tool-code-graph/README.md) |
-| `tool-git` | `tools/tool-git/` | Git operations (clone, checkout, status, diff, commit, push, worktree, and more), each git command run through `murmur:process`, so it needs a `mur` at WIT level 4 or higher and `git` in `capabilities.shell.allow`; on-shell hooks and the `read_only` check judge every git command it runs; see its [README](./tools/tool-git/README.md) |
+| `tool-git` | `tools/tool-git/` | Git operations (clone, checkout, status, diff, commit, push, worktree, and more), each git command run through `murmur:process@0.2.0`, so it needs a `mur` at WIT level 7 or higher (the murmur release after v0.11.0, not tagged yet) and `git` in `capabilities.shell.allow`; on-shell hooks and the `read_only` check judge every git command it runs; see its [README](./tools/tool-git/README.md) |
 | `tool-code-coverage` | `tools/tool-code-coverage/` | Spectrum-based fault localization (Ochiai / Tarantula) over per-test LCOV reports, writing suspicion scores onto `tool-code-graph`'s database; `repo_path` and `coverage_dir` are relative to the work folder or absolute inside a host folder the session opened (read-write for `repo_path`); see its [README](./tools/tool-code-coverage/README.md) |
-| `tool-browser` | `tools/tool-browser/` | Drives a headless Chrome or Chromium on the capsule's host one action per call: opens a page, reads it as an accessibility tree with refs, clicks, types, presses, selects, waits and goes back with a summary of what changed, reads console errors and failed requests, and saves screenshots. Starts the browser as a session process through `murmur:process` and keeps it until `close` or the session's end, so it needs a `mur` at WIT level 4 or higher. Needs one of `chromium`, `chromium-browser`, `google-chrome` or `chrome` in `capabilities.shell.allow`, and on murmur's `scoped` and `sealed` tiers `chrome-headless-shell` under that name. Pins Chrome for Testing's `chrome-headless-shell` as the download of `chromium`, which `mur install` fetches once per host, so a host with no browser needs no hand install. Declares what Chrome needs from the host under `programs:` (its folder, NSS's modules, the fonts, the libraries it links), so a capsule grants only the name and names no host path; see its [README](./tools/tool-browser/README.md) |
-| `tool-computer` | `tools/tool-computer/` | The capsule's own 1440x900 virtual display (Xvfb): screenshot, click, drag, scroll, type, keys, wait and zoom, one action per call, each returning the cursor and a PNG screenshot. Starts Xvfb, a window manager and the configured programs as `murmur:process` session processes, so it needs a `mur` reporting WIT level 4 or higher and a Linux host with Xvfb. Declares `provider_tool: {kind: computer}`, so it runs only in a `sealed` capsule; see its [README](./tools/tool-computer/README.md) |
+| `tool-browser` | `tools/tool-browser/` | Drives a headless Chrome or Chromium on the capsule's host one action per call: opens a page, reads it as an accessibility tree with refs, clicks, types, presses, selects, waits and goes back with a summary of what changed, reads console errors and failed requests, and saves screenshots. Starts the browser as a session process through `murmur:process@0.2.0` and keeps it until `close` or the session's end, so it needs a `mur` at WIT level 7 or higher (the murmur release after v0.11.0, not tagged yet). Needs one of `chromium`, `chromium-browser`, `google-chrome` or `chrome` in `capabilities.shell.allow`, and on murmur's `scoped` and `sealed` tiers `chrome-headless-shell` under that name. Pins Chrome for Testing's `chrome-headless-shell` as the download of `chromium`, which `mur install` fetches once per host, so a host with no browser needs no hand install. Declares what Chrome needs from the host under `programs:` (its folder, NSS's modules, the fonts, the libraries it links), so a capsule grants only the name and names no host path; see its [README](./tools/tool-browser/README.md) |
+| `tool-computer` | `tools/tool-computer/` | The capsule's own 1440x900 virtual display (Xvfb): screenshot, click, drag, scroll, type, keys, wait and zoom, one action per call, each returning the cursor and a PNG screenshot. Starts Xvfb, a window manager and the configured programs as `murmur:process@0.2.0` session processes, so it needs a `mur` reporting WIT level 7 or higher (the murmur release after v0.11.0, not tagged yet) and a Linux host with Xvfb. Declares `provider_tool: {kind: computer}`, so it runs only in a `sealed` capsule; see its [README](./tools/tool-computer/README.md) |
+| `tool-repl-js` | `tools/tool-repl-js/` | Code mode: one tool that runs JavaScript in a QuickJS context lasting for the session. A program lists the capsule's tools (`tools()`), calls one (`call`) or several at once (`callAll`) through `murmur:bus`, runs an allowlisted program (`run`, through `murmur:process@0.2.0`) and prints; only what it prints and the value of its last expression reach the model. Named in `code_mode.repl`; needs a `mur` at WIT level 8 or higher (the murmur release after v0.11.0, not tagged yet) and `inference.transport: http`; see its [README](./tools/tool-repl-js/README.md) |
 
 ## Skills
 
@@ -222,6 +223,50 @@ ungranted hook still links and still runs, and its functions return
 needs one has to detect the refusal itself and say so.
 [`hook-memory`](./hooks/hook-memory/) calls all three of
 `murmur:conversation/read`, `murmur:runtime/tokens` and `murmur:task-io/read`.
+
+### WIT level 8
+
+`wit/guest/` is mirrored from murmur `d95c68b4` (#423) on `main`. It now holds `murmur:bus@0.1.0`
+and `world code-mode`, which imports the bus beside everything `world tool` imports, and
+`world tool` imports `murmur:process@0.2.0` (murmur `d2935525`, #419), whose `read` reports when
+each stream has ended. A `mur` serves `murmur:process@0.2.0` from WIT level 7 on and
+`murmur:bus@0.1.0` from WIT level 8 on. The first murmur release to serve either is the release
+after v0.11.0, which is not tagged yet; v0.11.0 serves level 6.
+
+`tool-git`, `tool-browser` and `tool-computer` import `murmur:process@0.2.0`, so their releases
+below need a `mur` at level 7 or later, and `tool-repl-js` imports `murmur:bus@0.1.0`, so it needs
+level 8. Every other rebuilt artifact imports what it imported before and still fits level 3.
+Hooks and process drivers did not move.
+
+| Artifact | First release on this mirror |
+|---|---|
+| `driver-anthropic` | 0.22.0 |
+| `driver-baseten` | 0.8.0 |
+| `driver-deepseek` | 0.20.0 |
+| `driver-huggingface` | 0.2.0 |
+| `driver-moonshotai` | 0.19.0 |
+| `driver-openai` | 0.22.0 |
+| `driver-xai` | 0.2.0 |
+| `driver-zai` | 0.10.0 |
+| `tool-browser` | 0.6.0 |
+| `tool-code-coverage` | 0.8.0 |
+| `tool-code-graph` | 0.9.0 |
+| `tool-computer` | 0.4.0 |
+| `tool-corpus` | 0.11.0 |
+| `tool-create` | 0.13.0 |
+| `tool-edit` | 0.6.0 |
+| `tool-find` | 0.6.0 |
+| `tool-git` | 0.9.0 |
+| `tool-github` | 0.8.0 |
+| `tool-read` | 0.6.0 |
+| `tool-registry-search` | 0.8.0 |
+| `tool-repl-js` | 0.1.0 |
+| `tool-report` | 0.10.0 |
+| `tool-request-input` | 0.10.0 |
+| `tool-tavily` | 0.11.0 |
+| `tool-test-report` | 0.8.0 |
+| `tool-transit-board-relay` | 0.3.0 |
+| `tool-write` | 0.6.0 |
 
 ### WIT level 4
 

@@ -1,5 +1,5 @@
 //! tool-git — a Murmur tool, packaged as a `wasm32-wasip2` component exporting
-//! `murmur:tool/run@0.2.0` and importing `murmur:process/process@0.1.0` (world `tool`), that gives
+//! `murmur:tool/run@0.2.0` and importing `murmur:process/process@0.2.0` (world `tool`), that gives
 //! a capsule typed git operations.
 //!
 //! Every git command runs through `murmur:process` `run`: the program `git`, the handler's

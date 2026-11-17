@@ -1,6 +1,6 @@
 //! The test host the WASM tools on `murmur:process` share: a Wasmtime harness that runs a
 //! tool's compiled `wasm32-wasip2` component the way murmur does, with a host for
-//! `murmur:process/process@0.1.0` that starts real programs outside any capsule.
+//! `murmur:process/process@0.2.0` that starts real programs outside any capsule.
 //!
 //! A [`Session`] is one murmur session's processes, shared by every call; [`call`] runs one tool
 //! call in a fresh `Store` and instance, as murmur gives every tool call. Dropping the `Session`
@@ -94,6 +94,8 @@ const STREAM_KEEP: usize = 1024 * 1024;
 struct StreamBuf {
     bytes: VecDeque<u8>,
     dropped: u64,
+    /// The reader has hit end-of-file (or a read error, which ends the stream the same way).
+    eof: bool,
 }
 
 fn pump(
@@ -104,7 +106,10 @@ fn pump(
         let mut chunk = [0u8; 8192];
         loop {
             match from.read(&mut chunk) {
-                Ok(0) | Err(_) => return,
+                Ok(0) | Err(_) => {
+                    into.lock().unwrap().eof = true;
+                    return;
+                }
                 Ok(n) => {
                     let mut b = into.lock().unwrap();
                     b.bytes.extend(&chunk[..n]);
@@ -126,7 +131,7 @@ struct Proc {
     stdout: Arc<Mutex<StreamBuf>>,
     stderr: Arc<Mutex<StreamBuf>>,
     /// The threads reading stdout and stderr, joined once the process exits so its last output
-    /// is buffered before its exit is reported.
+    /// is buffered before its exit is reported: `status` says `exited` only after both finish.
     readers: Vec<thread::JoinHandle<()>>,
     exit: Option<i32>,
 }
@@ -401,18 +406,20 @@ impl wit::Host for HostState {
         let take = |b: &Arc<Mutex<StreamBuf>>| {
             let mut b = b.lock().unwrap();
             let n = b.bytes.len().min(max_bytes as usize);
-            (
-                b.bytes.drain(..n).collect::<Vec<u8>>(),
-                std::mem::take(&mut b.dropped),
-            )
+            let bytes = b.bytes.drain(..n).collect::<Vec<u8>>();
+            // Ended once the reader saw end-of-file and every byte has been handed out.
+            let ended = b.eof && b.bytes.is_empty();
+            (bytes, std::mem::take(&mut b.dropped), ended)
         };
-        let (stdout, stdout_dropped) = take(&p.stdout);
-        let (stderr, stderr_dropped) = take(&p.stderr);
+        let (stdout, stdout_dropped, stdout_ended) = take(&p.stdout);
+        let (stderr, stderr_dropped, stderr_ended) = take(&p.stderr);
         Ok(wit::Output {
             stdout,
             stderr,
             stdout_dropped,
             stderr_dropped,
+            stdout_ended,
+            stderr_ended,
         })
     }
 

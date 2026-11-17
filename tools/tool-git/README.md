@@ -15,16 +15,17 @@ the capsule's decision point exactly as it puts a shell `git` command: the
 operations outside its scope, `bash` in the shell allowlist serves as the escape hatch.
 
 ```bash
-mur install -g murmur/tool-git@0.8.0
+mur install -g murmur/tool-git@0.9.0
 ```
 
-The tool imports `murmur:process/process@0.1.0`, so it needs a `mur` whose `mur version` reports
-WIT level 4 or higher: the murmur release holding #390 (`f9d4a1f8`). No murmur release holds it
-yet; murmur `main` from `f9d4a1f8` on does. An older `mur` installs the zip, then refuses the
-capsule at launch:
+The tool imports `murmur:process/process@0.2.0`, so it needs a `mur` whose `mur version` reports
+WIT level 7 or higher. Level 7 is murmur `d2935525` (#419); the first murmur release to serve it
+is the release after v0.11.0, which is not tagged yet, and that release serves level 8, built from
+murmur `d95c68b4` (#423) on. An older `mur`, such as v0.11.0 at level 6, installs the zip, then
+refuses the capsule at launch:
 
 ```text
-error[E-WIT-LEVEL-001]: artifact 'local/tool-git@0.7.0' does not fit WIT level 3, the level this mur serves: it imports murmur:process/process@0.1.0, and level 3 has no version of murmur:process
+error[E-WIT-LEVEL-001]: artifact 'local/tool-git@0.9.0' does not fit WIT level 6, the level this mur serves: it imports murmur:process/process@0.2.0, and level 6 has murmur:process@0.1.0
 ```
 
 Supported operations: `status`, `add`, `diff`, `restore`, `stash`, `log`, `show`,
@@ -236,7 +237,7 @@ version: 0.1.0
 
 artifacts:
   - name: murmur/tool-git
-    version: "0.8.0"
+    version: "0.9.0"
 
 capabilities:
   shell:
@@ -288,7 +289,7 @@ cargo build -p tool-git --target wasm32-wasip2 --release
 ```
 
 The component is `target/wasm32-wasip2/release/tool_git.wasm`; the zip is
-`dist/tool-git-0.8.0.mur.zip`.
+`dist/tool-git-0.9.0.mur.zip`.
 
 ## Tests
 
@@ -309,5 +310,5 @@ One suite is ignored by default:
 ```bash
 # Real `mur run` at scoped and sealed through a fake provider on loopback, against the recorded
 # 0.6.0 results; and what an on-shell hook and a read_only grant refuse.
-MUR_BIN=<mur at WIT level 4> cargo test -p tool-git --test mur_run_parity -- --ignored --nocapture
+MUR_BIN=<mur at WIT level 7> cargo test -p tool-git --test mur_run_parity -- --ignored --nocapture
 ```

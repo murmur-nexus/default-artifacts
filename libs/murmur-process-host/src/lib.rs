@@ -1,5 +1,5 @@
 //! What a WASM tool needs from its host, as two traits: the session's processes
-//! (`murmur:process/process@0.1.0` in a component, a fake in unit tests) and a clock.
+//! (`murmur:process/process@0.2.0` in a component, a fake in unit tests) and a clock.
 //!
 //! A tool reaches its programs only through these, so its call logic runs and is tested on the
 //! host target. Each tool implements [`Processes`] and [`Conn`] over its own `wit_bindgen`

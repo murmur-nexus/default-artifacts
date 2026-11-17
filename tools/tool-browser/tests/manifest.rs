@@ -32,7 +32,7 @@ fn declares_a_wasm_tool_with_its_component() {
     let m = manifest();
     for line in [
         "name: tool-browser",
-        "version: 0.5.0",
+        "version: 0.6.0",
         "runtime: tool",
         "implementation: wasm",
     ] {

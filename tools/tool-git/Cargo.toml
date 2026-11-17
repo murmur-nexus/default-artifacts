@@ -14,7 +14,7 @@ serde_json.workspace = true
 # compiles SQLite's C sources into the component with the pinned wasi-sdk (wasi-sdk.toml), which
 # .cargo/config.toml names as the wasm32-wasip2 C compiler; no system SQLite is linked.
 rusqlite.workspace = true
-# Binds the murmur:tool/run@0.2.0 export and the murmur:process/process@0.1.0 import (world
+# Binds the murmur:tool/run@0.2.0 export and the murmur:process/process@0.2.0 import (world
 # `tool`) in the wasm32 module.
 wit-bindgen.workspace = true
 # Where the database, a `clone` destination and `log_path` open: in the work folder, or inside a

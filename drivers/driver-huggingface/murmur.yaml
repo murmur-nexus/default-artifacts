@@ -1,5 +1,5 @@
 name: driver-huggingface
-version: 0.1.0
+version: 0.2.0
 runtime: driver
 description: "Hugging Face Inference Providers router driver — open models pinned to one backend each as <org>/<model>:<provider>, on the Chat Completions surface, with reasoning_effort and replay_reasoning config keys where the backend documents them"
 requires_files:

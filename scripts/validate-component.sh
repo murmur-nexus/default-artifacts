@@ -23,7 +23,8 @@
 #     write,edit,find,corpus,report,            that export murmur:tool/run)
 #     tavily,github,registry-search,
 #     test-report,browser,git,
-#     code-coverage,code-graph,computer}
+#     code-coverage,code-graph,computer,
+#     repl-js}
 #   murmur-fake-computer               -> TOOL   category (test-only: the drivers'
 #                                               computer-tool suites pack it;
 #                                               nothing publishes it)
@@ -45,6 +46,12 @@
 #         murmur:process/process for an artifact named `tool-*`: the `tool` world imports it,
 #         and murmur serves it only to an agent capsule's tool calls, so a driver that imports
 #         it fails.
+#         tool-repl-js is built from the `code-mode` world instead: its murmur:* imports are
+#         a subset of { murmur:bus/bus, murmur:process/process } and nothing else, plus the
+#         type-only murmur:tool/run instance that murmur:bus's `use murmur:tool/run.{tool-result}`
+#         pulls in, which must export no function. No other artifact may import murmur:bus/bus:
+#         murmur refuses at launch any artifact importing it that `code_mode.repl` does not name
+#         (E-CAP-022).
 #   PROCESS-DRIVER: export set == { murmur:driver/process@<process-driver-wit-version> }; zero
 #         murmur:* imports. The runtime instantiates a process driver on an empty WASI context
 #         with no murmur host import at all, so any murmur:* import is a component that cannot
@@ -123,6 +130,16 @@ process_driver_version="$(wit_package_version "$PROCESS_DRIVER_WIT" "murmur:driv
 
 # ---- single-artifact validation ----------------------------------------------
 # Returns 0 pass / 1 validation failure / 2 unrecognised artifact name.
+# True when the component's import of interface `$2` (no version) is an instance whose type
+# exports no function. Fails closed: an instance type it cannot find counts as not type-only.
+type_only_import() {
+  wasm-tools print "$1" | awk -v id="$2" '
+    $1 == "(type" && index($2, "$ty-" id "@") == 1 { seen = 1; f = 1; next }
+    f && index($0, "(import \"" id "@") { f = 0 }
+    f && /\(func/ { found = 1 }
+    END { if (!seen || found) exit 1; exit 0 }'
+}
+
 validate_one() {
   local wasm="$1"
   local base name category expected_export expected_version
@@ -142,7 +159,7 @@ validate_one() {
       expected_export="murmur:driver/process"
       expected_version="$process_driver_version"
       ;;
-    driver-*|tool-request-input|tool-create|tool-read|tool-write|tool-edit|tool-find|tool-corpus|tool-report|tool-tavily|tool-transit-board-relay|tool-github|tool-registry-search|tool-test-report|tool-browser|tool-git|tool-code-coverage|tool-code-graph|tool-computer|murmur-fake-computer)
+    driver-*|tool-request-input|tool-create|tool-read|tool-write|tool-edit|tool-find|tool-corpus|tool-report|tool-tavily|tool-transit-board-relay|tool-github|tool-registry-search|tool-test-report|tool-browser|tool-git|tool-code-coverage|tool-code-graph|tool-computer|tool-repl-js|murmur-fake-computer)
       category="tool"
       expected_export="murmur:tool/run"
       expected_version="$tool_version"
@@ -185,7 +202,7 @@ validate_one() {
   murmur_imports="$(printf '%s\n' "$imports" | grep '^murmur:' || true)"
   murmur_exports="$(printf '%s\n' "$exports_versioned" | grep '^murmur:' || true)"
 
-  local fail=0
+  local fail=0 type_only=""
 
   # ---- 3. export check -------------------------------------------------------
   # Exactly the one expected murmur export, at exactly the vendored WIT's version,
@@ -242,13 +259,40 @@ validate_one() {
           ;;
       esac
     done <<< "$murmur_imports"
+  elif [ "$name" = "tool-repl-js" ]; then
+    # The code-mode REPL imports the bus and murmur:process and nothing else of Murmur's. The bus
+    # does `use murmur:tool/run.{tool-result}`, so murmur:tool/run rides along as an instance; it
+    # must be type-only, carrying no function.
+    while IFS= read -r i; do
+      [ -n "$i" ] || continue
+      case "$i" in
+        murmur:bus/bus|murmur:process/process) ;;
+        murmur:tool/run)
+          if type_only_import "$wasm" "murmur:tool/run"; then
+            type_only="murmur:tool/run"
+          else
+            echo "FAIL: $base (tool): import 'murmur:tool/run' is not a type-only instance — tool-repl-js may import it only for the bus's tool-result type, with no function" >&2
+            fail=1
+          fi
+          ;;
+        *)
+          echo "FAIL: $base (tool): unexpected import '$i' — tool-repl-js may import only murmur:bus/bus and murmur:process/process (and the type-only murmur:tool/run the bus uses)" >&2
+          fail=1
+          ;;
+      esac
+    done <<< "$murmur_imports"
   else
     # Tools/drivers may import only murmur:stream/events and/or murmur:task/task; a tool
-    # (`tool-*`, never a `driver-*`) may also import murmur:process/process.
+    # (`tool-*`, never a `driver-*`) may also import murmur:process/process. Only tool-repl-js
+    # (above) may import murmur:bus/bus.
     while IFS= read -r i; do
       [ -n "$i" ] || continue
       case "$i" in
         murmur:stream/events|murmur:task/task) ;;
+        murmur:bus/bus)
+          echo "FAIL: $base (tool): unexpected import '$i' — only tool-repl-js may import murmur:bus/bus; murmur refuses any artifact importing it that code_mode.repl does not name (E-CAP-022)" >&2
+          fail=1
+          ;;
         murmur:process/process)
           case "$name" in
             tool-*) ;;
@@ -270,6 +314,10 @@ validate_one() {
     return 1
   fi
 
+  # A type-only instance links nothing; it is named on its own line rather than counted.
+  if [ -n "$type_only" ]; then
+    murmur_imports="$(printf '%s\n' "$murmur_imports" | grep -vx "$type_only" || true)"
+  fi
   local n_wasi n_murmur
   n_wasi="$(printf '%s\n' "$imports" | grep -c '^wasi:' || true)"
   n_murmur="$(printf '%s\n' "$murmur_imports" | grep -c . || true)"
@@ -278,6 +326,9 @@ validate_one() {
     echo "  imports: $n_wasi wasi:*, $n_murmur murmur:* (${murmur_imports//$'\n'/, }) — OK"
   else
     echo "  imports: $n_wasi wasi:*, $n_murmur murmur:* — OK"
+  fi
+  if [ -n "$type_only" ]; then
+    echo "  type-only import: $type_only (no function) — OK"
   fi
   echo "PASS: $base"
   return 0
