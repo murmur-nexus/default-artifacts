@@ -18,7 +18,7 @@ mod render;
 
 pub use engine::{Engine, Outcome};
 pub use host::{
-    Attachment, CallError, Envelope, Host, Operation, ProcessError, ResultStatus, RunOutput,
+    Attachment, CallError, Envelope, Host, Operation, ProcError, ResultStatus, RunOutput,
     RunRequest,
 };
 pub use render::cut;

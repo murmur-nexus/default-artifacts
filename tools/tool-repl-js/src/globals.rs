@@ -2,73 +2,41 @@
 //! shapes are the artifact's contract.
 //!
 //! [`install`] sets them on `globalThis` at the start of every call, so a program that replaced
-//! one gets it back on the next call. They reach the call's [`Host`] through [`Shared`], which
-//! holds it only while [`Engine::run`](crate::Engine::run) runs (see [`lend`]).
+//! one gets it back on the next call. They reach the engine's [`Host`] through [`Shared`].
 
-use std::{
-    cell::{Cell, RefCell},
-    ptr::NonNull,
-    rc::Rc,
-};
+use std::{cell::RefCell, rc::Rc};
 
 use rquickjs::{
     function::Rest, Array, Ctx, Exception, Function, Object, Result as JsResult, Value,
 };
 
 use crate::{
-    host::{CallError, Envelope, Host, ProcessError, ResultStatus, RunOutput, RunRequest},
+    host::{CallError, Envelope, Host, ProcError, ResultStatus, RunOutput, RunRequest},
     render::{self, render},
 };
 
 /// What the globals share with the engine.
-#[derive(Default)]
 pub(crate) struct Shared {
-    /// The call's host while [`Engine::run`](crate::Engine::run) runs, else `None`.
-    host: Cell<Option<NonNull<dyn Host>>>,
+    /// The bus and the process runner, for the life of the engine.
+    host: Rc<RefCell<dyn Host>>,
     /// What `print` wrote during this call.
     pub(crate) printed: RefCell<String>,
 }
 
-/// Clears [`Shared::host`] when dropped.
-pub(crate) struct Lent<'a> {
-    shared: &'a Shared,
-}
-
-impl Drop for Lent<'_> {
-    fn drop(&mut self) {
-        self.shared.host.set(None);
-    }
-}
-
-/// Lends `host` to the globals until the returned guard drops.
-pub(crate) fn lend<'a>(shared: &'a Shared, host: &'a mut dyn Host) -> Lent<'a> {
-    let borrowed: NonNull<dyn Host + 'a> = NonNull::from(host);
-    // SAFETY: this only erases the trait object's lifetime bound. The pointer is stored in
-    // `shared.host` and the returned `Lent`, whose lifetime `'a` is no longer than the
-    // `&'a mut dyn Host` borrow, clears it on drop, so no copy is dereferenced after the borrow
-    // ends. `with_host` is the only reader.
-    let erased: NonNull<dyn Host> = unsafe {
-        std::mem::transmute::<NonNull<dyn Host + 'a>, NonNull<dyn Host + 'static>>(borrowed)
-    };
-    shared.host.set(Some(erased));
-    Lent { shared }
-}
-
-/// Runs `f` with the lent host; `None` when no call is running.
-fn with_host<R>(shared: &Shared, f: impl FnOnce(&mut dyn Host) -> R) -> Option<R> {
-    struct Restore<'a>(&'a Shared, NonNull<dyn Host>);
-    impl Drop for Restore<'_> {
-        fn drop(&mut self) {
-            self.0.host.set(Some(self.1));
+impl Shared {
+    pub(crate) fn new(host: Rc<RefCell<dyn Host>>) -> Self {
+        Shared {
+            host,
+            printed: RefCell::default(),
         }
     }
-    let ptr = shared.host.take()?;
-    let _restore = Restore(shared, ptr);
-    // SAFETY: `ptr` came from `lend`, whose guard is still alive because it has not cleared the
-    // cell, so the `&mut dyn Host` it was made from is still borrowed for the engine and nothing
-    // else uses it. Taking it out of the cell for the duration of `f` means no second `&mut` can
-    // be made from it while this one lives, even if `f` re-entered a global.
-    Some(f(unsafe { &mut *ptr.as_ptr() }))
+}
+
+/// Runs `f` with the host; `None` when the host is already borrowed, which only a [`Host`] that
+/// ran JavaScript from inside one of its own methods could cause.
+fn with_host<R>(shared: &Shared, f: impl FnOnce(&mut dyn Host) -> R) -> Option<R> {
+    let mut host = shared.host.try_borrow_mut().ok()?;
+    Some(f(&mut *host))
 }
 
 /// Sets the five globals on `globalThis`.
@@ -96,7 +64,7 @@ pub(crate) fn install<'js>(ctx: &Ctx<'js>, shared: &Rc<Shared>) -> JsResult<()> 
 
     let s = Rc::clone(shared);
     let tools = Function::new(ctx.clone(), move |ctx: Ctx<'js>| -> JsResult<Value<'js>> {
-        let listed = with_host(&s, |h| h.list()).ok_or_else(|| no_call(&ctx))?;
+        let listed = with_host(&s, |h| h.list()).ok_or_else(|| host_busy(&ctx))?;
         let operations = listed.map_err(|text| ctx.throw(kind_error(&ctx, &text, "refused")))?;
         let array = Array::new(ctx.clone())?;
         for (i, op) in operations.iter().enumerate() {
@@ -124,7 +92,7 @@ pub(crate) fn install<'js>(ctx: &Ctx<'js>, shared: &Rc<Shared>) -> JsResult<()> 
         move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> JsResult<Value<'js>> {
             let (name, input) =
                 call_args(&ctx, args.0.first(), args.0.get(1), "call(name, input)")?;
-            let result = with_host(&s, |h| h.call(&name, &input)).ok_or_else(|| no_call(&ctx))?;
+            let result = with_host(&s, |h| h.call(&name, &input)).ok_or_else(|| host_busy(&ctx))?;
             call_result(&ctx, result).map_err(|thrown| ctx.throw(thrown))
         },
     )?;
@@ -140,7 +108,7 @@ pub(crate) fn install<'js>(ctx: &Ctx<'js>, shared: &Rc<Shared>) -> JsResult<()> 
             if pairs.is_empty() {
                 return Ok(out.into_value());
             }
-            let results = with_host(&s, |h| h.call_batch(&pairs)).ok_or_else(|| no_call(&ctx))?;
+            let results = with_host(&s, |h| h.call_batch(&pairs)).ok_or_else(|| host_busy(&ctx))?;
             let returned = results.len();
             let mut results = results.into_iter();
             for i in 0..pairs.len() {
@@ -168,7 +136,7 @@ pub(crate) fn install<'js>(ctx: &Ctx<'js>, shared: &Rc<Shared>) -> JsResult<()> 
         ctx.clone(),
         move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> JsResult<Value<'js>> {
             let request = run_args(&ctx, args.0.first(), args.0.get(1), args.0.get(2))?;
-            let result = with_host(&s, |h| h.run(request)).ok_or_else(|| no_call(&ctx))?;
+            let result = with_host(&s, |h| h.run(request)).ok_or_else(|| host_busy(&ctx))?;
             match result {
                 Ok(output) => run_output(&ctx, &output),
                 Err(e) => Err(ctx.throw(process_error(&ctx, &e))),
@@ -181,9 +149,9 @@ pub(crate) fn install<'js>(ctx: &Ctx<'js>, shared: &Rc<Shared>) -> JsResult<()> 
     Ok(())
 }
 
-/// The error a global throws when no tool call is running.
-fn no_call(ctx: &Ctx<'_>) -> rquickjs::Error {
-    Exception::throw_message(ctx, "tool-repl-js: no tool call is running")
+/// The error a global throws when the host is already answering a call.
+fn host_busy(ctx: &Ctx<'_>) -> rquickjs::Error {
+    Exception::throw_message(ctx, "tool-repl-js: the host is already answering a call")
 }
 
 /// A new `Error` with `message` and `kind`, as a value (not thrown).
@@ -488,18 +456,18 @@ fn run_output<'js>(ctx: &Ctx<'js>, output: &RunOutput) -> JsResult<Value<'js>> {
 }
 
 /// The `Error` `run` throws for a `process-error`.
-fn process_error<'js>(ctx: &Ctx<'js>, e: &ProcessError) -> Value<'js> {
+fn process_error<'js>(ctx: &Ctx<'js>, e: &ProcError) -> Value<'js> {
     match e {
-        ProcessError::Refused { rule, reason } => {
+        ProcError::Refused { rule, reason } => {
             let error = kind_error(ctx, &format!("{rule}: {reason}"), "refused");
             if let Some(object) = error.as_object() {
                 let _ = object.set("rule", rule.as_str());
             }
             error
         }
-        ProcessError::UnknownHandle => kind_error(ctx, "unknown handle", "unknown-handle"),
-        ProcessError::NotRunning => kind_error(ctx, "the process is not running", "not-running"),
-        ProcessError::TimedOut => kind_error(ctx, "the program timed out", "timed-out"),
-        ProcessError::Failed(text) => kind_error(ctx, text, "failed"),
+        ProcError::UnknownHandle => kind_error(ctx, "unknown handle", "unknown-handle"),
+        ProcError::NotRunning => kind_error(ctx, "the process is not running", "not-running"),
+        ProcError::TimedOut => kind_error(ctx, "the program timed out", "timed-out"),
+        ProcError::Failed(text) => kind_error(ctx, text, "failed"),
     }
 }

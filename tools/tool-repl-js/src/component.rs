@@ -1,11 +1,11 @@
 //! The wasm32 adapter: [`Host`] over the `murmur:bus` and `murmur:process` imports, and the
 //! `murmur:tool/run` export over one [`Engine`] kept for the life of the instance.
 
-use std::cell::RefCell;
+use std::{cell::RefCell, rc::Rc};
 
 use crate::{
-    Attachment, CallError, Engine, Envelope, Host, Operation, ProcessError, ResultStatus,
-    RunOutput, RunRequest, ARTIFACT_CONFIG_ENV,
+    Attachment, CallError, Engine, Envelope, Host, Operation, ProcError, ResultStatus, RunOutput,
+    RunRequest, ARTIFACT_CONFIG_ENV,
 };
 
 wit_bindgen::generate!({
@@ -88,7 +88,7 @@ impl Host for Imports {
             .collect()
     }
 
-    fn run(&mut self, request: RunRequest) -> Result<RunOutput, ProcessError> {
+    fn run(&mut self, request: RunRequest) -> Result<RunOutput, ProcError> {
         let request = process::RunRequest {
             program: request.program,
             args: request.args,
@@ -105,14 +105,14 @@ impl Host for Imports {
                 stderr: o.stderr,
                 stderr_truncated: o.stderr_truncated,
             }),
-            Err(process::ProcessError::Refused(r)) => Err(ProcessError::Refused {
+            Err(process::ProcessError::Refused(r)) => Err(ProcError::Refused {
                 rule: r.rule,
                 reason: r.reason,
             }),
-            Err(process::ProcessError::UnknownHandle) => Err(ProcessError::UnknownHandle),
-            Err(process::ProcessError::NotRunning) => Err(ProcessError::NotRunning),
-            Err(process::ProcessError::TimedOut) => Err(ProcessError::TimedOut),
-            Err(process::ProcessError::Failed(text)) => Err(ProcessError::Failed(text)),
+            Err(process::ProcessError::UnknownHandle) => Err(ProcError::UnknownHandle),
+            Err(process::ProcessError::NotRunning) => Err(ProcError::NotRunning),
+            Err(process::ProcessError::TimedOut) => Err(ProcError::TimedOut),
+            Err(process::ProcessError::Failed(text)) => Err(ProcError::Failed(text)),
         }
     }
 }
@@ -141,13 +141,13 @@ impl Guest for Component {
         ENGINE.with(|cell| {
             let mut cell = cell.borrow_mut();
             if cell.is_none() {
-                match Engine::new() {
+                match Engine::new(Rc::new(RefCell::new(Imports))) {
                     Ok(engine) => *cell = Some(engine),
                     Err(e) => return result(ResultStatus::Error, e, false),
                 }
             }
             let engine = cell.as_mut().expect("the engine was just made");
-            let outcome = engine.handle(input.data.as_deref(), config.as_deref(), &mut Imports);
+            let outcome = engine.handle(input.data.as_deref(), config.as_deref());
             result(outcome.status, outcome.text, outcome.truncated)
         })
     }

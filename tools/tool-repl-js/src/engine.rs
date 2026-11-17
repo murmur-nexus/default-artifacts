@@ -39,8 +39,8 @@ pub struct Engine {
 
 impl Engine {
     /// A runtime and a `Context::full` context: the language's built-ins, no module loader and
-    /// no QuickJS `std` or `os` module.
-    pub fn new() -> Result<Self, String> {
+    /// no QuickJS `std` or `os` module. Every global reaches `host` for the life of the engine.
+    pub fn new(host: Rc<RefCell<dyn Host>>) -> Result<Self, String> {
         let runtime =
             Runtime::new().map_err(|e| format!("tool-repl-js: no QuickJS runtime: {e}"))?;
         let context = Context::full(&runtime)
@@ -48,19 +48,14 @@ impl Engine {
         Ok(Engine {
             context,
             runtime,
-            shared: Rc::new(Shared::default()),
+            shared: Rc::new(Shared::new(host)),
         })
     }
 
     /// One tool call: checks the artifact config (`MURMUR_ARTIFACT_CONFIG`'s text, `None` when
     /// unset) and the input (`tool-input.data`), then runs `code`. A bad config or input is
     /// status `error` and runs nothing.
-    pub fn handle(
-        &mut self,
-        data: Option<&str>,
-        config: Option<&str>,
-        host: &mut dyn Host,
-    ) -> Outcome {
+    pub fn handle(&mut self, data: Option<&str>, config: Option<&str>) -> Outcome {
         let limit = match self.parse_config(config) {
             Ok(limit) => limit,
             Err(e) => return Outcome::error(e),
@@ -69,7 +64,7 @@ impl Engine {
             Ok(code) => code,
             Err(e) => return Outcome::error(e),
         };
-        self.run(&code, host, limit)
+        self.run(&code, limit)
     }
 
     /// `output_limit_bytes` from the artifact config: `None` when there is no config or the
@@ -138,16 +133,14 @@ impl Engine {
         })
     }
 
-    /// Runs `code` as a global script in the context, with the globals bound to `host` for the
-    /// call. Promise jobs it queues run before this returns. The text is what `print` wrote, then
+    /// Runs `code` as a global script in the context. Promise jobs it queues run before this returns. The text is what `print` wrote, then
     /// `=> <value>` of the last expression unless it is `undefined`, a string in JSON quotes
     /// (status `passed`); or, on a
     /// throw, `Uncaught …`, the stack, then what was printed (status `failed`). With `limit`,
     /// the text is cut to at most that many bytes and marked.
-    pub fn run(&mut self, code: &str, host: &mut dyn Host, limit: Option<u32>) -> Outcome {
+    pub fn run(&mut self, code: &str, limit: Option<u32>) -> Outcome {
         let shared = Rc::clone(&self.shared);
         shared.printed.borrow_mut().clear();
-        let _lent = globals::lend(&shared, host);
         let (status, text) = self.context.with(|ctx| {
             if let Err(e) = globals::install(&ctx, &shared) {
                 ctx.catch();

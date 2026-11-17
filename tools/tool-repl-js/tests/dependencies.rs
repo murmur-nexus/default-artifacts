@@ -1,8 +1,8 @@
-//! The crate depends on QuickJS and wit-bindgen and nothing else: the input, the config and the
-//! schemas are parsed with QuickJS's own `JSON`.
+//! The crate depends on QuickJS, wit-bindgen and the std-only `murmur-process-host` and nothing
+//! else: the input, the config and the schemas are parsed with QuickJS's own `JSON`.
 
 #[test]
-fn dependencies_are_exactly_rquickjs_and_wit_bindgen() {
+fn dependencies_are_exactly_rquickjs_wit_bindgen_and_the_process_host() {
     let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
         .expect("read Cargo.toml");
     let mut section = String::new();
@@ -23,7 +23,11 @@ fn dependencies_are_exactly_rquickjs_and_wit_bindgen() {
     }
     assert_eq!(
         names,
-        ["[dependencies] rquickjs", "[dependencies] wit-bindgen"],
+        [
+            "[dependencies] rquickjs",
+            "[dependencies] wit-bindgen",
+            "[dependencies] murmur-process-host"
+        ],
         "tool-repl-js's dependencies"
     );
     assert!(

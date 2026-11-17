@@ -1,8 +1,10 @@
 //! The engine against a fake [`Host`]: state across calls, rendering, the output formats, the
 //! cut, the config and input checks, and every global's happy path, `TypeError` and `Error.kind`.
 
+use std::{cell::RefCell, rc::Rc};
+
 use tool_repl_js::{
-    Attachment, CallError, Engine, Envelope, Host, Operation, Outcome, ProcessError, ResultStatus,
+    Attachment, CallError, Engine, Envelope, Host, Operation, Outcome, ProcError, ResultStatus,
     RunOutput, RunRequest,
 };
 
@@ -12,7 +14,7 @@ struct Fake {
     list: Option<Result<Vec<Operation>, String>>,
     /// Answers by name; a name with no answer is refused the way the bus refuses it.
     answers: Vec<(String, Result<Envelope, CallError>)>,
-    run_answer: Option<Result<RunOutput, ProcessError>>,
+    run_answer: Option<Result<RunOutput, ProcError>>,
     calls: Vec<(String, String)>,
     batches: Vec<Vec<(String, String)>>,
     runs: Vec<RunRequest>,
@@ -48,7 +50,7 @@ impl Host for Fake {
         self.batches.push(calls.to_vec());
         calls.iter().map(|(n, _)| self.answer(n)).collect()
     }
-    fn run(&mut self, request: RunRequest) -> Result<RunOutput, ProcessError> {
+    fn run(&mut self, request: RunRequest) -> Result<RunOutput, ProcError> {
         self.runs.push(request);
         self.run_answer
             .clone()
@@ -68,64 +70,66 @@ fn passed(data: &str) -> Envelope {
     }
 }
 
-fn eval(engine: &mut Engine, host: &mut Fake, code: &str) -> Outcome {
-    engine.run(code, host, None)
+fn eval(engine: &mut Engine, code: &str) -> Outcome {
+    engine.run(code, None)
 }
 
 /// The text of a call that must pass.
-fn ok(engine: &mut Engine, host: &mut Fake, code: &str) -> String {
-    let out = eval(engine, host, code);
+fn ok(engine: &mut Engine, code: &str) -> String {
+    let out = eval(engine, code);
     assert_eq!(out.status, ResultStatus::Passed, "{code}: {}", out.text);
     assert!(!out.truncated);
     out.text
 }
 
 /// The text of a call that must fail.
-fn failed(engine: &mut Engine, host: &mut Fake, code: &str) -> String {
-    let out = eval(engine, host, code);
+fn failed(engine: &mut Engine, code: &str) -> String {
+    let out = eval(engine, code);
     assert_eq!(out.status, ResultStatus::Failed, "{code}: {}", out.text);
     out.text
 }
 
-fn fresh() -> (Engine, Fake) {
-    (Engine::new().unwrap(), Fake::default())
+/// An engine and the fake it reaches, which the test keeps to set answers and read records.
+fn fresh() -> (Engine, Rc<RefCell<Fake>>) {
+    let host = Rc::new(RefCell::new(Fake::default()));
+    (Engine::new(host.clone()).unwrap(), host)
 }
 
 // ── state ────────────────────────────────────────────────────────────────────
 
 #[test]
 fn state_lasts_across_calls() {
-    let (mut e, mut h) = fresh();
+    let (mut e, _host) = fresh();
     assert_eq!(
-        ok(&mut e, &mut h, "globalThis.n = 41; let kept = 'yes'; var v = 1; function f() { return 2 } class C {}; print('set')"),
+        ok(&mut e, "globalThis.n = 41; let kept = 'yes'; var v = 1; function f() { return 2 } class C {}; print('set')"),
         "set\n"
     );
     assert_eq!(
-        ok(&mut e, &mut h, "[n + 1, kept, v, f(), typeof C]"),
+        ok(&mut e, "[n + 1, kept, v, f(), typeof C]"),
         "=> [42,\"yes\",1,2,\"function\"]"
     );
 }
 
 #[test]
 fn a_throw_keeps_the_context() {
-    let (mut e, mut h) = fresh();
-    ok(&mut e, &mut h, "var a = 1");
-    failed(&mut e, &mut h, "a = 2; throw new Error('x')");
-    assert_eq!(ok(&mut e, &mut h, "a"), "=> 2");
+    let (mut e, _host) = fresh();
+    ok(&mut e, "var a = 1");
+    failed(&mut e, "a = 2; throw new Error('x')");
+    assert_eq!(ok(&mut e, "a"), "=> 2");
 }
 
 #[test]
 fn a_replaced_global_comes_back_on_the_next_call() {
-    let (mut e, mut h) = fresh();
-    ok(&mut e, &mut h, "print = 5; JSON.stringify = () => 'no'");
-    assert_eq!(ok(&mut e, &mut h, "print({a: 1}); 0"), "{\"a\":1}\n=> 0");
+    let (mut e, _host) = fresh();
+    ok(&mut e, "print = 5; JSON.stringify = () => 'no'");
+    assert_eq!(ok(&mut e, "print({a: 1}); 0"), "{\"a\":1}\n=> 0");
 }
 
 // ── rendering ────────────────────────────────────────────────────────────────
 
 #[test]
 fn every_rendering_rule() {
-    let (mut e, mut h) = fresh();
+    let (mut e, _host) = fresh();
     let cases = [
         ("'text'", "\"text\""),
         ("'two\\nlines'", "\"two\\nlines\""),
@@ -161,41 +165,33 @@ fn every_rendering_rule() {
         ("Object.create(null)", "{}"),
     ];
     for (code, want) in cases {
-        assert_eq!(ok(&mut e, &mut h, code), format!("=> {want}"), "{code}");
+        assert_eq!(ok(&mut e, code), format!("=> {want}"), "{code}");
     }
     assert_eq!(
-        ok(
-            &mut e,
-            &mut h,
-            "print('a', 1, undefined, null, [1], {b: 2}, 3n)"
-        ),
+        ok(&mut e, "print('a', 1, undefined, null, [1], {b: 2}, 3n)"),
         "a 1 undefined null [1] {\"b\":2} 3n\n"
     );
-    assert_eq!(ok(&mut e, &mut h, "print()"), "\n");
+    assert_eq!(ok(&mut e, "print()"), "\n");
     // print writes a string as it is; the `=> ` line quotes it.
-    assert_eq!(
-        ok(&mut e, &mut h, "print('a\\nb'); 'a\\nb'"),
-        "a\nb\n=> \"a\\nb\""
-    );
+    assert_eq!(ok(&mut e, "print('a\\nb'); 'a\\nb'"), "a\nb\n=> \"a\\nb\"");
 }
 
 #[test]
 fn undefined_prints_no_value_line_and_nothing_is_empty() {
-    let (mut e, mut h) = fresh();
-    assert_eq!(ok(&mut e, &mut h, "undefined"), "");
-    assert_eq!(ok(&mut e, &mut h, "let x = 1"), "");
-    assert_eq!(ok(&mut e, &mut h, "print('p')"), "p\n");
-    assert_eq!(ok(&mut e, &mut h, "print('p'); 7"), "p\n=> 7");
+    let (mut e, _host) = fresh();
+    assert_eq!(ok(&mut e, "undefined"), "");
+    assert_eq!(ok(&mut e, "let x = 1"), "");
+    assert_eq!(ok(&mut e, "print('p')"), "p\n");
+    assert_eq!(ok(&mut e, "print('p'); 7"), "p\n=> 7");
 }
 
 // ── exceptions ───────────────────────────────────────────────────────────────
 
 #[test]
 fn an_error_returns_its_head_stack_and_what_was_printed() {
-    let (mut e, mut h) = fresh();
+    let (mut e, _host) = fresh();
     let text = failed(
         &mut e,
-        &mut h,
         "print('before'); function f() { throw new Error('boom') } f()",
     );
     assert!(text.starts_with("Uncaught Error: boom\n"), "{text}");
@@ -205,61 +201,57 @@ fn an_error_returns_its_head_stack_and_what_was_printed() {
 
 #[test]
 fn a_thrown_non_error_is_rendered() {
-    let (mut e, mut h) = fresh();
+    let (mut e, _host) = fresh();
     assert_eq!(
-        failed(&mut e, &mut h, "print('p'); throw {code: 3}"),
+        failed(&mut e, "print('p'); throw {code: 3}"),
         "Uncaught {\"code\":3}\np\n"
     );
-    assert_eq!(failed(&mut e, &mut h, "throw 'plain'"), "Uncaught plain\n");
+    assert_eq!(failed(&mut e, "throw 'plain'"), "Uncaught plain\n");
 }
 
 #[test]
 fn top_level_await_is_a_syntax_error() {
-    let (mut e, mut h) = fresh();
-    let text = failed(&mut e, &mut h, "await Promise.resolve(1)");
+    let (mut e, _host) = fresh();
+    let text = failed(&mut e, "await Promise.resolve(1)");
     assert!(text.starts_with("Uncaught SyntaxError: "), "{text}");
 }
 
 #[test]
 fn redeclaring_a_top_level_let_throws() {
-    let (mut e, mut h) = fresh();
-    ok(&mut e, &mut h, "let once = 1");
-    let text = failed(&mut e, &mut h, "let once = 2");
+    let (mut e, _host) = fresh();
+    ok(&mut e, "let once = 1");
+    let text = failed(&mut e, "let once = 2");
     assert!(text.starts_with("Uncaught SyntaxError: "), "{text}");
-    assert_eq!(ok(&mut e, &mut h, "once"), "=> 1");
+    assert_eq!(ok(&mut e, "once"), "=> 1");
 }
 
 #[test]
 fn promise_jobs_run_in_the_same_call() {
-    let (mut e, mut h) = fresh();
+    let (mut e, _host) = fresh();
     assert_eq!(
-        ok(&mut e, &mut h, "Promise.resolve(3).then(v => print(v))"),
+        ok(&mut e, "Promise.resolve(3).then(v => print(v))"),
         "3\n=> {}"
     );
     assert_eq!(
-        ok(
-            &mut e,
-            &mut h,
-            "Promise.resolve(4).then(v => print(v)); undefined"
-        ),
+        ok(&mut e, "Promise.resolve(4).then(v => print(v)); undefined"),
         "4\n"
     );
     // Each call starts with empty printed text.
-    assert_eq!(ok(&mut e, &mut h, "1"), "=> 1");
+    assert_eq!(ok(&mut e, "1"), "=> 1");
 }
 
 // ── the cut ──────────────────────────────────────────────────────────────────
 
 #[test]
 fn the_cut_ends_on_a_utf8_boundary_and_is_marked() {
-    let (mut e, mut h) = fresh();
+    let (mut e, _host) = fresh();
     // "é" is 2 bytes: 3 of them and a newline are 7 bytes; a limit of 5 falls inside the third,
     // so 4 bytes are kept.
-    let out = e.run("print('ééé')", &mut h, Some(5));
+    let out = e.run("print('ééé')", Some(5));
     assert_eq!(out.status, ResultStatus::Passed);
     assert!(out.truncated);
     assert_eq!(out.text, "éé\n[output cut: 7 bytes, the first 4 shown]");
-    let out = e.run("print('x'.repeat(2000))", &mut h, Some(512));
+    let out = e.run("print('x'.repeat(2000))", Some(512));
     assert_eq!(
         out.text,
         format!(
@@ -267,22 +259,22 @@ fn the_cut_ends_on_a_utf8_boundary_and_is_marked() {
             "x".repeat(512)
         )
     );
-    let out = e.run("'abc'", &mut h, Some(8));
+    let out = e.run("'abc'", Some(8));
     assert_eq!((out.text.as_str(), out.truncated), ("=> \"abc\"", false));
 }
 
 #[test]
 fn no_limit_cuts_nothing() {
-    let (mut e, mut h) = fresh();
-    let out = e.run("print('x'.repeat(200000))", &mut h, None);
+    let (mut e, _host) = fresh();
+    let out = e.run("print('x'.repeat(200000))", None);
     assert_eq!(out.text.len(), 200_001);
     assert!(!out.truncated);
 }
 
 #[test]
 fn a_failed_call_is_cut_too() {
-    let (mut e, mut h) = fresh();
-    let out = e.run("throw new Error('y'.repeat(100))", &mut h, Some(20));
+    let (mut e, _host) = fresh();
+    let out = e.run("throw new Error('y'.repeat(100))", Some(20));
     assert_eq!(out.status, ResultStatus::Failed);
     assert!(out.truncated);
     assert!(out.text.starts_with("Uncaught Error: yyyy"));
@@ -292,11 +284,10 @@ fn a_failed_call_is_cut_too() {
 
 #[test]
 fn config_is_read_from_the_artifact_config() {
-    let (mut e, mut h) = fresh();
+    let (mut e, _host) = fresh();
     let out = e.handle(
         Some(r#"{"code": "print('x'.repeat(20))"}"#),
         Some(r#"{"output_limit_bytes":10}"#),
-        &mut h,
     );
     assert_eq!(
         out.text,
@@ -316,7 +307,7 @@ fn config_is_read_from_the_artifact_config() {
 
 #[test]
 fn each_config_error_runs_nothing() {
-    let (mut e, mut h) = fresh();
+    let (mut e, _host) = fresh();
     let cases = [
         ("not json", "the artifact config is not JSON"),
         ("[1]", "the artifact config must be a JSON object"),
@@ -343,11 +334,7 @@ fn each_config_error_runs_nothing() {
         ),
     ];
     for (config, want) in cases {
-        let out = e.handle(
-            Some(r#"{"code": "globalThis.ran = true"}"#),
-            Some(config),
-            &mut h,
-        );
+        let out = e.handle(Some(r#"{"code": "globalThis.ran = true"}"#), Some(config));
         assert_eq!(out.status, ResultStatus::Error, "{config}");
         assert!(
             out.text.starts_with("tool-repl-js: "),
@@ -356,12 +343,12 @@ fn each_config_error_runs_nothing() {
         );
         assert!(out.text.contains(want), "{config}: {}", out.text);
     }
-    assert_eq!(ok(&mut e, &mut h, "typeof ran"), "=> \"undefined\"");
+    assert_eq!(ok(&mut e, "typeof ran"), "=> \"undefined\"");
 }
 
 #[test]
 fn an_input_without_a_string_code_runs_nothing() {
-    let (mut e, mut h) = fresh();
+    let (mut e, _host) = fresh();
     let cases: [(Option<&str>, &str); 6] = [
         (None, "is not JSON"),
         (Some("[]"), "must be a JSON object with a string `code`"),
@@ -374,11 +361,11 @@ fn an_input_without_a_string_code_runs_nothing() {
         (Some("{"), "is not JSON"),
     ];
     for (data, want) in cases {
-        let out = e.handle(data, None, &mut h);
+        let out = e.handle(data, None);
         assert_eq!(out.status, ResultStatus::Error, "{data:?}");
         assert!(out.text.contains(want), "{data:?}: {}", out.text);
     }
-    let out = e.handle(Some(r#"{"code": "6 * 7"}"#), None, &mut h);
+    let out = e.handle(Some(r#"{"code": "6 * 7"}"#), None);
     assert_eq!(
         (out.status, out.text.as_str()),
         (ResultStatus::Passed, "=> 42")
@@ -389,8 +376,8 @@ fn an_input_without_a_string_code_runs_nothing() {
 
 #[test]
 fn tools_lists_operations_with_parsed_schemas() {
-    let (mut e, mut h) = fresh();
-    h.list = Some(Ok(vec![
+    let (mut e, h) = fresh();
+    h.borrow_mut().list = Some(Ok(vec![
         Operation {
             name: "tool-read".into(),
             description: "Reads a file.".into(),
@@ -403,19 +390,18 @@ fn tools_lists_operations_with_parsed_schemas() {
         },
     ]));
     assert_eq!(
-        ok(&mut e, &mut h, "tools()"),
+        ok(&mut e, "tools()"),
         r#"=> [{"name":"tool-read","description":"Reads a file.","inputSchema":{"type":"object"}},{"name":"odd","description":"","inputSchema":"not json"}]"#
     );
 }
 
 #[test]
 fn a_refused_list_throws_kind_refused() {
-    let (mut e, mut h) = fresh();
-    h.list = Some(Err("the bus answers only in the foreground".into()));
+    let (mut e, h) = fresh();
+    h.borrow_mut().list = Some(Err("the bus answers only in the foreground".into()));
     assert_eq!(
         ok(
             &mut e,
-            &mut h,
             "try { tools() } catch (e) { [e instanceof Error, e.kind, e.message] }"
         ),
         r#"=> [true,"refused","the bus answers only in the foreground"]"#
@@ -426,8 +412,8 @@ fn a_refused_list_throws_kind_refused() {
 
 #[test]
 fn call_returns_the_envelope() {
-    let (mut e, mut h) = fresh();
-    h.answers.push((
+    let (mut e, h) = fresh();
+    h.borrow_mut().answers.push((
         "tool-read".into(),
         Ok(Envelope {
             status: ResultStatus::Failed,
@@ -447,11 +433,11 @@ fn call_returns_the_envelope() {
         }),
     ));
     assert_eq!(
-        ok(&mut e, &mut h, "call('tool-read', {path: 'note.txt'})"),
+        ok(&mut e, "call('tool-read', {path: 'note.txt'})"),
         r#"=> {"status":"failed","summary":"sum","data":null,"dataPath":"/x","truncated":true,"metadata":{"k":"1","j":"3"},"attachments":[{"mediaType":"image/png","path":"a.png"}]}"#
     );
     assert_eq!(
-        h.calls,
+        h.borrow().calls,
         vec![(
             "tool-read".to_string(),
             r#"{"path":"note.txt"}"#.to_string()
@@ -461,20 +447,20 @@ fn call_returns_the_envelope() {
 
 #[test]
 fn call_input_defaults_to_an_empty_object() {
-    let (mut e, mut h) = fresh();
-    h.answers.push(("t".into(), Ok(passed("d"))));
+    let (mut e, h) = fresh();
+    h.borrow_mut().answers.push(("t".into(), Ok(passed("d"))));
     ok(
         &mut e,
-        &mut h,
         "call('t'); call('t', undefined); call('t', null); call('t', [1])",
     );
-    let inputs: Vec<&str> = h.calls.iter().map(|(_, i)| i.as_str()).collect();
+    let fake = h.borrow();
+    let inputs: Vec<&str> = fake.calls.iter().map(|(_, i)| i.as_str()).collect();
     assert_eq!(inputs, ["{}", "{}", "null", "[1]"]);
 }
 
 #[test]
 fn call_type_errors_reach_no_bus() {
-    let (mut e, mut h) = fresh();
+    let (mut e, h) = fresh();
     for code in [
         "call()",
         "call(1)",
@@ -483,23 +469,23 @@ fn call_type_errors_reach_no_bus() {
         "call('t', 1n)",
         "(() => { const o = {}; o.o = o; return call('t', o) })()",
     ] {
-        let text = failed(&mut e, &mut h, code);
+        let text = failed(&mut e, code);
         assert!(
             text.starts_with("Uncaught TypeError: call(name, input): "),
             "{code}: {text}"
         );
     }
-    assert!(h.calls.is_empty());
+    assert!(h.borrow().calls.is_empty());
 }
 
 #[test]
 fn call_errors_carry_their_kind() {
-    let (mut e, mut h) = fresh();
-    h.answers.push((
+    let (mut e, h) = fresh();
+    h.borrow_mut().answers.push((
         "gone".into(),
         Err(CallError::Failed("the tool trapped".into())),
     ));
-    h.answers.push((
+    h.borrow_mut().answers.push((
         "bad".into(),
         Ok(Envelope {
             status: ResultStatus::Error,
@@ -507,7 +493,7 @@ fn call_errors_carry_their_kind() {
             ..passed("")
         }),
     ));
-    h.answers.push((
+    h.borrow_mut().answers.push((
         "bad2".into(),
         Ok(Envelope {
             status: ResultStatus::Error,
@@ -516,7 +502,7 @@ fn call_errors_carry_their_kind() {
             ..passed("")
         }),
     ));
-    h.answers.push((
+    h.borrow_mut().answers.push((
         "bad3".into(),
         Ok(Envelope {
             status: ResultStatus::Error,
@@ -528,26 +514,26 @@ fn call_errors_carry_their_kind() {
         format!("try {{ call('{name}', {{}}) }} catch (e) {{ [e instanceof Error, e.kind, e.message, e.result === undefined ? null : e.result.status] }}")
     };
     assert_eq!(
-        ok(&mut e, &mut h, &probe("tool-write")),
+        ok(&mut e, &probe("tool-write")),
         r#"=> [true,"refused","'tool-write' is not an operation this program may call; list() returns every operation it may call",null]"#
     );
     assert_eq!(
-        ok(&mut e, &mut h, &probe("gone")),
+        ok(&mut e, &probe("gone")),
         r#"=> [true,"failed","the tool trapped",null]"#
     );
     assert_eq!(
-        ok(&mut e, &mut h, &probe("bad")),
+        ok(&mut e, &probe("bad")),
         r#"=> [true,"error","tool said no","error"]"#
     );
     assert_eq!(
-        ok(&mut e, &mut h, &probe("bad2")),
+        ok(&mut e, &probe("bad2")),
         r#"=> [true,"error","summary no","error"]"#
     );
     assert_eq!(
-        ok(&mut e, &mut h, &probe("bad3")),
+        ok(&mut e, &probe("bad3")),
         r#"=> [true,"error","tool returned status error","error"]"#
     );
-    let text = failed(&mut e, &mut h, "call('gone')");
+    let text = failed(&mut e, "call('gone')");
     assert!(
         text.starts_with("Uncaught Error: the tool trapped\n"),
         "{text}"
@@ -558,19 +544,20 @@ fn call_errors_carry_their_kind() {
 
 #[test]
 fn call_all_keeps_order_with_a_refused_entry_in_place() {
-    let (mut e, mut h) = fresh();
-    h.answers.push(("a".into(), Ok(passed("alpha"))));
-    h.answers.push(("b".into(), Ok(passed("beta"))));
+    let (mut e, h) = fresh();
+    h.borrow_mut()
+        .answers
+        .push(("a".into(), Ok(passed("alpha"))));
+    h.borrow_mut()
+        .answers
+        .push(("b".into(), Ok(passed("beta"))));
     assert_eq!(
-        ok(
-            &mut e,
-            &mut h,
-            "callAll([['a', {path: 'a.txt'}], ['tool-write', {}], ['b']]).map(r => r instanceof Error ? r.kind : r.data)"
+        ok(&mut e, "callAll([['a', {path: 'a.txt'}], ['tool-write', {}], ['b']]).map(r => r instanceof Error ? r.kind : r.data)"
         ),
         r#"=> ["alpha","refused","beta"]"#
     );
     assert_eq!(
-        h.batches,
+        h.borrow().batches,
         vec![vec![
             ("a".to_string(), r#"{"path":"a.txt"}"#.to_string()),
             ("tool-write".to_string(), "{}".to_string()),
@@ -578,15 +565,15 @@ fn call_all_keeps_order_with_a_refused_entry_in_place() {
         ]]
     );
     assert!(
-        h.calls.is_empty(),
+        h.borrow().calls.is_empty(),
         "callAll makes one batch, not single calls"
     );
 }
 
 #[test]
 fn call_all_entry_for_status_error_is_the_unthrown_error() {
-    let (mut e, mut h) = fresh();
-    h.answers.push((
+    let (mut e, h) = fresh();
+    h.borrow_mut().answers.push((
         "bad".into(),
         Ok(Envelope {
             status: ResultStatus::Error,
@@ -595,21 +582,21 @@ fn call_all_entry_for_status_error_is_the_unthrown_error() {
         }),
     ));
     assert_eq!(
-        ok(&mut e, &mut h, "const [r] = callAll([['bad', {}]]); [r instanceof Error, r.kind, r.message, r.result.data]"),
+        ok(&mut e, "const [r] = callAll([['bad', {}]]); [r instanceof Error, r.kind, r.message, r.result.data]"),
         r#"=> [true,"error","no","no"]"#
     );
 }
 
 #[test]
 fn an_empty_call_all_makes_no_bus_call() {
-    let (mut e, mut h) = fresh();
-    assert_eq!(ok(&mut e, &mut h, "callAll([])"), "=> []");
-    assert!(h.batches.is_empty());
+    let (mut e, h) = fresh();
+    assert_eq!(ok(&mut e, "callAll([])"), "=> []");
+    assert!(h.borrow().batches.is_empty());
 }
 
 #[test]
 fn call_all_type_errors_reach_no_bus() {
-    let (mut e, mut h) = fresh();
+    let (mut e, h) = fresh();
     for code in [
         "callAll()",
         "callAll('a')",
@@ -619,21 +606,21 @@ fn call_all_type_errors_reach_no_bus() {
         "callAll([[1]])",
         "callAll([['a', {}], ['b', () => 1]])",
     ] {
-        let text = failed(&mut e, &mut h, code);
+        let text = failed(&mut e, code);
         assert!(
             text.starts_with("Uncaught TypeError: callAll(pairs): "),
             "{code}: {text}"
         );
     }
-    assert!(h.batches.is_empty());
+    assert!(h.borrow().batches.is_empty());
 }
 
 // ── run() ────────────────────────────────────────────────────────────────────
 
 #[test]
 fn run_maps_its_options_and_output() {
-    let (mut e, mut h) = fresh();
-    h.run_answer = Some(Ok(RunOutput {
+    let (mut e, h) = fresh();
+    h.borrow_mut().run_answer = Some(Ok(RunOutput {
         exit_code: 3,
         timed_out: false,
         stdout: b"hi\n".to_vec(),
@@ -642,11 +629,11 @@ fn run_maps_its_options_and_output() {
         stderr_truncated: false,
     }));
     assert_eq!(
-        ok(&mut e, &mut h, "run('echo', ['hi'], {env: {A: '1', B: 'two'}, stdin: 'é', timeoutMs: 250})"),
+        ok(&mut e, "run('echo', ['hi'], {env: {A: '1', B: 'two'}, stdin: 'é', timeoutMs: 250})"),
         "=> {\"exitCode\":3,\"timedOut\":false,\"stdout\":\"hi\\n\",\"stdoutTruncated\":true,\"stderr\":\"\u{FFFD}e\",\"stderrTruncated\":false}"
     );
     assert_eq!(
-        h.runs,
+        h.borrow().runs,
         vec![RunRequest {
             program: "echo".into(),
             args: vec!["hi".into()],
@@ -655,16 +642,16 @@ fn run_maps_its_options_and_output() {
             timeout_ms: Some(250),
         }]
     );
-    ok(&mut e, &mut h, "run('true'); run('true', undefined, {})");
+    ok(&mut e, "run('true'); run('true', undefined, {})");
     assert_eq!(
-        h.runs[1],
+        h.borrow().runs[1],
         RunRequest {
             program: "true".into(),
             ..RunRequest::default()
         }
     );
     assert_eq!(
-        h.runs[2],
+        h.borrow().runs[2],
         RunRequest {
             program: "true".into(),
             ..RunRequest::default()
@@ -674,7 +661,7 @@ fn run_maps_its_options_and_output() {
 
 #[test]
 fn run_type_errors_run_nothing() {
-    let (mut e, mut h) = fresh();
+    let (mut e, h) = fresh();
     for code in [
         "run()",
         "run(1)",
@@ -691,52 +678,52 @@ fn run_type_errors_run_nothing() {
         "run('a', [], {timeoutMs: 1.5})",
         "run('a', [], {timeoutMs: '5'})",
     ] {
-        let text = failed(&mut e, &mut h, code);
+        let text = failed(&mut e, code);
         assert!(
             text.starts_with("Uncaught TypeError: run(program, args, options): "),
             "{code}: {text}"
         );
     }
-    assert!(h.runs.is_empty());
+    assert!(h.borrow().runs.is_empty());
 }
 
 #[test]
 fn run_errors_carry_kind_and_rule() {
-    let (mut e, mut h) = fresh();
+    let (mut e, h) = fresh();
     let probe = "try { run('cat', ['x']) } catch (e) { [e instanceof Error, e.kind, e.rule === undefined ? null : e.rule, e.message] }";
-    h.run_answer = Some(Err(ProcessError::Refused {
+    h.borrow_mut().run_answer = Some(Err(ProcError::Refused {
         rule: "capabilities.shell.allow".into(),
         reason: "binary 'cat' is not in capabilities.shell.allow".into(),
     }));
     assert_eq!(
-        ok(&mut e, &mut h, probe),
+        ok(&mut e, probe),
         r#"=> [true,"refused","capabilities.shell.allow","capabilities.shell.allow: binary 'cat' is not in capabilities.shell.allow"]"#
     );
     for (error, kind) in [
-        (ProcessError::UnknownHandle, "unknown-handle"),
-        (ProcessError::NotRunning, "not-running"),
-        (ProcessError::TimedOut, "timed-out"),
-        (ProcessError::Failed("spawn failed".into()), "failed"),
+        (ProcError::UnknownHandle, "unknown-handle"),
+        (ProcError::NotRunning, "not-running"),
+        (ProcError::TimedOut, "timed-out"),
+        (ProcError::Failed("spawn failed".into()), "failed"),
     ] {
-        h.run_answer = Some(Err(error));
-        let text = ok(&mut e, &mut h, probe);
+        h.borrow_mut().run_answer = Some(Err(error));
+        let text = ok(&mut e, probe);
         assert!(
             text.starts_with(&format!("=> [true,\"{kind}\",null,")),
             "{kind}: {text}"
         );
     }
     assert_eq!(
-        ok(&mut e, &mut h, "try { run('x') } catch (e) { e.message }"),
+        ok(&mut e, "try { run('x') } catch (e) { e.message }"),
         "=> \"spawn failed\""
     );
 }
 
 #[test]
 fn no_global_returns_a_promise() {
-    let (mut e, mut h) = fresh();
-    h.answers.push(("t".into(), Ok(passed("d"))));
+    let (mut e, h) = fresh();
+    h.borrow_mut().answers.push(("t".into(), Ok(passed("d"))));
     assert_eq!(
-        ok(&mut e, &mut h, "[tools(), call('t'), callAll([['t']]), run('x'), print()].map(v => v instanceof Promise)"),
+        ok(&mut e, "[tools(), call('t'), callAll([['t']]), run('x'), print()].map(v => v instanceof Promise)"),
         "\n=> [false,false,false,false,false]"
     );
 }

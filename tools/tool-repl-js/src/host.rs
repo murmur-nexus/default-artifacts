@@ -68,19 +68,8 @@ pub struct RunOutput {
     pub stderr_truncated: bool,
 }
 
-/// `process-error`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProcessError {
-    /// A rule refused the program; nothing ran.
-    Refused {
-        rule: String,
-        reason: String,
-    },
-    UnknownHandle,
-    NotRunning,
-    TimedOut,
-    Failed(String),
-}
+/// `process-error`, shared with the other tools on `murmur:process`.
+pub use murmur_process_host::ProcError;
 
 /// The bus and the process runner, as the globals call them.
 pub trait Host {
@@ -91,5 +80,5 @@ pub trait Host {
     /// `call-batch`: `(name, input)` pairs, one result per pair in the same order.
     fn call_batch(&mut self, calls: &[(String, String)]) -> Vec<Result<Envelope, CallError>>;
     /// `murmur:process` `run`.
-    fn run(&mut self, request: RunRequest) -> Result<RunOutput, ProcessError>;
+    fn run(&mut self, request: RunRequest) -> Result<RunOutput, ProcError>;
 }

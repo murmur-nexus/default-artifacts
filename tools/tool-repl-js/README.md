@@ -176,7 +176,8 @@ cargo test -p tool-repl-js
 
 runs the engine against a fake host (`tests/engine.rs`): state across calls, every rendering rule,
 the output formats, the cut, the config and input checks, and each global's results, `TypeError`s
-and `Error.kind`s; and checks the crate depends on `rquickjs` and `wit-bindgen` only.
+and `Error.kind`s; and checks the crate depends on `rquickjs`, `wit-bindgen` and the std-only
+`murmur-process-host` only.
 
 One suite is ignored by default, because it drives a real `mur`:
 
