@@ -14,7 +14,7 @@
 //! directory, against a loopback fake Chat Completions provider that scripts the model's tool
 //! calls and records every request body. `driver-openai` and `tool-browser` (both
 //! wasm32-wasip2) are built out of this workspace and packed by `scripts/package-artifact.sh`
-//! on every run. `mur` comes from `MUR_BIN` and must report WIT level 4 or higher, the first
+//! on every run. `mur` comes from `MUR_BIN` and must report WIT level 7 or higher, the first
 //! with `murmur:process`, and must read `programs.<program>.download` (murmur `b0d4c42e` or
 //! later); a run without one fails rather than skipping.
 //!
@@ -108,7 +108,17 @@ const NSS_NEEDS: [&str; 11] = [
 /// look, so they take turns.
 fn one_at_a_time() -> MutexGuard<'static, ()> {
     static TURN: Mutex<()> = Mutex::new(());
-    TURN.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    let turn = TURN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    running_before();
+    turn
+}
+
+/// The pids that named `--user-data-dir=.tool-browser/` before this test process started a
+/// browser: another checkout's browser, which the leftover check must not count.
+fn running_before() -> &'static [u64] {
+    static BEFORE: std::sync::OnceLock<Vec<u64>> = std::sync::OnceLock::new();
+    BEFORE
+        .get_or_init(|| murmur_process_test_host::pids_mentioning("--user-data-dir=.tool-browser/"))
 }
 
 // ── the runtime under test ───────────────────────────────────────────────────
@@ -117,7 +127,7 @@ fn mur_binary() -> PathBuf {
     let path = PathBuf::from(std::env::var_os("MUR_BIN").unwrap_or_else(|| {
         panic!(
             "set MUR_BIN to a mur at murmur b0d4c42e or later, whose `mur version` reports WIT \
-             level 4 or higher. This test \
+             level 7 or higher. This test \
              launches the runtime as a subprocess, so a missing binary is a failure rather than a \
              skip."
         )
@@ -135,8 +145,8 @@ fn mur_binary() -> PathBuf {
         .and_then(|l| l.trim().parse().ok())
         .unwrap_or(0);
     assert!(
-        level >= 4,
-        "MUR_BIN must report WIT level 4 or higher (murmur:process), at murmur b0d4c42e or later \
+        level >= 7,
+        "MUR_BIN must report WIT level 7 or higher (murmur:process@0.2.0), at murmur b0d4c42e or later \
          (programs.<program>.download); it reports:\n{text}"
     );
     path
@@ -1054,7 +1064,11 @@ fn granted_session(staging: &Staging, tier: &str, https: bool, path: &str, copy:
 
     let left =
         murmur_process_test_host::pids_mentioning(&format!("{}/.tool-browser/", workdir.display()));
-    let rel_left = murmur_process_test_host::pids_mentioning("--user-data-dir=.tool-browser/");
+    let rel_left: Vec<u64> =
+        murmur_process_test_host::pids_mentioning("--user-data-dir=.tool-browser/")
+            .into_iter()
+            .filter(|pid| !running_before().contains(pid))
+            .collect();
     assert!(
         left.is_empty() && rel_left.is_empty(),
         "no process names .tool-browser/ after mur run exits on {tier}: {left:?} {rel_left:?}"

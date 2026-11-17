@@ -43,14 +43,24 @@
 #                   listed here. A rebuild against a bumped mirror exports a
 #                   different interface version, so the bytes differ.
 #
-#   workspace       `[workspace.package]` and any `[profile.*]`, the
+#   workspace       `[workspace.package]` and any `[profile.*]` — except that a
+#                   `[profile.<profile>.package.<p>]` section (its header and its
+#                   lines) reaches only an artifact whose crate is `<p>` or whose
+#                   resolved Cargo.lock graph holds a package named `<p>`, since
+#                   it changes how `<p>` alone is compiled; a `"*"` package
+#                   section reaches every artifact — the
 #                   `[workspace.dependencies]` entries this crate declares (a
 #                   feature list is not in the lockfile), its own resolved
-#                   third-party versions walked out of Cargo.lock,
+#                   third-party versions walked out of Cargo.lock (when both
+#                   sides of a comparison hold a third-party package at one
+#                   version, only the dependency names both list for it are
+#                   followed: Cargo.lock lists the union over every member's
+#                   features, while scripts/build-wasm.sh builds each artifact
+#                   alone with its own),
 #                   rust-toolchain.toml, and — for a wasm artifact whose
 #                   resolved closure holds a crate that compiles C sources
 #                   (WASM_C_CRATES: libsqlite3-sys, tree-sitter and its
-#                   grammars) — wasi-sdk.toml, the C
+#                   grammars, rquickjs-sys) — wasi-sdk.toml, the C
 #                   toolchain that compiles them into the component. Narrowed to the one artifact on
 #                   purpose: adding an unrelated crate to the workspace changes
 #                   neither its dependencies nor its bytes. A crate's version
@@ -324,6 +334,9 @@ def wit_trees(ref, entries):
 
 _workspace_cache = {}
 
+# `[profile.<profile>.package.<p>]`, `<p>` bare or quoted.
+PACKAGE_PROFILE = re.compile(r'^\[profile\.([^.\]]+)\.package\.(?:"([^"]+)"|([^.\]"]+))\]$')
+
 
 def workspace_state(ref):
     """The workspace-wide build inputs at `ref`, parsed once per ref.
@@ -340,17 +353,30 @@ def workspace_state(ref):
         return _workspace_cache[ref]
 
     # [workspace.package] without its version, plus any [profile.*]: edition,
-    # MSRV and codegen settings all change the emitted code.
+    # MSRV and codegen settings all change the emitted code. A
+    # [profile.<profile>.package.<p>] section changes only how <p> is compiled,
+    # so it is kept apart under <p> and reaches only the artifacts that build <p>
+    # (workspace_inputs); a "*" package section stays shared.
     cargo_toml = show(ref, "Cargo.toml") or ""
     shared, workspace_deps, workspace_version = [], {}, ""
-    section = ""
+    package_profiles = {}
+    section, profile_package = "", None
     for line in cargo_toml.splitlines():
         if line.startswith("["):
             section = line.strip()
-            if section in ("[workspace.package]",) or section.startswith("[profile"):
+            match = PACKAGE_PROFILE.match(section)
+            named = (match.group(2) or match.group(3)) if match else None
+            profile_package = named if named != "*" else None
+            if profile_package is not None:
+                package_profiles.setdefault(profile_package, []).append(line)
+            elif section in ("[workspace.package]",) or section.startswith("[profile"):
                 shared.append(line)
             continue
-        if section == "[workspace.package]":
+        if profile_package is not None:
+            package_profiles[profile_package].append(line)
+        elif section.startswith("[profile"):
+            shared.append(line)
+        elif section == "[workspace.package]":
             if re.match(r"^version\s*=", line):
                 workspace_version = line.strip()
             else:
@@ -397,6 +423,7 @@ def workspace_state(ref):
 
     state = {
         "shared": "\n".join(shared),
+        "package_profiles": package_profiles,
         "version": workspace_version,
         "workspace_deps": workspace_deps,
         "packages": packages,
@@ -408,8 +435,37 @@ def workspace_state(ref):
     return state
 
 
-def locked_closure(state, crate):
-    """Every third-party (name, version) `crate` resolves to, transitively."""
+def locked_names(state, crate):
+    """The name of every package, workspace member or third-party, `crate`
+    reaches in Cargo.lock, `crate` included."""
+    seen, stack = set(), list(state["by_name"].get(crate, []))
+    while stack:
+        key = stack.pop()
+        if key in seen or key not in state["packages"]:
+            continue
+        seen.add(key)
+        for dep in state["packages"][key]["deps"]:
+            parts = dep.split()
+            if len(parts) == 2:
+                stack.append((parts[0], parts[1]))
+            else:
+                stack.extend(state["by_name"].get(parts[0], []))
+    return {name for name, _version in seen} | {crate}
+
+
+def locked_closure(state, crate, peer=None):
+    """Every third-party (name, version) `crate` resolves to, transitively.
+
+    Cargo.lock lists a package's dependencies as the union over every feature
+    any workspace member enables, but scripts/build-wasm.sh builds each artifact
+    in its own invocation, which enables only the features its own graph asks
+    for (check-build-isolation.sh proves the bytes match). So when `peer` (the
+    other side of a comparison) holds the same third-party (name, version), the
+    walk follows only the dependency names both sides list for it: a name that
+    another member's features added is not this artifact's input. A dependency
+    whose version moved is still followed under its name, and a feature this
+    artifact enables itself shows in its own Cargo.toml, a path dependency or a
+    [workspace.dependencies] line."""
     keys = state["by_name"].get(crate)
     if not keys:
         return None
@@ -422,7 +478,12 @@ def locked_closure(state, crate):
         package = state["packages"][key]
         if package["source"]:
             external.add(key)
+        shared_names = None
+        if package["source"] and peer is not None and key in peer["packages"]:
+            shared_names = {d.split()[0] for d in peer["packages"][key]["deps"]}
         for dep in package["deps"]:
+            if shared_names is not None and dep.split()[0] not in shared_names:
+                continue
             parts = dep.split()
             if len(parts) == 2:
                 stack.append((parts[0], parts[1]))
@@ -434,13 +495,19 @@ def locked_closure(state, crate):
 # Third-party crates that compile C sources into a wasm32-wasip2 component with the
 # pinned wasi-sdk (wasi-sdk.toml). A wasm artifact whose resolved closure holds one
 # of these takes wasi-sdk.toml as a build input: bundled SQLite (tool-test-report,
-# tool-code-graph), and tree-sitter's runtime and the Rust and Python grammars
-# (tool-code-graph). A later port that brings another C crate into a component adds
-# it here.
-WASM_C_CRATES = ("libsqlite3-sys", "tree-sitter", "tree-sitter-rust", "tree-sitter-python")
+# tool-code-graph), tree-sitter's runtime and the Rust and Python grammars
+# (tool-code-graph), and QuickJS (tool-repl-js). A later port that brings another C
+# crate into a component adds it here.
+WASM_C_CRATES = (
+    "libsqlite3-sys",
+    "tree-sitter",
+    "tree-sitter-rust",
+    "tree-sitter-python",
+    "rquickjs-sys",
+)
 
 
-def workspace_inputs(ref, crate, declared, inherits_version, is_wasm):
+def workspace_inputs(ref, crate, declared, inherits_version, is_wasm, peer_ref=None):
     """The workspace inputs that reach this one artifact: the shared manifest
     settings, `[workspace.package] version` when one of its crates inherits it,
     the `[workspace.dependencies]` entries it actually declares (their feature
@@ -449,12 +516,23 @@ def workspace_inputs(ref, crate, declared, inherits_version, is_wasm):
     (WASM_C_CRATES), the wasi-sdk pin that compiles them."""
     state = workspace_state(ref)
     parts = [state["shared"]]
+    # Appended only when one applies, so an artifact no section names keeps the
+    # inputs it had before any [profile.*.package.*] section existed.
+    reached = locked_names(state, crate) if state["package_profiles"] else set()
+    own_profiles = [
+        "\n".join(lines)
+        for package, lines in sorted(state["package_profiles"].items())
+        if package in reached
+    ]
+    if own_profiles:
+        parts.append("\n".join(own_profiles))
     if inherits_version:
         parts.append(state["version"])
     parts.append(
         "\n".join(state["workspace_deps"][d] for d in sorted(declared) if d in state["workspace_deps"])
     )
-    closure = locked_closure(state, crate)
+    peer = workspace_state(peer_ref) if peer_ref is not None else None
+    closure = locked_closure(state, crate, peer)
     parts.append(
         "\n".join(f"{n} {v}" for n, v in sorted(closure)) if closure is not None else "<unlocked>"
     )
@@ -490,8 +568,9 @@ def inherits_workspace_version(entries):
     )
 
 
-def fingerprint(ref, artifact):
-    """A digest per input class, so a mismatch names what moved."""
+def fingerprint(ref, artifact, peer_ref=None):
+    """A digest per input class, so a mismatch names what moved. `peer_ref` is the
+    other side of a comparison (see locked_closure)."""
     root = normalise(artifact["path"])
     if artifact.get("skill"):
         own = skill_tree(ref, root)
@@ -527,6 +606,7 @@ def fingerprint(ref, artifact):
                 declared_workspace_deps(all_entries),
                 inherits_workspace_version(all_entries),
                 artifact.get("implementation", "wasm") == "wasm",
+                peer_ref,
             )
         )
         digests["workspace"] = hashlib.sha256(joined.encode()).hexdigest()
@@ -555,7 +635,7 @@ def compare(base, head):
             continue
         if was["version"] != entry["version"]:
             continue
-        before, after = fingerprint(base, was), fingerprint(head, entry)
+        before, after = fingerprint(base, was, head), fingerprint(head, entry, base)
         if before is None or after is None:
             continue
         checked += 1

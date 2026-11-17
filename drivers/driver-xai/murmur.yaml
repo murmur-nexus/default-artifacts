@@ -1,5 +1,5 @@
 name: driver-xai
-version: 0.1.0
+version: 0.2.0
 runtime: driver
 description: "xAI inference driver — grok-4.7, grok-4.6 and grok-build-0.1 on the Responses API, stateless with response storage off and each turn's encrypted reasoning sent back, with reasoning_effort and response_format config keys"
 requires_files:

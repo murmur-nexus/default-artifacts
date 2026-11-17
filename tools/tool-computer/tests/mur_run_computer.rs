@@ -8,11 +8,11 @@
 //! calls (screenshot, left_click at the xmessage button, screenshot) and records every request
 //! body. `driver-openai` and `tool-computer` (both wasm32-wasip2) are built out of this workspace
 //! and packed by `scripts/package-artifact.sh` on every run. `mur` comes from `MUR_BIN` and must
-//! report WIT level 4 or higher, the first with `murmur:process`; a run without one fails rather
+//! report WIT level 7 or higher, the first with `murmur:process@0.2.0`; a run without one fails rather
 //! than skipping.
 //!
 //! `#[ignore]`d because the default `cargo test --workspace` has no `mur` to launch.
-//! `MUR_BIN=<level-4 mur> cargo test -p tool-computer --test mur_run_computer -- --ignored
+//! `MUR_BIN=<level-7 mur> cargo test -p tool-computer --test mur_run_computer -- --ignored
 //! --nocapture` runs it.
 
 #![cfg(target_os = "linux")]
@@ -55,7 +55,7 @@ fn one_at_a_time() -> MutexGuard<'static, ()> {
 fn mur_binary() -> PathBuf {
     let path = PathBuf::from(std::env::var_os("MUR_BIN").unwrap_or_else(|| {
         panic!(
-            "set MUR_BIN to a mur whose `mur version` reports WIT level 4 or higher. This test \
+            "set MUR_BIN to a mur whose `mur version` reports WIT level 7 or higher. This test \
              launches the runtime as a subprocess, so a missing binary is a failure rather than a \
              skip."
         )
@@ -73,8 +73,8 @@ fn mur_binary() -> PathBuf {
         .and_then(|l| l.trim().parse().ok())
         .unwrap_or(0);
     assert!(
-        level >= 4,
-        "MUR_BIN must report WIT level 4 or higher (murmur:process); it reports:\n{text}"
+        level >= 7,
+        "MUR_BIN must report WIT level 7 or higher (murmur:process@0.2.0); it reports:\n{text}"
     );
     path
 }

@@ -32,7 +32,7 @@ by a process driver. This driver is the API-key case.
 ```yaml
 artifacts:
   - name: murmur/driver-xai
-    version: "0.1.0"
+    version: "0.2.0"
     runtime: driver
     gateway:
       endpoint: https://api.x.ai/v1

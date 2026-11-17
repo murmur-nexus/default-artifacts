@@ -11,7 +11,7 @@ and it runs until `close` or the session's end, when murmur kills it with its pr
 Nothing runs at capsule launch.
 
 ```bash
-mur install -g murmur/tool-browser@0.5.0
+mur install -g murmur/tool-browser@0.6.0
 ```
 
 `mur install` also fetches the pinned `chrome-headless-shell` for `chromium`, about 128 MB, once
@@ -24,12 +24,14 @@ per host, and checks its SHA-256:
 A later `mur install` on the same host prints
 `chromium for linux-x86_64 (murmur/tool-browser): already in the store` and fetches nothing.
 
-The tool is a WASM component that imports `murmur:process`. It needs a `mur` whose `mur version`
-reports WIT level 4 or higher: murmur v0.10.0 is the first release that serves level 4.
-An older `mur` installs the zip, then refuses the capsule at launch:
+The tool is a WASM component that imports `murmur:process/process@0.2.0`. It needs a `mur` whose
+`mur version` reports WIT level 7 or higher. Level 7 is murmur `d2935525` (#419); the first murmur
+release to serve it is the release after v0.11.0, which is not tagged yet, and that release serves
+level 8, built from murmur `d95c68b4` (#423) on. An older `mur`, such as v0.11.0 at level 6,
+installs the zip, then refuses the capsule at launch:
 
 ```text
-error[E-WIT-LEVEL-001]: artifact 'local/tool-browser@0.5.0' does not fit WIT level 3, the level this mur serves: it imports murmur:process/process@0.1.0, and level 3 has no version of murmur:process
+error[E-WIT-LEVEL-001]: artifact 'local/tool-browser@0.6.0' does not fit WIT level 6, the level this mur serves: it imports murmur:process/process@0.2.0, and level 6 has murmur:process@0.1.0
 ```
 
 What Chrome needs from the host, and the pinned download, are declared in the tool's own
@@ -234,7 +236,7 @@ instead`. `chrome-headless-shell` has no ProcessSingleton, so it is the browser 
 ```yaml
 artifacts:
   - name: murmur/tool-browser
-    version: 0.5.0
+    version: 0.6.0
     runtime: tool
 capabilities:
   containment: sealed  # or scoped

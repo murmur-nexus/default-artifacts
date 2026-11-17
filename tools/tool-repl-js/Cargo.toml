@@ -1,0 +1,24 @@
+[package]
+name = "tool-repl-js"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# QuickJS, built from its C sources by rquickjs-sys with the pinned wasi-sdk (wasi-sdk.toml), which
+# .cargo/config.toml names as the wasm32-wasip2 C compiler. Default features off: no module
+# loader, no dynamic loading, no extra conversions; the context holds the built-ins only.
+rquickjs = { version = "0.14", default-features = false }
+# Binds the murmur:tool/run@0.2.0 export and the murmur:bus/bus@0.1.0 and
+# murmur:process/process@0.2.0 imports (world `code-mode`) in the wasm32 module.
+wit-bindgen.workspace = true
+# `ProcError`: the plain-Rust `process-error` the process tools share. std only.
+murmur-process-host = { path = "../../libs/murmur-process-host" }
+
+# Host-only: tests/mur_run_repl.rs reads the fake provider's request bodies and the trace.
+# A `[dev-dependencies]` entry never reaches the cdylib.
+[dev-dependencies]
+serde_json.workspace = true

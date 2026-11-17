@@ -1,4 +1,4 @@
-//! The test host for `murmur:process/process@0.1.0` `run`, shared by the component harness and
+//! The test host for `murmur:process/process@0.2.0` `run`, shared by the component harness and
 //! the host runner of the core.
 //!
 //! It runs the real program the way murmur's `run` does, minus containment: in the work folder,

@@ -22,8 +22,8 @@
 # it catches and fails on a member it cannot classify.
 #
 # C sources that are compiled for wasm32-wasip2 (rusqlite's bundled SQLite, in
-# tool-test-report, tool-code-coverage and tool-code-graph, and tree-sitter with
-# its grammars, in tool-code-graph) need the pinned wasi-sdk (wasi-sdk.toml), and this script
+# tool-test-report, tool-code-coverage and tool-code-graph, tree-sitter with its
+# grammars, in tool-code-graph, and QuickJS, in tool-repl-js) need the pinned wasi-sdk (wasi-sdk.toml), and this script
 # installs it itself through scripts/wasi-sdk.sh before its first cargo
 # invocation. The release workflow (build.yml) calls this script and is not
 # edited for a toolchain, so the script provisions its own; with the toolchain

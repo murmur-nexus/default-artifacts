@@ -22,7 +22,7 @@ like any other artifact:
 ```yaml
 artifacts:
   - name: murmur/skill-create-manifest
-    version: "0.17.0"
+    version: "0.18.0"
     runtime: skill
 ```
 
@@ -58,6 +58,10 @@ same checks before anything is listed or packed. A folder is refused when:
 
 Complete `murmur.yaml` schema reference — enables an agent to generate valid
 capsule manifests from plain-language task descriptions.
+
+0.18.0 pins the file tools (`tool-read`, `tool-write`, `tool-edit`, `tool-find`), `tool-git` and
+`driver-anthropic` at the releases rebuilt on murmur `d95c68b4`'s WIT mirror; it teaches nothing
+new.
 
 0.16.0 breaks the artifact's layout:
 

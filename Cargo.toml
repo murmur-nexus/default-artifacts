@@ -51,6 +51,7 @@ members = [
   "tools/tool-tavily",
   "tools/tool-transit-board-relay",
   "tools/tool-browser",
+  "tools/tool-repl-js",
 ]
 resolver = "2"
 
@@ -75,3 +76,18 @@ tree-sitter = "0.22"
 tree-sitter-rust = "0.21"
 tree-sitter-python = "0.21"
 sha2 = "0.10"
+
+# tool-repl-js embeds QuickJS. Optimising it and its QuickJS crates for size takes the component
+# from about 1.23 MB to about 0.87 MB. check-version-drift.sh counts each of these sections as an
+# input only of the artifacts that build the named package, so no other artifact drifts.
+[profile.release.package.tool-repl-js]
+opt-level = "s"
+
+[profile.release.package.rquickjs]
+opt-level = "s"
+
+[profile.release.package.rquickjs-core]
+opt-level = "s"
+
+[profile.release.package.rquickjs-sys]
+opt-level = "s"
