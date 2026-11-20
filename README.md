@@ -155,6 +155,7 @@ component (`wasm32-wasip2`, exporting `murmur:tool/run`), shipped as one zip for
 | `tool-registry-search` | `tools/tool-registry-search/` | Searches a Murmur artifact index for artifacts, listing every published version of each `scope/name`. Fetches the index over `wasi:http`, so the capsule's `capabilities.network.allow` must list `https://github.com` and `https://release-assets.githubusercontent.com` for the default index; see its [README](./tools/tool-registry-search/README.md) |
 | `tool-request-input` | `tools/tool-request-input/` | HITL pause gate — suspends the agent loop and waits for human input via `SendMessage` |
 | `tool-tavily` | `tools/tool-tavily/` | Web search through Tavily, returning a bounded plain-text result; the Tavily key is bound on the entry as `gateway.api_key` and attached by the runtime, never held by the tool, and every cost- and size-bearing lever is in the entry's `config:` block |
+| `tool-huggingface` | `tools/tool-huggingface/` | Read-only Hugging Face access: search models, datasets, Spaces and papers, inspect a repo (license, tags, files with sizes, card), peek at a dataset's splits, schema and rows, download a file or byte range into the work folder with its sha256, and look up a paper. The Hub is reached through the entry's `gateway:` (the token bound as `gateway.api_key`, or `keyless: true`), the datasets server and CDN directly and keylessly; see its [README](./tools/tool-huggingface/README.md) |
 | `tool-transit-board-relay` | `tools/tool-transit-board-relay/` | Acts on a Transit board through the board tool `nexus transit serve` answers: lists, shows and adds cards and whatever else the grant allows, one verb per call, `help` first. A thin relay that knows the envelope and never the verbs, so a new verb needs no relay release. The grant is the entry's `config:` block (`board`, `verbs`, `protect`), checked by nexus on every call; serve's key is bound on the entry as `gateway.api_key: ${NEXUS_TRANSIT_TOOL_KEY}` and attached by the runtime, never held by the tool; see its [README](./tools/tool-transit-board-relay/README.md) |
 | `tool-test-report` | `tools/tool-test-report/` | Parses raw test-runner output (cargo, pytest, go, jest) into a structured failure list; `input_path` and `repo_path` are relative to the work folder or absolute inside a host folder the session opened; see its [README](./tools/tool-test-report/README.md) |
 | `tool-code-graph` | `tools/tool-code-graph/` | Indexes a Rust and/or Python repo into a SQLite symbol/edge graph at `<repo_path>/.murmur/code-graph.db`; structured queries over stable symbol identities. `repo_path` is relative to the work folder or absolute inside a host folder the session opened, read-write to index; see its [README](./tools/tool-code-graph/README.md) |
@@ -258,6 +259,7 @@ Hooks and process drivers did not move.
 | `tool-find` | 0.6.0 |
 | `tool-git` | 0.9.0 |
 | `tool-github` | 0.8.0 |
+| `tool-huggingface` | 0.1.0 |
 | `tool-read` | 0.6.0 |
 | `tool-registry-search` | 0.8.0 |
 | `tool-repl-js` | 0.1.0 |

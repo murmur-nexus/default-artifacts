@@ -49,6 +49,7 @@ members = [
   "tools/tool-report",
   "tools/tool-request-input",
   "tools/tool-tavily",
+  "tools/tool-huggingface",
   "tools/tool-transit-board-relay",
   "tools/tool-browser",
   "tools/tool-repl-js",
