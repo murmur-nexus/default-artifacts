@@ -43,15 +43,6 @@ pub enum Method {
     Head,
 }
 
-impl Method {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Get => "GET",
-            Self::Head => "HEAD",
-        }
-    }
-}
-
 /// One response. Header names are lowercase. `body` is empty for a `HEAD`, for a followed
 /// redirect, and for a `2xx` whose body went to a [`BodySink`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

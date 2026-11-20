@@ -1797,6 +1797,38 @@ fn every_input_refusal_sends_nothing() {
 }
 
 #[test]
+fn a_refusal_quotes_at_most_a_bounded_excerpt_of_what_the_model_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    let huge = "x".repeat(100_000);
+    let cases: Vec<Value> = vec![
+        json!({"op": huge}),
+        json!({"op":"search","kind":huge,"query":"x"}),
+        json!({"op":"search","kind":"model","query":"x","sort":[huge]}),
+        json!({"op":"search","kind":"model","query":"x","limit":huge}),
+        json!({"op":"search","kind":"model","query":"x",huge.as_str():1}),
+        json!({"op":"repo","repo":huge}),
+        json!({"op":"repo","repo":format!("a/b/{huge}")}),
+        json!({"op":"repo","repo":"a/b","revision":huge}),
+        json!({"op":"repo","repo":"a/b",huge.as_str():1}),
+        json!({"op":"paper","arxiv_id":huge}),
+    ];
+    for input in cases {
+        let mut fake = Fake::none();
+        let response = call(&mut fake, dir.path(), None, input);
+        assert_eq!(error_kind(&response), "invalid_input");
+        assert!(fake.seen.is_empty(), "nothing sent");
+        assert!(
+            response.data.len() <= 1024,
+            "a refusal is {} bytes: {}",
+            response.data.len(),
+            &response.data[..200]
+        );
+        // The excerpt ends in an ellipsis, after a few leading characters that are not `x`.
+        assert!(response.data.contains(&format!("{}…", "x".repeat(90))));
+    }
+}
+
+#[test]
 fn config_refusals_and_a_missing_gateway_send_nothing() {
     let dir = tempfile::tempdir().unwrap();
     for config in [

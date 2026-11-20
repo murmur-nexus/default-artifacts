@@ -127,7 +127,8 @@ set, and the trailer says the full response could not be saved.
 A failure returns `data` as compact JSON, `{"ok": false, "error_kind": …, "message": …}`, plus
 the extra fields below. `summary` is the message and `metadata` is empty. Upstream text in a
 message is the response's `x-error-message` header if present, else the body's `error`, cut to
-300 characters.
+300 characters. An `invalid_input` message quotes at most the first 100 characters of the value
+it refuses, so a refusal stays small however long the input was.
 
 | `error_kind` | `status` | When | Extra fields |
 |---|---|---|---|

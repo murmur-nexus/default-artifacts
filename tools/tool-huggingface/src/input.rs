@@ -36,6 +36,8 @@ pub const DATASET_LIMIT_MAX: u32 = 100;
 
 /// The revision used when the agent names none.
 pub const DEFAULT_REVISION: &str = "main";
+/// Longest excerpt of a refused input value a refusal message quotes, in characters.
+pub const MAX_SHOWN_CHARS: usize = 100;
 
 /// The operation a call selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,14 +306,15 @@ pub fn parse_input(data: &str, max_download_bytes: u64) -> Result<Input, String>
     let mut keys: Vec<&String> = args.keys().collect();
     keys.sort();
     if let Some(key) = keys.iter().find(|key| !known.contains(&key.as_str())) {
-        return Err(format!("'{key}' is not an input of this tool"));
+        return Err(format!("'{}' is not an input of this tool", shown(key)));
     }
     if let Some(key) = keys
         .iter()
         .find(|key| !op.properties().contains(&key.as_str()))
     {
         return Err(format!(
-            "'{key}' is not used by op {}; it takes {}",
+            "'{}' is not used by op {}; it takes {}",
+            shown(key),
             op.as_str(),
             op.properties().join(", ")
         ));
@@ -358,7 +361,10 @@ impl Args {
                 .or_else(|| value.as_u64().map(i128::from))
             {
                 Some(n) => Ok(Some(n)),
-                None => Err(format!("\"{key}\" must be an integer, got {value}")),
+                None => Err(format!(
+                    "\"{key}\" must be an integer, got {}",
+                    shown(&value.to_string())
+                )),
             },
         }
     }
@@ -634,13 +640,15 @@ pub fn repo(value: String) -> Result<String, String> {
     let value = value.trim().to_string();
     if value.is_empty() || value.len() > MAX_REPO_BYTES {
         return Err(format!(
-            "\"repo\" must be owner/name, 1 to {MAX_REPO_BYTES} characters, got '{value}'"
+            "\"repo\" must be owner/name, 1 to {MAX_REPO_BYTES} characters, got '{}'",
+            shown(&value)
         ));
     }
     let segments: Vec<&str> = value.split('/').collect();
     if segments.len() > 2 {
         return Err(format!(
-            "\"repo\" must be owner/name or name, got '{value}'"
+            "\"repo\" must be owner/name or name, got '{}'",
+            shown(&value)
         ));
     }
     for segment in &segments {
@@ -652,7 +660,8 @@ pub fn repo(value: String) -> Result<String, String> {
         if !first_ok || !rest_ok || segment.contains("..") || segment.contains("--") {
             return Err(format!(
                 "\"repo\" must be owner/name, each part starting with a letter or digit and \
-                 holding only letters, digits, '.', '_' and '-' (no '..' or '--'), got '{value}'"
+                 holding only letters, digits, '.', '_' and '-' (no '..' or '--'), got '{}'",
+                shown(&value)
             ));
         }
     }
@@ -671,7 +680,8 @@ pub fn revision(value: String) -> Result<String, String> {
     if !ok {
         return Err(format!(
             "\"revision\" must be a branch, tag or commit: 1 to {MAX_REVISION_BYTES} of letters, \
-             digits, '.', '_', '/' and '-', with no '..', got '{value}'"
+             digits, '.', '_', '/' and '-', with no '..', got '{}'",
+            shown(&value)
         ));
     }
     Ok(value)
@@ -786,7 +796,11 @@ pub fn arxiv_id(value: &str) -> Result<String, String> {
 }
 
 fn arxiv_message(value: &str) -> String {
-    format!("\"arxiv_id\" must be an arXiv id such as 1706.03762 (a version suffix such as v2 is allowed), got '{value}'")
+    format!(
+        "\"arxiv_id\" must be an arXiv id such as 1706.03762 (a version suffix such as v2 is \
+         allowed), got '{}'",
+        shown(value)
+    )
 }
 
 fn enum_value<T: Copy>(key: &str, value: &Value, table: &[(&'static str, T)]) -> Result<T, String> {
@@ -796,8 +810,18 @@ fn enum_value<T: Copy>(key: &str, value: &Value, table: &[(&'static str, T)]) ->
         .map(|(_, variant)| *variant)
         .ok_or_else(|| {
             let names: Vec<&str> = table.iter().map(|(name, _)| *name).collect();
-            format!("\"{key}\" must be one of {}, got {value}", names.join(", "))
+            format!(
+                "\"{key}\" must be one of {}, got {}",
+                names.join(", "),
+                shown(&value.to_string())
+            )
         })
+}
+
+/// `value` as a refusal quotes it: cut to [`MAX_SHOWN_CHARS`] characters, so a refusal stays
+/// small whatever the model sent.
+fn shown(value: &str) -> String {
+    crate::render::cut_chars(value, MAX_SHOWN_CHARS).0
 }
 
 fn json_type_name(value: &Value) -> &'static str {
