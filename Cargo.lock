@@ -2987,6 +2987,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tool-huggingface"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "wasip2",
+ "wasmtime",
+ "wasmtime-wasi",
+ "wasmtime-wasi-http",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
 name = "tool-read"
 version = "0.0.0"
 dependencies = [

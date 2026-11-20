@@ -1,0 +1,133 @@
+name: tool-huggingface
+version: 0.1.0
+runtime: tool
+implementation: wasm
+description: |
+  Read from Hugging Face — search, inspect a repo, peek at a dataset, download a file, look up a paper — and only read. The token is bound by the operator and attached by the runtime, never held by the tool.
+
+  One tool, five operations selected by op:
+    search    keyword search over models, datasets, Spaces or papers (kind); models and
+              datasets also take task, library, license, tag and sort
+    repo      one model, dataset or Space: license, tags, gated, private, last update,
+              commit, the file list with sizes, and the card text
+    dataset   splits, schema and a page of rows of one dataset, a text search over rows
+              (query) or a filter (where, order_by), without downloading it
+    download  one file, or one byte range of it (byte_offset, byte_length), into the work
+              folder at dest; the size is checked against the cap before any byte is
+              fetched, and the result names the path and the sha256
+    paper     one paper by arXiv id: title, authors, abstract, and the models and datasets
+              that cite it
+
+  The tool sends only GET and HEAD. Every result is plain text within the operator's
+  max_output_bytes. When anything is cut, the result is marked truncated and the full
+  upstream response is written to hf-results/<op>-<n>.json in the work folder, named by
+  data_path. The runtime fences the text as untrusted content; the tool passes it through
+  unaltered.
+
+  The Hub is reached only through the gateway; the datasets server and the download CDN are
+  reached directly, without a credential, so their hosts go on network.allow (never the Hub):
+
+      artifacts:
+        - name: murmur/tool-huggingface
+          runtime: tool
+          gateway:
+            endpoint: https://huggingface.co
+            api_key: ${HUGGINGFACE_ACCESS_TOKEN}   # or keyless: true, for public data only
+          capabilities:
+            network:
+              allow:
+                - https://datasets-server.huggingface.co
+                - https://us.aws.cdn.hf.co
+
+  List the same hosts in the capsule-wide capabilities.network.allow. Store the token with
+  `mur config set -g credentials.HUGGINGFACE_ACCESS_TOKEN <token>`. The calls are brokered
+  but not metered by murmur (W-SEC-030). A gated or private dataset cannot be peeked: the
+  datasets server is reached without the token, so op dataset returns gated, and op download
+  fetches its files through the gateway. The optional config: block (config_version: 1) sets
+  max_output_bytes (2048–65536, default 16384), max_download_bytes (1–2147483648, default
+  104857600) and datasets_server_endpoint; a credential-shaped key in it is refused.
+
+  A failure returns {ok: false, error_kind, message, ...} where error_kind is one of
+  invalid_input, config_invalid, gateway_missing, not_found, gated, upstream_unauthorized,
+  rate_limited, too_large, viewer_unavailable, upstream_error, transport_error,
+  response_invalid, write_failed.
+
+upstream_auth:
+  header: Authorization
+  value: "Bearer {key}"
+
+input_schema:
+  type: object
+  properties:
+    op:
+      type: string
+      enum: [search, repo, dataset, download, paper]
+      description: "The operation. Each uses only the properties marked for it."
+    kind:
+      type: string
+      enum: [model, dataset, space, paper]
+      description: "search: what to search (required). repo, download: the repo type (default model)."
+    query:
+      type: string
+      description: "search: keywords (required, at most 200 characters). dataset: text search over rows."
+    task:
+      type: string
+      description: "search, kind model or dataset: a task such as text-classification."
+    library:
+      type: string
+      description: "search, kind model or dataset: a library such as transformers."
+    license:
+      type: string
+      description: "search, kind model or dataset: a license id such as apache-2.0."
+    tag:
+      type: string
+      description: "search, kind model or dataset: any Hub tag."
+    sort:
+      type: string
+      enum: [downloads, likes, updated, trending, created]
+      description: "search, kind model or dataset: order, descending."
+    limit:
+      type: integer
+      description: "search: results, 1-50 (default 10). dataset: rows, 1-100 (default 10)."
+    offset:
+      type: integer
+      description: "dataset: first row (default 0)."
+    repo:
+      type: string
+      description: "repo, dataset, download: owner/name (required)."
+    revision:
+      type: string
+      description: "repo, download: branch, tag or commit (default main)."
+    repo_file:
+      type: string
+      description: "download: the file's path inside the repo (required)."
+    dest:
+      type: string
+      format: murmur-destination
+      description: "download: new file path relative to the work folder (required; must not exist)."
+    byte_offset:
+      type: integer
+      description: "download: first byte of a range; give with byte_length."
+    byte_length:
+      type: integer
+      description: "download: bytes in the range; give with byte_offset."
+    config:
+      type: string
+      description: "dataset: config name (default: the first listed)."
+    split:
+      type: string
+      description: "dataset: split name (default: the first listed)."
+    where:
+      type: string
+      description: "dataset: SQL-like row filter, e.g. \"label\"=1; not with query."
+    order_by:
+      type: string
+      description: "dataset: order for where, e.g. \"text\" DESC."
+    arxiv_id:
+      type: string
+      description: "paper: arXiv id such as 1706.03762 (required)."
+  required: [op]
+  additionalProperties: false
+
+requires_files:
+  - tool_huggingface.wasm
