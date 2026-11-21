@@ -432,6 +432,11 @@ pub struct PullRequest {
     pub base_ref: String,
     pub title: String,
     pub body: String,
+    /// Whether the PR is a draft; `false` when GitHub's `draft` is absent or not a bool.
+    pub draft: bool,
+    /// GitHub's summary of whether the PR can merge now (`clean`, `unstable`, `blocked`,
+    /// `dirty`, `behind`, `draft`, `has_hooks`, `unknown`), `None` when absent or not a string.
+    pub mergeable_state: Option<String>,
     /// GitHub's test merge of the head into the base (`merge_commit_sha`), while the PR is open.
     pub merge_commit_sha: Option<String>,
     /// The repository the head branch lives in (`head.repo.full_name`).
@@ -479,6 +484,8 @@ pub fn parse_pull_request(body: &Value) -> Result<PullRequest, String> {
             .to_string(),
         title: text("title"),
         body: text("body"),
+        draft: body.get("draft").and_then(Value::as_bool).unwrap_or(false),
+        mergeable_state: optional_text(body.get("mergeable_state")),
         merge_commit_sha: optional_text(body.get("merge_commit_sha")),
         head_repo: optional_text(head.pointer("/repo/full_name")),
         default_branch: optional_text(base.pointer("/repo/default_branch")),

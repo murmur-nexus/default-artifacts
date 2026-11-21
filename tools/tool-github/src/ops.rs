@@ -1124,6 +1124,14 @@ fn pr_edit(
     })
 }
 
+/// The token permission the reviews request needs.
+const REVIEWS_NEED: &str = "Pull requests: read";
+/// The token permission the check-runs request needs.
+const CHECKS_NEED: &str = "Checks: read";
+
+/// `pr_view`: the pull request, then its reviews, then its head commit's check runs. Only the
+/// pull request is essential; a reviews or check-runs request that fails for any reason leaves
+/// that field `null` and adds an entry to `missing` (see [`optional_get`]).
 fn pr_view(
     config: &Config,
     input: PrViewInput,
@@ -1141,63 +1149,82 @@ fn pr_view(
     let pr = github::parse_pull_request(&response)
         .map_err(|e| failure(kind::RESPONSE_INVALID, e, Map::new()))?;
 
-    let (status, reviews_body) = send(
+    let mut missing = Vec::new();
+    let reviews = optional_get(
         transport,
-        "GET",
         &github::reviews_path(&config.repo, input.number),
-        None,
-    )?;
-    if status != 200 {
-        return Err(upstream_error(status, &reviews_body));
-    }
-    let reviews: Vec<Value> = reviews_body
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|review| {
-            json!({
-                "user": review.get("user").and_then(|u| u.get("login")).cloned().unwrap_or(Value::Null),
-                "state": review.get("state").cloned().unwrap_or(Value::Null),
+        "reviews",
+        REVIEWS_NEED,
+        &mut missing,
+    )
+    .map(|body| {
+        let reviews: Vec<Value> = body
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|review| {
+                json!({
+                    "user": review.get("user").and_then(|u| u.get("login")).cloned().unwrap_or(Value::Null),
+                    "state": review.get("state").cloned().unwrap_or(Value::Null),
+                })
             })
-        })
-        .collect();
+            .collect();
+        Value::Array(reviews)
+    })
+    .unwrap_or(Value::Null);
 
-    let (status, checks_body) = send(
+    let checks = optional_get(
         transport,
-        "GET",
         &github::check_runs_path(&config.repo, &pr.head_sha),
-        None,
-    )?;
-    if status != 200 {
-        return Err(upstream_error(status, &checks_body));
-    }
-    let checks: Vec<Value> = checks_body
-        .get("check_runs")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|check| {
-            json!({
-                "name": check.get("name").cloned().unwrap_or(Value::Null),
-                "status": check.get("status").cloned().unwrap_or(Value::Null),
-                "conclusion": check.get("conclusion").cloned().unwrap_or(Value::Null),
+        "checks",
+        CHECKS_NEED,
+        &mut missing,
+    )
+    .map(|body| {
+        let checks: Vec<Value> = body
+            .get("check_runs")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|check| {
+                json!({
+                    "name": check.get("name").cloned().unwrap_or(Value::Null),
+                    "status": check.get("status").cloned().unwrap_or(Value::Null),
+                    "conclusion": check.get("conclusion").cloned().unwrap_or(Value::Null),
+                })
             })
-        })
-        .collect();
+            .collect();
+        Value::Array(checks)
+    })
+    .unwrap_or(Value::Null);
+
+    let mut summary = format!("PR #{} is {}", pr.number, pr.state);
+    if !missing.is_empty() {
+        let parts: Vec<String> = missing.iter().map(missing_summary).collect();
+        summary.push_str(&format!("; missing {}", parts.join(", ")));
+    }
 
     let mut data = Map::new();
     data.insert("ok".to_string(), json!(true));
     data.insert("number".to_string(), json!(pr.number));
     data.insert("state".to_string(), json!(pr.state));
+    data.insert("title".to_string(), json!(pr.title));
+    data.insert("body".to_string(), json!(pr.body));
+    data.insert("url".to_string(), json!(pr.url));
+    data.insert("head_ref".to_string(), json!(pr.head_ref));
+    data.insert("base_ref".to_string(), json!(pr.base_ref));
+    data.insert("draft".to_string(), json!(pr.draft));
     data.insert("mergeable".to_string(), json!(pr.mergeable));
+    data.insert("mergeable_state".to_string(), json!(pr.mergeable_state));
     data.insert("head_sha".to_string(), json!(pr.head_sha));
-    data.insert("checks".to_string(), json!(checks));
-    data.insert("reviews".to_string(), json!(reviews));
+    data.insert("checks".to_string(), checks);
+    data.insert("reviews".to_string(), reviews);
+    data.insert("missing".to_string(), Value::Array(missing));
     Ok(Response {
         status: OpStatus::Passed,
-        summary: format!("PR #{} is {}", pr.number, pr.state),
+        summary,
         data: Value::Object(data).to_string(),
         metadata: vec![
             ("state_effect".to_string(), "read".to_string()),
@@ -1207,6 +1234,48 @@ fn pr_view(
             ),
         ],
     })
+}
+
+/// One GET whose failure leaves `field` absent instead of failing the call. A 200 gives its
+/// parsed body. Any other outcome gives `None` and pushes onto `missing` the entry
+/// `{field, error_kind, message, http_status?, needs}`, whose kind, message and status are read
+/// back out of the failure this request would have returned had it been essential: a
+/// transport error, redirect or unparsable body from [`send`], else [`upstream_error`]. GitHub's
+/// `errors` list stays rendered inside `message` and is not copied into the entry.
+fn optional_get(
+    transport: &mut dyn Transport,
+    path: &str,
+    field: &str,
+    needs: &str,
+    missing: &mut Vec<Value>,
+) -> Option<Value> {
+    let failed = match send(transport, "GET", path, None) {
+        Ok((200, body)) => return Some(body),
+        Ok((status, body)) => upstream_error(status, &body),
+        Err(failed) => failed,
+    };
+    let failed: Value = serde_json::from_str(&failed.data).unwrap_or(Value::Null);
+    let mut entry = Map::new();
+    entry.insert("field".to_string(), json!(field));
+    for key in ["error_kind", "message", "http_status"] {
+        if let Some(value) = failed.get(key) {
+            entry.insert(key.to_string(), value.clone());
+        }
+    }
+    entry.insert("needs".to_string(), json!(needs));
+    missing.push(Value::Object(entry));
+    None
+}
+
+/// A `missing` entry as the summary names it: `<field> (HTTP <status>, needs <needs>)`, or
+/// `<field> (<error_kind>, needs <needs>)` when the failure carried no HTTP status.
+fn missing_summary(entry: &Value) -> String {
+    let text = |key: &str| entry.get(key).and_then(Value::as_str).unwrap_or_default();
+    let cause = match entry.get("http_status").and_then(Value::as_u64) {
+        Some(status) => format!("HTTP {status}"),
+        None => text("error_kind").to_string(),
+    };
+    format!("{} ({cause}, needs {})", text("field"), text("needs"))
 }
 
 fn pr_list(

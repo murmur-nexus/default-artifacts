@@ -12,7 +12,7 @@ supports per-entry credential gateways: the first murmur release after v0.3.0 (m
 ## Install
 
 ```bash
-mur install -g murmur/tool-github@0.10.0
+mur install -g murmur/tool-github@0.11.0
 ```
 
 ## Binding the token
@@ -23,7 +23,7 @@ repo in `config:`:
 ```yaml
 artifacts:
   - name: murmur/tool-github
-    version: 0.10.0
+    version: 0.11.0
     runtime: tool
     gateway:
       endpoint: https://api.github.com
@@ -217,7 +217,7 @@ commits ahead of the local repository is refused with `operation_not_allowed`.
 |---|---|
 | `pr_create` | Opens a pull request from `head` into `base`. `draft: true` opens it as a draft |
 | `pr_edit` | Changes an existing pull request's title, body or both with one `PATCH /repos/{repo}/pulls/{n}` carrying only the fields given |
-| `pr_view` | Reads one pull request with its mergeability, head SHA, check runs and reviews |
+| `pr_view` | Reads one pull request: its title, body, branches, draft flag, mergeability, head SHA, reviews and check runs. A reviews or check-runs part that cannot be read is `null` and listed in `missing` (see [What pr_view needs from the token](#what-pr_view-needs-from-the-token)) |
 | `pr_list` | Lists pull requests, filtered by `state`, `head` and `base` |
 | `pr_merge` | Merges one pull request, if `allow_merge` and `merge_methods` allow it |
 
@@ -261,6 +261,58 @@ sends it to GitHub, and if the PR has moved since, GitHub refuses the merge and 
 `head_moved`. A PR GitHub cannot merge is `not_mergeable`. With `commit_identity` set, a `merge`
 or `squash` commit is built by the tool instead, as described in
 [Commit identity](#commit-identity).
+
+### What pr_view needs from the token
+
+`pr_view` sends three requests, in this order. Each answers some of its output fields:
+
+| Fields | Request | Fine-grained | Classic |
+|---|---|---|---|
+| `number`, `state`, `mergeable`, `mergeable_state`, `draft`, `head_sha`, `head_ref`, `base_ref`, `title`, `body`, `url` | `GET /repos/{repo}/pulls/{n}` | Pull requests: read (Contents: read also suffices) | `repo` |
+| `reviews` | `GET /repos/{repo}/pulls/{n}/reviews` | Pull requests: read | `repo` |
+| `checks` | `GET /repos/{repo}/commits/{head_sha}/check-runs` | None on a private repo (see below) | `repo` |
+
+Only the pull request itself is essential. If its request fails, the call fails with that
+request's `error_kind`, and nothing further is sent. A reviews or check-runs request that fails
+for any reason (a 403, a 404, a rate limit, a 5xx, a redirect, a transport error or an
+unparsable body) leaves that field `null`. The call still passes, and an entry naming the field
+is added to `missing`, which is always present and `[]` when every field was read:
+
+| Key | Holds |
+|---|---|
+| `field` | `reviews` or `checks` |
+| `error_kind` | The kind the call would have failed with had the field been essential |
+| `message` | That failure's message, GitHub's `errors` list included |
+| `http_status` | GitHub's HTTP status; absent for a transport error, a redirect or an unparsable body |
+| `needs` | The permission the field's request needs: `Pull requests: read` or `Checks: read` |
+
+```json
+{"field": "checks", "error_kind": "upstream_forbidden", "http_status": 403,
+ "message": "GitHub answered HTTP 403: Resource not accessible by personal access token",
+ "needs": "Checks: read"}
+```
+
+The summary names each missing field, as in
+`PR #1 is open; missing checks (HTTP 403, needs Checks: read)`.
+
+Checks: read is GitHub's own name for the permission the check-runs request needs. GitHub grants
+it to GitHub App tokens, but a fine-grained personal access token has no Checks permission to
+grant. With the recommended token, `checks` is therefore `null` on a private repo, and is read on
+a public one. A classic token with `repo` reads check runs. `mergeable_state` needs no extra
+permission and summarises what the checks mean for merging:
+
+| `mergeable_state` | Means |
+|---|---|
+| `clean` | Mergeable, and its checks pass |
+| `unstable` | Mergeable, but a check is not passing |
+| `blocked` | The merge is blocked, for example by a required check or review |
+| `dirty` | The merge commit cannot be created cleanly |
+| `behind` | The head branch is out of date with the base |
+| `draft` | The pull request is a draft |
+| `has_hooks` | Mergeable, its checks pass, and the repo has pre-receive hooks |
+| `unknown` | GitHub has not determined it yet; ask again shortly |
+
+The tool never reads commit statuses.
 
 ## Commit identity
 
@@ -362,7 +414,7 @@ A success returns `data` as compact JSON with `"ok": true`:
 | `fetch` | `branch`, `remote_ref`, `head_sha`, `previous_sha` (the ref's earlier value, or `null`), `objects_written` |
 | `pr_create` | `number`, `url`, `head_sha`; with `body_file`, also `body_file`, `body_bytes`, `body_verified: true` |
 | `pr_edit` | `number`, `url`, `head_sha`, `state`; with `body_file`, also `body_file`, `body_bytes`, `body_verified: true` |
-| `pr_view` | `number`, `state`, `mergeable`, `head_sha`, `checks`, `reviews` |
+| `pr_view` | `number`, `state`, `title`, `body` (`""` when the PR has none), `url`, `head_ref`, `base_ref`, `draft`, `mergeable` (`true`, `false` or `null`), `mergeable_state` (a string, or `null`), `head_sha`, `reviews` (`[{user, state}]`, or `null`), `checks` (`[{name, status, conclusion}]`, or `null`), `missing` (always present, `[]` when complete) |
 | `pr_list` | `prs` |
 | `pr_merge` | `merged`, `merge_sha`, `trailer` (the trailer line sent, or `null`), `identity` (`{name, email}`; present only when `commit_identity` is configured, and `null` for a rebase) |
 

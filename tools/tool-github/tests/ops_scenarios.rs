@@ -417,6 +417,472 @@ fn pr_view_reports_checks_and_reviews() {
     assert_eq!(value["checks"][0]["conclusion"], json!("success"));
 }
 
+/// A fake GitHub that replies with raw outcomes in order: a reply whose body is sent as given
+/// (so it need not be JSON), or a transport error. It records each request's path.
+struct RawFake {
+    replies: Vec<RawReply>,
+    paths: Vec<String>,
+}
+
+impl RawFake {
+    fn new(mut replies: Vec<RawReply>) -> Self {
+        replies.reverse();
+        Self {
+            replies,
+            paths: Vec::new(),
+        }
+    }
+}
+
+impl Transport for RawFake {
+    fn request(
+        &mut self,
+        method: &str,
+        path: &str,
+        _headers: &[(String, String)],
+        _body: Option<&Value>,
+    ) -> Result<HttpReply, String> {
+        self.paths.push(path.to_string());
+        self.replies
+            .pop()
+            .unwrap_or_else(|| panic!("raw fake ran out of replies at {method} {path}"))
+    }
+}
+
+/// One outcome a [`RawFake`] hands back: a reply, or a transport error.
+type RawReply = Result<HttpReply, String>;
+
+fn raw(status: u16, location: Option<&str>, body: &[u8]) -> RawReply {
+    Ok(HttpReply {
+        status,
+        location: location.map(str::to_string),
+        body: body.to_vec(),
+    })
+}
+
+fn raw_json(status: u16, body: Value) -> RawReply {
+    raw(status, None, body.to_string().as_bytes())
+}
+
+const PR_VIEW: &str = r#"{"op":"pr_view","number":1}"#;
+
+/// The three paths `pr_view` of PR 1 sends, in order, for a head of `a` × 40.
+fn pr_view_paths() -> Vec<String> {
+    vec![
+        "/repos/acme/widgets/pulls/1".to_string(),
+        "/repos/acme/widgets/pulls/1/reviews".to_string(),
+        format!("/repos/acme/widgets/commits/{}/check-runs", "a".repeat(40)),
+    ]
+}
+
+/// `pr_json` plus the two fields only `GET /pulls/{n}` carries.
+fn pr_view_json(draft: bool, mergeable_state: &str) -> Value {
+    let mut pr = pr_json(1, "open", &"a".repeat(40));
+    pr["draft"] = json!(draft);
+    pr["mergeable_state"] = json!(mergeable_state);
+    pr
+}
+
+/// GitHub's real answer to a fine-grained token listing check runs on a private repo.
+fn checks_forbidden() -> Value {
+    json!({
+        "message": "Resource not accessible by personal access token",
+        "documentation_url": "https://docs.github.com/rest/checks/runs#list-check-runs-for-a-git-reference",
+        "status": "403"
+    })
+}
+
+fn checks_forbidden_entry() -> Value {
+    json!({
+        "field": "checks",
+        "error_kind": "upstream_forbidden",
+        "http_status": 403,
+        "message": "GitHub answered HTTP 403: Resource not accessible by personal access token",
+        "needs": "Checks: read"
+    })
+}
+
+fn paths(requests: &[Recorded]) -> Vec<String> {
+    requests.iter().map(|r| r.path.clone()).collect()
+}
+
+#[test]
+fn pr_view_with_every_scope_answers_every_field_and_misses_nothing() {
+    let mut fake = Fake::new(vec![
+        ok(pr_view_json(false, "clean")),
+        ok(json!([{"user": {"login": "ada"}, "state": "APPROVED"}])),
+        ok(json!({"check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}]})),
+    ]);
+    let response = run(Some(CONFIG), PR_VIEW, &mut fake, Path::new("."));
+    assert_eq!(response.status, ops::OpStatus::Passed);
+    assert_eq!(response.summary, "PR #1 is open");
+    let value = data(&response);
+    assert_eq!(value["ok"], json!(true));
+    assert_eq!(value["missing"], json!([]));
+    assert_eq!(
+        value["reviews"],
+        json!([{"user": "ada", "state": "APPROVED"}])
+    );
+    assert_eq!(
+        value["checks"],
+        json!([{"name": "ci", "status": "completed", "conclusion": "success"}])
+    );
+    assert_eq!(value["number"], json!(1));
+    assert_eq!(value["state"], json!("open"));
+    assert_eq!(value["mergeable"], json!(true));
+    assert_eq!(value["head_sha"], json!("a".repeat(40)));
+    assert_eq!(value["title"], json!("Add feature"));
+    assert_eq!(value["body"], json!("does the thing"));
+    assert_eq!(
+        value["url"],
+        json!("https://github.com/acme/widgets/pull/1")
+    );
+    assert_eq!(value["head_ref"], json!("feature-x"));
+    assert_eq!(value["base_ref"], json!("main"));
+    assert_eq!(value["draft"], json!(false));
+    assert_eq!(value["mergeable_state"], json!("clean"));
+    assert_eq!(value.as_object().unwrap().len(), 15, "{value}");
+    assert_eq!(paths(&fake.requests()), pr_view_paths());
+    assert!(fake.requests().iter().all(|r| r.method == "GET"));
+}
+
+#[test]
+fn pr_view_without_checks_read_passes_with_checks_null_and_one_missing_entry() {
+    let mut fake = Fake::new(vec![
+        ok(pr_view_json(false, "unstable")),
+        ok(json!([{"user": {"login": "ada"}, "state": "APPROVED"}])),
+        status(403, checks_forbidden()),
+    ]);
+    let response = run(Some(CONFIG), PR_VIEW, &mut fake, Path::new("."));
+    assert_eq!(response.status, ops::OpStatus::Passed);
+    assert_eq!(
+        response.summary,
+        "PR #1 is open; missing checks (HTTP 403, needs Checks: read)"
+    );
+    let value = data(&response);
+    assert_eq!(value["ok"], json!(true));
+    assert_eq!(value["state"], json!("open"));
+    assert_eq!(value["head_sha"], json!("a".repeat(40)));
+    assert_eq!(value["mergeable_state"], json!("unstable"));
+    assert_eq!(value["reviews"][0]["state"], json!("APPROVED"));
+    assert_eq!(value["checks"], Value::Null);
+    assert_eq!(value["missing"], json!([checks_forbidden_entry()]));
+    assert_eq!(paths(&fake.requests()), pr_view_paths());
+    assert_eq!(
+        response.metadata,
+        vec![
+            ("state_effect".to_string(), "read".to_string()),
+            (
+                "resource_id".to_string(),
+                "github:acme/widgets:pr:1".to_string()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn pr_view_with_reviews_and_checks_both_refused_misses_both_in_request_order() {
+    let refused = json!({"message": "Resource not accessible by integration"});
+    let mut fake = Fake::new(vec![
+        ok(pr_view_json(true, "draft")),
+        status(403, refused.clone()),
+        status(403, refused),
+    ]);
+    let response = run(Some(CONFIG), PR_VIEW, &mut fake, Path::new("."));
+    assert_eq!(response.status, ops::OpStatus::Passed);
+    assert_eq!(
+        response.summary,
+        "PR #1 is open; missing reviews (HTTP 403, needs Pull requests: read), \
+         checks (HTTP 403, needs Checks: read)"
+    );
+    let value = data(&response);
+    assert_eq!(value["reviews"], Value::Null);
+    assert_eq!(value["checks"], Value::Null);
+    assert_eq!(value["draft"], json!(true));
+    let message = "GitHub answered HTTP 403: Resource not accessible by integration";
+    assert_eq!(
+        value["missing"],
+        json!([
+            {"field": "reviews", "error_kind": "upstream_forbidden", "http_status": 403,
+             "message": message, "needs": "Pull requests: read"},
+            {"field": "checks", "error_kind": "upstream_forbidden", "http_status": 403,
+             "message": message, "needs": "Checks: read"},
+        ])
+    );
+    assert_eq!(
+        paths(&fake.requests()),
+        pr_view_paths(),
+        "check runs are still read after reviews fail"
+    );
+}
+
+#[test]
+fn pr_view_check_runs_failures_each_leave_checks_null_with_the_fatal_kind_and_message() {
+    let pr = || raw_json(200, pr_view_json(false, "blocked"));
+    let reviews = || raw_json(200, json!([]));
+    let cases: Vec<(&str, RawReply, &str, Option<u16>)> = vec![
+        (
+            "404",
+            raw_json(404, json!({"message": "Not Found"})),
+            "not_found",
+            Some(404),
+        ),
+        (
+            "500",
+            raw_json(500, json!({"message": "Server Error"})),
+            "upstream_error",
+            Some(500),
+        ),
+        (
+            "secondary rate limit",
+            raw_json(
+                403,
+                json!({"message": "You have exceeded a secondary rate limit."}),
+            ),
+            "rate_limited",
+            Some(403),
+        ),
+        (
+            "301",
+            raw(301, Some("https://example.com/moved"), b""),
+            "upstream_error",
+            None,
+        ),
+        (
+            "non-JSON 200",
+            raw(200, None, b"<html>oops</html>"),
+            "response_invalid",
+            None,
+        ),
+        (
+            "transport error",
+            Err("connection reset".to_string()),
+            "transport_error",
+            None,
+        ),
+        (
+            "422 with errors",
+            raw_json(
+                422,
+                json!({"message": "Validation Failed", "errors": [{"field": "sha", "code": "invalid"}]}),
+            ),
+            "upstream_error",
+            Some(422),
+        ),
+    ];
+    for (name, reply, expected_kind, expected_status) in cases {
+        let mut fake = RawFake::new(vec![pr(), reviews(), reply]);
+        let response = ops::run(
+            Some(GATEWAY),
+            Some(CONFIG),
+            PR_VIEW,
+            &mut fake,
+            Path::new("."),
+        );
+        assert_eq!(response.status, ops::OpStatus::Passed, "{name}");
+        let value = data(&response);
+        assert_eq!(value["ok"], json!(true), "{name}");
+        assert_eq!(value["checks"], Value::Null, "{name}");
+        assert_eq!(value["reviews"], json!([]), "{name}");
+        assert_eq!(fake.paths, pr_view_paths(), "{name}");
+        let missing = value["missing"].as_array().unwrap();
+        assert_eq!(missing.len(), 1, "{name}: {value}");
+        let entry = missing[0].as_object().unwrap();
+        assert_eq!(entry["field"], json!("checks"), "{name}");
+        assert_eq!(entry["error_kind"], json!(expected_kind), "{name}");
+        assert_eq!(entry["needs"], json!("Checks: read"), "{name}");
+        assert_eq!(
+            entry.get("http_status").cloned(),
+            expected_status.map(|s| json!(s)),
+            "{name}"
+        );
+        let mut keys: Vec<&str> = entry.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        let mut want = vec!["error_kind", "field", "message", "needs"];
+        if expected_status.is_some() {
+            want.push("http_status");
+        }
+        want.sort_unstable();
+        assert_eq!(keys, want, "{name}: no errors or errors_omitted key");
+        let cause = match expected_status {
+            Some(code) => format!("HTTP {code}"),
+            None => expected_kind.to_string(),
+        };
+        assert_eq!(
+            response.summary,
+            format!("PR #1 is open; missing checks ({cause}, needs Checks: read)"),
+            "{name}"
+        );
+
+        // The entry's message is the one the call returns when check runs are the only
+        // request: the same failure the essential path builds.
+        let message = entry["message"].as_str().unwrap();
+        match name {
+            "301" => assert!(message.contains("example.com/moved"), "{message}"),
+            "non-JSON 200" => assert!(
+                message.starts_with("GitHub's response is not valid JSON"),
+                "{message}"
+            ),
+            "transport error" => assert_eq!(
+                message,
+                "the request to the credential gateway failed: connection reset"
+            ),
+            "422 with errors" => assert_eq!(
+                message,
+                "GitHub answered HTTP 422: Validation Failed (sha: invalid)"
+            ),
+            _ => assert!(
+                message.starts_with(&format!(
+                    "GitHub answered HTTP {}",
+                    expected_status.unwrap()
+                )),
+                "{message}"
+            ),
+        }
+    }
+}
+
+#[test]
+fn pr_view_a_failed_reviews_request_leaves_reviews_null_and_still_reads_checks() {
+    let mut fake = Fake::new(vec![
+        ok(pr_view_json(false, "clean")),
+        status(500, json!({"message": "Server Error"})),
+        ok(json!({"check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}]})),
+    ]);
+    let response = run(Some(CONFIG), PR_VIEW, &mut fake, Path::new("."));
+    assert_eq!(response.status, ops::OpStatus::Passed);
+    assert_eq!(
+        response.summary,
+        "PR #1 is open; missing reviews (HTTP 500, needs Pull requests: read)"
+    );
+    let value = data(&response);
+    assert_eq!(value["reviews"], Value::Null);
+    assert_eq!(value["checks"][0]["conclusion"], json!("success"));
+    assert_eq!(
+        value["missing"],
+        json!([{"field": "reviews", "error_kind": "upstream_error", "http_status": 500,
+                "message": "GitHub answered HTTP 500: Server Error",
+                "needs": "Pull requests: read"}])
+    );
+    assert_eq!(paths(&fake.requests()), pr_view_paths());
+}
+
+#[test]
+fn pr_view_a_200_of_an_unexpected_shape_is_an_empty_list_not_a_missing_part() {
+    let mut fake = Fake::new(vec![
+        ok(pr_json(1, "open", &"a".repeat(40))),
+        ok(json!({"not": "an array"})),
+        ok(json!({"total_count": 0})),
+    ]);
+    let response = run(Some(CONFIG), PR_VIEW, &mut fake, Path::new("."));
+    assert_eq!(response.summary, "PR #1 is open");
+    let value = data(&response);
+    assert_eq!(value["reviews"], json!([]));
+    assert_eq!(value["checks"], json!([]));
+    assert_eq!(value["missing"], json!([]));
+    assert_eq!(value["draft"], json!(false), "absent draft is false");
+    assert_eq!(
+        value["mergeable_state"],
+        Value::Null,
+        "absent mergeable_state is null"
+    );
+}
+
+#[test]
+fn pr_view_a_null_body_and_odd_draft_and_mergeable_state_types_read_as_their_defaults() {
+    let mut pr = pr_json(1, "open", &"a".repeat(40));
+    pr["body"] = Value::Null;
+    pr["draft"] = json!("yes");
+    pr["mergeable_state"] = json!(7);
+    let mut fake = Fake::new(vec![ok(pr), ok(json!([])), ok(json!({"check_runs": []}))]);
+    let value = data(&run(Some(CONFIG), PR_VIEW, &mut fake, Path::new(".")));
+    assert_eq!(value["body"], json!(""));
+    assert_eq!(value["draft"], json!(false));
+    assert_eq!(value["mergeable_state"], Value::Null);
+}
+
+#[test]
+fn pr_view_a_failed_pull_request_request_fails_the_call_and_sends_nothing_more() {
+    let cases = [
+        (
+            403,
+            "Resource not accessible by personal access token",
+            "upstream_forbidden",
+        ),
+        (404, "Not Found", "not_found"),
+    ];
+    for (code, message, expected) in cases {
+        let mut fake = Fake::new(vec![status(code, json!({"message": message}))]);
+        let response = run(Some(CONFIG), PR_VIEW, &mut fake, Path::new("."));
+        assert_eq!(response.status, ops::OpStatus::Error, "{code}");
+        let value = data(&response);
+        assert_eq!(value["ok"], json!(false));
+        assert_eq!(value["error_kind"], json!(expected));
+        assert_eq!(value["http_status"], json!(code));
+        assert_eq!(
+            value["message"],
+            json!(format!("GitHub answered HTTP {code}: {message}"))
+        );
+        assert!(value.get("missing").is_none());
+        assert_eq!(fake.requests().len(), 1, "{code}");
+    }
+
+    for (name, reply, expected) in [
+        ("non-JSON", raw(200, None, b"not json"), "response_invalid"),
+        ("transport", Err("refused".to_string()), "transport_error"),
+        (
+            "no head",
+            raw_json(200, json!({"number": 1, "base": {"ref": "main"}})),
+            "response_invalid",
+        ),
+    ] {
+        let mut fake = RawFake::new(vec![reply]);
+        let response = ops::run(
+            Some(GATEWAY),
+            Some(CONFIG),
+            PR_VIEW,
+            &mut fake,
+            Path::new("."),
+        );
+        assert_eq!(response.status, ops::OpStatus::Error, "{name}");
+        assert_eq!(data(&response)["error_kind"], json!(expected), "{name}");
+        assert_eq!(fake.paths.len(), 1, "{name}");
+    }
+}
+
+#[test]
+fn pr_list_and_pr_create_output_carries_no_pr_view_only_field() {
+    let mut fake = Fake::new(vec![ok(json!([pr_view_json(true, "draft")]))]);
+    let value = data(&run(
+        Some(CONFIG),
+        r#"{"op":"pr_list"}"#,
+        &mut fake,
+        Path::new("."),
+    ));
+    let pr = value["prs"][0].as_object().unwrap();
+    assert!(
+        !pr.contains_key("mergeable_state") && !pr.contains_key("missing"),
+        "{value}"
+    );
+
+    let mut fake = Fake::new(vec![created(pr_view_json(true, "draft"))]);
+    let input =
+        json!({"op": "pr_create", "title": "Add feature", "head": "feature-x", "base": "main"});
+    let value = data(&run(
+        Some(CONFIG),
+        &input.to_string(),
+        &mut fake,
+        Path::new("."),
+    ));
+    let pr = value.as_object().unwrap();
+    assert!(
+        !pr.contains_key("mergeable_state")
+            && !pr.contains_key("draft")
+            && !pr.contains_key("missing"),
+        "{value}"
+    );
+}
+
 #[test]
 fn pr_list_sends_query_parameters() {
     let mut fake = Fake::new(vec![ok(json!([pr_json(
@@ -2093,6 +2559,22 @@ fn strict_form_pr_view_sends_what_the_sparse_pr_view_sends() {
     let response =
         assert_strict_form_matches(CONFIG, json!({"op": "pr_view", "number": 1}), script);
     assert_eq!(data(&response)["reviews"][0]["state"], json!("APPROVED"));
+}
+
+#[test]
+fn strict_form_pr_view_without_checks_read_sends_what_the_sparse_pr_view_sends() {
+    let script = vec![
+        ok(pr_view_json(false, "unstable")),
+        ok(json!([])),
+        status(403, checks_forbidden()),
+    ];
+    let response =
+        assert_strict_form_matches(CONFIG, json!({"op": "pr_view", "number": 1}), script);
+    assert_eq!(response.status, ops::OpStatus::Passed);
+    assert_eq!(
+        data(&response)["missing"],
+        json!([checks_forbidden_entry()])
+    );
 }
 
 #[test]
