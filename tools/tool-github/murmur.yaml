@@ -1,5 +1,5 @@
 name: tool-github
-version: 0.10.0
+version: 0.11.0
 runtime: tool
 implementation: wasm
 description: |
@@ -15,7 +15,7 @@ description: |
     fetch      {repo_path?, branch?, remote?}  -> {branch, remote_ref, head_sha, previous_sha, objects_written}
     pr_create  {title, body? | body_file?, head, base, draft?}  -> {number, url, head_sha, body_file?, body_bytes?, body_verified?}
     pr_edit    {number, title?, body? | body_file?}  -> {number, url, head_sha, state, body_file?, body_bytes?, body_verified?}
-    pr_view    {number}  -> {number, state, mergeable, head_sha, checks, reviews}
+    pr_view    {number}  -> {number, state, mergeable, mergeable_state, draft, head_sha, head_ref, base_ref, title, body, url, checks, reviews, missing}
     pr_list    {state?, head?, base?}  -> {prs}
     pr_merge   {number, expected_head_sha, method?, message?}  -> {merged, merge_sha, trailer, identity?}
 
@@ -52,6 +52,14 @@ description: |
   pr_create's draft: true opens the pull request as a draft; false or omitted opens it ready
   for review. head is a branch of the pinned repo; a head naming another owner's fork is
   refused with repo_not_allowed. The body is sent as given unless config: sets pr_footer.
+
+  pr_view's checks needs the token's Checks: read, which a fine-grained token cannot hold, so
+  with one checks is null on a private repo; reviews needs Pull requests: read. A reviews or
+  checks request that is refused or fails sets that field to null and adds {field, error_kind,
+  message, http_status?, needs} to missing (always present) instead of failing the call; a
+  failure reading the pull request itself still fails it. mergeable_state (clean, unstable,
+  blocked, dirty, behind, draft, has_hooks, unknown) needs no extra permission and summarises
+  the checks.
 
   pr_edit changes an existing pull request's title, body or both with one PATCH carrying only
   the fields given; it needs number and at least one of title, body, body_file, and the same

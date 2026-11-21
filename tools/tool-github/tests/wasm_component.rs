@@ -314,6 +314,134 @@ fn pr_view_is_one_get_carrying_the_standard_headers_and_no_credential() {
     }
 }
 
+/// A fake GitHub answering each request by its request path from a table of status line and
+/// body, recording every request; an unlisted path is a 404.
+struct PathRoutedGithub {
+    endpoint: String,
+    requests: Arc<Mutex<Vec<Recorded>>>,
+}
+
+impl PathRoutedGithub {
+    fn start(routes: Vec<(String, &'static str, Value)>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&requests);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let Some(request) = read_request(&mut stream) else {
+                    continue;
+                };
+                let path = request
+                    .request_line
+                    .split(' ')
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_string();
+                recorded.lock().unwrap().push(request);
+                let (status_line, body) = routes
+                    .iter()
+                    .find(|(route, _, _)| *route == path)
+                    .map(|(_, status_line, body)| (*status_line, body.to_string()))
+                    .unwrap_or((
+                        "HTTP/1.1 404 Not Found",
+                        json!({"message": format!("unhandled path {path}")}).to_string(),
+                    ));
+                let response = format!(
+                    "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        Self { endpoint, requests }
+    }
+
+    fn requests(&self) -> Vec<Recorded> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[test]
+fn pr_view_without_checks_read_passes_with_checks_null_and_a_missing_entry() {
+    let sha = "a".repeat(40);
+    let pr = json!({
+        "number": 1, "state": "open", "mergeable": true, "mergeable_state": "unstable",
+        "draft": false, "title": "Add feature", "body": "does the thing",
+        "html_url": "https://github.com/acme/widgets/pull/1",
+        "head": {"sha": sha, "ref": "feature-x"},
+        "base": {"ref": "main"},
+    });
+    let check_runs = format!("/repos/acme/widgets/commits/{sha}/check-runs");
+    let fake = PathRoutedGithub::start(vec![
+        (
+            "/repos/acme/widgets/pulls/1".to_string(),
+            "HTTP/1.1 200 OK",
+            pr,
+        ),
+        (
+            "/repos/acme/widgets/pulls/1/reviews".to_string(),
+            "HTTP/1.1 200 OK",
+            json!([]),
+        ),
+        (
+            check_runs.clone(),
+            "HTTP/1.1 403 Forbidden",
+            json!({"message": "Resource not accessible by personal access token"}),
+        ),
+    ]);
+    let result = run_component(
+        Some(&fake.endpoint),
+        Some(CONFIG),
+        r#"{"op":"pr_view","number":1}"#,
+    );
+
+    assert!(
+        matches!(result.status, Status::Passed),
+        "{:?}",
+        result.summary
+    );
+    assert_eq!(
+        result.summary.as_deref(),
+        Some("PR #1 is open; missing checks (HTTP 403, needs Checks: read)")
+    );
+    let data: Value = serde_json::from_str(&result.data.unwrap()).unwrap();
+    assert_eq!(data["ok"], json!(true));
+    assert_eq!(data["head_sha"], json!(sha));
+    assert_eq!(data["mergeable_state"], json!("unstable"));
+    assert_eq!(data["reviews"], json!([]));
+    assert_eq!(data["checks"], Value::Null);
+    assert_eq!(data["missing"][0]["field"], json!("checks"));
+    assert_eq!(data["missing"][0]["http_status"], json!(403));
+    assert_eq!(
+        data["missing"][0]["error_kind"],
+        json!("upstream_forbidden")
+    );
+    assert_eq!(data["missing"][0]["needs"], json!("Checks: read"));
+
+    let requests = fake.requests();
+    let lines: Vec<&str> = requests.iter().map(|r| r.request_line.as_str()).collect();
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    for (line, path) in lines.iter().zip([
+        "/repos/acme/widgets/pulls/1",
+        "/repos/acme/widgets/pulls/1/reviews",
+        check_runs.as_str(),
+    ]) {
+        assert!(line.starts_with(&format!("GET {path} ")), "{line}");
+    }
+    for request in &requests {
+        assert!(
+            request
+                .headers
+                .iter()
+                .all(|(name, _)| name != "authorization"),
+            "{}",
+            request.request_line
+        );
+    }
+}
+
 #[test]
 fn an_unset_or_empty_gateway_is_refused_with_nothing_sent() {
     let fake = FakeGithub::start("HTTP/1.1 200 OK", json!({}).to_string());
