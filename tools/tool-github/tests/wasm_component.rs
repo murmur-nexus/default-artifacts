@@ -377,6 +377,151 @@ fn pr_create_with_a_footer_line_sends_it_appended() {
     );
 }
 
+// ── body_file: the body read inside the component, through the guest's `.` preopen ───────
+
+/// A fake GitHub answering every pull-request call with a PR whose `body` echoes the `body`
+/// the request carried: `201 Created` for a `POST`, `200 OK` otherwise.
+struct PrBodyEchoGithub {
+    endpoint: String,
+    requests: Arc<Mutex<Vec<Recorded>>>,
+}
+
+impl PrBodyEchoGithub {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&requests);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let Some(request) = read_request(&mut stream) else {
+                    continue;
+                };
+                let status_line = if request.request_line.starts_with("POST ") {
+                    "HTTP/1.1 201 Created"
+                } else {
+                    "HTTP/1.1 200 OK"
+                };
+                let mut pr = created_pr();
+                pr["body"] = request.body.get("body").cloned().unwrap_or(Value::Null);
+                recorded.lock().unwrap().push(request);
+                let body = pr.to_string();
+                let response = format!(
+                    "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        Self { endpoint, requests }
+    }
+
+    fn requests(&self) -> Vec<Recorded> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+/// A 30-line Markdown body with a GFM table, a line with trailing spaces and a non-ASCII char.
+fn table_body(tag: &str) -> String {
+    let mut lines = vec![
+        format!("## Summary ({tag})"),
+        String::new(),
+        "Trailing spaces follow — café.  ".to_string(),
+        String::new(),
+        "| Field | Before | After |".to_string(),
+        "|-------|--------|-------|".to_string(),
+        "| count | 0 | 1 |".to_string(),
+        "| name | old | new |".to_string(),
+        "| flag | false | true |".to_string(),
+        String::new(),
+    ];
+    let mut n = 1;
+    while lines.len() < 30 {
+        lines.push(format!("- point {n} for {tag}"));
+        n += 1;
+    }
+    lines.join("\n") + "\n"
+}
+
+#[test]
+fn the_wasm_component_opens_and_edits_a_pr_from_body_files_in_its_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let v1 = table_body("v1");
+    let v2 = table_body("v2");
+    std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("sub/pr-body.md"), &v1).unwrap();
+    std::fs::write(dir.path().join("pr-body-v2.md"), &v2).unwrap();
+    let fake = PrBodyEchoGithub::start();
+
+    let create = json!({"op": "pr_create", "title": "Add feature", "head": "feature-x",
+                        "base": "main", "draft": true, "body_file": "sub/pr-body.md"});
+    let edit = json!({"op": "pr_edit", "number": 9, "body_file": "pr-body-v2.md"});
+    for (input, file, text) in [
+        (&create, "sub/pr-body.md", &v1),
+        (&edit, "pr-body-v2.md", &v2),
+    ] {
+        let result = run_component_in_dir(
+            dir.path(),
+            Some(&fake.endpoint),
+            Some(CONFIG),
+            &input.to_string(),
+        );
+        assert!(
+            matches!(result.status, Status::Passed),
+            "{input}: {:?}",
+            result.summary
+        );
+        let data: Value = serde_json::from_str(&result.data.unwrap()).unwrap();
+        assert_eq!(data["body_verified"], json!(true), "{data}");
+        assert_eq!(data["body_file"], json!(file));
+        assert_eq!(data["body_bytes"], json!(text.len()));
+    }
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[0]
+            .request_line
+            .starts_with("POST /repos/acme/widgets/pulls "),
+        "{}",
+        requests[0].request_line
+    );
+    assert_eq!(requests[0].body["body"], json!(v1));
+    assert!(
+        requests[1]
+            .request_line
+            .starts_with("PATCH /repos/acme/widgets/pulls/9 "),
+        "{}",
+        requests[1].request_line
+    );
+    assert_eq!(requests[1].body, json!({"body": v2}));
+}
+
+#[test]
+fn the_wasm_component_refuses_an_absolute_body_file_with_nothing_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("sub/pr-body.md"), table_body("v1")).unwrap();
+    let fake = PrBodyEchoGithub::start();
+    let input = json!({"op": "pr_create", "title": "Add feature", "head": "feature-x",
+                       "base": "main", "body_file": "/sub/pr-body.md"});
+    let result = run_component_in_dir(
+        dir.path(),
+        Some(&fake.endpoint),
+        Some(CONFIG),
+        &input.to_string(),
+    );
+    assert!(
+        matches!(result.status, Status::Failed),
+        "{:?}",
+        result.summary
+    );
+    let data: Value = serde_json::from_str(&result.data.unwrap()).unwrap();
+    assert_eq!(data["error_kind"], json!("invalid_input"));
+    assert!(fake.requests().is_empty());
+}
+
 // ── the mandatory runtime spike: reading real packfiles inside the compiled wasm32-wasip2 ──
 // ── component, through actual WASI filesystem calls under Wasmtime, not just `cargo test` ──
 

@@ -1,8 +1,8 @@
 # tool-github
 
 Pushes a local commit range from a capsule's workdir to one GitHub repo, and the remote branch
-lands on the identical SHA. It also fetches a branch back, and opens, inspects, lists and merges
-pull requests on that repo. The operator pins the repo and binds the GitHub token on the tool's
+lands on the identical SHA. It also fetches a branch back, and opens, edits, inspects, lists and
+merges pull requests on that repo. The operator pins the repo and binds the GitHub token on the tool's
 entry, and the runtime attaches the token to every request. The tool never holds, reads or builds
 the token, and it never spawns `git`: it reads `.git` from the workdir and talks to GitHub's API.
 
@@ -12,7 +12,7 @@ supports per-entry credential gateways: the first murmur release after v0.3.0 (m
 ## Install
 
 ```bash
-mur install -g murmur/tool-github@0.9.0
+mur install -g murmur/tool-github@0.10.0
 ```
 
 ## Binding the token
@@ -23,7 +23,7 @@ repo in `config:`:
 ```yaml
 artifacts:
   - name: murmur/tool-github
-    version: 0.9.0
+    version: 0.10.0
     runtime: tool
     gateway:
       endpoint: https://api.github.com
@@ -114,15 +114,15 @@ with `config_invalid`.
 | `merge_methods` | list of `merge`, `squash`, `rebase` | `[]` | The methods `pr_merge` may use. The first is the default when the call names none |
 | `allow_force_push` | boolean | `false` | A `push` with `force: true` is refused with `operation_not_allowed` unless `true` |
 | `allow_push_default_branch` | boolean | `false` | A `push` to the repo's default branch is refused with `operation_not_allowed` unless `true` |
-| `pr_footer` | string or `false` | unset | One line appended to every PR body `pr_create` sends. Unset or `false` sends the body untouched |
+| `pr_footer` | string or `false` | unset | One line appended to every PR body this tool opens or edits (`pr_create`, and `pr_edit` when it sends a body). Unset or `false` sends the body untouched |
 | `merge_trailer` | string or `false` | unset | One `Key: value` trailer line appended to every merge or squash commit message. Unset or `false` sends none |
 | `commit_identity` | mapping `{name, email}` or `false` | unset | The author and committer of every `merge` or `squash` commit `pr_merge` makes, which the tool then builds itself (see [Commit identity](#commit-identity)). Unset or `false` leaves those commits to GitHub's merge endpoint |
 
 `pr_footer` applies these rules:
 
-| Body the agent gave | Body sent |
+| Body the agent gave (`body`, or the bytes of `body_file`) | Body sent |
 |---|---|
-| none, or empty | exactly the line |
+| none, or empty (`pr_create` only; a `pr_edit` without a body sends no body) | exactly the line |
 | a body whose last line is already the line | the body, unchanged |
 | any other body | the body, a blank line, then the line |
 
@@ -216,9 +216,45 @@ commits ahead of the local repository is refused with `operation_not_allowed`.
 | Op | Does |
 |---|---|
 | `pr_create` | Opens a pull request from `head` into `base`. `draft: true` opens it as a draft |
+| `pr_edit` | Changes an existing pull request's title, body or both with one `PATCH /repos/{repo}/pulls/{n}` carrying only the fields given |
 | `pr_view` | Reads one pull request with its mergeability, head SHA, check runs and reviews |
 | `pr_list` | Lists pull requests, filtered by `state`, `head` and `base` |
 | `pr_merge` | Merges one pull request, if `allow_merge` and `merge_methods` allow it |
+
+### Body from a file
+
+`body_file` on `pr_create` or `pr_edit` names a file in the tool's folder (the work folder, or the
+entry's `capabilities.filesystem.scope`). The tool reads it once, before its first request, and
+sends its bytes as the body, so the body never passes through the model. Everything is kept: a
+byte-order mark, CRLF line endings, trailing spaces, and the final newline whether present or
+absent. The only change ever made is the operator's `pr_footer`. `pr_edit` needs the same token
+permission as `pr_create` (Pull requests: write), and no capability beyond the entry's existing
+folder.
+
+| `body_file` refusal | `error_kind` | When |
+|---|---|---|
+| An absolute path, such as `/etc/passwd` | `invalid_input` | Before anything is read or sent |
+| A `..` component anywhere, such as `../x.md` or `a/../b.md` | `invalid_input` | Before anything is read or sent |
+| `body_file` together with a non-empty `body` | `invalid_input` | Before anything is read or sent |
+| A missing file, or one that is not a regular file | `invalid_input` | Before anything is sent |
+| A file over 1 MiB (1,048,576 bytes), checked from its size before it is read | `invalid_input` | Before anything is sent |
+| An empty file | `invalid_input` | Before anything is sent |
+| A file that is not valid UTF-8; the message gives the byte offset of the first invalid sequence | `invalid_input` | Before anything is sent |
+
+The tool does not check GitHub's 65,536-character body limit itself: GitHub's HTTP 422 comes back
+as `upstream_error` with its `errors` list.
+
+When the body came from `body_file`, the tool compares the body GitHub's reply holds (`null` read
+as empty) with the bytes it sent. A byte-exact match adds `body_file` (the path as given),
+`body_bytes` (the length of the body sent, footer included) and `body_verified: true` to the
+output. Any difference is `body_mismatch`: the pull request exists, but its body is not the file.
+The failure names the PR (`number`, `url`), the `body_file`, `sent_bytes`, `stored_bytes` and
+`first_difference` (the first differing byte offset, or the shorter length when one body is a
+prefix of the other), and its message says to retry with `pr_edit`. Do not merge a PR that came
+back `body_mismatch`. An inline `body` is sent as before and never verified.
+
+`pr_edit` needs `number` and at least one of `title`, `body` and `body_file`. A 404 is
+`not_found`.
 
 `pr_merge` requires `expected_head_sha`, the PR head the caller last saw in `pr_view`. The tool
 sends it to GitHub, and if the PR has moved since, GitHub refuses the merge and the tool returns
@@ -310,7 +346,8 @@ missing `number`. A field that does not belong to the op and holds any other val
 |---|---|
 | `push` | `head_sha` (40 hex, required), `remote_branch` (required), `repo_path`, `force` |
 | `fetch` | `repo_path`, `branch`, `remote` |
-| `pr_create` | `title` (required), `head` (required), `base` (required), `body`, `draft` |
+| `pr_create` | `title` (required), `head` (required), `base` (required), `body` or `body_file`, `draft` |
+| `pr_edit` | `number` (required), and at least one of `title`, `body`, `body_file` (`body` and `body_file` never together) |
 | `pr_view` | `number` (required) |
 | `pr_list` | `state` (`open`, `closed` or `all`), `head`, `base` |
 | `pr_merge` | `number` (required), `expected_head_sha` (40 hex, required), `method`, `message` |
@@ -323,7 +360,8 @@ A success returns `data` as compact JSON with `"ok": true`:
 |---|---|
 | `push` | `remote_branch`, `head_sha`, `created` (the branch was new), `objects_uploaded` |
 | `fetch` | `branch`, `remote_ref`, `head_sha`, `previous_sha` (the ref's earlier value, or `null`), `objects_written` |
-| `pr_create` | `number`, `url`, `head_sha` |
+| `pr_create` | `number`, `url`, `head_sha`; with `body_file`, also `body_file`, `body_bytes`, `body_verified: true` |
+| `pr_edit` | `number`, `url`, `head_sha`, `state`; with `body_file`, also `body_file`, `body_bytes`, `body_verified: true` |
 | `pr_view` | `number`, `state`, `mergeable`, `head_sha`, `checks`, `reviews` |
 | `pr_list` | `prs` |
 | `pr_merge` | `merged`, `merge_sha`, `trailer` (the trailer line sent, or `null`), `identity` (`{name, email}`; present only when `commit_identity` is configured, and `null` for a rebase) |
@@ -344,6 +382,9 @@ changes `error_kind`. The `conflict`, `head_moved` and `not_mergeable` failures 
 A `squash` with `commit_identity` set that fails after it rewrote the PR's head branch adds
 `head_sha`: the squashed commit the head branch now holds.
 
+`body_mismatch` adds `number`, `url`, `body_file`, `sent_bytes`, `stored_bytes` and
+`first_difference`.
+
 | Rule | Behaviour |
 |---|---|
 | Kept from an object entry | `resource`, `field`, `code` and `message`, each only when its value is a string. Every other key is dropped, including `value`, where GitHub can echo a submitted value |
@@ -356,7 +397,7 @@ A `squash` with `commit_identity` set that fails after it rewrote the PR's head 
 
 | `error_kind` | When |
 |---|---|
-| `invalid_input` | The input breaks a rule above, or the push meets a signed commit GitHub lacks or a gitlink |
+| `invalid_input` | The input breaks a rule above (an unusable `body_file` included), or the push meets a signed commit GitHub lacks or a gitlink |
 | `config_invalid` | `config:` is missing or breaks a rule above |
 | `gateway_missing` | The entry has no `gateway:` |
 | `repo_not_allowed` | `pr_create`'s `head` names a fork outside the pinned repo, or a `commit_identity` merge's head branch is outside it |
@@ -373,6 +414,7 @@ A `squash` with `commit_identity` set that fails after it rewrote the PR's head 
 | `upstream_error` | Any other non-2xx, or any 3xx: the tool never follows a redirect |
 | `transport_error` | The request could not be sent, including when the runtime denies it |
 | `response_invalid` | A body that is not JSON or lacks a field, or an object whose SHA differs from the one expected |
+| `body_mismatch` | The pull request was opened or edited from `body_file`, but the body GitHub's reply holds is not byte for byte the body sent. The PR exists; retry with `pr_edit` |
 
 Configuration, input and gateway are checked, in that order, before any request.
 
@@ -416,7 +458,7 @@ Not changed:
 | `tests/fetch.rs` | fetch writes verified loose objects and the remote-tracking ref |
 | `tests/pack_reading.rs` | push reads checked-in, `git`-built packs, including a cross-pack `REF_DELTA` |
 | `tests/shallow_clone.rs` | a commit on a `git clone --depth 1` lands the identical SHA, as from a full clone; a shallow tip whose parent GitHub lacks is `repo_unreadable`. Builds its repositories with the system `git` at test time |
-| `tests/wasm_component.rs` | the compiled component under Wasmtime: headers, no credential header, `gateway_missing`, the footer, packs read through WASI, and a `commit_identity` squash's six requests |
+| `tests/wasm_component.rs` | the compiled component under Wasmtime: headers, no credential header, `gateway_missing`, the footer, packs read through WASI, `body_file` read through WASI for `pr_create` and `pr_edit`, and a `commit_identity` squash's six requests |
 | `tests/mur_run_gateway.rs` (`#[ignore]`d) | under a real `mur run`, the runtime attaches the token to the tool's requests and it appears nowhere in the session |
 
 ```bash
