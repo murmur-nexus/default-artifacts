@@ -1,5 +1,5 @@
 name: tool-github
-version: 0.8.0
+version: 0.9.0
 runtime: tool
 implementation: wasm
 description: |
@@ -16,7 +16,7 @@ description: |
     pr_create  {title, body?, head, base, draft?}  -> {number, url, head_sha}
     pr_view    {number}  -> {number, state, mergeable, head_sha, checks, reviews}
     pr_list    {state?, head?, base?}  -> {prs}
-    pr_merge   {number, expected_head_sha, method?, message?}  -> {merged, merge_sha, trailer}
+    pr_merge   {number, expected_head_sha, method?, message?}  -> {merged, merge_sha, trailer, identity?}
 
   A field set to "", 0, false or null counts as absent, so a caller that sends every
   property on every call (empty for the ones it does not use) sends the same request as one
@@ -59,6 +59,17 @@ description: |
   is not_mergeable. The commit message is the caller's message, else GitHub's own, unless
   config: sets merge_trailer; rebase never carries a message or a trailer.
 
+  With config: commit_identity set, a merge or squash commit is built by the tool itself
+  through GitHub's Git Data API from the merge GitHub computed for the PR, authored and
+  committed by that identity and carrying the merge_trailer, and the base branch is
+  fast-forwarded to it; a squash first points the PR's head branch at the squashed commit, so
+  GitHub records the PR as merged. That commit is unsigned, and a protected base branch
+  (required reviews, required signed commits) refuses it. The PR opener, who merged the PR
+  and every pushed ref update stay the token owner's, and rebase and push never apply the
+  identity. The output's identity is {name, email} on a commit built that way and null on a
+  rebase; without commit_identity there is no identity key. A squash that fails after its
+  head branch was rewritten adds head_sha, the squashed commit the head now holds.
+
   The operator binds the token on this tool's entry, never in config:
 
       artifacts:
@@ -83,8 +94,10 @@ description: |
   ("owner/name") and additionally sets allow_merge, merge_methods, allow_force_push,
   allow_push_default_branch, pr_footer (a line appended to every PR body this tool opens;
   unset or false appends nothing) and merge_trailer (a "Key: value" trailer appended to
-  every merge or squash commit message; unset or false appends nothing). A credential-shaped
-  key in it is refused.
+  every merge or squash commit message; unset or false appends nothing) and commit_identity
+  ({name, email}: the author and committer of every merge or squash commit pr_merge makes;
+  unset or false leaves those commits to GitHub's merge endpoint). A credential-shaped key in
+  it is refused.
 
   A failure returns {ok: false, error_kind, message, ...} where error_kind is one of
   invalid_input, config_invalid, gateway_missing, repo_not_allowed, repo_unreadable,

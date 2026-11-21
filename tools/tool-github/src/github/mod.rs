@@ -7,6 +7,7 @@
 
 use serde_json::{json, Value};
 
+use crate::config::CommitIdentity;
 use crate::git::date::{to_iso8601, Identity};
 use crate::git::object::{Commit, TreeEntry};
 use crate::git::rebuild::{RemoteCommit, RemoteIdentity, RemoteSignature};
@@ -76,7 +77,8 @@ pub fn create_commit_path(repo: &str) -> String {
     format!("{}/git/commits", repo_base(repo))
 }
 
-/// `GET` answers 200 when the repository has the commit, 404 when it does not.
+/// `GET` answers 200 when the repository has the commit, 404 when it does not; the 200 body is
+/// what [`parse_git_commit`] reads.
 pub fn get_commit_path(repo: &str, sha: &str) -> String {
     format!("{}/git/commits/{sha}", repo_base(repo))
 }
@@ -97,6 +99,55 @@ fn identity_json(identity: &Identity) -> Value {
         "email": identity.email,
         "date": to_iso8601(identity),
     })
+}
+
+/// The body of a commit this tool builds itself as the configured `commit_identity`: the same
+/// `{name, email}` for author and committer, and no `date`, so GitHub stamps the current time.
+/// [`create_commit_body`] is the byte-reproducing form `push` uses.
+pub fn create_built_commit_body(
+    message: &str,
+    tree: &str,
+    parents: &[&str],
+    identity: &CommitIdentity,
+) -> Value {
+    let person = json!({ "name": identity.name, "email": identity.email });
+    json!({
+        "message": message,
+        "tree": tree,
+        "parents": parents,
+        "author": person,
+        "committer": person,
+    })
+}
+
+/// The tree and parents of a commit, as a `GET .../git/commits/{sha}` response reports them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitCommit {
+    pub tree: String,
+    pub parents: Vec<String>,
+}
+
+/// `tree.sha` and every `parents[].sha` from a `GET .../git/commits/{sha}` response.
+pub fn parse_git_commit(body: &Value) -> Result<GitCommit, String> {
+    let tree = body
+        .pointer("/tree/sha")
+        .and_then(Value::as_str)
+        .ok_or("GitHub's commit response has no tree.sha")?
+        .to_string();
+    let parents = body
+        .get("parents")
+        .and_then(Value::as_array)
+        .ok_or("GitHub's commit response has no parents list")?
+        .iter()
+        .map(|parent| {
+            parent
+                .get("sha")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| "a parent in GitHub's commit response has no sha".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(GitCommit { tree, parents })
 }
 
 /// `value["sha"]`, common to blob/tree/commit creation responses.
@@ -369,6 +420,12 @@ pub struct PullRequest {
     pub base_ref: String,
     pub title: String,
     pub body: String,
+    /// GitHub's test merge of the head into the base (`merge_commit_sha`), while the PR is open.
+    pub merge_commit_sha: Option<String>,
+    /// The repository the head branch lives in (`head.repo.full_name`).
+    pub head_repo: Option<String>,
+    /// The base repository's default branch (`base.repo.default_branch`).
+    pub default_branch: Option<String>,
 }
 
 pub fn parse_pull_request(body: &Value) -> Result<PullRequest, String> {
@@ -410,7 +467,14 @@ pub fn parse_pull_request(body: &Value) -> Result<PullRequest, String> {
             .to_string(),
         title: text("title"),
         body: text("body"),
+        merge_commit_sha: optional_text(body.get("merge_commit_sha")),
+        head_repo: optional_text(head.pointer("/repo/full_name")),
+        default_branch: optional_text(base.pointer("/repo/default_branch")),
     })
+}
+
+fn optional_text(value: Option<&Value>) -> Option<String> {
+    value.and_then(Value::as_str).map(str::to_string)
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
@@ -573,5 +637,90 @@ mod tests {
             .map(|e| e["mode"].as_str().unwrap())
             .collect();
         assert_eq!(modes, ["040000", "100644", "100755", "120000", "160000"]);
+    }
+
+    #[test]
+    fn a_pull_request_with_no_merge_commit_or_repos_reads_them_as_none() {
+        let body = json!({
+            "number": 7, "state": "open",
+            "head": {"sha": "a".repeat(40), "ref": "feature-x", "repo": null},
+            "base": {"ref": "main"},
+        });
+        let pr = parse_pull_request(&body).unwrap();
+        assert_eq!(pr.merge_commit_sha, None);
+        assert_eq!(pr.head_repo, None);
+        assert_eq!(pr.default_branch, None);
+    }
+
+    #[test]
+    fn parses_the_merge_commit_and_both_repos_of_a_pull_request() {
+        let body = json!({
+            "number": 7, "state": "open", "merge_commit_sha": "c".repeat(40),
+            "head": {"sha": "a".repeat(40), "ref": "feature-x",
+                     "repo": {"full_name": "acme/widgets"}},
+            "base": {"ref": "main",
+                     "repo": {"full_name": "acme/widgets", "default_branch": "main"}},
+        });
+        let pr = parse_pull_request(&body).unwrap();
+        assert_eq!(pr.merge_commit_sha, Some("c".repeat(40)));
+        assert_eq!(pr.head_repo.as_deref(), Some("acme/widgets"));
+        assert_eq!(pr.default_branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn parses_a_git_commit_tree_and_parents_in_order() {
+        let body = json!({
+            "sha": "c".repeat(40),
+            "tree": {"sha": "d".repeat(40), "url": "x"},
+            "parents": [{"sha": "1".repeat(40), "url": "x"}, {"sha": "2".repeat(40)}],
+            "author": {"name": "GitHub"},
+        });
+        assert_eq!(
+            parse_git_commit(&body).unwrap(),
+            GitCommit {
+                tree: "d".repeat(40),
+                parents: vec!["1".repeat(40), "2".repeat(40)],
+            }
+        );
+    }
+
+    #[test]
+    fn a_malformed_git_commit_response_is_refused() {
+        for body in [
+            json!({"parents": []}),
+            json!({"tree": {}, "parents": []}),
+            json!({"tree": {"sha": "d"}}),
+            json!({"tree": {"sha": "d"}, "parents": "x"}),
+            json!({"tree": {"sha": "d"}, "parents": [{"url": "x"}]}),
+            json!(null),
+        ] {
+            assert!(parse_git_commit(&body).is_err(), "{body}");
+        }
+    }
+
+    #[test]
+    fn a_built_commit_body_carries_the_identity_twice_and_no_date() {
+        let identity = CommitIdentity {
+            name: "Release Bot".to_string(),
+            email: "bot@example.com".to_string(),
+        };
+        let parents = ["1".repeat(40), "2".repeat(40)];
+        let body = create_built_commit_body(
+            "msg",
+            &"d".repeat(40),
+            &[&parents[0], &parents[1]],
+            &identity,
+        );
+        let person = json!({"name": "Release Bot", "email": "bot@example.com"});
+        assert_eq!(
+            body,
+            json!({
+                "message": "msg",
+                "tree": "d".repeat(40),
+                "parents": parents,
+                "author": person,
+                "committer": person,
+            })
+        );
     }
 }

@@ -12,7 +12,7 @@ supports per-entry credential gateways: the first murmur release after v0.3.0 (m
 ## Install
 
 ```bash
-mur install -g murmur/tool-github@0.8.0
+mur install -g murmur/tool-github@0.9.0
 ```
 
 ## Binding the token
@@ -23,7 +23,7 @@ repo in `config:`:
 ```yaml
 artifacts:
   - name: murmur/tool-github
-    version: 0.8.0
+    version: 0.9.0
     runtime: tool
     gateway:
       endpoint: https://api.github.com
@@ -116,6 +116,7 @@ with `config_invalid`.
 | `allow_push_default_branch` | boolean | `false` | A `push` to the repo's default branch is refused with `operation_not_allowed` unless `true` |
 | `pr_footer` | string or `false` | unset | One line appended to every PR body `pr_create` sends. Unset or `false` sends the body untouched |
 | `merge_trailer` | string or `false` | unset | One `Key: value` trailer line appended to every merge or squash commit message. Unset or `false` sends none |
+| `commit_identity` | mapping `{name, email}` or `false` | unset | The author and committer of every `merge` or `squash` commit `pr_merge` makes, which the tool then builds itself (see [Commit identity](#commit-identity)). Unset or `false` leaves those commits to GitHub's merge endpoint |
 
 `pr_footer` applies these rules:
 
@@ -138,6 +139,28 @@ that method. `merge_trailer: true` is refused, and so are a string that is not o
 line (the key letters, digits and `-`) and any non-string value. Each refusal is
 `config_invalid` and names `merge_trailer`. For example:
 `merge_trailer: "Co-authored-by: Release Bot <bot@example.com>"`.
+
+`commit_identity` is a mapping with exactly two string keys, `name` and `email`, both stored
+verbatim:
+
+```yaml
+commit_identity:
+  name: Release Bot
+  email: bot@example.com
+```
+
+Each of these is refused with `config_invalid`, with a message naming `commit_identity`:
+
+- `commit_identity: true`, with a message showing the `{name: …, email: …}` mapping to set
+- a value that is neither a mapping nor `false`
+- a mapping missing `name` or `email`, or with any other key
+- a `name` or `email` that is not a string
+- a `name` that is blank, or contains `<`, `>`, a line break or NUL
+- an `email` that contains whitespace, `<`, `>` or NUL, or has no `@` with at least one
+  character on each side
+
+`config_version` stays `1`. Nothing in a call can set or change the identity: an `author`,
+`committer` or `commit_identity` input field is `invalid_input`.
 
 ## Push
 
@@ -199,7 +222,79 @@ commits ahead of the local repository is refused with `operation_not_allowed`.
 
 `pr_merge` requires `expected_head_sha`, the PR head the caller last saw in `pr_view`. The tool
 sends it to GitHub, and if the PR has moved since, GitHub refuses the merge and the tool returns
-`head_moved`. A PR GitHub cannot merge is `not_mergeable`.
+`head_moved`. A PR GitHub cannot merge is `not_mergeable`. With `commit_identity` set, a `merge`
+or `squash` commit is built by the tool instead, as described in
+[Commit identity](#commit-identity).
+
+## Commit identity
+
+With `commit_identity` set, a `pr_merge` using `merge` or `squash` no longer asks GitHub's merge
+endpoint to make the commit. The tool builds the commit itself through GitHub's Git Data API:
+its author and committer are the configured identity, its message carries the `merge_trailer`,
+and its tree is the merge GitHub already computed for the pull request. The tool then
+fast-forwards the base branch to that commit, and GitHub records the pull request as merged. A
+`rebase`, and every merge when `commit_identity` is unset, goes to GitHub's merge endpoint with
+the same requests and the same result as without the key.
+
+| What GitHub records | `commit_identity` unset | `commit_identity` set |
+|---|---|---|
+| The `merge` or `squash` commit `pr_merge` makes | Made by GitHub's merge endpoint: GitHub picks the author (the merging account or the PR's author), GitHub is the committer and signs it | Author and committer are the configured identity. The commit is unsigned |
+| The `merge_trailer` co-author line | On a GitHub-made merge or squash commit | On the tool-built commit |
+| Commits from a `rebase` merge | GitHub's rebase: the authors are kept and GitHub is the committer | Unchanged: the identity does not apply |
+| Commits `push` uploads | Byte-identical to the local commits, with whoever made them as author and committer | Unchanged: `push` never rewrites a commit |
+| The pull request's opener (`pr_create`) | Token owner | Token owner |
+| Who merged the pull request, and who pushed each ref update | Token owner | Token owner |
+
+Why the identity covers exactly those commits:
+
+- **GitHub's REST merge endpoint** takes only `commit_title`, `commit_message`, `sha` and
+  `merge_method`, with no author or committer, so through it only the trailer can be set. It
+  stays the path when `commit_identity` is unset.
+- **GraphQL `mergePullRequest`'s `authorEmail`** picks among the merging account's own verified
+  addresses. It cannot credit another account and sets neither a name nor a committer.
+- **Rewriting commits on `push`** would change every SHA and break `push`'s promise that the
+  remote branch lands on the identical local SHA. A push-time check refusing other authors'
+  commits creates no commit and would refuse branches carrying other people's work.
+- **A tool-built Git Data commit** (`POST /git/commits` accepts any author and committer),
+  placed on the base by a fast-forward, is what the tool does. GitHub marks a pull request
+  merged once its head is reachable from its base.
+
+The requests, after the `allow_merge` and `merge_methods` gates:
+
+| Step | `merge` | `squash` |
+|---|---|---|
+| 1 | `GET /repos/{repo}/pulls/{n}` | same |
+| 2 | `GET /repos/{repo}/git/commits/{merge_commit_sha}`: GitHub's test merge, whose parents must be the base tip and the PR head | same |
+| 3 | `POST /repos/{repo}/git/commits` `{message, tree, parents: [base tip, head], author, committer}` | same, with `parents: [base tip]` |
+| 4 | `PATCH /repos/{repo}/git/refs/heads/{base}` `{sha, force: false}` | `GET /repos/{repo}/git/refs/heads/{head}`: must still be the PR head |
+| 5 | | `PATCH /repos/{repo}/git/refs/heads/{head}` `{sha, force: true}`: the head branch now holds the squashed commit, so it stays reachable and GitHub shows the PR merged, not closed |
+| 6 | | `PATCH /repos/{repo}/git/refs/heads/{base}` `{sha, force: false}` |
+
+`author` and `committer` are both `{name, email}` with no `date`, so GitHub stamps the current
+time. The message is the caller's `message` when it gave one. Otherwise a merge reads
+`Merge pull request #{n} from {owner}/{head}`, a blank line and the PR title, and a squash reads
+`{title} (#{n})`, a blank line and the PR body (left out when blank). The `merge_trailer` joins
+it by the rules above.
+
+| Failure | `error_kind` | Sent |
+|---|---|---|
+| The PR is not open | `not_mergeable` | 1 |
+| The PR's head branch is not in the pinned repo | `repo_not_allowed` | 1 |
+| The PR's head is not `expected_head_sha` | `head_moved` | 1 |
+| GitHub is still computing mergeability (run `pr_merge` again in a few seconds) | `not_mergeable` | 1 |
+| GitHub reports the PR not mergeable | `not_mergeable` | 1 |
+| The PR has no `merge_commit_sha`, or a squash's PR has no `base.repo.default_branch` | `response_invalid` | 1 |
+| A squash whose head branch is the repo's default branch | `operation_not_allowed` | 1 |
+| GitHub's test merge is out of date: not exactly two parents, or the second is not the head (run `pr_merge` again) | `conflict` | 2 |
+| The commit or ref read fails, or GitHub refuses to create the commit | by HTTP status | 2, 3 or 4 |
+| A squash's head branch no longer holds the PR head | `head_moved` | 4 |
+| GitHub refuses the head branch update; the base is not touched | by HTTP status | 5 |
+| The base moved since GitHub computed the merge (HTTP 422, "not a fast forward"); nothing was merged | `conflict` | 4 or 6 |
+| Any other refused base update, such as branch protection. The message ends `; a protected base branch refuses a commit this tool builds itself — unset commit_identity to let GitHub merge as the token owner` | by HTTP status, with `http_status` and `errors` | 4 or 6 |
+
+No ref is written until the commit exists. A squash failure after step 5 adds `head_sha`, the
+squashed commit the PR's head branch now holds, with the same change as before. A squash
+`conflict` says so and says to retry with `expected_head_sha` set to it.
 
 ## Input
 
@@ -231,7 +326,7 @@ A success returns `data` as compact JSON with `"ok": true`:
 | `pr_create` | `number`, `url`, `head_sha` |
 | `pr_view` | `number`, `state`, `mergeable`, `head_sha`, `checks`, `reviews` |
 | `pr_list` | `prs` |
-| `pr_merge` | `merged`, `merge_sha`, `trailer` (the trailer line sent, or `null`) |
+| `pr_merge` | `merged`, `merge_sha`, `trailer` (the trailer line sent, or `null`), `identity` (`{name, email}`; present only when `commit_identity` is configured, and `null` for a rebase) |
 
 ## Errors
 
@@ -245,6 +340,9 @@ carries that list, and `message` and the summary name each entry. A pull request
 GitHub cannot read reads `GitHub answered HTTP 422: Validation Failed (head: invalid)`, with
 `"errors": [{"code": "invalid", "field": "head", "resource": "PullRequest"}]`. The list never
 changes `error_kind`. The `conflict`, `head_moved` and `not_mergeable` failures carry no list.
+
+A `squash` with `commit_identity` set that fails after it rewrote the PR's head branch adds
+`head_sha`: the squashed commit the head branch now holds.
 
 | Rule | Behaviour |
 |---|---|
@@ -261,13 +359,13 @@ changes `error_kind`. The `conflict`, `head_moved` and `not_mergeable` failures 
 | `invalid_input` | The input breaks a rule above, or the push meets a signed commit GitHub lacks or a gitlink |
 | `config_invalid` | `config:` is missing or breaks a rule above |
 | `gateway_missing` | The entry has no `gateway:` |
-| `repo_not_allowed` | `pr_create`'s `head` names a fork outside the pinned repo |
+| `repo_not_allowed` | `pr_create`'s `head` names a fork outside the pinned repo, or a `commit_identity` merge's head branch is outside it |
 | `repo_unreadable` | The local repository has no objects directory, uses alternates, has an unpaired pack, a pack set over 256 MiB, or lacks or cannot decode an object the operation needs |
 | `repo_unwritable` | `fetch` could not write an object or update the remote-tracking ref |
 | `operation_not_allowed` | A `config:` gate refuses the call: merging, a merge method, force-pushing, pushing the default branch, or a fetch over 10,000 commits |
-| `conflict` | A non-fast-forward push without `force`, or GitHub refused the ref update |
-| `not_mergeable` | GitHub answered the merge with HTTP 405 |
-| `head_moved` | GitHub answered the merge with HTTP 409: the PR head is no longer `expected_head_sha` |
+| `conflict` | A non-fast-forward push without `force`, GitHub refused the ref update, or a `commit_identity` merge found GitHub's test merge out of date or the base moved |
+| `not_mergeable` | GitHub answered the merge with HTTP 405, or a `commit_identity` merge found the PR not open or not (yet) mergeable |
+| `head_moved` | GitHub answered the merge with HTTP 409, or a `commit_identity` merge found the PR head or head branch no longer at `expected_head_sha` |
 | `upstream_unauthorized` | HTTP 401 |
 | `upstream_forbidden` | HTTP 403 that is not a rate limit |
 | `not_found` | HTTP 404 where the operation needed the resource, or `fetch` of a branch the repo lacks |
@@ -278,17 +376,17 @@ changes `error_kind`. The `conflict`, `head_moved` and `not_mergeable` failures 
 
 Configuration, input and gateway are checked, in that order, before any request.
 
-## Changes from nexus-tool-github 0.2.0
+## Changes from the predecessor tool 0.2.0
 
-This tool is ported from `nexus-tool-github` 0.2.0. The ops, their input fields, the output fields, the
+This tool is ported from a predecessor GitHub tool at version 0.2.0. The ops, their input fields, the output fields, the
 `config:` key names, the `error_kind` values and the gateway contract are unchanged, so a capsule
 moves by changing the artifact name.
 
-| Change | nexus-tool-github 0.2.0 | tool-github |
+| Change | Predecessor 0.2.0 | tool-github |
 |---|---|---|
-| PR footer | `pr_footer` was a boolean, on by default: every PR body got `Generated with Murmur Nexus` | `pr_footer` is the line to append. Unset or `false` sends the body untouched. `true` is `config_invalid` |
-| Merge trailer | `merge_trailer` was a boolean, on by default: every merge and squash got `Co-authored-by: Nexus by Murmur <nexus@murmur.nexus>`, except a squash of a PR the `nexus-by-murmur` account opened | `merge_trailer` is the trailer line to append. Unset or `false` sends none. `true`, or a line that is not `Key: value`, is `config_invalid`. Who opened the PR does not matter |
-| Names | The description, error messages and `User-Agent: nexus-tool-github/0.2.0` named nexus | Every name is `tool-github`. The `gateway_missing` message names "the tool-github entry", and the `User-Agent` is `tool-github` with no version |
+| PR footer | `pr_footer` was a boolean, on by default: every PR body got a fixed product footer | `pr_footer` is the line to append. Unset or `false` sends the body untouched. `true` is `config_invalid` |
+| Merge trailer | `merge_trailer` was a boolean, on by default: every merge and squash got a fixed product `Co-authored-by:` trailer, except a squash of a PR the product's own bot account opened | `merge_trailer` is the trailer line to append. Unset or `false` sends none. `true`, or a line that is not `Key: value`, is `config_invalid`. Who opened the PR does not matter |
+| Names | The description, error messages and the versioned `User-Agent` named the predecessor product | Every name is `tool-github`. The `gateway_missing` message names "the tool-github entry", and the `User-Agent` is `tool-github` with no version |
 | Unknown `op` message | Listed `push, pr_create, pr_view, pr_list, pr_merge` | Also lists `fetch` |
 | Empty input fields | Every field outside the op's own list was `invalid_input`, empty or not, so a model that sends every schema property on every call could not make a single call. An empty `branch` was `invalid_input`, `number: 0` was sent to GitHub, and `body: ""` or `message: ""` was sent as an empty string | A field set to `""`, `0`, `false` or `null` counts as absent, for every op. An empty `branch` is the default branch, `number: 0` is `invalid_input` ("\"number\" is required"), and an empty `body` or `message` is not sent. A foreign field with any other value is still `invalid_input` |
 
@@ -313,12 +411,12 @@ Not changed:
 
 | Suite | Proves |
 |---|---|
-| unit tests (`src/`) | config, input, footer and trailer rules, the object reader and push planner, and source invariants: no credential read, no GitHub host outside one constant, no "nexus" |
+| unit tests (`src/`) | config, input, footer and trailer rules, the object reader and push planner, and source invariants: no credential read, no GitHub host outside one constant, no predecessor-product name |
 | `tests/ops_scenarios.rs` | every op and `error_kind` against a recording fake, including a fake GitHub that recomputes real git ids |
 | `tests/fetch.rs` | fetch writes verified loose objects and the remote-tracking ref |
 | `tests/pack_reading.rs` | push reads checked-in, `git`-built packs, including a cross-pack `REF_DELTA` |
 | `tests/shallow_clone.rs` | a commit on a `git clone --depth 1` lands the identical SHA, as from a full clone; a shallow tip whose parent GitHub lacks is `repo_unreadable`. Builds its repositories with the system `git` at test time |
-| `tests/wasm_component.rs` | the compiled component under Wasmtime: headers, no credential header, `gateway_missing`, the footer, and packs read through WASI |
+| `tests/wasm_component.rs` | the compiled component under Wasmtime: headers, no credential header, `gateway_missing`, the footer, packs read through WASI, and a `commit_identity` squash's six requests |
 | `tests/mur_run_gateway.rs` (`#[ignore]`d) | under a real `mur run`, the runtime attaches the token to the tool's requests and it appears nowhere in the session |
 
 ```bash

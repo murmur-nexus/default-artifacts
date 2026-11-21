@@ -55,6 +55,59 @@ pub fn compose(
     }
 }
 
+/// What a tool-built commit message is made from: the pull request's number, title, body and
+/// head branch, and the pinned repo's owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrText<'a> {
+    pub number: u64,
+    pub owner: &'a str,
+    pub head_ref: &'a str,
+    pub title: &'a str,
+    pub body: &'a str,
+}
+
+/// The whole message of a commit this tool builds itself when `config.commit_identity` is set.
+///
+/// A non-empty `message_override` (the agent's `pr_merge` `message`) is the whole base text.
+/// Otherwise `squash` gives `{title} (#{n})`, then a blank line and the body when the body is
+/// not blank; every other method gives `Merge pull request #{n} from {owner}/{head_ref}`, then
+/// a blank line and the title when the title is not empty. `trailer` (`config.merge_trailer`)
+/// is then joined on by the same rules [`compose`] uses. `rebase` never builds a commit, so it
+/// never reaches this function.
+pub fn built_message(
+    method: MergeMethod,
+    pr: PrText<'_>,
+    message_override: Option<&str>,
+    trailer: Option<&str>,
+) -> String {
+    let base = match message_override.filter(|message| !message.is_empty()) {
+        Some(message) => message.to_string(),
+        None if method == MergeMethod::Squash => {
+            let body = pr.body.trim_end_matches(['\n', '\r']);
+            if body.trim().is_empty() {
+                format!("{} (#{})", pr.title, pr.number)
+            } else {
+                format!("{} (#{})\n\n{body}", pr.title, pr.number)
+            }
+        }
+        None => {
+            let head = format!(
+                "Merge pull request #{} from {}/{}",
+                pr.number, pr.owner, pr.head_ref
+            );
+            if pr.title.is_empty() {
+                head
+            } else {
+                format!("{head}\n\n{}", pr.title)
+            }
+        }
+    };
+    match trailer {
+        Some(trailer) => join_trailer(&base, trailer),
+        None => base,
+    }
+}
+
 /// Whether `line` looks like a trailer (`Key: value`), the same shape `git interpret-trailers`
 /// recognizes: an alphanumeric-and-hyphen key, a colon, a space, then content.
 pub(crate) fn is_trailer_line(line: &str) -> bool {
@@ -207,5 +260,117 @@ mod tests {
         assert!(!is_trailer_line("Co authored by: someone"));
         assert!(!is_trailer_line("Key:"));
         assert!(!is_trailer_line(""));
+    }
+
+    fn pr_text() -> PrText<'static> {
+        PrText {
+            number: 1,
+            owner: "acme",
+            head_ref: "feature-x",
+            title: "Add feature",
+            body: "does the thing",
+        }
+    }
+
+    #[test]
+    fn built_merge_message_names_the_pr_and_head_then_the_title_and_trailer() {
+        assert_eq!(
+            built_message(MergeMethod::Merge, pr_text(), None, Some(TRAILER)),
+            "Merge pull request #1 from acme/feature-x\n\nAdd feature\n\nCo-authored-by: Release Bot <bot@example.com>"
+        );
+    }
+
+    #[test]
+    fn built_squash_message_is_title_number_then_body_and_trailer() {
+        assert_eq!(
+            built_message(MergeMethod::Squash, pr_text(), None, Some(TRAILER)),
+            "Add feature (#1)\n\ndoes the thing\n\nCo-authored-by: Release Bot <bot@example.com>"
+        );
+    }
+
+    #[test]
+    fn built_message_without_a_trailer_has_none() {
+        assert_eq!(
+            built_message(MergeMethod::Merge, pr_text(), None, None),
+            "Merge pull request #1 from acme/feature-x\n\nAdd feature"
+        );
+        assert_eq!(
+            built_message(MergeMethod::Squash, pr_text(), None, None),
+            "Add feature (#1)\n\ndoes the thing"
+        );
+    }
+
+    #[test]
+    fn built_merge_message_with_an_empty_title_is_the_first_line_alone() {
+        let pr = PrText {
+            title: "",
+            ..pr_text()
+        };
+        assert_eq!(
+            built_message(MergeMethod::Merge, pr, None, None),
+            "Merge pull request #1 from acme/feature-x"
+        );
+    }
+
+    #[test]
+    fn built_squash_message_drops_a_blank_body_and_trims_trailing_newlines() {
+        for body in ["", "  ", "\n\n", " \n"] {
+            let pr = PrText { body, ..pr_text() };
+            assert_eq!(
+                built_message(MergeMethod::Squash, pr, None, None),
+                "Add feature (#1)",
+                "{body:?}"
+            );
+        }
+        let pr = PrText {
+            body: "does the thing\n\n",
+            ..pr_text()
+        };
+        assert_eq!(
+            built_message(MergeMethod::Squash, pr, None, Some(TRAILER)),
+            "Add feature (#1)\n\ndoes the thing\n\nCo-authored-by: Release Bot <bot@example.com>"
+        );
+    }
+
+    #[test]
+    fn a_non_empty_message_override_is_the_whole_base_text() {
+        for method in [MergeMethod::Merge, MergeMethod::Squash] {
+            assert_eq!(
+                built_message(method, pr_text(), Some("custom"), Some(TRAILER)),
+                "custom\n\nCo-authored-by: Release Bot <bot@example.com>"
+            );
+            assert_eq!(
+                built_message(method, pr_text(), Some("custom"), None),
+                "custom"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_message_override_falls_back_to_the_default_text() {
+        assert_eq!(
+            built_message(MergeMethod::Squash, pr_text(), Some(""), None),
+            "Add feature (#1)\n\ndoes the thing"
+        );
+    }
+
+    #[test]
+    fn built_message_joins_an_existing_trailer_block_and_never_duplicates() {
+        let pr = PrText {
+            body: "does the thing\nSigned-off-by: Ada <ada@example.com>",
+            ..pr_text()
+        };
+        assert_eq!(
+            built_message(MergeMethod::Squash, pr, None, Some(TRAILER)),
+            "Add feature (#1)\n\ndoes the thing\nSigned-off-by: Ada <ada@example.com>\nCo-authored-by: Release Bot <bot@example.com>"
+        );
+        let pr = PrText {
+            body: "does the thing\n\nCo-authored-by: Release Bot <bot@example.com>",
+            ..pr_text()
+        };
+        assert_eq!(
+            built_message(MergeMethod::Squash, pr, None, Some(TRAILER)),
+            "Add feature (#1)\n\ndoes the thing\n\nCo-authored-by: Release Bot <bot@example.com>"
+        );
     }
 }
