@@ -355,6 +355,18 @@ pub fn get_pr_path(repo: &str, number: u64) -> String {
     format!("{}/pulls/{number}", repo_base(repo))
 }
 
+/// The `PATCH .../pulls/{number}` body for `pr_edit`: only the fields being changed.
+pub fn edit_pr_body(title: Option<&str>, body: Option<&str>) -> Value {
+    let mut value = json!({});
+    if let Some(title) = title {
+        value["title"] = json!(title);
+    }
+    if let Some(body) = body {
+        value["body"] = json!(body);
+    }
+    value
+}
+
 pub fn list_prs_path(
     repo: &str,
     state: Option<&str>,
@@ -550,6 +562,16 @@ mod tests {
         assert_eq!(base64_encode(b"fo"), "Zm8=");
         assert_eq!(base64_encode(b"foo"), "Zm9v");
         assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn an_edit_body_holds_only_the_fields_given() {
+        assert_eq!(edit_pr_body(Some("t"), None), json!({"title": "t"}));
+        assert_eq!(edit_pr_body(None, Some("b")), json!({"body": "b"}));
+        assert_eq!(
+            edit_pr_body(Some("t"), Some("b")),
+            json!({"title": "t", "body": "b"})
+        );
     }
 
     #[test]

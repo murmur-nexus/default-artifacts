@@ -1,5 +1,5 @@
 //! What the agent may ask this tool to do: `{"op": "push"|"fetch"|"pr_create"|"pr_view"|
-//! "pr_list"|"pr_merge", ...}`. Every op-specific field is validated here; everything about *which* repo
+//! "pr_list"|"pr_merge"|"pr_edit", ...}`. Every op-specific field is validated here; everything about *which* repo
 //! and *whether an op is even allowed* lives in `config:` (see [`crate::config`]) and is
 //! checked by [`crate::ops`], not here.
 //!
@@ -7,6 +7,8 @@
 //! schema property on every call (OpenAI's strict function calling does) sends the same request
 //! as one that sends only the op's own fields. No field gives one of those values a meaning of
 //! its own: every boolean defaults to `false`, and an absent string or number means unset.
+
+use std::path::{Component, Path};
 
 use serde_json::{Map, Value};
 
@@ -30,10 +32,20 @@ pub struct FetchInput {
     pub remote: String,
 }
 
+/// Where a pull request body comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BodySource {
+    /// `body`: the text the caller passed.
+    Inline(String),
+    /// `body_file`: a relative path, already checked by [`check_body_file_path`], to a file in
+    /// the tool's work folder whose bytes are the body.
+    File(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrCreateInput {
     pub title: String,
-    pub body: Option<String>,
+    pub body: Option<BodySource>,
     /// The branch carrying the change, `owner:branch` or a bare branch name (same-repo).
     pub head: String,
     pub base: String,
@@ -63,6 +75,14 @@ pub struct PrMergeInput {
     pub message: Option<String>,
 }
 
+/// `pr_edit`: at least one of `title` and `body` is `Some`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrEditInput {
+    pub number: u64,
+    pub title: Option<String>,
+    pub body: Option<BodySource>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Input {
     Push(PushInput),
@@ -71,6 +91,7 @@ pub enum Input {
     PrView(PrViewInput),
     PrList(PrListInput),
     PrMerge(PrMergeInput),
+    PrEdit(PrEditInput),
 }
 
 /// Parse the tool input. The `Err` string is the agent-facing `invalid_input` message.
@@ -97,8 +118,10 @@ pub fn parse_input(data: &str) -> Result<Input, String> {
         "pr_view" => parse_pr_view(map).map(Input::PrView),
         "pr_list" => parse_pr_list(map).map(Input::PrList),
         "pr_merge" => parse_pr_merge(map).map(Input::PrMerge),
+        "pr_edit" => parse_pr_edit(map).map(Input::PrEdit),
         other => Err(format!(
-            "\"op\" must be one of push, fetch, pr_create, pr_view, pr_list, pr_merge, got {other:?}"
+            "\"op\" must be one of push, fetch, pr_create, pr_view, pr_list, pr_merge, pr_edit, \
+             got {other:?}"
         )),
     }
 }
@@ -204,11 +227,49 @@ fn parse_fetch(mut map: Map<String, Value>) -> Result<FetchInput, String> {
     })
 }
 
+/// Whether `path` may name a body file: relative to the tool's work folder, with no `..`
+/// component anywhere (even one that would stay inside). The `Err` is the `invalid_input`
+/// message.
+pub fn check_body_file_path(path: &str) -> Result<(), String> {
+    let shape = Path::new(path);
+    if shape.has_root() {
+        return Err(format!(
+            "\"body_file\" must be a path relative to the work folder, got {path:?}"
+        ));
+    }
+    if shape.components().any(|part| part == Component::ParentDir) {
+        return Err(format!(
+            "\"body_file\" must not contain a \"..\" component, got {path:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// `body` or `body_file`, never both. A `body_file` is shape-checked here; it is read later,
+/// by the op, before its first request.
+fn take_body(map: &mut Map<String, Value>) -> Result<Option<BodySource>, String> {
+    let inline = take_string(map, "body")?;
+    let file = take_string(map, "body_file")?;
+    match (inline, file) {
+        (Some(_), Some(_)) => Err(
+            "give either \"body\" or \"body_file\", not both: \"body_file\" sends a file's \
+             bytes as the body"
+                .to_string(),
+        ),
+        (Some(text), None) => Ok(Some(BodySource::Inline(text))),
+        (None, Some(path)) => {
+            check_body_file_path(&path)?;
+            Ok(Some(BodySource::File(path)))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
 fn parse_pr_create(mut map: Map<String, Value>) -> Result<PrCreateInput, String> {
-    reject_unknown(&map, &["title", "body", "head", "base", "draft"])?;
+    reject_unknown(&map, &["title", "body", "body_file", "head", "base", "draft"])?;
     Ok(PrCreateInput {
         title: require_string(&mut map, "title")?,
-        body: take_string(&mut map, "body")?,
+        body: take_body(&mut map)?,
         head: require_string(&mut map, "head")?,
         base: require_string(&mut map, "base")?,
         draft: take_bool(&mut map, "draft")?,
@@ -238,6 +299,21 @@ fn parse_pr_merge(mut map: Map<String, Value>) -> Result<PrMergeInput, String> {
         method: take_string(&mut map, "method")?,
         expected_head_sha: require_sha(&mut map, "expected_head_sha")?,
         message: take_string(&mut map, "message")?,
+    })
+}
+
+fn parse_pr_edit(mut map: Map<String, Value>) -> Result<PrEditInput, String> {
+    reject_unknown(&map, &["number", "title", "body", "body_file"])?;
+    let number = require_number(&mut map, "number")?;
+    let title = take_string(&mut map, "title")?;
+    let body = take_body(&mut map)?;
+    if title.is_none() && body.is_none() {
+        return Err("pr_edit needs at least one of title, body, body_file".to_string());
+    }
+    Ok(PrEditInput {
+        number,
+        title,
+        body,
     })
 }
 
@@ -326,7 +402,7 @@ mod tests {
         assert_eq!(
             err,
             "\"op\" must be one of push, fetch, pr_create, pr_view, pr_list, pr_merge, \
-             got \"delete_repo\""
+             pr_edit, got \"delete_repo\""
         );
     }
 
@@ -339,11 +415,12 @@ mod tests {
     /// Every `input_schema` property, as a strict-mode model sends it on every call.
     fn strict_form(fields: Value) -> String {
         let mut full = serde_json::json!({
-            "base": "", "body": "", "branch": "", "draft": false, "expected_head_sha": "",
-            "force": false, "head": "", "head_sha": "", "message": "", "method": "",
+            "base": "", "body": "", "body_file": "", "branch": "", "draft": false,
+            "expected_head_sha": "", "force": false, "head": "", "head_sha": "", "message": "", "method": "",
             "number": 0, "op": "", "remote": "", "remote_branch": "", "repo_path": "",
             "state": "", "title": ""
         });
+        assert_eq!(full.as_object().unwrap().len(), 18);
         for (key, value) in fields.as_object().unwrap() {
             full[key] = value.clone();
         }
@@ -360,6 +437,10 @@ mod tests {
             serde_json::json!({"op": "pr_view", "number": 3}),
             serde_json::json!({"op": "pr_list", "state": "open"}),
             serde_json::json!({"op": "pr_merge", "number": 3, "expected_head_sha": sha}),
+            serde_json::json!({"op": "pr_create", "title": "t", "head": "h", "base": "main",
+                               "body_file": "pr-body.md"}),
+            serde_json::json!({"op": "pr_edit", "number": 3, "body_file": "pr-body.md"}),
+            serde_json::json!({"op": "pr_edit", "number": 3, "title": "t", "body": "b"}),
         ] {
             assert_eq!(
                 parse_input(&strict_form(sparse.clone())).unwrap(),
@@ -379,7 +460,7 @@ mod tests {
 
     #[test]
     fn number_zero_is_the_missing_number_refusal() {
-        for op in ["pr_view", "pr_merge"] {
+        for op in ["pr_view", "pr_merge", "pr_edit"] {
             let zero = parse_input(&format!(r#"{{"op":"{op}","number":0}}"#)).unwrap_err();
             let missing = parse_input(&format!(r#"{{"op":"{op}"}}"#)).unwrap_err();
             assert_eq!(zero, missing);
@@ -393,6 +474,7 @@ mod tests {
             ("title", serde_json::json!("x")),
             ("force", serde_json::json!(true)),
             ("number", serde_json::json!(4)),
+            ("body_file", serde_json::json!("x")),
         ] {
             let mut input = serde_json::json!({"op": "fetch"});
             input[field] = value;
@@ -426,5 +508,86 @@ mod tests {
     fn pr_merge_requires_the_expected_head_sha() {
         let err = parse_input(r#"{"op":"pr_merge","number":7}"#).unwrap_err();
         assert!(err.contains("expected_head_sha"), "{err}");
+    }
+
+    #[test]
+    fn parses_pr_edit_with_each_body_source() {
+        assert_eq!(
+            parse_input(r#"{"op":"pr_edit","number":12,"body_file":"docs/pr-body.md"}"#).unwrap(),
+            Input::PrEdit(PrEditInput {
+                number: 12,
+                title: None,
+                body: Some(BodySource::File("docs/pr-body.md".to_string())),
+            })
+        );
+        assert_eq!(
+            parse_input(r#"{"op":"pr_edit","number":12,"title":"New","body":"text"}"#).unwrap(),
+            Input::PrEdit(PrEditInput {
+                number: 12,
+                title: Some("New".to_string()),
+                body: Some(BodySource::Inline("text".to_string())),
+            })
+        );
+    }
+
+    #[test]
+    fn pr_edit_needs_something_to_change() {
+        for input in [
+            r#"{"op":"pr_edit","number":12}"#,
+            r#"{"op":"pr_edit","number":12,"title":"","body":null,"body_file":""}"#,
+        ] {
+            assert_eq!(
+                parse_input(input).unwrap_err(),
+                "pr_edit needs at least one of title, body, body_file",
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn body_and_body_file_together_are_refused_naming_both() {
+        for op in [
+            r#""op":"pr_create","title":"t","head":"h","base":"main""#,
+            r#""op":"pr_edit","number":1"#,
+        ] {
+            let err = parse_input(&format!(r#"{{{op},"body":"x","body_file":"y.md"}}"#))
+                .unwrap_err();
+            assert!(
+                err.contains("\"body\"") && err.contains("\"body_file\""),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_body_file_must_stay_relative_with_no_parent_component() {
+        for bad in ["/etc/passwd", "../outside.md", "a/../../b.md", "a/../b.md", "/sub/x.md"] {
+            let err = check_body_file_path(bad).unwrap_err();
+            assert!(err.starts_with("\"body_file\""), "{bad}: {err}");
+            assert!(err.contains(&format!("{bad:?}")), "{bad}: {err}");
+        }
+        for good in ["pr-body.md", "docs/pr-body.md", "./pr-body.md", "a/./b.md", "..md"] {
+            assert_eq!(check_body_file_path(good), Ok(()), "{good}");
+        }
+    }
+
+    #[test]
+    fn body_file_is_refused_on_every_other_op() {
+        let sha = "a".repeat(40);
+        for input in [
+            serde_json::json!({"op": "push", "head_sha": sha, "remote_branch": "x"}),
+            serde_json::json!({"op": "fetch"}),
+            serde_json::json!({"op": "pr_view", "number": 1}),
+            serde_json::json!({"op": "pr_list"}),
+            serde_json::json!({"op": "pr_merge", "number": 1, "expected_head_sha": sha}),
+        ] {
+            let mut input = input;
+            input["body_file"] = serde_json::json!("x");
+            assert_eq!(
+                parse_input(&input.to_string()).unwrap_err(),
+                "'body_file' is not a recognised field for this op",
+                "{input}"
+            );
+        }
     }
 }

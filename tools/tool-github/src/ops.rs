@@ -2,9 +2,11 @@
 //! the request(s) one operation needs, and map the reply to a tool result.
 //!
 //! Every check that can fail runs before the first request an operation would send from a
-//! refused call, so a refused `push`, `pr_create` or `pr_merge` sends nothing.
+//! refused call, so a refused `push`, `pr_create`, `pr_edit` or `pr_merge` sends nothing.
 
 use std::collections::HashSet;
+use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
@@ -18,7 +20,8 @@ use crate::git::walk::{self, PlanError};
 use crate::git::write;
 use crate::github;
 use crate::input::{
-    self, FetchInput, Input, PrCreateInput, PrListInput, PrMergeInput, PrViewInput, PushInput,
+    self, BodySource, FetchInput, Input, PrCreateInput, PrEditInput, PrListInput, PrMergeInput,
+    PrViewInput, PushInput,
 };
 use crate::trailer;
 
@@ -41,7 +44,11 @@ pub mod kind {
     pub const UPSTREAM_ERROR: &str = "upstream_error";
     pub const TRANSPORT_ERROR: &str = "transport_error";
     pub const RESPONSE_INVALID: &str = "response_invalid";
+    pub const BODY_MISMATCH: &str = "body_mismatch";
 }
+
+/// The largest `body_file` this tool reads, in bytes (1 MiB).
+pub const MAX_BODY_FILE_BYTES: u64 = 1024 * 1024;
 
 /// Sends one request, headers included. The wasm adapter implements it over `wasi:http`; host
 /// tests implement it with a recording fake — which is what lets a host-level test assert on
@@ -102,8 +109,9 @@ pub struct Response {
 }
 
 /// Run one call. `gateway_endpoint` is `MURMUR_GATEWAY_ENDPOINT` and `config_json` is
-/// `MURMUR_ARTIFACT_CONFIG`, each `None` when the runtime did not set it. `repo_root` resolves
-/// a `push` input's `repo_path`.
+/// `MURMUR_ARTIFACT_CONFIG`, each `None` when the runtime did not set it. `repo_root` is the
+/// tool's work folder: it resolves `push` and `fetch`'s `repo_path` and `pr_create` and
+/// `pr_edit`'s `body_file`.
 pub fn run(
     gateway_endpoint: Option<&str>,
     config_json: Option<&str>,
@@ -152,7 +160,8 @@ fn run_inner(
     match op {
         Input::Push(input) => push(config, input, transport, repo_root),
         Input::Fetch(input) => fetch(config, input, transport, repo_root),
-        Input::PrCreate(input) => pr_create(config, input, transport),
+        Input::PrCreate(input) => pr_create(config, input, transport, repo_root),
+        Input::PrEdit(input) => pr_edit(config, input, transport, repo_root),
         Input::PrView(input) => pr_view(config, input, transport),
         Input::PrList(input) => pr_list(config, input, transport),
         Input::PrMerge(input) => pr_merge(config, input, transport),
@@ -871,10 +880,125 @@ fn repo_owner(repo: &str) -> &str {
     repo.split('/').next().unwrap_or_default()
 }
 
+/// The text of a pull request body, and the `body_file` path it was read from (`None` for an
+/// inline `body`). A file is read here, so before the op's first request.
+fn resolve_body(
+    source: Option<BodySource>,
+    repo_root: &Path,
+) -> Result<(Option<String>, Option<String>), Response> {
+    match source {
+        None => Ok((None, None)),
+        Some(BodySource::Inline(text)) => Ok((Some(text), None)),
+        Some(BodySource::File(path)) => {
+            let text = read_body_file(repo_root, &path)?;
+            Ok((Some(text), Some(path)))
+        }
+    }
+}
+
+/// The bytes of `path` (relative to `repo_root`, already shape-checked by
+/// [`input::check_body_file_path`]) as text, or an `invalid_input` failure naming the path when
+/// it is missing, not a regular file, over [`MAX_BODY_FILE_BYTES`], empty, or not UTF-8. The
+/// size comes from metadata, before anything is read.
+fn read_body_file(repo_root: &Path, path: &str) -> Result<String, Response> {
+    let refuse = |message: String| failure(kind::INVALID_INPUT, message, Map::new());
+    let over_limit = |size: u64| {
+        refuse(format!(
+            "body_file {path:?} is {size} bytes, over the 1 MiB limit ({MAX_BODY_FILE_BYTES} \
+             bytes) for a PR body file"
+        ))
+    };
+    let full = repo_root.join(path);
+    let metadata = fs::metadata(&full).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            refuse(format!("body_file {path:?} does not exist in the work folder"))
+        } else {
+            refuse(format!("body_file {path:?} cannot be read: {e}"))
+        }
+    })?;
+    if !metadata.is_file() {
+        return Err(refuse(format!(
+            "body_file {path:?} is not a regular file"
+        )));
+    }
+    if metadata.len() > MAX_BODY_FILE_BYTES {
+        return Err(over_limit(metadata.len()));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    fs::File::open(&full)
+        .and_then(|file| file.take(MAX_BODY_FILE_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|e| refuse(format!("body_file {path:?} cannot be read: {e}")))?;
+    if bytes.len() as u64 > MAX_BODY_FILE_BYTES {
+        return Err(over_limit(bytes.len() as u64));
+    }
+    if bytes.is_empty() {
+        return Err(refuse(format!("body_file {path:?} is empty")));
+    }
+    String::from_utf8(bytes).map_err(|e| {
+        refuse(format!(
+            "body_file {path:?} is not valid UTF-8: the first invalid byte sequence starts at \
+             byte offset {}",
+            e.utf8_error().valid_up_to()
+        ))
+    })
+}
+
+/// The first byte offset at which `sent` and `stored` differ, or the shorter length when one
+/// is a prefix of the other.
+fn first_difference(sent: &[u8], stored: &[u8]) -> usize {
+    sent.iter()
+        .zip(stored)
+        .position(|(a, b)| a != b)
+        .unwrap_or(sent.len().min(stored.len()))
+}
+
+/// `Ok` when the body GitHub stored (`pr.body`, `null` read as `""`) is byte for byte the body
+/// sent from `body_file`; otherwise a `body_mismatch` failure. The PR exists either way.
+fn verify_body(pr: &github::PullRequest, sent: &str, body_file: &str) -> Result<(), Response> {
+    if pr.body == sent {
+        return Ok(());
+    }
+    let at = first_difference(sent.as_bytes(), pr.body.as_bytes());
+    let mut extra = Map::new();
+    extra.insert("number".to_string(), json!(pr.number));
+    extra.insert("url".to_string(), json!(pr.url));
+    extra.insert("body_file".to_string(), json!(body_file));
+    extra.insert("sent_bytes".to_string(), json!(sent.len()));
+    extra.insert("stored_bytes".to_string(), json!(pr.body.len()));
+    extra.insert("first_difference".to_string(), json!(at));
+    Err(failure(
+        kind::BODY_MISMATCH,
+        format!(
+            "PR #{} exists at {}, but the body GitHub stored is not the body sent from body_file \
+             {body_file:?}: sent {} bytes, stored {} bytes, first difference at byte {at}; \
+             retry with pr_edit {{number: {}, body_file: {body_file:?}}} before relying on it",
+            pr.number,
+            pr.url,
+            sent.len(),
+            pr.body.len(),
+            pr.number
+        ),
+        extra,
+    ))
+}
+
+/// Add the verified `body_file` keys to a success `data`.
+fn insert_body_file_keys(data: &mut Map<String, Value>, body_file: &str, sent: &str) {
+    data.insert("body_file".to_string(), json!(body_file));
+    data.insert("body_bytes".to_string(), json!(sent.len()));
+    data.insert("body_verified".to_string(), json!(true));
+}
+
+/// The summary fragment for a verified `body_file` body.
+fn body_file_summary(body_file: &str, sent: &str) -> String {
+    format!("body from {body_file} ({} bytes, verified)", sent.len())
+}
+
 fn pr_create(
     config: &Config,
     input: PrCreateInput,
     transport: &mut dyn Transport,
+    repo_root: &Path,
 ) -> Result<Response, Response> {
     if let Some((owner, _)) = input.head.split_once(':') {
         if owner != repo_owner(&config.repo) {
@@ -890,7 +1014,8 @@ fn pr_create(
         }
     }
 
-    let body = crate::footer::apply(input.body.as_deref(), config.pr_footer.as_deref());
+    let (text, body_file) = resolve_body(input.body, repo_root)?;
+    let body = crate::footer::apply(text.as_deref(), config.pr_footer.as_deref());
 
     let request_body = github::create_pr_body(
         &input.title,
@@ -916,9 +1041,78 @@ fn pr_create(
     data.insert("number".to_string(), json!(pr.number));
     data.insert("url".to_string(), json!(pr.url));
     data.insert("head_sha".to_string(), json!(pr.head_sha));
+    let mut summary = format!("opened PR #{} on {}", pr.number, config.repo);
+    if let (Some(path), Some(sent)) = (body_file.as_deref(), body.as_deref()) {
+        verify_body(&pr, sent, path)?;
+        insert_body_file_keys(&mut data, path, sent);
+        summary.push_str(&format!("; {}", body_file_summary(path, sent)));
+    }
     Ok(Response {
         status: OpStatus::Passed,
-        summary: format!("opened PR #{} on {}", pr.number, config.repo),
+        summary,
+        data: Value::Object(data).to_string(),
+        metadata: vec![
+            ("state_effect".to_string(), "mutate".to_string()),
+            (
+                "resource_id".to_string(),
+                format!("github:{}:pr:{}", config.repo, pr.number),
+            ),
+        ],
+    })
+}
+
+/// Change an open or closed PR's title, body or both with one `PATCH`.
+fn pr_edit(
+    config: &Config,
+    input: PrEditInput,
+    transport: &mut dyn Transport,
+    repo_root: &Path,
+) -> Result<Response, Response> {
+    let (text, body_file) = resolve_body(input.body, repo_root)?;
+    let body = text
+        .as_deref()
+        .and_then(|text| crate::footer::apply(Some(text), config.pr_footer.as_deref()));
+
+    let request_body = github::edit_pr_body(input.title.as_deref(), body.as_deref());
+    let (status, response) = send(
+        transport,
+        "PATCH",
+        &github::get_pr_path(&config.repo, input.number),
+        Some(&request_body),
+    )?;
+    if status != 200 {
+        return Err(upstream_error(status, &response));
+    }
+    let pr = github::parse_pull_request(&response)
+        .map_err(|e| failure(kind::RESPONSE_INVALID, e, Map::new()))?;
+
+    let mut data = Map::new();
+    data.insert("ok".to_string(), json!(true));
+    data.insert("number".to_string(), json!(pr.number));
+    data.insert("url".to_string(), json!(pr.url));
+    data.insert("head_sha".to_string(), json!(pr.head_sha));
+    data.insert("state".to_string(), json!(pr.state));
+    let mut changed = Vec::new();
+    if input.title.is_some() {
+        changed.push("title".to_string());
+    }
+    match (body_file.as_deref(), body.as_deref()) {
+        (Some(path), Some(sent)) => {
+            verify_body(&pr, sent, path)?;
+            insert_body_file_keys(&mut data, path, sent);
+            changed.push(body_file_summary(path, sent));
+        }
+        (None, Some(_)) => changed.push("body".to_string()),
+        _ => {}
+    }
+    Ok(Response {
+        status: OpStatus::Passed,
+        summary: format!(
+            "edited PR #{} on {}: {}",
+            pr.number,
+            config.repo,
+            changed.join(", ")
+        ),
         data: Value::Object(data).to_string(),
         metadata: vec![
             ("state_effect".to_string(), "mutate".to_string()),
@@ -1739,5 +1933,14 @@ mod tests {
             "{:?}",
             unauthorized.summary
         );
+    }
+
+    #[test]
+    fn first_difference_is_the_offset_or_the_shorter_length() {
+        assert_eq!(first_difference(b"abc", b"abd"), 2);
+        assert_eq!(first_difference(b"abc", b"ab"), 2);
+        assert_eq!(first_difference(b"ab", b"abc"), 2);
+        assert_eq!(first_difference(b"abc", b""), 0);
+        assert_eq!(first_difference(b"xbc", b"abc"), 0);
     }
 }

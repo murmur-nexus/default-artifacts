@@ -1,19 +1,20 @@
 name: tool-github
-version: 0.9.0
+version: 0.10.0
 runtime: tool
 implementation: wasm
 description: |
   Push a local commit range to GitHub, byte-reproducing each commit so the remote branch
-  lands on the identical local SHA, fetch a remote branch back the same way, and open,
+  lands on the identical local SHA, fetch a remote branch back the same way, and open, edit,
   inspect, list and merge pull requests against exactly one operator-pinned repo. The GitHub
   token is bound by the operator and attached by the runtime's credential gateway; this tool
   never holds it.
 
-  Input is {"op": "push"|"fetch"|"pr_create"|"pr_view"|"pr_list"|"pr_merge", ...}:
+  Input is {"op": "push"|"fetch"|"pr_create"|"pr_edit"|"pr_view"|"pr_list"|"pr_merge", ...}:
 
     push       {repo_path?, head_sha, remote_branch, force?}  -> {remote_branch, head_sha, created, objects_uploaded}
     fetch      {repo_path?, branch?, remote?}  -> {branch, remote_ref, head_sha, previous_sha, objects_written}
-    pr_create  {title, body?, head, base, draft?}  -> {number, url, head_sha}
+    pr_create  {title, body? | body_file?, head, base, draft?}  -> {number, url, head_sha, body_file?, body_bytes?, body_verified?}
+    pr_edit    {number, title?, body? | body_file?}  -> {number, url, head_sha, state, body_file?, body_bytes?, body_verified?}
     pr_view    {number}  -> {number, state, mergeable, head_sha, checks, reviews}
     pr_list    {state?, head?, base?}  -> {prs}
     pr_merge   {number, expected_head_sha, method?, message?}  -> {merged, merge_sha, trailer, identity?}
@@ -51,6 +52,24 @@ description: |
   pr_create's draft: true opens the pull request as a draft; false or omitted opens it ready
   for review. head is a branch of the pinned repo; a head naming another owner's fork is
   refused with repo_not_allowed. The body is sent as given unless config: sets pr_footer.
+
+  pr_edit changes an existing pull request's title, body or both with one PATCH carrying only
+  the fields given; it needs number and at least one of title, body, body_file, and the same
+  token permission as pr_create (Pull requests: write). A PR that does not exist is not_found.
+
+  body_file (pr_create and pr_edit) names a file in this tool's folder (the work folder, or the
+  entry's capabilities.filesystem.scope) whose bytes are sent as the body, so a long body never
+  passes through the model: a BOM, CRLF, trailing spaces and the final newline (present or
+  absent) are all kept, and only pr_footer is ever added. It is refused with invalid_input,
+  before anything is sent, when it is an absolute path, has a ".." component anywhere, comes
+  with a non-empty body, does not exist or is not a regular file, is over 1 MiB (1048576
+  bytes), is empty, or is not valid UTF-8. GitHub's own 65536-character limit comes back as
+  upstream_error with its errors list. When the body came from body_file, the body in GitHub's
+  reply is compared byte for byte with the body sent: a match adds body_file, body_bytes (the
+  length sent) and body_verified: true; any difference is body_mismatch, with number, url,
+  body_file, sent_bytes, stored_bytes and first_difference (the first differing byte offset).
+  The PR exists then, but its body is not the file: retry with pr_edit, and do not merge it. An
+  inline body is never verified.
 
   pr_merge is refused with operation_not_allowed unless config: sets allow_merge: true and
   lists the method under merge_methods; method defaults to the first one listed.
@@ -92,8 +111,8 @@ description: |
   and stores it with `mur config set -g credentials.GITHUB_TOKEN <token>`. The calls are
   brokered but not metered by murmur. The config: block (config_version: 1) requires repo
   ("owner/name") and additionally sets allow_merge, merge_methods, allow_force_push,
-  allow_push_default_branch, pr_footer (a line appended to every PR body this tool opens;
-  unset or false appends nothing) and merge_trailer (a "Key: value" trailer appended to
+  allow_push_default_branch, pr_footer (a line appended to every PR body this tool opens or
+  edits; unset or false appends nothing) and merge_trailer (a "Key: value" trailer appended to
   every merge or squash commit message; unset or false appends nothing) and commit_identity
   ({name, email}: the author and committer of every merge or squash commit pr_merge makes;
   unset or false leaves those commits to GitHub's merge endpoint). A credential-shaped key in
@@ -103,7 +122,7 @@ description: |
   invalid_input, config_invalid, gateway_missing, repo_not_allowed, repo_unreadable,
   repo_unwritable, operation_not_allowed, conflict, not_mergeable, head_moved,
   upstream_unauthorized, upstream_forbidden, not_found, rate_limited, upstream_error,
-  transport_error, response_invalid.
+  transport_error, response_invalid, body_mismatch.
   A refusal GitHub explains with an errors list names each entry in message and adds errors:
   [{resource, field, code, message}] (at most 10; errors_omitted counts the rest).
 
@@ -117,7 +136,7 @@ input_schema:
   properties:
     op:
       type: string
-      description: "Which operation to run: push, fetch, pr_create, pr_view, pr_list or pr_merge."
+      description: "Which operation to run: push, fetch, pr_create, pr_edit, pr_view, pr_list or pr_merge."
     repo_path:
       type: string
       description: "push, fetch only. Where the local git repository is, relative to the workdir. Defaults to \".\"."
@@ -138,10 +157,13 @@ input_schema:
       description: "fetch only. The remote name to record the branch under, as refs/remotes/<remote>/<branch>. Defaults to \"origin\"."
     title:
       type: string
-      description: "pr_create only. The pull request's title."
+      description: "pr_create, pr_edit only. The pull request's title (required for pr_create; on pr_edit, the new title)."
     body:
       type: string
-      description: "pr_create only. The pull request's body."
+      description: "pr_create, pr_edit only. The pull request's body, as text. Never together with body_file."
+    body_file:
+      type: string
+      description: "pr_create, pr_edit only. A file in the work folder (a relative path, no \"..\") whose bytes are sent byte for byte as the pull request's body, so a long body need not be typed out; the result reports body_verified: true once GitHub's stored body matches. Never together with body."
     head:
       type: string
       description: "pr_create only. The branch carrying the change: a bare branch name, or owner:branch for a fork of the pinned repo."
@@ -153,7 +175,7 @@ input_schema:
       description: "pr_create only. Open the pull request as a draft. Defaults to false."
     number:
       type: integer
-      description: "pr_view, pr_merge only. The pull request number."
+      description: "pr_view, pr_merge, pr_edit only. The pull request number."
     state:
       type: string
       description: "pr_list only. Filter by state: open, closed or all."

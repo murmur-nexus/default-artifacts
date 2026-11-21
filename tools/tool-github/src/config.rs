@@ -70,8 +70,8 @@ pub struct Config {
     pub merge_methods: Vec<MergeMethod>,
     pub allow_force_push: bool,
     pub allow_push_default_branch: bool,
-    /// The line `pr_create` appends to a PR body; `None` (unset or `false`) sends the body
-    /// untouched.
+    /// The line `pr_create` and `pr_edit` append to every PR body they send; `None` (unset or
+    /// `false`) sends the body untouched.
     pub pr_footer: Option<String>,
     /// The `Key: value` trailer `pr_merge` appends to a merge or squash commit message; `None`
     /// (unset or `false`) sends none.

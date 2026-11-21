@@ -1416,18 +1416,497 @@ fn push_from_a_directory_that_is_not_a_repository_is_repo_unreadable() {
     );
 }
 
+// ── body_file on pr_create and pr_edit ─────────────────────────────────────
+
+/// A fake GitHub for one PR call: answers every request with `status` and a PR whose `body`
+/// is `stored(<the body the request sent>)`, recording each request.
+struct PrEcho {
+    status: u16,
+    stored: fn(Option<&str>) -> Value,
+    requests: RefCell<Vec<Recorded>>,
+}
+
+impl PrEcho {
+    fn new(status: u16, stored: fn(Option<&str>) -> Value) -> Self {
+        Self {
+            status,
+            stored,
+            requests: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn requests(&self) -> Vec<Recorded> {
+        self.requests.borrow().clone()
+    }
+}
+
+impl Transport for PrEcho {
+    fn request(
+        &mut self,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: Option<&Value>,
+    ) -> Result<HttpReply, String> {
+        self.requests.borrow_mut().push(Recorded {
+            method: method.to_string(),
+            path: path.to_string(),
+            headers: headers.to_vec(),
+            body: body.cloned(),
+        });
+        let number = path
+            .rsplit('/')
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(9);
+        let mut pr = pr_json(number, "open", &"a".repeat(40));
+        pr["body"] = (self.stored)(body.and_then(|b| b.get("body")).and_then(Value::as_str));
+        Ok(HttpReply {
+            status: self.status,
+            location: None,
+            body: pr.to_string().into_bytes(),
+        })
+    }
+}
+
+/// GitHub storing exactly what it was sent.
+fn echo_body(sent: Option<&str>) -> Value {
+    json!(sent)
+}
+
+/// GitHub storing what it was sent minus its last line.
+fn drop_last_line(sent: Option<&str>) -> Value {
+    let text = sent.unwrap_or_default().trim_end_matches('\n');
+    json!(&text[..text.rfind('\n').unwrap_or(0)])
+}
+
+/// GitHub storing no body at all.
+fn null_body(_: Option<&str>) -> Value {
+    Value::Null
+}
+
+/// A 30-line Markdown body: a GFM table, a fenced code block, a line with trailing spaces, a
+/// non-ASCII char and a final newline. `tag` makes two bodies differ.
+fn sample_body(tag: &str) -> String {
+    let mut lines = vec![
+        format!("## Summary ({tag})"),
+        String::new(),
+        "Adds the widget café counter — with an exact body.".to_string(),
+        "This line ends in two trailing spaces.  ".to_string(),
+        String::new(),
+        "| Field | Before | After |".to_string(),
+        "|-------|--------|-------|".to_string(),
+        "| count | 0 | 1 |".to_string(),
+        "| name | `old` | `new` |".to_string(),
+        "| flag | false | true |".to_string(),
+        String::new(),
+        "```rust".to_string(),
+        "fn main() {".to_string(),
+        "    println!(\"{}\", 1 + 1);".to_string(),
+        "}".to_string(),
+        "```".to_string(),
+        String::new(),
+    ];
+    let mut n = 1;
+    while lines.len() < 30 {
+        lines.push(format!("- point {n} for {tag}"));
+        n += 1;
+    }
+    let mut text = lines.join("\n");
+    text.push('\n');
+    text
+}
+
+/// A tempdir holding `files` (path, bytes).
+fn work_folder(files: &[(&str, &[u8])]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    for (path, bytes) in files {
+        let full = dir.path().join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, bytes).unwrap();
+    }
+    dir
+}
+
+fn create_from(body_file: &str) -> String {
+    json!({"op": "pr_create", "title": "Add feature", "head": "feature-x", "base": "main",
+           "body_file": body_file})
+    .to_string()
+}
+
+#[test]
+fn pr_create_with_body_file_sends_the_file_byte_for_byte_and_verifies_it() {
+    let text = sample_body("v1");
+    assert_eq!(text.lines().count(), 30);
+    let dir = work_folder(&[("pr-body.md", text.as_bytes())]);
+    let mut fake = PrEcho::new(201, echo_body);
+    let response = run(Some(CONFIG), &create_from("pr-body.md"), &mut fake, dir.path());
+    assert_eq!(response.status, ops::OpStatus::Passed, "{}", response.data);
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!((requests[0].method.as_str(), requests[0].path.as_str()), ("POST", "/repos/acme/widgets/pulls"));
+    assert_eq!(requests[0].body.as_ref().unwrap()["body"], json!(text));
+    let value = data(&response);
+    assert_eq!(value["number"], json!(9));
+    assert_eq!(value["body_file"], json!("pr-body.md"));
+    assert_eq!(value["body_bytes"], json!(text.len()));
+    assert_eq!(value["body_verified"], json!(true));
+    assert_eq!(
+        response.summary,
+        format!(
+            "opened PR #9 on acme/widgets; body from pr-body.md ({} bytes, verified)",
+            text.len()
+        )
+    );
+}
+
+#[test]
+fn pr_create_with_body_file_keeps_a_bom_crlf_and_a_missing_final_newline() {
+    let text = "\u{feff}line one  \r\nline two\r\n\r\nno final newline";
+    let dir = work_folder(&[("pr-body.md", text.as_bytes())]);
+    let mut fake = PrEcho::new(201, echo_body);
+    let response = run(Some(CONFIG), &create_from("pr-body.md"), &mut fake, dir.path());
+    assert_eq!(data(&response)["body_verified"], json!(true), "{}", response.data);
+    assert_eq!(fake.requests()[0].body.as_ref().unwrap()["body"], json!(text));
+    assert_eq!(data(&response)["body_bytes"], json!(text.len()));
+}
+
+#[test]
+fn pr_create_without_body_file_reports_exactly_the_old_keys() {
+    let mut fake = PrEcho::new(201, echo_body);
+    let input = r#"{"op":"pr_create","title":"Add feature","body":"inline","head":"feature-x","base":"main"}"#;
+    let response = run(Some(CONFIG), input, &mut fake, Path::new("."));
+    let value = data(&response);
+    let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["head_sha", "number", "ok", "url"]);
+    assert_eq!(response.summary, "opened PR #9 on acme/widgets");
+}
+
+#[test]
+fn pr_create_with_body_file_and_a_footer_appends_the_footer_once_and_verifies() {
+    let text = sample_body("v1");
+    let with_footer = format!("{}\n\n{FOOTER_LINE}\n", text.trim_end_matches('\n'));
+    let dir = work_folder(&[
+        ("pr-body.md", text.as_bytes()),
+        ("signed.md", with_footer.as_bytes()),
+    ]);
+    let config = footer_config();
+    for (file, expected) in [
+        (
+            "pr-body.md",
+            format!("{}\n\n{FOOTER_LINE}", text.trim_end_matches('\n')),
+        ),
+        ("signed.md", with_footer.clone()),
+    ] {
+        let mut fake = PrEcho::new(201, echo_body);
+        let response = run(Some(&config), &create_from(file), &mut fake, dir.path());
+        assert_eq!(fake.requests()[0].body.as_ref().unwrap()["body"], json!(expected), "{file}");
+        let value = data(&response);
+        assert_eq!(value["body_verified"], json!(true), "{file}: {value}");
+        assert_eq!(value["body_bytes"], json!(expected.len()), "{file}");
+    }
+}
+
+#[test]
+fn pr_edit_with_body_file_sends_one_patch_carrying_only_the_body() {
+    let text = sample_body("v2");
+    let dir = work_folder(&[("pr-body-v2.md", text.as_bytes())]);
+    let mut fake = PrEcho::new(200, echo_body);
+    let input = r#"{"op":"pr_edit","number":12,"body_file":"pr-body-v2.md"}"#;
+    let response = run(Some(CONFIG), input, &mut fake, dir.path());
+    assert_eq!(response.status, ops::OpStatus::Passed, "{}", response.data);
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "PATCH");
+    assert_eq!(requests[0].path, "/repos/acme/widgets/pulls/12");
+    let body_text = json!({"body": text}).to_string();
+    assert_eq!(requests[0].headers, ops::standard_headers(Some(body_text.len())));
+    assert_eq!(requests[0].body, Some(json!({"body": text})));
+    let value = data(&response);
+    assert_eq!(value["ok"], json!(true));
+    assert_eq!(value["number"], json!(12));
+    assert_eq!(value["url"], json!("https://github.com/acme/widgets/pull/12"));
+    assert_eq!(value["head_sha"], json!("a".repeat(40)));
+    assert_eq!(value["state"], json!("open"));
+    assert_eq!(value["body_file"], json!("pr-body-v2.md"));
+    assert_eq!(value["body_bytes"], json!(text.len()));
+    assert_eq!(value["body_verified"], json!(true));
+    assert_eq!(
+        response.metadata,
+        vec![
+            ("state_effect".to_string(), "mutate".to_string()),
+            ("resource_id".to_string(), "github:acme/widgets:pr:12".to_string()),
+        ]
+    );
+    assert_eq!(
+        response.summary,
+        format!(
+            "edited PR #12 on acme/widgets: body from pr-body-v2.md ({} bytes, verified)",
+            text.len()
+        )
+    );
+}
+
+#[test]
+fn pr_edit_title_only_sends_only_the_title_and_verifies_nothing() {
+    let mut fake = PrEcho::new(200, echo_body);
+    let input = r#"{"op":"pr_edit","number":12,"title":"New title"}"#;
+    let response = run(Some(&footer_config()), input, &mut fake, Path::new("."));
+    assert_eq!(fake.requests()[0].body, Some(json!({"title": "New title"})));
+    let value = data(&response);
+    assert_eq!(value["ok"], json!(true));
+    assert!(value.get("body_verified").is_none(), "{value}");
+    assert!(value.get("body_file").is_none(), "{value}");
+    assert_eq!(response.summary, "edited PR #12 on acme/widgets: title");
+}
+
+#[test]
+fn pr_edit_title_and_inline_body_sends_both_with_the_footer_applied() {
+    let input = r#"{"op":"pr_edit","number":12,"title":"New title","body":"new text"}"#;
+    let mut fake = PrEcho::new(200, echo_body);
+    let response = run(Some(CONFIG), input, &mut fake, Path::new("."));
+    assert_eq!(
+        fake.requests()[0].body,
+        Some(json!({"title": "New title", "body": "new text"}))
+    );
+    assert!(data(&response).get("body_verified").is_none());
+    assert_eq!(response.summary, "edited PR #12 on acme/widgets: title, body");
+
+    // An inline body is not verified: a different stored body is still a success.
+    let mut fake = PrEcho::new(200, null_body);
+    let response = run(Some(&footer_config()), input, &mut fake, Path::new("."));
+    assert_eq!(
+        fake.requests()[0].body,
+        Some(json!({"title": "New title", "body": format!("new text\n\n{FOOTER_LINE}")}))
+    );
+    assert_eq!(data(&response)["ok"], json!(true));
+}
+
+#[test]
+fn pr_edit_with_nothing_to_change_is_invalid_input_with_no_requests() {
+    for input in [
+        json!({"op": "pr_edit", "number": 12}).to_string(),
+        strict_form(json!({"op": "pr_edit", "number": 12})),
+    ] {
+        let mut fake = Fake::new(vec![]);
+        let response = run(Some(CONFIG), &input, &mut fake, Path::new("."));
+        let value = data(&response);
+        assert_eq!(value["error_kind"], json!("invalid_input"));
+        assert_eq!(
+            value["message"],
+            json!("pr_edit needs at least one of title, body, body_file")
+        );
+        assert!(fake.requests().is_empty());
+    }
+    for input in [
+        r#"{"op":"pr_edit","title":"t"}"#,
+        r#"{"op":"pr_edit","number":0,"title":"t"}"#,
+    ] {
+        let mut fake = Fake::new(vec![]);
+        let value = data(&run(Some(CONFIG), input, &mut fake, Path::new(".")));
+        assert_eq!(value["message"], json!("\"number\" is required"), "{input}");
+        assert!(fake.requests().is_empty());
+    }
+}
+
+#[test]
+fn body_and_body_file_together_are_refused_before_the_file_is_opened() {
+    for input in [
+        json!({"op": "pr_create", "title": "t", "head": "feature-x", "base": "main",
+               "body": "inline", "body_file": "does-not-exist.md"}),
+        json!({"op": "pr_edit", "number": 12, "body": "inline", "body_file": "does-not-exist.md"}),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fake = Fake::new(vec![]);
+        let response = run(Some(CONFIG), &input.to_string(), &mut fake, dir.path());
+        let value = data(&response);
+        assert_eq!(response.status, ops::OpStatus::Failed);
+        assert_eq!(value["error_kind"], json!("invalid_input"), "{input}");
+        let message = value["message"].as_str().unwrap();
+        assert!(
+            message.contains("\"body\"") && message.contains("\"body_file\""),
+            "{message}"
+        );
+        assert!(!message.contains("does not exist"), "the file was looked at: {message}");
+        assert!(fake.requests().is_empty());
+    }
+}
+
+#[test]
+fn a_body_file_that_could_leave_the_work_folder_is_refused_with_no_requests() {
+    let dir = work_folder(&[("a/b.md", b"inside")]);
+    for bad in ["/etc/passwd", "../outside.md", "a/../../b.md", "a/../b.md"] {
+        for input in [
+            create_from(bad),
+            json!({"op": "pr_edit", "number": 12, "body_file": bad}).to_string(),
+        ] {
+            let mut fake = Fake::new(vec![]);
+            let value = data(&run(Some(CONFIG), &input, &mut fake, dir.path()));
+            assert_eq!(value["error_kind"], json!("invalid_input"), "{input}");
+            let message = value["message"].as_str().unwrap();
+            assert!(message.starts_with("\"body_file\""), "{message}");
+            assert!(message.contains(&format!("{bad:?}")), "{message}");
+            assert!(fake.requests().is_empty(), "{input}");
+        }
+    }
+}
+
+#[test]
+fn a_nested_body_file_path_is_accepted() {
+    let text = sample_body("nested");
+    let dir = work_folder(&[("docs/pr-body.md", text.as_bytes())]);
+    let mut fake = PrEcho::new(201, echo_body);
+    let response = run(Some(CONFIG), &create_from("docs/pr-body.md"), &mut fake, dir.path());
+    let value = data(&response);
+    assert_eq!(value["body_verified"], json!(true), "{value}");
+    assert_eq!(value["body_file"], json!("docs/pr-body.md"));
+}
+
+#[test]
+fn an_unusable_body_file_is_invalid_input_naming_it_with_no_requests() {
+    let big = vec![b'x'; 1_048_577];
+    let at_limit = vec![b'x'; 1_048_576];
+    let dir = work_folder(&[
+        ("empty.md", b""),
+        ("big.md", &big),
+        ("at-limit.md", &at_limit),
+        ("bad.md", b"ok\xff\xfe"),
+        ("docs/keep.md", b"x"),
+    ]);
+    let cases: [(&str, &[&str]); 5] = [
+        ("missing.md", &["does not exist"]),
+        ("docs", &["not a regular file"]),
+        ("empty.md", &["is empty"]),
+        ("big.md", &["1048577 bytes", "1 MiB", "1048576"]),
+        ("bad.md", &["not valid UTF-8", "byte offset 2"]),
+    ];
+    for (file, expected) in cases {
+        for input in [
+            create_from(file),
+            json!({"op": "pr_edit", "number": 12, "body_file": file}).to_string(),
+        ] {
+            let mut fake = Fake::new(vec![]);
+            let response = run(Some(CONFIG), &input, &mut fake, dir.path());
+            let value = data(&response);
+            assert_eq!(response.status, ops::OpStatus::Failed, "{input}");
+            assert_eq!(value["error_kind"], json!("invalid_input"), "{input}");
+            let message = value["message"].as_str().unwrap();
+            assert!(message.contains(&format!("body_file {file:?}")), "{message}");
+            for part in expected {
+                assert!(message.contains(part), "{file}: {message}");
+            }
+            assert!(fake.requests().is_empty(), "{input}");
+        }
+    }
+
+    // Exactly 1 MiB is within the limit.
+    let mut fake = PrEcho::new(201, echo_body);
+    let response = run(Some(CONFIG), &create_from("at-limit.md"), &mut fake, dir.path());
+    assert_eq!(data(&response)["body_bytes"], json!(1_048_576), "{}", response.summary);
+}
+
+#[test]
+fn a_fork_head_is_refused_before_the_body_file_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fake = Fake::new(vec![]);
+    let input = json!({"op": "pr_create", "title": "t", "head": "someone-else:feature-x",
+                       "base": "main", "body_file": "missing.md"});
+    let value = data(&run(Some(CONFIG), &input.to_string(), &mut fake, dir.path()));
+    assert_eq!(value["error_kind"], json!("repo_not_allowed"));
+    assert!(fake.requests().is_empty());
+}
+
+#[test]
+fn a_stored_body_that_differs_from_the_file_is_body_mismatch() {
+    let text = sample_body("v1");
+    let dir = work_folder(&[("pr-body.md", text.as_bytes())]);
+    let stored = drop_last_line(Some(&text));
+    let stored_len = stored.as_str().unwrap().len();
+    for (input, code, number) in [
+        (create_from("pr-body.md"), 201, 9),
+        (
+            json!({"op": "pr_edit", "number": 12, "body_file": "pr-body.md"}).to_string(),
+            200,
+            12,
+        ),
+    ] {
+        let mut fake = PrEcho::new(code, drop_last_line);
+        let response = run(Some(CONFIG), &input, &mut fake, dir.path());
+        assert_eq!(response.status, ops::OpStatus::Error, "{input}");
+        let value = data(&response);
+        let url = format!("https://github.com/acme/widgets/pull/{number}");
+        assert_eq!(
+            value,
+            json!({
+                "ok": false,
+                "error_kind": "body_mismatch",
+                "message": value["message"],
+                "number": number,
+                "url": url,
+                "body_file": "pr-body.md",
+                "sent_bytes": text.len(),
+                "stored_bytes": stored_len,
+                "first_difference": stored_len,
+            })
+        );
+        let message = value["message"].as_str().unwrap();
+        assert!(message.contains(&format!("PR #{number} exists at {url}")), "{message}");
+        assert!(message.contains("pr_edit"), "{message}");
+        assert_eq!(fake.requests().len(), 1);
+    }
+
+    let mut fake = PrEcho::new(201, null_body);
+    let value = data(&run(Some(CONFIG), &create_from("pr-body.md"), &mut fake, dir.path()));
+    assert_eq!(value["error_kind"], json!("body_mismatch"));
+    assert_eq!(value["stored_bytes"], json!(0));
+    assert_eq!(value["first_difference"], json!(0));
+    assert_eq!(value["sent_bytes"], json!(text.len()));
+}
+
+#[test]
+fn pr_edit_refusals_come_back_through_upstream_error() {
+    let mut fake = Fake::new(vec![status(404, json!({"message": "Not Found"}))]);
+    let input = r#"{"op":"pr_edit","number":99999,"title":"t"}"#;
+    let response = run(Some(CONFIG), input, &mut fake, Path::new("."));
+    let value = data(&response);
+    assert_eq!(value["error_kind"], json!("not_found"));
+    assert_eq!(value["http_status"], json!(404));
+    assert_eq!(fake.requests()[0].path, "/repos/acme/widgets/pulls/99999");
+
+    let errors = json!([{"resource": "PullRequest", "field": "body", "code": "custom",
+                         "message": "body is too long (maximum is 65536 characters)"}]);
+    let mut fake = Fake::new(vec![status(
+        422,
+        json!({"message": "Validation Failed", "errors": errors}),
+    )]);
+    let dir = work_folder(&[("pr-body.md", b"text")]);
+    let input = r#"{"op":"pr_edit","number":12,"body_file":"pr-body.md"}"#;
+    let response = run(Some(CONFIG), input, &mut fake, dir.path());
+    let value = data(&response);
+    assert_eq!(value["error_kind"], json!("upstream_error"));
+    assert_eq!(value["http_status"], json!(422));
+    assert_eq!(value["errors"], errors);
+    assert_eq!(
+        response.summary,
+        "GitHub answered HTTP 422: Validation Failed \
+         (body: body is too long (maximum is 65536 characters))"
+    );
+}
+
 // ── strict-mode input: every schema property on every call ──────────────────
 
-/// The full 17-property input a strict-mode model (OpenAI's Responses API, with no `strict`
+/// The full 18-property input a strict-mode model (OpenAI's Responses API, with no `strict`
 /// field on the tool) sends on every call, captured from a `gpt-5.6-luna` session: the op's own
 /// fields set, every other property `""`, `0` or `false`.
 fn strict_form(fields: Value) -> String {
     let mut full = json!({
-        "base": "", "body": "", "branch": "", "draft": false, "expected_head_sha": "",
-        "force": false, "head": "", "head_sha": "", "message": "", "method": "", "number": 0,
-        "op": "", "remote": "", "remote_branch": "", "repo_path": "", "state": "", "title": ""
+        "base": "", "body": "", "body_file": "", "branch": "", "draft": false,
+        "expected_head_sha": "", "force": false, "head": "", "head_sha": "", "message": "",
+        "method": "", "number": 0, "op": "", "remote": "", "remote_branch": "", "repo_path": "",
+        "state": "", "title": ""
     });
-    assert_eq!(full.as_object().unwrap().len(), 17);
+    assert_eq!(full.as_object().unwrap().len(), 18);
     for (key, value) in fields.as_object().unwrap() {
         full[key] = value.clone();
     }
@@ -1567,6 +2046,61 @@ fn strict_form_pr_merge_sends_what_the_sparse_pr_merge_sends() {
     let value = data(&response);
     assert_eq!(value["merged"], json!(true));
     assert_eq!(value["trailer"], json!(null));
+}
+
+#[test]
+fn strict_form_pr_edit_sends_what_the_sparse_pr_edit_sends() {
+    let script = vec![ok(pr_json(12, "open", &"a".repeat(40)))];
+    let sparse = json!({"op": "pr_edit", "number": 12, "title": "New title"});
+    let response = assert_strict_form_matches(CONFIG, sparse, script.clone());
+    assert_eq!(data(&response)["number"], json!(12));
+
+    let mut fake = Fake::new(script);
+    let strict = strict_form(json!({"op": "pr_edit", "number": 12, "title": "New title"}));
+    run(Some(CONFIG), &strict, &mut fake, Path::new("."));
+    assert_eq!(
+        fake.requests()[0].body,
+        Some(json!({"title": "New title"})),
+        "an empty body and body_file send no body key"
+    );
+}
+
+#[test]
+fn strict_form_body_file_calls_send_what_the_sparse_calls_send() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = sample_body("strict");
+    std::fs::write(dir.path().join("pr-body.md"), &text).unwrap();
+    for sparse in [
+        json!({"op": "pr_create", "title": "Add feature", "head": "feature-x", "base": "main",
+               "body_file": "pr-body.md"}),
+        json!({"op": "pr_edit", "number": 12, "body_file": "pr-body.md"}),
+    ] {
+        let code = if sparse["op"] == "pr_create" { 201 } else { 200 };
+        let mut fake = PrEcho::new(code, echo_body);
+        let expected = run(Some(CONFIG), &sparse.to_string(), &mut fake, dir.path());
+        let mut strict_fake = PrEcho::new(code, echo_body);
+        let actual = run(
+            Some(CONFIG),
+            &strict_form(sparse.clone()),
+            &mut strict_fake,
+            dir.path(),
+        );
+        assert_eq!(data(&actual)["body_verified"], json!(true), "{}", actual.data);
+        assert_eq!(actual, expected, "{sparse}");
+        assert_eq!(sent(strict_fake.requests()), sent(fake.requests()));
+    }
+}
+
+#[test]
+fn strict_form_with_body_file_on_fetch_is_refused_as_unrecognised() {
+    let mut fake = Fake::new(vec![]);
+    let input = strict_form(json!({"op": "fetch", "body_file": "x"}));
+    let response = run(Some(CONFIG), &input, &mut fake, Path::new("."));
+    assert_eq!(
+        data(&response)["message"],
+        json!("'body_file' is not a recognised field for this op")
+    );
+    assert!(fake.requests().is_empty());
 }
 
 #[test]
