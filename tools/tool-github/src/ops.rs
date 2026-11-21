@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
-use crate::config::{self, Config, MergeMethod};
+use crate::config::{self, CommitIdentity, Config, MergeMethod};
 use crate::git::object::ObjectKind;
 use crate::git::pack::OpenError as PackOpenError;
 use crate::git::rebuild;
@@ -209,6 +209,11 @@ fn send(
 }
 
 fn upstream_error(status: u16, body: &Value) -> Response {
+    upstream_error_with_hint(status, body, "")
+}
+
+/// [`upstream_error`] with `hint` appended to its message and summary.
+fn upstream_error_with_hint(status: u16, body: &Value, hint: &str) -> Response {
     let message = body
         .get("message")
         .and_then(Value::as_str)
@@ -226,6 +231,7 @@ fn upstream_error(status: u16, body: &Value) -> Response {
         summary.push_str(&format!(" ({list})"));
         extra.insert("errors".to_string(), Value::Array(entries));
     }
+    summary.push_str(hint);
     failure(upstream_kind(status, message), summary, extra)
 }
 
@@ -1109,6 +1115,12 @@ fn pr_merge(
     let pr = github::parse_pull_request(&pr_body)
         .map_err(|e| failure(kind::RESPONSE_INVALID, e, Map::new()))?;
 
+    if let Some(identity) = &config.commit_identity {
+        if method != MergeMethod::Rebase {
+            return merge_as_identity(config, identity, method, &input, &pr, transport);
+        }
+    }
+
     let composed = trailer::compose(
         method,
         &pr.title,
@@ -1161,6 +1173,11 @@ fn pr_merge(
     data.insert("merged".to_string(), json!(merged));
     data.insert("merge_sha".to_string(), json!(merge_sha));
     data.insert("trailer".to_string(), json!(composed.trailer));
+    if config.commit_identity.is_some() {
+        // Only a rebase reaches GitHub's merge endpoint with an identity configured, and the
+        // identity never applies to it.
+        data.insert("identity".to_string(), Value::Null);
+    }
     Ok(Response {
         status: OpStatus::Passed,
         summary: format!(
@@ -1178,6 +1195,289 @@ fn pr_merge(
             ),
         ],
     })
+}
+
+/// Appended to a refused base-branch update on the identity path, whose usual cause is branch
+/// protection that only GitHub's own merge satisfies.
+const PROTECTED_BASE_HINT: &str = "; a protected base branch refuses a commit this tool builds \
+     itself — unset commit_identity to let GitHub merge as the token owner";
+
+/// A `merge` or `squash` with `config.commit_identity` set: build the commit through the Git
+/// Data API from GitHub's own test merge, authored and committed as `identity`, then
+/// fast-forward the base branch to it. A squash first force-moves the PR's head branch to the
+/// squashed commit, so the head stays reachable from the base and GitHub records the PR as
+/// merged rather than closed.
+///
+/// Every check on the PR runs before the first request after the PR read, and no ref is
+/// written until the commit exists.
+fn merge_as_identity(
+    config: &Config,
+    identity: &CommitIdentity,
+    method: MergeMethod,
+    input: &PrMergeInput,
+    pr: &github::PullRequest,
+    transport: &mut dyn Transport,
+) -> Result<Response, Response> {
+    let number = pr.number;
+    if pr.state != "open" {
+        return Err(failure(
+            kind::NOT_MERGEABLE,
+            format!(
+                "PR #{number} is {}, not open; only an open PR can be merged",
+                pr.state
+            ),
+            Map::new(),
+        ));
+    }
+    if pr.head_repo.as_deref() != Some(config.repo.as_str()) {
+        return Err(failure(
+            kind::REPO_NOT_ALLOWED,
+            format!(
+                "PR #{number}'s head branch is in {}, not the pinned repo {}; a commit this tool \
+                 builds can only merge a head branch in the pinned repo",
+                pr.head_repo.as_deref().unwrap_or("an unknown repository"),
+                config.repo
+            ),
+            Map::new(),
+        ));
+    }
+    if pr.head_sha != input.expected_head_sha {
+        return Err(failure(
+            kind::HEAD_MOVED,
+            format!(
+                "PR #{number}'s head is {}, not the expected {}; the pull request's head moved \
+                 since it was read; refresh and retry",
+                pr.head_sha, input.expected_head_sha
+            ),
+            Map::new(),
+        ));
+    }
+    match pr.mergeable {
+        None => {
+            return Err(failure(
+                kind::NOT_MERGEABLE,
+                format!(
+                    "GitHub is still computing whether PR #{number} is mergeable; run pr_merge \
+                     again in a few seconds"
+                ),
+                Map::new(),
+            ))
+        }
+        Some(false) => {
+            return Err(failure(
+                kind::NOT_MERGEABLE,
+                format!("GitHub reports PR #{number} is not mergeable"),
+                Map::new(),
+            ))
+        }
+        Some(true) => {}
+    }
+    let Some(test_merge) = pr.merge_commit_sha.as_deref() else {
+        return Err(response_invalid(format!(
+            "GitHub's response for PR #{number} has no merge_commit_sha to build the merge from"
+        )));
+    };
+    if method == MergeMethod::Squash {
+        match pr.default_branch.as_deref() {
+            Some(default) if default == pr.head_ref => {
+                return Err(failure(
+                    kind::OPERATION_NOT_ALLOWED,
+                    format!(
+                        "a squash with commit_identity rewrites the head branch, and PR \
+                         #{number}'s head '{}' is the default branch",
+                        pr.head_ref
+                    ),
+                    Map::new(),
+                ))
+            }
+            Some(_) => {}
+            None => {
+                return Err(response_invalid(format!(
+                    "GitHub's response for PR #{number} has no base.repo.default_branch, so a \
+                     squash cannot tell whether rewriting its head branch is safe"
+                )))
+            }
+        }
+    }
+
+    let (status, commit_body) = send(
+        transport,
+        "GET",
+        &github::get_commit_path(&config.repo, test_merge),
+        None,
+    )?;
+    if status != 200 {
+        return Err(upstream_error(status, &commit_body));
+    }
+    let merged = github::parse_git_commit(&commit_body).map_err(response_invalid)?;
+    let [base_tip, merged_head] = merged.parents.as_slice() else {
+        return Err(stale_test_merge(number));
+    };
+    if *merged_head != pr.head_sha {
+        return Err(stale_test_merge(number));
+    }
+
+    let message = trailer::built_message(
+        method,
+        trailer::PrText {
+            number,
+            owner: repo_owner(&config.repo),
+            head_ref: &pr.head_ref,
+            title: &pr.title,
+            body: &pr.body,
+        },
+        input.message.as_deref(),
+        config.merge_trailer.as_deref(),
+    );
+    let parents: Vec<&str> = match method {
+        MergeMethod::Squash => vec![base_tip],
+        _ => vec![base_tip, &pr.head_sha],
+    };
+    let commit_request =
+        github::create_built_commit_body(&message, &merged.tree, &parents, identity);
+    let (status, created) = send(
+        transport,
+        "POST",
+        &github::create_commit_path(&config.repo),
+        Some(&commit_request),
+    )?;
+    if status != 201 {
+        return Err(upstream_error(status, &created));
+    }
+    let built = github::created_sha(&created).map_err(response_invalid)?;
+
+    if method == MergeMethod::Squash {
+        move_head_to_squash(config, pr, &built, transport)?;
+        fast_forward_base(config, pr, method, &built, transport)
+            .map_err(|response| with_data(response, "head_sha", json!(built)))?;
+    } else {
+        fast_forward_base(config, pr, method, &built, transport)?;
+    }
+
+    let mut data = Map::new();
+    data.insert("ok".to_string(), json!(true));
+    data.insert("merged".to_string(), json!(true));
+    data.insert("merge_sha".to_string(), json!(built));
+    data.insert("trailer".to_string(), json!(config.merge_trailer));
+    data.insert(
+        "identity".to_string(),
+        json!({ "name": identity.name, "email": identity.email }),
+    );
+    Ok(Response {
+        status: OpStatus::Passed,
+        summary: format!(
+            "merged PR #{number} on {} via {} as {} <{}>",
+            config.repo,
+            method.as_str(),
+            identity.name,
+            identity.email
+        ),
+        data: Value::Object(data).to_string(),
+        metadata: vec![
+            ("state_effect".to_string(), "mutate".to_string()),
+            (
+                "resource_id".to_string(),
+                format!("github:{}:pr:{number}", config.repo),
+            ),
+        ],
+    })
+}
+
+fn stale_test_merge(number: u64) -> Response {
+    failure(
+        kind::CONFLICT,
+        format!(
+            "GitHub's test merge for PR #{number} is out of date (it does not merge the PR's \
+             current head into its base); run pr_merge again"
+        ),
+        Map::new(),
+    )
+}
+
+/// Point the PR's head branch at the squashed commit, after checking it still holds the head
+/// that was squashed.
+fn move_head_to_squash(
+    config: &Config,
+    pr: &github::PullRequest,
+    squashed: &str,
+    transport: &mut dyn Transport,
+) -> Result<(), Response> {
+    let ref_path = github::get_ref_path(&config.repo, &pr.head_ref);
+    let (status, body) = send(transport, "GET", &ref_path, None)?;
+    if status != 200 {
+        return Err(upstream_error(status, &body));
+    }
+    let current = github::ref_sha(&body).map_err(response_invalid)?;
+    if current != pr.head_sha {
+        return Err(failure(
+            kind::HEAD_MOVED,
+            format!(
+                "the head branch '{}' is at {current}, not PR #{}'s head {}; the pull \
+                 request's head moved since it was read; refresh and retry",
+                pr.head_ref, pr.number, pr.head_sha
+            ),
+            Map::new(),
+        ));
+    }
+    let (status, body) = send(
+        transport,
+        "PATCH",
+        &github::update_ref_path(&config.repo, &pr.head_ref),
+        Some(&github::update_ref_body(squashed, true)),
+    )?;
+    if !(200..300).contains(&status) {
+        return Err(upstream_error(status, &body));
+    }
+    Ok(())
+}
+
+/// Fast-forward the base branch to the built commit.
+fn fast_forward_base(
+    config: &Config,
+    pr: &github::PullRequest,
+    method: MergeMethod,
+    built: &str,
+    transport: &mut dyn Transport,
+) -> Result<(), Response> {
+    let (status, body) = send(
+        transport,
+        "PATCH",
+        &github::update_ref_path(&config.repo, &pr.base_ref),
+        Some(&github::update_ref_body(built, false)),
+    )?;
+    if (200..300).contains(&status) {
+        return Ok(());
+    }
+    let message = body
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if status == 422 && message.to_ascii_lowercase().contains("fast forward") {
+        let moved = format!(
+            "the base branch '{}' moved since GitHub computed the merge for PR #{}, and nothing \
+             was merged",
+            pr.base_ref, pr.number
+        );
+        let message = match method {
+            MergeMethod::Squash => format!(
+                "{moved}; the PR's head branch '{}' now holds the squashed commit {built}, with \
+                 the same change — run pr_merge again with expected_head_sha {built}",
+                pr.head_ref
+            ),
+            _ => format!("{moved}; run pr_merge again"),
+        };
+        return Err(failure(kind::CONFLICT, message, Map::new()));
+    }
+    Err(upstream_error_with_hint(status, &body, PROTECTED_BASE_HINT))
+}
+
+/// `response` with `key` added to its `data` object.
+fn with_data(mut response: Response, key: &str, value: Value) -> Response {
+    if let Ok(Value::Object(mut data)) = serde_json::from_str::<Value>(&response.data) {
+        data.insert(key.to_string(), value);
+        response.data = Value::Object(data).to_string();
+    }
+    response
 }
 
 fn gateway_missing_message() -> String {

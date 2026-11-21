@@ -940,3 +940,137 @@ fn a_request_refused_before_its_body_is_read_reports_the_refusal() {
         );
     }
 }
+
+// ── pr_merge with commit_identity: the tool-built squash through the compiled component ────
+
+/// A fake GitHub answering requests in a fixed order, one scripted reply each, recording what
+/// it received.
+struct ScriptedGithub {
+    endpoint: String,
+    requests: Arc<Mutex<Vec<Recorded>>>,
+}
+
+impl ScriptedGithub {
+    fn start(replies: Vec<(&'static str, Value)>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&requests);
+        thread::spawn(move || {
+            let mut replies = replies.into_iter();
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let Some(request) = read_request(&mut stream) else {
+                    continue;
+                };
+                recorded.lock().unwrap().push(request);
+                let (status_line, body) = replies.next().unwrap_or((
+                    "HTTP/1.1 500 Internal Server Error",
+                    json!({"message": "the fake ran out of scripted replies"}),
+                ));
+                let body = body.to_string();
+                let response = format!(
+                    "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        Self { endpoint, requests }
+    }
+
+    fn requests(&self) -> Vec<Recorded> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[test]
+fn the_wasm_component_squashes_as_the_configured_identity() {
+    let base = "1".repeat(40);
+    let head = "2".repeat(40);
+    let tree = "3".repeat(40);
+    let squashed = "5".repeat(40);
+    let test_merge = "6".repeat(40);
+    let pr = json!({
+        "number": 1, "state": "open", "mergeable": true, "title": "Add feature",
+        "body": "does the thing", "merge_commit_sha": test_merge,
+        "head": {"sha": head, "ref": "feature-x", "repo": {"full_name": "acme/widgets"}},
+        "base": {"ref": "main", "repo": {"full_name": "acme/widgets", "default_branch": "main"}},
+    });
+    let fake = ScriptedGithub::start(vec![
+        ("HTTP/1.1 200 OK", pr),
+        (
+            "HTTP/1.1 200 OK",
+            json!({"sha": test_merge, "tree": {"sha": tree}, "parents": [{"sha": base}, {"sha": head}]}),
+        ),
+        ("HTTP/1.1 201 Created", json!({"sha": squashed})),
+        ("HTTP/1.1 200 OK", json!({"object": {"sha": head}})),
+        ("HTTP/1.1 200 OK", json!({"object": {"sha": squashed}})),
+        ("HTTP/1.1 200 OK", json!({"object": {"sha": squashed}})),
+    ]);
+    let config = json!({
+        "config_version": 1, "repo": "acme/widgets", "allow_merge": true,
+        "merge_methods": ["squash"],
+        "merge_trailer": "Co-authored-by: Release Bot <bot@example.com>",
+        "commit_identity": {"name": "Release Bot", "email": "bot@example.com"},
+    })
+    .to_string();
+    let input = json!({"op": "pr_merge", "number": 1, "expected_head_sha": head}).to_string();
+    let result = run_component(Some(&fake.endpoint), Some(&config), &input);
+    assert!(
+        matches!(result.status, Status::Passed),
+        "{:?} {:?}",
+        result.summary,
+        result.data
+    );
+    let data: Value = serde_json::from_str(&result.data.unwrap()).unwrap();
+    assert_eq!(data["merge_sha"], json!(squashed));
+    assert_eq!(
+        data["identity"],
+        json!({"name": "Release Bot", "email": "bot@example.com"})
+    );
+
+    let person = json!({"name": "Release Bot", "email": "bot@example.com"});
+    let expected: Vec<(String, Value)> = vec![
+        ("GET /repos/acme/widgets/pulls/1".to_string(), Value::Null),
+        (
+            format!("GET /repos/acme/widgets/git/commits/{test_merge}"),
+            Value::Null,
+        ),
+        (
+            "POST /repos/acme/widgets/git/commits".to_string(),
+            json!({
+                "message": "Add feature (#1)\n\ndoes the thing\n\nCo-authored-by: Release Bot <bot@example.com>",
+                "tree": tree,
+                "parents": [base],
+                "author": person,
+                "committer": person,
+            }),
+        ),
+        (
+            "GET /repos/acme/widgets/git/refs/heads/feature-x".to_string(),
+            Value::Null,
+        ),
+        (
+            "PATCH /repos/acme/widgets/git/refs/heads/feature-x".to_string(),
+            json!({"sha": squashed, "force": true}),
+        ),
+        (
+            "PATCH /repos/acme/widgets/git/refs/heads/main".to_string(),
+            json!({"sha": squashed, "force": false}),
+        ),
+    ];
+    let actual: Vec<(String, Value)> = fake
+        .requests()
+        .into_iter()
+        .map(|request| {
+            let line = request
+                .request_line
+                .rsplit_once(' ')
+                .map(|(line, _version)| line.to_string())
+                .unwrap_or(request.request_line);
+            (line, request.body)
+        })
+        .collect();
+    assert_eq!(actual, expected);
+}
