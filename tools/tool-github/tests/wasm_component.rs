@@ -314,55 +314,6 @@ fn pr_view_is_one_get_carrying_the_standard_headers_and_no_credential() {
     }
 }
 
-/// A fake GitHub answering each request by its request path from a table of status line and
-/// body, recording every request; an unlisted path is a 404.
-struct PathRoutedGithub {
-    endpoint: String,
-    requests: Arc<Mutex<Vec<Recorded>>>,
-}
-
-impl PathRoutedGithub {
-    fn start(routes: Vec<(String, &'static str, Value)>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let endpoint = format!("http://{}", listener.local_addr().unwrap());
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let recorded = Arc::clone(&requests);
-        thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { return };
-                let Some(request) = read_request(&mut stream) else {
-                    continue;
-                };
-                let path = request
-                    .request_line
-                    .split(' ')
-                    .nth(1)
-                    .unwrap_or_default()
-                    .to_string();
-                recorded.lock().unwrap().push(request);
-                let (status_line, body) = routes
-                    .iter()
-                    .find(|(route, _, _)| *route == path)
-                    .map(|(_, status_line, body)| (*status_line, body.to_string()))
-                    .unwrap_or((
-                        "HTTP/1.1 404 Not Found",
-                        json!({"message": format!("unhandled path {path}")}).to_string(),
-                    ));
-                let response = format!(
-                    "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(response.as_bytes());
-            }
-        });
-        Self { endpoint, requests }
-    }
-
-    fn requests(&self) -> Vec<Recorded> {
-        self.requests.lock().unwrap().clone()
-    }
-}
-
 #[test]
 fn pr_view_without_checks_read_passes_with_checks_null_and_a_missing_entry() {
     let sha = "a".repeat(40);
@@ -374,19 +325,10 @@ fn pr_view_without_checks_read_passes_with_checks_null_and_a_missing_entry() {
         "base": {"ref": "main"},
     });
     let check_runs = format!("/repos/acme/widgets/commits/{sha}/check-runs");
-    let fake = PathRoutedGithub::start(vec![
+    let fake = ScriptedGithub::start(vec![
+        ("HTTP/1.1 200 OK", pr),
+        ("HTTP/1.1 200 OK", json!([])),
         (
-            "/repos/acme/widgets/pulls/1".to_string(),
-            "HTTP/1.1 200 OK",
-            pr,
-        ),
-        (
-            "/repos/acme/widgets/pulls/1/reviews".to_string(),
-            "HTTP/1.1 200 OK",
-            json!([]),
-        ),
-        (
-            check_runs.clone(),
             "HTTP/1.1 403 Forbidden",
             json!({"message": "Resource not accessible by personal access token"}),
         ),
