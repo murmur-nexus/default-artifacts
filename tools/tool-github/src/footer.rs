@@ -15,7 +15,12 @@ pub fn apply(body: Option<&str>, footer: Option<&str>) -> Option<String> {
         return Some(line.to_string());
     }
     let trimmed = text.trim_end_matches('\n');
-    if trimmed.lines().last() == Some(line) {
+    // A CRLF body's last line keeps its `\r` here; it still ends in exactly `line`.
+    let last = trimmed
+        .lines()
+        .last()
+        .map(|last| last.strip_suffix('\r').unwrap_or(last));
+    if last == Some(line) {
         return Some(text.to_string());
     }
     Some(format!("{trimmed}\n\n{line}"))
@@ -52,5 +57,15 @@ mod tests {
     fn a_body_already_ending_in_the_line_is_not_duplicated() {
         let body = "hello\n\nOpened by our release bot";
         assert_eq!(apply(Some(body), Some(LINE)).unwrap(), body);
+    }
+
+    #[test]
+    fn a_crlf_body_already_ending_in_the_line_is_not_duplicated() {
+        for body in [
+            "hello\r\n\r\nOpened by our release bot",
+            "hello\r\n\r\nOpened by our release bot\r\n",
+        ] {
+            assert_eq!(apply(Some(body), Some(LINE)).unwrap(), body, "{body:?}");
+        }
     }
 }

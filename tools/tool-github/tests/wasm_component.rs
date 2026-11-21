@@ -512,7 +512,11 @@ fn the_wasm_component_refuses_an_absolute_body_file_with_nothing_sent() {
         Some(CONFIG),
         &input.to_string(),
     );
-    assert!(matches!(result.status, Status::Failed), "{:?}", result.summary);
+    assert!(
+        matches!(result.status, Status::Failed),
+        "{:?}",
+        result.summary
+    );
     let data: Value = serde_json::from_str(&result.data.unwrap()).unwrap();
     assert_eq!(data["error_kind"], json!("invalid_input"));
     assert!(fake.requests().is_empty());

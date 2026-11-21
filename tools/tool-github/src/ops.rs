@@ -911,15 +911,15 @@ fn read_body_file(repo_root: &Path, path: &str) -> Result<String, Response> {
     let full = repo_root.join(path);
     let metadata = fs::metadata(&full).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            refuse(format!("body_file {path:?} does not exist in the work folder"))
+            refuse(format!(
+                "body_file {path:?} does not exist in the work folder"
+            ))
         } else {
             refuse(format!("body_file {path:?} cannot be read: {e}"))
         }
     })?;
     if !metadata.is_file() {
-        return Err(refuse(format!(
-            "body_file {path:?} is not a regular file"
-        )));
+        return Err(refuse(format!("body_file {path:?} is not a regular file")));
     }
     if metadata.len() > MAX_BODY_FILE_BYTES {
         return Err(over_limit(metadata.len()));

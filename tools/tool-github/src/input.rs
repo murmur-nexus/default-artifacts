@@ -266,7 +266,10 @@ fn take_body(map: &mut Map<String, Value>) -> Result<Option<BodySource>, String>
 }
 
 fn parse_pr_create(mut map: Map<String, Value>) -> Result<PrCreateInput, String> {
-    reject_unknown(&map, &["title", "body", "body_file", "head", "base", "draft"])?;
+    reject_unknown(
+        &map,
+        &["title", "body", "body_file", "head", "base", "draft"],
+    )?;
     Ok(PrCreateInput {
         title: require_string(&mut map, "title")?,
         body: take_body(&mut map)?,
@@ -550,8 +553,8 @@ mod tests {
             r#""op":"pr_create","title":"t","head":"h","base":"main""#,
             r#""op":"pr_edit","number":1"#,
         ] {
-            let err = parse_input(&format!(r#"{{{op},"body":"x","body_file":"y.md"}}"#))
-                .unwrap_err();
+            let err =
+                parse_input(&format!(r#"{{{op},"body":"x","body_file":"y.md"}}"#)).unwrap_err();
             assert!(
                 err.contains("\"body\"") && err.contains("\"body_file\""),
                 "{err}"
@@ -561,12 +564,24 @@ mod tests {
 
     #[test]
     fn a_body_file_must_stay_relative_with_no_parent_component() {
-        for bad in ["/etc/passwd", "../outside.md", "a/../../b.md", "a/../b.md", "/sub/x.md"] {
+        for bad in [
+            "/etc/passwd",
+            "../outside.md",
+            "a/../../b.md",
+            "a/../b.md",
+            "/sub/x.md",
+        ] {
             let err = check_body_file_path(bad).unwrap_err();
             assert!(err.starts_with("\"body_file\""), "{bad}: {err}");
             assert!(err.contains(&format!("{bad:?}")), "{bad}: {err}");
         }
-        for good in ["pr-body.md", "docs/pr-body.md", "./pr-body.md", "a/./b.md", "..md"] {
+        for good in [
+            "pr-body.md",
+            "docs/pr-body.md",
+            "./pr-body.md",
+            "a/./b.md",
+            "..md",
+        ] {
             assert_eq!(check_body_file_path(good), Ok(()), "{good}");
         }
     }
