@@ -61,13 +61,16 @@ capabilities:
 artifacts:
   - name: murmur/driver-claude-code
     runtime: driver
-    version: "0.11.0"
+    version: "0.12.0"
 ```
 
 The harness starts from an **empty** environment and sees exactly the variables
 `capabilities.env.allow` declares. That is what keeps the subscription the thing being spent: an
 API key sitting in the operator's shell reaches `claude` only if the operator writes it down
 here.
+
+The driver itself sets one more variable, `CLAUDE_CODE_DISABLE_CRON=1`, on every turn. See
+[Waiting goes through Nexus](#waiting-goes-through-nexus).
 
 ## Driver config
 
@@ -203,6 +206,51 @@ with claude 2.1.319, as uid 0 in a user namespace.
 
 The driver never sets `IS_SANDBOX`, the variable that switches Claude Code's root guard off.
 
+## Waiting goes through Nexus
+
+Every launch plan sets `CLAUDE_CODE_DISABLE_CRON=1` in `claude`'s environment. It turns off
+Claude Code's session scheduler: its cron tools and `/loop`. `claude` 2.1.330 reads it as
+`!s.CLAUDE_CODE_DISABLE_CRON` in the gate on its cron tools.
+
+A scheduled task belongs to `claude`, not to the capsule. It fires only while a `claude` process
+runs, and the runtime starts one `claude` per turn and closes its stdin to end it. Nexus never
+sees such a task, so the person cannot see what it waits on or cancel it. No capsule is helped by
+keeping the scheduler, so the switch is unconditional: bridged or not, new session or resumed.
+
+`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` is deliberately not set. It would also remove background
+subagents and `Ctrl+B`.
+
+Under this driver's argv, `claude` offers no built-in tool at all, so the switch is defence in
+depth. `--tools` carries only the bridged `mcp__<server>__<tool>` names, or `""` with no bridge.
+Every recorded `system/init` line in `tests/fixtures/` (claude 2.1.278, 2.1.314 and 2.1.316)
+lists only bridged tools. A 2.1.330 turn with `--tools ""` printed `"tools": []` both with and
+without the variable. None of them lists `Bash`, `CronCreate`, `CronList`, `CronDelete`,
+`Monitor` or `ScheduleWakeup`. The switch covers a `claude` that offers deferred or new tools
+despite `--tools`, and a durable cron task left on disk.
+
+When the capsule's bridge offers a tool whose bare name is exactly `nexus`, the driver appends
+this line to the `--system-prompt` value, after a blank line:
+
+```
+Claude Code's session scheduler is off in this capsule. To wait for something, or to tell the person when something happens, never sleep, poll or loop: create a trigger with the `nexus` tool (`nexus trigger add`), which the person sees and can cancel, and load the skill `skill-nexus-trigger` first when it is installed.
+```
+
+That tool exists when the capsule grants the `nexus` shell binary:
+
+```yaml
+capabilities:
+  shell:
+    allow: [nexus]
+```
+
+The match is exact and case-sensitive: `Nexus`, `nexus-relay` or `nexus_x` does not add the
+line. With a blank system prompt the line is the whole value. Without a `nexus` tool the argv is
+exactly what it was before the line existed, because a line naming a command the capsule cannot
+run would mislead it.
+
+The skill `skill-nexus-trigger` teaches the model how to write the trigger. Install it beside
+this driver.
+
 ## The argv this driver produces
 
 ```
@@ -238,6 +286,8 @@ claude --print --output-format stream-json --verbose
 - `--permission-mode bypassPermissions` is safe because the bridge already enforces the
   capsule's capabilities on every tool call; a second interactive approval inside the harness
   would only deadlock a headless run.
+- `--system-prompt` carries the capsule's prompt, followed by the
+  [instruction line](#waiting-goes-through-nexus) only when `nexus` is a bridged tool.
 
 The task goes out as one newline-terminated JSON line on stdin:
 
