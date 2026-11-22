@@ -193,9 +193,16 @@ Hand a wait to Nexus instead of waiting yourself: when to create a trigger, neve
 loop or use a scheduler of one's own, how to write the check command, when to add `--wake` and
 which form to prefer, that a trigger an agent creates waits for the person's approval before its
 first check, and how to read the `[trigger: <label>]` message a fire sends back. It names no
-harness, provider or harness tool, so it holds under every driver. Its command lines follow
-murmur-nexus's `nexus trigger` commands (cards `66ebf485` and `c42b9327`), and
-`nexus trigger add --help` wins on flags where they differ.
+harness, provider or harness tool, so it holds under every driver.
+
+`nexus trigger` comes from nexus, not from this skill, and no nexus release has it yet: as of this
+release murmur-nexus `main` holds neither the trigger commands nor `--wake` and the clock sources.
+The skill's command lines follow murmur-nexus's design for both. The skill tells the agent that
+`nexus trigger add --help` wins on flags where the two differ. An older `nexus` reads
+`nexus trigger …` as a request to open its window in the current folder: it starts its full-screen
+app there and writes `murmur.yaml`, `murmur.lock`, `instructions.md`, `compaction.md` and
+`.murmur/` into the folder. Install this skill only beside a `nexus` that lists `trigger` in
+`nexus --help`.
 
 0.1.0 is the first release. It teaches:
 

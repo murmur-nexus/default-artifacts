@@ -249,7 +249,8 @@ exactly what it was before the line existed, because a line naming a command the
 run would mislead it.
 
 The skill `skill-nexus-trigger` teaches the model how to write the trigger. Install it beside
-this driver.
+this driver. `nexus trigger` needs a `nexus` that lists `trigger` in `nexus --help`, which no nexus
+release does yet; see [skills/README.md](../../skills/README.md#skill-nexus-trigger).
 
 ## The argv this driver produces
 
