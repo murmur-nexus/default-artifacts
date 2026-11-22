@@ -65,6 +65,19 @@ const CLAUDE_DIR: &str = "~/.claude";
 /// The host `claude` calls for inference and for refreshing a subscription login.
 const API_HOST: &str = "api.anthropic.com";
 
+/// The variable that turns off `claude`'s session scheduler: its cron tools and `/loop`. A
+/// scheduled task lives only while one `claude` process runs, the runtime starts one per turn,
+/// and Nexus never sees the task, so no capsule is served by keeping it.
+/// `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` is not set: it would also remove background subagents.
+const SCHEDULER_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_CRON", "1");
+
+/// The bare bridged tool name that carries the `nexus` command when the capsule grants it in
+/// `capabilities.shell.allow`.
+const TRIGGER_TOOL: &str = "nexus";
+
+/// The line appended to the system prompt when [`TRIGGER_TOOL`] is bridged. One line, no newline.
+const ASK_NEXUS_TO_WAIT: &str = "Claude Code's session scheduler is off in this capsule. To wait for something, or to tell the person when something happens, never sleep, poll or loop: create a trigger with the `nexus` tool (`nexus trigger add`), which the person sees and can cancel, and load the skill `skill-nexus-trigger` first when it is installed.";
+
 // ── Launch constants ──────────────────────────────────────────────────────────
 
 /// The name of the MCP config file the driver asks the runtime to write, and points
@@ -639,10 +652,9 @@ pub fn launch(request: LaunchRequest) -> Result<Launched, String> {
 
     let plan = LaunchPlan {
         args,
-        // The harness gets exactly what `capabilities.env.allow` passes through: declaring a
-        // variable here would put a value in the harness's environment that the operator never
-        // asked for, and `claude` needs none.
-        env_set: Vec::new(),
+        // Only the scheduler switch, on every plan: everything else in the harness's environment
+        // comes from `capabilities.env.allow`, so the operator decides every other value.
+        env_set: vec![(SCHEDULER_OFF.0.to_string(), SCHEDULER_OFF.1.to_string())],
         files,
         stdin: Some(stdin_line(&request.task)),
         // `--input-format stream-json` reads messages until stdin closes, and closing it is how
@@ -731,9 +743,30 @@ fn build_args(request: &LaunchRequest, config: &DriverConfig) -> Vec<String> {
     }
 
     args.push("--system-prompt".to_string());
-    args.push(request.system_prompt.clone());
+    args.push(system_prompt_arg(request));
 
     args
+}
+
+/// The `--system-prompt` value: the capsule's prompt, followed by [`ASK_NEXUS_TO_WAIT`] only
+/// when the bridge offers a tool named exactly [`TRIGGER_TOOL`]. A line naming a command the
+/// capsule cannot run would mislead it, so without that tool the prompt passes unchanged.
+fn system_prompt_arg(request: &LaunchRequest) -> String {
+    let nexus_bridged = request
+        .bridge
+        .as_ref()
+        .is_some_and(|bridge| bridge.tool_names.iter().any(|name| name == TRIGGER_TOOL));
+    if !nexus_bridged {
+        return request.system_prompt.clone();
+    }
+    if request.system_prompt.trim().is_empty() {
+        return ASK_NEXUS_TO_WAIT.to_string();
+    }
+    format!(
+        "{}\n\n{}",
+        request.system_prompt.trim_end(),
+        ASK_NEXUS_TO_WAIT
+    )
 }
 
 /// The model to pass to `--model`, or `none` to leave the choice to the harness.
@@ -2242,9 +2275,97 @@ mod tests {
     }
 
     #[test]
-    fn the_driver_sets_no_environment_variable() {
-        let plan = launch(request()).expect("launch plans every request").plan;
-        assert!(plan.env_set.is_empty());
+    fn the_driver_sets_only_the_scheduler_switch() {
+        let bridged = LaunchRequest {
+            bridge: Some(bridge()),
+            ..request()
+        };
+        let mut resumed = request();
+        resumed.session.mode = SessionMode::Resume;
+        for request in [request(), bridged, resumed] {
+            let plan = launch(request).expect("launch plans every request").plan;
+            assert_eq!(
+                plan.env_set,
+                vec![("CLAUDE_CODE_DISABLE_CRON".to_string(), "1".to_string())]
+            );
+        }
+    }
+
+    /// A request whose bridge offers `bridge()`'s tools plus `extra`.
+    fn request_with_extra_tool(extra: &str) -> LaunchRequest {
+        let mut bridge = bridge();
+        bridge.tool_names = vec!["echo_tool".to_string(), extra.to_string()];
+        LaunchRequest {
+            bridge: Some(bridge),
+            ..request()
+        }
+    }
+
+    #[test]
+    fn a_bridged_nexus_tool_appends_the_ask_nexus_to_wait_line() {
+        let expected = format!("{SYSTEM_PROMPT}\n\n{ASK_NEXUS_TO_WAIT}");
+        for mode in [SessionMode::New, SessionMode::Resume] {
+            let mut request = request_with_extra_tool("nexus");
+            request.session.mode = mode;
+            let args = args_of(request);
+            assert_eq!(
+                value_after(&args, "--system-prompt").as_deref(),
+                Some(expected.as_str())
+            );
+            assert_eq!(
+                args.iter()
+                    .filter(|arg| arg.contains(ASK_NEXUS_TO_WAIT))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                args.iter().filter(|arg| *arg == "--system-prompt").count(),
+                1
+            );
+            assert_eq!(args[args.len() - 2], "--system-prompt");
+        }
+    }
+
+    #[test]
+    fn a_blank_system_prompt_with_nexus_bridged_gives_the_line_alone() {
+        let mut request = request_with_extra_tool("nexus");
+        request.system_prompt = "  \n".to_string();
+        let args = args_of(request);
+        assert_eq!(
+            value_after(&args, "--system-prompt").as_deref(),
+            Some(ASK_NEXUS_TO_WAIT)
+        );
+    }
+
+    #[test]
+    fn no_line_without_a_tool_named_exactly_nexus() {
+        let bridged = LaunchRequest {
+            bridge: Some(bridge()),
+            ..request()
+        };
+        let mut requests = vec![request(), bridged];
+        for near_miss in [
+            "Nexus",
+            "nexus-relay",
+            "nexus_x",
+            "mcp__claude_bridge__nexus",
+        ] {
+            requests.push(request_with_extra_tool(near_miss));
+        }
+        for request in requests {
+            let args = args_of(request);
+            assert_eq!(
+                value_after(&args, "--system-prompt").as_deref(),
+                Some(SYSTEM_PROMPT)
+            );
+        }
+    }
+
+    #[test]
+    fn the_ask_nexus_to_wait_line_is_one_line_naming_the_command_and_the_skill() {
+        assert!(!ASK_NEXUS_TO_WAIT.contains('\n'));
+        assert!(ASK_NEXUS_TO_WAIT.contains("nexus trigger add"));
+        assert!(ASK_NEXUS_TO_WAIT.contains("skill-nexus-trigger"));
     }
 
     // ── Scenario 9 — reading one line at a time ───────────────────────────────

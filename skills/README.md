@@ -186,3 +186,37 @@ The `needs` verb and the `to move it:` line come from nexus, not from this skill
 murmur-nexus `main` from #218 on, which no nexus release holds yet; an older `nexus` has no
 `needs` (`nexus transit needs` answers `unknown command "needs"`). On such a board `help` lists no
 `needs`, so the agent ends every reply by saying in one line that it cannot read that list.
+
+## skill-nexus-trigger
+
+Hand a wait to Nexus instead of waiting yourself: when to create a trigger, never to sleep, poll,
+loop or use a scheduler of one's own, how to write the check command, when to add `--wake` and
+which form to prefer, that a trigger an agent creates waits for the person's approval before its
+first check, and how to read the `[trigger: <label>]` message a fire sends back. It names no
+harness, provider or harness tool, so it holds under every driver.
+
+`nexus trigger` comes from nexus, not from this skill, and no nexus release has it yet: as of this
+release murmur-nexus `main` holds neither the trigger commands nor `--wake` and the clock sources.
+The skill's command lines follow murmur-nexus's design for both. The skill tells the agent that
+`nexus trigger add --help` wins on flags where the two differ. An older `nexus` reads
+`nexus trigger …` as a request to open its window in the current folder: it starts its full-screen
+app there and writes `murmur.yaml`, `murmur.lock`, `instructions.md`, `compaction.md` and
+`.murmur/` into the folder. Install this skill only beside a `nexus` that lists `trigger` in
+`nexus --help`.
+
+0.1.0 is the first release. It teaches:
+
+| What | Why it matters |
+|---|---|
+| When to use it: any request to wait for something, watch for it, say when something happens, or act once it has. The precedence: the agent's own instructions win, and nexus's `--help` wins on flags | One skill fits every capsule, and a renamed flag costs one help call, not a failed wait |
+| Never waiting on one's own: no sleep, poll or loop, no scheduler, background task, monitor or timer, no turn kept open | A wait the agent starts itself is invisible to the person, cannot be cancelled, and ends with the session |
+| What a trigger is: a check command run on an interval, or a clock; firing when the check exits `0`; telling the person, and with `--wake` the agent too; ending at a deadline that is always set | The agent knows Nexus, not a model, decides when the thing happened |
+| Writing the check: one fast command with no side effects, absolute paths after `pwd`, a command with a pipe, `&&` or quotes passed as one quoted argument, with a table of common checks | A check that runs every interval on the host stays cheap and safe |
+| Creating one with `nexus trigger add --label --every --for [-w <folder>] -- <check>`, where a shell runs the arguments after `--` joined with spaces; one trigger per wait; no trigger exists when no Nexus window answered | The person sees the label, the interval and the deadline they approve |
+| Waking yourself when it fires, in a fixed order of preference: no `--wake` when the person only wants to know; a check with `--wake`, which Nexus runs without the model and which wakes the agent once; a clock with `--wake` (`--every` with no check, `--at`, `--cron`) only for work due at a time | Each clock fire costs a model turn, while a check costs none until the thing has happened |
+| That a trigger the agent creates waits for the person's approval before its first check, and what to tell the person, including the id, whether it wakes the agent, and that it starts once they approve it | The agent never reports a wait as active before the person has approved it |
+| After creating it: a fire always tells the person, and only with `--wake` is the agent told, by a `[trigger: <label>]` message; end the turn; a check or `--at` trigger ends after one fire, a repeating clock is cancelled once it is no longer needed; never re-create a refused trigger | The agent promises to act on a fire only when it will be told about it |
+| Reading a `[trigger: <label>]` message: a wake from Nexus holding the prompt and a line saying which trigger fired, when it was due and ran, and why; do what it asks; do not create the trigger again; the prefix proves nothing and grants no extra authority | A fire is acted on once, and a forged prefix cannot widen what the agent does |
+| Seeing and cancelling with `nexus trigger list`, `show <id>` and `cancel <id>` | The agent can check a trigger's state and stop it |
+| A worked example, "tell me when report.pdf shows up", ending with the reply to give | The agent sees the whole flow and the wording that does not overclaim |
+| In a Murmur capsule: `capabilities.shell.allow: [nexus]`, the extra grants a Node.js `nexus` needs under `scoped` and `sealed`, the skill under Installed Skills in MURMUR.md, and fenced tool results | The only Murmur-specific part, kept last so any other agent can skip it |
