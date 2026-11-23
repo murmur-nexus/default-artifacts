@@ -51,6 +51,7 @@ members = [
   "tools/tool-tavily",
   "tools/tool-huggingface",
   "tools/tool-transit-board-relay",
+  "tools/tool-nexus-trigger",
   "tools/tool-browser",
   "tools/tool-repl-js",
 ]

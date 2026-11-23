@@ -157,6 +157,7 @@ component (`wasm32-wasip2`, exporting `murmur:tool/run`), shipped as one zip for
 | `tool-tavily` | `tools/tool-tavily/` | Web search through Tavily, returning a bounded plain-text result; the Tavily key is bound on the entry as `gateway.api_key` and attached by the runtime, never held by the tool, and every cost- and size-bearing lever is in the entry's `config:` block |
 | `tool-huggingface` | `tools/tool-huggingface/` | Read-only Hugging Face access: search models, datasets, Spaces and papers, inspect a repo (license, tags, files with sizes, card), peek at a dataset's splits, schema and rows, download a file or byte range into the work folder with its sha256, and look up a paper. The Hub is reached through the entry's `gateway:` (the token bound as `gateway.api_key`, or `keyless: true`), the datasets server and CDN directly and keylessly; see its [README](./tools/tool-huggingface/README.md) |
 | `tool-transit-board-relay` | `tools/tool-transit-board-relay/` | Acts on a Transit board through the board tool `nexus transit serve` answers: lists, shows and adds cards and whatever else the grant allows, one verb per call, `help` first. A thin relay that knows the envelope and never the verbs, so a new verb needs no relay release. The grant is the entry's `config:` block (`board`, `verbs`, `protect`), checked by nexus on every call; serve's key is bound on the entry as `gateway.api_key: ${NEXUS_TRANSIT_TOOL_KEY}` and attached by the runtime, never held by the tool; see its [README](./tools/tool-transit-board-relay/README.md) |
+| `tool-nexus-trigger` | `tools/tool-nexus-trigger/` | Asks Nexus to wait: adds, lists, shows and cancels the triggers of the work folder through the trigger inbox a Nexus window open on it answers (murmur-nexus inbox protocol v1). Every trigger it adds waits for a person's approval in that window. The capsule needs no shell grant; the entry is granted `capabilities.filesystem.scope: .nexus/triggers/inbox` and nothing else, and the tool holds no trigger policy, checking only the label's length and the request's size; see its [README](./tools/tool-nexus-trigger/README.md) |
 | `tool-test-report` | `tools/tool-test-report/` | Parses raw test-runner output (cargo, pytest, go, jest) into a structured failure list; `input_path` and `repo_path` are relative to the work folder or absolute inside a host folder the session opened; see its [README](./tools/tool-test-report/README.md) |
 | `tool-code-graph` | `tools/tool-code-graph/` | Indexes a Rust and/or Python repo into a SQLite symbol/edge graph at `<repo_path>/.murmur/code-graph.db`; structured queries over stable symbol identities. `repo_path` is relative to the work folder or absolute inside a host folder the session opened, read-write to index; see its [README](./tools/tool-code-graph/README.md) |
 | `tool-git` | `tools/tool-git/` | Git operations (clone, checkout, status, diff, commit, push, worktree, and more), each git command run through `murmur:process@0.2.0`, so it needs a `mur` at WIT level 7 or higher (the murmur release after v0.11.0, not tagged yet) and `git` in `capabilities.shell.allow`; on-shell hooks and the `read_only` check judge every git command it runs; see its [README](./tools/tool-git/README.md) |
@@ -261,6 +262,7 @@ Hooks and process drivers did not move.
 | `tool-git` | 0.9.0 |
 | `tool-github` | 0.8.0 |
 | `tool-huggingface` | 0.1.0 |
+| `tool-nexus-trigger` | 0.1.0 |
 | `tool-read` | 0.6.0 |
 | `tool-registry-search` | 0.8.0 |
 | `tool-repl-js` | 0.1.0 |
@@ -315,6 +317,7 @@ serves level 3. Hooks and process drivers did not move.
 | `tool-request-input` | 0.7.0 |
 | `tool-tavily` | 0.8.0 |
 | `tool-transit-board-relay` | 0.1.0 |
+| `tool-nexus-trigger` | 0.1.0 |
 | `tool-test-report` | 0.6.0 |
 | `tool-code-coverage` | 0.6.0 |
 | `tool-write` | 0.2.0 |

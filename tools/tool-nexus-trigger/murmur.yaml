@@ -1,0 +1,76 @@
+name: tool-nexus-trigger
+version: 0.1.0
+runtime: tool
+implementation: wasm
+description: |
+  Ask Nexus to wait for something, through the trigger inbox of the work folder: add a trigger, list the folder's triggers, show one, or cancel one. A trigger you add waits for a person's approval in a Nexus window and does nothing before then; the answer gives its id. Its check (until) is a shell command Nexus runs on the host, as the person, every interval until it exits 0 or the time runs out. Call list before you add, so you do not add a duplicate. approve, refuse and renew are a person's, typed in the Nexus window; this tool cannot do them.
+
+  Input is {"op": "add" | "list" | "show" | "cancel", ...the op's fields}. The result is Nexus's answer as JSON: {"ok", "op", "exit", "summary", "out", "err"}, where out and err are all the lines nexus trigger prints and summary is the first one; a successful add's summary starts "Requested: it waits for a person's approval". A line starting "tool-nexus-trigger:" is the tool's own, and says whether anything was written.
+
+  Operators: a Nexus window open on the work folder answers the inbox. Grant this entry the inbox and nothing else:
+
+      - name: murmur/tool-nexus-trigger
+        runtime: tool
+        capabilities:
+          filesystem:
+            scope: .nexus/triggers/inbox
+
+input_schema:
+  type: object
+  format: murmur-opaque
+  murmur-destinations: []
+  properties:
+    op:
+      type: string
+      enum: [add, list, show, cancel]
+      description: "add asks Nexus for a new trigger, which waits for a person's approval; list gives one line per trigger in the folder; show gives one trigger's record and history; cancel ends one."
+    id:
+      type: string
+      description: "For show and cancel, required: the trigger's id, such as t3, from add's answer or from list."
+    yes:
+      type: boolean
+      description: "For cancel: true cancels at once. Without it Nexus cancels nothing and says so."
+    until:
+      type: string
+      description: "For add: the check, one shell command Nexus runs on the host as the person, every interval; the trigger fires when it exits 0. Such as \"test -e build/done\"."
+    every:
+      type: string
+      description: "For add: with until, how often Nexus runs the check (default 30s, 1s to 1h). Without until or a board source, a clock that fires every interval (1m to 24h). Written as \"30s\", \"5m\" or \"2h\"."
+    for:
+      type: string
+      description: "For add: how long the trigger waits, counted from approval, such as \"30m\" or \"8h\". Nexus picks the default and refuses a value out of range."
+    label:
+      type: string
+      description: "For add: the name Nexus shows on the strip, at most 80 characters. Default: the command, clock or board source, cut to 40."
+    at:
+      type: string
+      description: "For add: a clock that fires once, at \"HH:MM\", \"YYYY-MM-DD HH:MM\" or \"+<d>\" such as \"+20m\", at most 24 hours ahead."
+    cron:
+      type: string
+      description: "For add: a clock that fires at each minute a five-field cron expression matches, in local time, such as \"0 9 * * 1-5\"."
+    wake:
+      type: string
+      description: "For add: each fire sends this prompt to the capsule of the window that approves the trigger. At most 4000 bytes."
+    scope:
+      type: string
+      description: "For add: project (the default) keeps the trigger going while any Nexus window is open on the folder or a transit daemon serves it; session ends it with the window that approves it."
+    reaches:
+      type: string
+      description: "For add, with card: a board source that fires once when the card is in this stage."
+    onEvent:
+      type: string
+      description: "For add: a board source that fires once when this domain event is recorded, on card when given, else on any card."
+    card:
+      type: string
+      description: "For add: the card a board source watches, and the default card of transitEvent. A card number or a crd_ id."
+    transitEvent:
+      type: string
+      description: "For add: each fire records this domain event on a card, acting as the person who approves the trigger. Not with wake."
+    eventCard:
+      type: string
+      description: "For add: the card transitEvent records on. Default: card."
+  required: [op]
+  additionalProperties: false
+
+requires_files:
+  - tool_nexus_trigger.wasm

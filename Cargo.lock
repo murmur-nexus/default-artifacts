@@ -3001,6 +3001,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tool-nexus-trigger"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "serde_norway",
+ "tempfile",
+ "wasip2",
+ "wasmtime",
+ "wasmtime-wasi",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
 name = "tool-read"
 version = "0.0.0"
 dependencies = [
