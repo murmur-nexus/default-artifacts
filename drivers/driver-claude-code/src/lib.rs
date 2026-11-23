@@ -2295,7 +2295,15 @@ mod tests {
         };
         let mut resumed = request();
         resumed.session.mode = SessionMode::Resume;
-        for request in [request(), bridged, resumed] {
+        let requests = [
+            request(),
+            bridged,
+            resumed,
+            request_with_tools(&["echo_tool", "nexus"]),
+            request_with_tools(&["echo_tool", "tool-nexus-trigger"]),
+            request_with_tools(&["echo_tool", "nexus", "tool-nexus-trigger"]),
+        ];
+        for request in requests {
             let plan = launch(request).expect("launch plans every request").plan;
             assert_eq!(
                 plan.env_set,
@@ -2306,12 +2314,7 @@ mod tests {
 
     /// A request whose bridge offers `bridge()`'s tools plus `extra`.
     fn request_with_extra_tool(extra: &str) -> LaunchRequest {
-        let mut bridge = bridge();
-        bridge.tool_names = vec!["echo_tool".to_string(), extra.to_string()];
-        LaunchRequest {
-            bridge: Some(bridge),
-            ..request()
-        }
+        request_with_tools(&["echo_tool", extra])
     }
 
     #[test]
