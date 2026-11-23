@@ -27,17 +27,13 @@ pub const GUEST_ROOT: &str = ".";
 /// The read-only preopen the runtime hands only a tool entry without a scope.
 pub const RUNTIME_PREOPEN: &str = "murmur-runtime";
 
-/// The prefix of the host roots the runtime hands only a tool entry without a scope.
-pub const HOST_ROOT_PREOPEN_PREFIX: &str = "murmur-host";
-
 /// What the guest's preopen names say the entry reaches: a scoped entry holds only its subtree
-/// (and `state` when it has a store), so a `murmur-runtime` or `murmur-host…` preopen means it
-/// declared no scope.
+/// (and `state` when it has a store), so a `murmur-runtime` preopen or a host root
+/// ([`murmur_host_roots::HostRoot::from_preopen`]) means it declared no scope.
 pub fn grant_of<'a>(preopen_names: impl IntoIterator<Item = &'a str>) -> Grant {
-    if preopen_names
-        .into_iter()
-        .any(|name| name == RUNTIME_PREOPEN || name.starts_with(HOST_ROOT_PREOPEN_PREFIX))
-    {
+    if preopen_names.into_iter().any(|name| {
+        name == RUNTIME_PREOPEN || murmur_host_roots::HostRoot::from_preopen(name, false).is_some()
+    }) {
         Grant::WholeWorkdir
     } else {
         Grant::Inbox
@@ -338,5 +334,6 @@ mod tests {
             crate::grant_of([".", "murmur-host/data"]),
             Grant::WholeWorkdir
         );
+        assert_eq!(crate::grant_of([".", "murmur-hostile"]), Grant::Inbox);
     }
 }

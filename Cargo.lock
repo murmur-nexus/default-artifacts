@@ -3004,6 +3004,7 @@ dependencies = [
 name = "tool-nexus-trigger"
 version = "0.0.0"
 dependencies = [
+ "murmur-host-roots",
  "serde_json",
  "serde_norway",
  "tempfile",
