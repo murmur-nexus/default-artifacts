@@ -73,10 +73,19 @@ const SCHEDULER_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_CRON", "1");
 
 /// The bare bridged tool name that carries the `nexus` command when the capsule grants it in
 /// `capabilities.shell.allow`.
-const TRIGGER_TOOL: &str = "nexus";
+const NEXUS_TOOL: &str = "nexus";
 
-/// The line appended to the system prompt when [`TRIGGER_TOOL`] is bridged. One line, no newline.
+/// The bare bridged name of the trigger tool, `tool-nexus-trigger`, which writes the work
+/// folder's trigger inbox and needs no shell grant.
+const TRIGGER_TOOL: &str = "tool-nexus-trigger";
+
+/// The line appended to the system prompt when [`NEXUS_TOOL`] is bridged and [`TRIGGER_TOOL`]
+/// is not. One line, no newline.
 const ASK_NEXUS_TO_WAIT: &str = "Claude Code's session scheduler is off in this capsule. To wait for something, or to tell the person when something happens, never sleep, poll or loop: create a trigger with the `nexus` tool (`nexus trigger add`), which the person sees and can cancel, and load the skill `skill-nexus-trigger` first when it is installed.";
+
+/// The line appended to the system prompt when [`TRIGGER_TOOL`] is bridged, whether or not
+/// [`NEXUS_TOOL`] is too. One line, no newline.
+const ASK_TRIGGER_TOOL_TO_WAIT: &str = "Claude Code's session scheduler is off in this capsule. To wait for something, or to tell the person when something happens, never sleep, poll or loop: create a trigger with the `tool-nexus-trigger` tool (`\"op\": \"add\"`), which the person sees and can cancel, and load the skill `skill-nexus-trigger` first when it is installed.";
 
 // ── Launch constants ──────────────────────────────────────────────────────────
 
@@ -748,25 +757,29 @@ fn build_args(request: &LaunchRequest, config: &DriverConfig) -> Vec<String> {
     args
 }
 
-/// The `--system-prompt` value: the capsule's prompt, followed by [`ASK_NEXUS_TO_WAIT`] only
-/// when the bridge offers a tool named exactly [`TRIGGER_TOOL`]. A line naming a command the
-/// capsule cannot run would mislead it, so without that tool the prompt passes unchanged.
+/// The `--system-prompt` value: the capsule's prompt, followed by at most one line on how to
+/// ask Nexus to wait. A bridged tool named exactly [`TRIGGER_TOOL`] selects
+/// [`ASK_TRIGGER_TOOL_TO_WAIT`], even when [`NEXUS_TOOL`] is bridged too; otherwise one named
+/// exactly [`NEXUS_TOOL`] selects [`ASK_NEXUS_TO_WAIT`]. A line naming a tool the capsule cannot
+/// call would mislead it, so with neither the prompt passes unchanged.
 fn system_prompt_arg(request: &LaunchRequest) -> String {
-    let nexus_bridged = request
-        .bridge
-        .as_ref()
-        .is_some_and(|bridge| bridge.tool_names.iter().any(|name| name == TRIGGER_TOOL));
-    if !nexus_bridged {
-        return request.system_prompt.clone();
-    }
-    if request.system_prompt.trim().is_empty() {
-        return ASK_NEXUS_TO_WAIT.to_string();
-    }
-    format!(
-        "{}\n\n{}",
-        request.system_prompt.trim_end(),
+    let bridged = |wanted: &str| {
+        request
+            .bridge
+            .as_ref()
+            .is_some_and(|bridge| bridge.tool_names.iter().any(|name| name == wanted))
+    };
+    let line = if bridged(TRIGGER_TOOL) {
+        ASK_TRIGGER_TOOL_TO_WAIT
+    } else if bridged(NEXUS_TOOL) {
         ASK_NEXUS_TO_WAIT
-    )
+    } else {
+        return request.system_prompt.clone();
+    };
+    if request.system_prompt.trim().is_empty() {
+        return line.to_string();
+    }
+    format!("{}\n\n{}", request.system_prompt.trim_end(), line)
 }
 
 /// The model to pass to `--model`, or `none` to leave the choice to the harness.
@@ -2282,7 +2295,15 @@ mod tests {
         };
         let mut resumed = request();
         resumed.session.mode = SessionMode::Resume;
-        for request in [request(), bridged, resumed] {
+        let requests = [
+            request(),
+            bridged,
+            resumed,
+            request_with_tools(&["echo_tool", "nexus"]),
+            request_with_tools(&["echo_tool", "tool-nexus-trigger"]),
+            request_with_tools(&["echo_tool", "nexus", "tool-nexus-trigger"]),
+        ];
+        for request in requests {
             let plan = launch(request).expect("launch plans every request").plan;
             assert_eq!(
                 plan.env_set,
@@ -2293,12 +2314,7 @@ mod tests {
 
     /// A request whose bridge offers `bridge()`'s tools plus `extra`.
     fn request_with_extra_tool(extra: &str) -> LaunchRequest {
-        let mut bridge = bridge();
-        bridge.tool_names = vec!["echo_tool".to_string(), extra.to_string()];
-        LaunchRequest {
-            bridge: Some(bridge),
-            ..request()
-        }
+        request_with_tools(&["echo_tool", extra])
     }
 
     #[test]
@@ -2366,6 +2382,113 @@ mod tests {
         assert!(!ASK_NEXUS_TO_WAIT.contains('\n'));
         assert!(ASK_NEXUS_TO_WAIT.contains("nexus trigger add"));
         assert!(ASK_NEXUS_TO_WAIT.contains("skill-nexus-trigger"));
+    }
+
+    /// A request whose bridge offers exactly `tools`.
+    fn request_with_tools(tools: &[&str]) -> LaunchRequest {
+        let mut bridge = bridge();
+        bridge.tool_names = tools.iter().map(|name| name.to_string()).collect();
+        LaunchRequest {
+            bridge: Some(bridge),
+            ..request()
+        }
+    }
+
+    #[test]
+    fn a_bridged_trigger_tool_appends_the_trigger_tool_line() {
+        let expected = format!("{SYSTEM_PROMPT}\n\n{ASK_TRIGGER_TOOL_TO_WAIT}");
+        for mode in [SessionMode::New, SessionMode::Resume] {
+            let mut request = request_with_extra_tool("tool-nexus-trigger");
+            request.session.mode = mode;
+            let args = args_of(request);
+            assert_eq!(
+                value_after(&args, "--system-prompt").as_deref(),
+                Some(expected.as_str())
+            );
+            assert_eq!(
+                args.iter()
+                    .filter(|arg| arg.contains(ASK_TRIGGER_TOOL_TO_WAIT))
+                    .count(),
+                1
+            );
+            assert!(!args.iter().any(|arg| arg.contains(ASK_NEXUS_TO_WAIT)));
+            assert_eq!(
+                args.iter().filter(|arg| *arg == "--system-prompt").count(),
+                1
+            );
+            assert_eq!(args[args.len() - 2], "--system-prompt");
+        }
+    }
+
+    #[test]
+    fn both_tools_bridged_give_only_the_trigger_tool_line() {
+        let expected = format!("{SYSTEM_PROMPT}\n\n{ASK_TRIGGER_TOOL_TO_WAIT}");
+        for tools in [
+            ["echo_tool", "nexus", "tool-nexus-trigger"],
+            ["echo_tool", "tool-nexus-trigger", "nexus"],
+        ] {
+            let args = args_of(request_with_tools(&tools));
+            assert_eq!(
+                value_after(&args, "--system-prompt").as_deref(),
+                Some(expected.as_str())
+            );
+            assert_eq!(
+                args.iter()
+                    .filter(|arg| arg.contains(ASK_TRIGGER_TOOL_TO_WAIT))
+                    .count(),
+                1
+            );
+            assert!(!args.iter().any(|arg| arg.contains(ASK_NEXUS_TO_WAIT)));
+        }
+    }
+
+    #[test]
+    fn a_blank_system_prompt_with_the_trigger_tool_gives_the_line_alone() {
+        for tools in [
+            &["echo_tool", "tool-nexus-trigger"][..],
+            &["echo_tool", "nexus", "tool-nexus-trigger"][..],
+        ] {
+            let mut request = request_with_tools(tools);
+            request.system_prompt = "  \n".to_string();
+            let args = args_of(request);
+            assert_eq!(
+                value_after(&args, "--system-prompt").as_deref(),
+                Some(ASK_TRIGGER_TOOL_TO_WAIT)
+            );
+        }
+    }
+
+    #[test]
+    fn no_line_without_a_tool_named_exactly_tool_nexus_trigger() {
+        for near_miss in [
+            "Tool-nexus-trigger",
+            "tool-nexus-trigger-x",
+            "tool_nexus_trigger",
+            "local/tool-nexus-trigger",
+            "murmur/tool-nexus-trigger",
+            "mcp__claude_bridge__tool-nexus-trigger",
+        ] {
+            let args = args_of(request_with_extra_tool(near_miss));
+            assert_eq!(
+                value_after(&args, "--system-prompt").as_deref(),
+                Some(SYSTEM_PROMPT)
+            );
+            // A near miss beside `nexus` falls back to the `nexus` line, never the tool line.
+            let args = args_of(request_with_tools(&["echo_tool", "nexus", near_miss]));
+            assert_eq!(
+                value_after(&args, "--system-prompt"),
+                Some(format!("{SYSTEM_PROMPT}\n\n{ASK_NEXUS_TO_WAIT}"))
+            );
+        }
+    }
+
+    #[test]
+    fn the_trigger_tool_line_is_one_line_naming_the_tool_and_the_skill() {
+        assert!(!ASK_TRIGGER_TOOL_TO_WAIT.contains('\n'));
+        assert!(ASK_TRIGGER_TOOL_TO_WAIT.contains("`tool-nexus-trigger`"));
+        assert!(ASK_TRIGGER_TOOL_TO_WAIT.contains(r#"`"op": "add"`"#));
+        assert!(ASK_TRIGGER_TOOL_TO_WAIT.contains("skill-nexus-trigger"));
+        assert!(!ASK_TRIGGER_TOOL_TO_WAIT.contains("nexus trigger add"));
     }
 
     // ── Scenario 9 — reading one line at a time ───────────────────────────────

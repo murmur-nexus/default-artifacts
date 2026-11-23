@@ -190,21 +190,37 @@ murmur-nexus `main` from #218 on, which no nexus release holds yet; an older `ne
 ## skill-nexus-trigger
 
 Hand a wait to Nexus instead of waiting yourself: when to create a trigger, never to sleep, poll,
-loop or use a scheduler of one's own, how to write the check command, when to add `--wake` and
+loop or use a scheduler of one's own, how to write the check command, when to add `wake` and
 which form to prefer, that a trigger an agent creates waits for the person's approval before its
 first check, and how to read the `[trigger: <label>]` message a fire sends back. It names no
 harness, provider or harness tool, so it holds under every driver.
 
-`nexus trigger` comes from nexus, not from this skill, and no nexus release has it yet: as of this
-release murmur-nexus `main` holds neither the trigger commands nor `--wake` and the clock sources.
-The skill's command lines follow murmur-nexus's design for both. The skill tells the agent that
-`nexus trigger add --help` wins on flags where the two differ. An older `nexus` reads
-`nexus trigger …` as a request to open its window in the current folder: it starts its full-screen
-app there and writes `murmur.yaml`, `murmur.lock`, `instructions.md`, `compaction.md` and
-`.murmur/` into the folder. Install this skill only beside a `nexus` that lists `trigger` in
-`nexus --help`.
+It teaches calls to [`tool-nexus-trigger`](../tools/tool-nexus-trigger/README.md), and the
+`nexus trigger` commands for an agent with only a shell. Both need a `nexus` that has the trigger
+commands and the trigger inbox protocol v1: murmur-nexus `main` from `1a8aba3` (#239). No nexus
+release has them yet. The tool's answer comes from a Nexus window open on the work folder, so with
+no window open the tool says no Nexus window answered and no trigger is created. An older `nexus`
+reads `nexus trigger …` as a request to open its window in the current folder: it starts its
+full-screen app there and writes `murmur.yaml`, `murmur.lock`, `instructions.md`, `compaction.md`
+and `.murmur/` into the folder. Teach the shell commands only beside a `nexus` that lists `trigger`
+in `nexus --help`.
 
-0.1.0 is the first release. It teaches:
+0.2.0 teaches tool calls in place of shell commands, so a capsule holding only the tool and this
+skill can ask Nexus to wait. What changed from 0.1.0:
+
+| What | Why it matters |
+|---|---|
+| Tool calls in place of commands: `add`, `list`, `show` and `cancel` as `tool-nexus-trigger` calls, with the tool's field names (`label`, `every`, `for`, `until`, `wake`, `at`, `cron`, `scope`, `id`, `yes`). The check is one string, `until`, run by a shell on the host; cancelling takes `"yes": true`. The tool's description and refusals win on fields | The agent needs no shell grant, and every example is a call the tool accepts |
+| The check runs from the work folder, so paths may be relative to it, or absolute as the host sees them. No `pwd` step | A tool-only agent has no shell to run `pwd` in, and a relative path is the same on the host and in the agent's view |
+| The light grant: the capsule section's manifest entry is the tool, scoped to `.nexus/triggers/inbox`, with no shell grant and no version pinned | The Node.js, OpenSSL and staged-runtime grants of 0.1.0 are no longer the way in |
+| A short `## Without the tool: the nexus command` section maps each call to `nexus trigger add --until`, `list`, `show` and `cancel --yes`, with `-w` and `--help`; with neither the tool nor the command the agent says it cannot set up the wait | An agent in a person's own shell still works, and an agent with neither does not wait on its own |
+| Run scope: by default a trigger runs while a Nexus window is open on the folder or a transit daemon runs for it; `"scope": "session"` ends it with the approving window. A wake prompts the session in the approving window | 0.1.0 said a trigger lives only while the window is open, which murmur-nexus no longer does |
+| The two no-answer outcomes: no Nexus window answered, so no trigger exists; a window took the request but did not answer, so call `list` before trying again | The agent never reports a trigger that does not exist, and never adds a duplicate after a timeout |
+
+The approval rule, the example reply ("starts once you approve it") and the
+`[trigger: <label>]` section are unchanged; the last is byte for byte 0.1.0's.
+
+0.1.0 was the first release. It taught:
 
 | What | Why it matters |
 |---|---|
