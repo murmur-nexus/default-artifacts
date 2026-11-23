@@ -61,7 +61,7 @@ capabilities:
 artifacts:
   - name: murmur/driver-claude-code
     runtime: driver
-    version: "0.12.0"
+    version: "0.13.0"
 ```
 
 The harness starts from an **empty** environment and sees exactly the variables
@@ -228,14 +228,41 @@ without the variable. None of them lists `Bash`, `CronCreate`, `CronList`, `Cron
 `Monitor` or `ScheduleWakeup`. The switch covers a `claude` that offers deferred or new tools
 despite `--tools`, and a durable cron task left on disk.
 
-When the capsule's bridge offers a tool whose bare name is exactly `nexus`, the driver appends
-this line to the `--system-prompt` value, after a blank line:
+The driver appends at most one line to the `--system-prompt` value, after a blank line, chosen
+by the bare names in the capsule's bridge:
+
+| Bridge offers | Line appended |
+|---|---|
+| `tool-nexus-trigger`, with or without `nexus` | The trigger tool line |
+| `nexus`, and no `tool-nexus-trigger` | The `nexus` line |
+| Neither | None: the argv is exactly what it was before either line existed |
+
+The trigger tool line:
+
+```
+Claude Code's session scheduler is off in this capsule. To wait for something, or to tell the person when something happens, never sleep, poll or loop: create a trigger with the `tool-nexus-trigger` tool (`"op": "add"`), which the person sees and can cancel, and load the skill `skill-nexus-trigger` first when it is installed.
+```
+
+The `nexus` line:
 
 ```
 Claude Code's session scheduler is off in this capsule. To wait for something, or to tell the person when something happens, never sleep, poll or loop: create a trigger with the `nexus` tool (`nexus trigger add`), which the person sees and can cancel, and load the skill `skill-nexus-trigger` first when it is installed.
 ```
 
-That tool exists when the capsule grants the `nexus` shell binary:
+The trigger tool is the light grant: one tool entry scoped to the work folder's trigger inbox, and
+no shell grant.
+
+```yaml
+artifacts:
+  - name: murmur/tool-nexus-trigger
+    runtime: tool
+    capabilities:
+      filesystem:
+        scope: .nexus/triggers/inbox
+```
+
+The `nexus` tool exists when the capsule grants the `nexus` shell binary, which also needs the
+grants Node.js needs to start under `scoped` or `sealed`:
 
 ```yaml
 capabilities:
@@ -243,14 +270,21 @@ capabilities:
     allow: [nexus]
 ```
 
-The match is exact and case-sensitive: `Nexus`, `nexus-relay` or `nexus_x` does not add the
-line. With a blank system prompt the line is the whole value. Without a `nexus` tool the argv is
-exactly what it was before the line existed, because a line naming a command the capsule cannot
-run would mislead it.
+Each match is exact and case-sensitive:
+
+| Near miss | Line |
+|---|---|
+| `Nexus`, `nexus-relay`, `nexus_x`, `mcp__claude_bridge__nexus` | No `nexus` line |
+| `Tool-nexus-trigger`, `tool-nexus-trigger-x`, `tool_nexus_trigger`, `local/tool-nexus-trigger`, `murmur/tool-nexus-trigger`, `mcp__claude_bridge__tool-nexus-trigger` | No trigger tool line |
+
+With a blank system prompt the chosen line is the whole value. A line naming a tool the capsule
+cannot call would mislead it, so with neither tool there is no line.
 
 The skill `skill-nexus-trigger` teaches the model how to write the trigger. Install it beside
-this driver. `nexus trigger` needs a `nexus` that lists `trigger` in `nexus --help`, which no nexus
-release does yet; see [skills/README.md](../../skills/README.md#skill-nexus-trigger).
+this driver. The trigger tool answers only while a Nexus window is open on the work folder, and
+needs a `nexus` with the trigger inbox protocol v1 (murmur-nexus `main` from `1a8aba3`), which no
+nexus release has yet; see [tool-nexus-trigger](../../tools/tool-nexus-trigger/README.md) and
+[skills/README.md](../../skills/README.md#skill-nexus-trigger).
 
 ## The argv this driver produces
 
@@ -287,8 +321,9 @@ claude --print --output-format stream-json --verbose
 - `--permission-mode bypassPermissions` is safe because the bridge already enforces the
   capsule's capabilities on every tool call; a second interactive approval inside the harness
   would only deadlock a headless run.
-- `--system-prompt` carries the capsule's prompt, followed by the
-  [instruction line](#waiting-goes-through-nexus) only when `nexus` is a bridged tool.
+- `--system-prompt` carries the capsule's prompt, followed by at most one
+  [instruction line](#waiting-goes-through-nexus): the trigger tool line when
+  `tool-nexus-trigger` is a bridged tool, else the `nexus` line when `nexus` is one.
 
 The task goes out as one newline-terminated JSON line on stdin:
 

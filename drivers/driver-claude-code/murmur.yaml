@@ -1,5 +1,5 @@
 name: driver-claude-code
-version: 0.12.0
+version: 0.13.0
 runtime: driver
 description: |
   Process driver for Claude Code. It tells a `transport: process` capsule how to drive the
@@ -53,10 +53,11 @@ description: |
 
   The driver sets one variable in `claude`'s environment, `CLAUDE_CODE_DISABLE_CRON=1`, which
   turns off its session scheduler: a scheduled task belongs to one `claude` process, the runtime
-  runs one per turn, and Nexus never sees it. When the capsule grants the `nexus` shell binary
-  (`capabilities.shell.allow: [nexus]`), the driver appends one line to the system prompt telling
-  the model to ask Nexus to wait with `nexus trigger add` instead; the skill `skill-nexus-trigger`
-  teaches how.
+  runs one per turn, and Nexus never sees it. When the capsule grants the tool
+  `tool-nexus-trigger`, the driver appends one line to the system prompt telling the model to ask
+  Nexus to wait by creating a trigger with that tool instead. When it grants only the `nexus`
+  shell binary (`capabilities.shell.allow: [nexus]`), that line names `nexus trigger add`, as
+  before. It never appends more than one line, and the skill `skill-nexus-trigger` teaches how.
 
   An image in a tool result is reported in the feed as `[image: <media type>, <n> bytes]`, never
   as its bytes; whether the model saw it is up to `claude`.
