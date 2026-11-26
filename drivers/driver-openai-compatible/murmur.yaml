@@ -1,0 +1,15 @@
+name: driver-openai-compatible
+version: 0.1.0
+runtime: driver
+description: "Self-hosted OpenAI compatible server driver (vLLM and others) — any model the server serves, its id passed through unchanged, on chat completions with tool calls or plain completions, with surface, structured_outputs and temperature config keys"
+requires_files:
+  - driver_openai_compatible.wasm
+
+# How this provider expects the inference credential to be presented; the runtime substitutes {key}.
+upstream_auth:
+  header: Authorization
+  value: "Bearer {key}"
+
+# No models: block. The operator chooses and serves the model, so the driver knows none of its
+# limits: a capsule sets inference.max_tokens (the output cap) and context.max_tokens (the
+# server's --max-model-len) itself.
