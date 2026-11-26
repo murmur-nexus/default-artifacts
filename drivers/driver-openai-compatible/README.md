@@ -98,6 +98,10 @@ An empty or whitespace-only id is refused before any request is built:
 driver: inference.model is empty: driver-openai-compatible sends the model id to the server unchanged, so it must be an id the server serves (its GET /models lists them)
 ```
 
+A current `mur` refuses a blank `inference.model` itself when it loads the
+manifest (`E-MAN-003 … 'inference.model': missing required field`), so this
+message appears only when a runtime hands the driver an empty id anyway.
+
 A server that refuses the model — its error's `param` is `"model"`, or it
 answers `404` with a message naming the id — fails the call with:
 

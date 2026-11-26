@@ -192,11 +192,8 @@ enum MurmurContentBlock {
         text: String,
     },
     // Reasoning this driver returned on an earlier turn. Declared so it deserializes; it is
-    // never sent back, on either surface.
-    Thinking {
-        #[allow(dead_code)]
-        text: String,
-    },
+    // never sent back, on either surface, so its text is never read.
+    Thinking {},
     // Declared so that it is recognised and refused by name: this driver sends text only. Its
     // source is never read.
     Image {},
@@ -682,14 +679,7 @@ fn json_error_failure(error: &Value) -> Failure {
 /// id went through unchanged; any other `404` points at `gateway.endpoint`.
 fn status_failure(status: u16, body: &str, model: &str, path: &str) -> Failure {
     let parsed = serde_json::from_str::<Value>(body).ok();
-    let error = parsed.as_ref().and_then(|value| {
-        value
-            .get("error")
-            .filter(|error| error.is_object())
-            .or_else(|| {
-                (value.get("object").and_then(Value::as_str) == Some("error")).then_some(value)
-            })
-    });
+    let error = parsed.as_ref().and_then(carried_error);
     let names_model = error.is_some_and(|error| {
         error.get("param").and_then(Value::as_str) == Some("model")
             || (status == 404
