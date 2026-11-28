@@ -117,7 +117,9 @@ jobs:
             echo "no earlier tag, nothing to compare"
             exit 0
           fi
-          moved=$(git diff "$prev" "$TAG" -U0 -- '*murmur.yaml' '*SKILL.md' | grep -cE '^\+ *version:' || true)
+          # --no-renames: an artifact renamed at an unchanged version is a new name, so its
+          # murmur.yaml must read as added, not as a rename with no version line moved.
+          moved=$(git diff --no-renames "$prev" "$TAG" -U0 -- '*murmur.yaml' '*SKILL.md' | grep -cE '^\+ *version:' || true)
           echo "artifact version lines changed since $prev: $moved"
           if [ "$moved" = 0 ]; then
             echo "::error::$TAG adds no new artifact version since $prev, so there is nothing to pack, index or attest. Bump the version of an artifact that changed, or do not tag."
