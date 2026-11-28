@@ -37,11 +37,11 @@ WASM components (`runtime: driver`). Export `murmur:tool/run` (`world driver`) a
 | `driver-huggingface` | `drivers/driver-huggingface/` | Hugging Face Inference Providers router Chat Completions — open models pinned to one backend each as `<org>/<model>:<provider>` (`openai/gpt-oss-120b:groq`, `Qwen/Qwen3.8-27B:cerebras`); a bare model name, the router's `:fastest`, `:cheapest` and `:preferred` policies and any unlisted id are refused; reasoning effort and reasoning replay are tuned by `inference.driver.config` wherever the backend documents them, which rejects any key it does not read |
 | `driver-moonshotai` | `drivers/driver-moonshotai/` | Moonshot AI Chat Completions API — the K3 models `kimi-k3.1-pro`, `kimi-k3.1-pro-highspeed` and `kimi-k3`, and the K2 models `kimi-k2.7-code`, `kimi-k2.7-code-highspeed` and `kimi-k2.6`, which Moonshot retires by the end of December 2026; reasoning effort (K3), the thinking switch (`kimi-k2.6`) and `json_schema` structured output are tuned by `inference.driver.config`, which rejects any key it does not read or the model cannot honour |
 | `driver-openai` | `drivers/driver-openai/` | OpenAI API — sends each model it lists to the Responses or Chat Completions endpoint that model's page lists, and refuses any other model; reasoning summaries, effort and verbosity are tuned by `inference.driver.config`, which rejects any key it does not read. Sizes each image to the model's dimension and patch limits, and sends a tool's image in its `function_call_output` (Responses) or in a user message after the tool messages (Chat Completions). Offers a computer tool (`provider_tool: {kind: computer}`) as OpenAI's `computer` tool on Responses models that list it, running each `computer_call` as an ordered group of tool calls |
-| `driver-openai-compatible` | `drivers/driver-openai-compatible/` | A self-hosted OpenAI compatible server such as vLLM — any model id the server serves, passed through unchanged with no model table; Chat Completions with tool calls and reasoning, or Completions with one plain prompt string, chosen by `surface`; `structured_outputs` (constrained output) and `temperature` are forwarded from `inference.driver.config`, which rejects any other key; keyless or with a key |
+| `driver-vllm` | `drivers/driver-vllm/` | A self-hosted vLLM server — any model id the server serves, passed through unchanged with no model table; Chat Completions with tool calls and reasoning, or Completions with one plain prompt string, chosen by `surface`; `structured_outputs` (constrained output) and `temperature` are forwarded from `inference.driver.config`, which rejects any other key; keyless or with a key |
 | `driver-xai` | `drivers/driver-xai/` | xAI Responses API — `grok-4.7`, `grok-4.6` and `grok-build-0.1` on an xAI API key, and any other model is refused; stateless, with response storage at xAI off, the whole history resent and each turn's encrypted reasoning sent back on later turns; reasoning effort and `json_schema` structured output are tuned by `inference.driver.config`, which rejects any key it does not read or the model cannot honour; refuses image blocks |
 | `driver-zai` | `drivers/driver-zai/` | Z.ai Chat Completions API — `glm-5.3` only, which always reasons; reasoning effort is tuned by `inference.driver.config`, which rejects any key it does not read; the reasoning goes back to Z.ai on every later turn unless the capsule sets `replay_reasoning: false` |
 
-All nine report the provider's own token counts on an optional top-level `usage` object of the response — `input_tokens`, `output_tokens`, `cached_tokens`, `cache_write_tokens` — which Murmur carries onto the `inference` trace event. `input_tokens` counts only the request tokens neither read from nor written to the prompt cache, so `input_tokens + cached_tokens + cache_write_tokens` is the provider's total request count, whichever way the provider itself splits it. Each member is independently optional and is omitted, never zero-filled, when the provider did not report it. Murmur also sends a `prompt_cache_key` routing hint: `driver-openai` and `driver-xai` forward it into the provider body, `driver-baseten` sends a SHA-256 of it as Baseten's `x-session-affinity` header, and the other six drop it, because none of those provider APIs, nor the self-hosted servers `driver-openai-compatible` reaches, defines a cache-key field. See each driver's own README for the per-provider field mapping.
+All nine report the provider's own token counts on an optional top-level `usage` object of the response — `input_tokens`, `output_tokens`, `cached_tokens`, `cache_write_tokens` — which Murmur carries onto the `inference` trace event. `input_tokens` counts only the request tokens neither read from nor written to the prompt cache, so `input_tokens + cached_tokens + cache_write_tokens` is the provider's total request count, whichever way the provider itself splits it. Each member is independently optional and is omitted, never zero-filled, when the provider did not report it. Murmur also sends a `prompt_cache_key` routing hint: `driver-openai` and `driver-xai` forward it into the provider body, `driver-baseten` sends a SHA-256 of it as Baseten's `x-session-affinity` header, and the other six drop it, because none of those provider APIs, nor the self-hosted servers `driver-vllm` reaches, defines a cache-key field. See each driver's own README for the per-provider field mapping.
 
 All nine also take the endpoint they talk to from the host, in
 `MURMUR_INFERENCE_ENDPOINT`, and none of them carries a provider URL of its own.
@@ -69,7 +69,7 @@ see above) refuses a driver release built before it at launch, with `E-WIT-LEVEL
 | `driver-huggingface` | 0.1.0 |
 | `driver-moonshotai` | 0.7.0 |
 | `driver-openai` | 0.9.0 |
-| `driver-openai-compatible` | 0.1.0 |
+| `driver-vllm` | 0.1.0 |
 | `driver-xai` | 0.1.0 |
 | `driver-zai` | 0.1.0 |
 
@@ -89,7 +89,7 @@ leaves them unset, and compacts against the input budget,
 `min(max_input_tokens, context_window − output cap)`. A model a driver does not list still needs
 `inference.max_tokens`, or the launch is refused with `E-RUN-052`, and needs `context.max_tokens`
 for compaction to run; `driver-baseten`, `driver-deepseek`, `driver-huggingface`, `driver-moonshotai`,
-`driver-openai`, `driver-xai` and `driver-zai` then refuse it on the first inference call. `driver-openai-compatible` declares no `models:`: it passes any model id through to the server
+`driver-openai`, `driver-xai` and `driver-zai` then refuse it on the first inference call. `driver-vllm` declares no `models:`: it passes any model id through to the server
 unchanged, so its capsules set `inference.max_tokens` and `context.max_tokens` themselves (its
 README, "Model scope"). Each other driver's README lists its models, the numbers and their sources,
 and the models it accepts without declaring or refuses:
@@ -254,7 +254,7 @@ Hooks and process drivers did not move.
 | `driver-huggingface` | 0.2.0 |
 | `driver-moonshotai` | 0.19.0 |
 | `driver-openai` | 0.22.0 |
-| `driver-openai-compatible` | 0.1.0 |
+| `driver-vllm` | 0.1.0 |
 | `driver-xai` | 0.2.0 |
 | `driver-zai` | 0.10.0 |
 | `tool-browser` | 0.6.0 |
@@ -310,7 +310,7 @@ serves level 3. Hooks and process drivers did not move.
 | `driver-huggingface` | 0.1.0 |
 | `driver-moonshotai` | 0.16.0 |
 | `driver-openai` | 0.18.0 |
-| `driver-openai-compatible` | 0.1.0 |
+| `driver-vllm` | 0.1.0 |
 | `driver-xai` | 0.1.0 |
 | `driver-zai` | 0.7.0 |
 | `tool-code-graph` | 0.7.0 |

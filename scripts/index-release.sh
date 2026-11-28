@@ -5,7 +5,8 @@
 # resolves to this repository), and lists every version of every artifact: the ones
 # packed into <release-dir> by this release, merged with every version the previous
 # release's index already carried. `mur install` reads the index of the latest
-# release only, so a version not carried forward here stops being installable.
+# release only, so a version not carried forward here stops being installable. A name
+# listed in scripts/retired-artifacts.txt is not carried forward on purpose.
 #
 # A version is a promise about bytes. `mur install` writes a payload's sha256 into
 # the consumer's murmur.lock and a store that holds <name>/<version> never fetches
@@ -84,6 +85,25 @@ if [ -n "$PREVIOUS" ]; then
         exit 1
     fi
     cp "$PREVIOUS" "$WORK/previous.json"
+
+    # Drop every name scripts/retired-artifacts.txt lists, so the merge does not carry it
+    # forward. The bytes gate compares only versions both indexes hold, so a dropped name
+    # never trips it. A retired name still in this checkout is a mistake: refuse it.
+    retired="$(sed -e 's/#.*//' -e 's/[[:space:]]//g' "$SCRIPT_DIR/retired-artifacts.txt" | grep -v '^$' || true)"
+    if [ -n "$retired" ]; then
+        live="$(bash "$SCRIPT_DIR/list-artifacts.sh" | cut -f2)"
+        clash="$(comm -12 <(sort -u <<< "$retired") <(sort -u <<< "$live"))"
+        if [ -n "$clash" ]; then
+            echo "error: retired-artifacts.txt names an artifact this checkout still builds: $(paste -sd ' ' - <<< "$clash")" >&2
+            exit 1
+        fi
+        jq --indent 2 --argjson drop "$(jq -R . <<< "$retired" | jq -s .)" \
+            '.artifacts |= map(select(.name as $n | $drop | index($n) | not))' \
+            "$WORK/previous.json" > "$WORK/previous.filtered.json"
+        mv "$WORK/previous.filtered.json" "$WORK/previous.json"
+        echo "Dropping retired artifact(s) from the previous index: $(paste -sd ' ' - <<< "$retired")"
+    fi
+
     merge=(--merge "$WORK/previous.json")
     echo "Merging the previous index $PREVIOUS (copied to $WORK/previous.json)."
 fi

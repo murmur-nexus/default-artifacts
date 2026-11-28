@@ -1,5 +1,5 @@
 [package]
-name = "driver-openai-compatible"
+name = "driver-vllm"
 version = "0.0.0"
 edition.workspace = true
 license.workspace = true
@@ -15,7 +15,7 @@ murmur-driver-env = { path = "../../libs/murmur-driver-env" }
 murmur-driver-stream = { path = "../../libs/murmur-driver-stream" }
 murmur-wasi-http = { path = "../../libs/murmur-wasi-http" }
 
-# tempfile gives tests/mur_run_fake_openai_compatible.rs scratch directories, and serde_norway
+# tempfile gives tests/mur_run_fake_vllm.rs scratch directories, and serde_norway
 # parses murmur.yaml in the test that keeps it free of a models: block. A `[dev-dependencies]`
 # entry is excluded from the cdylib the component is built from.
 [dev-dependencies]

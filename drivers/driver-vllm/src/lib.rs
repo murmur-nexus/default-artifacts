@@ -253,7 +253,7 @@ fn request_path(url: &str) -> &str {
 fn preflight_request(request: &MurmurRequest, surface: Surface) -> Result<(), String> {
     if request.model.trim().is_empty() {
         return Err(
-            "driver: inference.model is empty: driver-openai-compatible sends the model \
+            "driver: inference.model is empty: driver-vllm sends the model \
                     id to the server unchanged, so it must be an id the server serves (its GET \
                     /models lists them)"
                 .to_string(),
@@ -266,10 +266,7 @@ fn preflight_request(request: &MurmurRequest, surface: Surface) -> Result<(), St
             .any(|block| matches!(block, MurmurContentBlock::Image { .. }))
     });
     if has_image {
-        return Err(
-            "driver: driver-openai-compatible sends text only and refuses an image block"
-                .to_string(),
-        );
+        return Err("driver: driver-vllm sends text only and refuses an image block".to_string());
     }
     if surface == Surface::Completions {
         for (index, message) in request.messages.iter().enumerate() {
@@ -693,7 +690,7 @@ fn status_failure(status: u16, body: &str, model: &str, path: &str) -> Failure {
     let message = if names_model {
         format!(
             "driver: the server refused model '{model}': HTTP {status}: {shown} — \
-             driver-openai-compatible sends inference.model unchanged; use an id the server's \
+             driver-vllm sends inference.model unchanged; use an id the server's \
              GET /models lists (vLLM: --served-model-name)"
         )
     } else if status == 404 {
@@ -1139,9 +1136,9 @@ mod wasm_driver {
         }
     }
 
-    pub struct OpenAiCompatibleDriver;
+    pub struct VllmDriver;
 
-    impl exports::murmur::tool::run::Guest for OpenAiCompatibleDriver {
+    impl exports::murmur::tool::run::Guest for VllmDriver {
         fn run(
             input: exports::murmur::tool::run::ToolInput,
         ) -> exports::murmur::tool::run::ToolResult {
@@ -1445,7 +1442,7 @@ mod wasm_driver {
         Ok((scheme, authority, path))
     }
 
-    export!(OpenAiCompatibleDriver);
+    export!(VllmDriver);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1820,7 +1817,7 @@ mod tests {
 
     // ── Model id ──────────────────────────────────────────────────────────────
 
-    const EMPTY_MODEL: &str = "driver: inference.model is empty: driver-openai-compatible sends \
+    const EMPTY_MODEL: &str = "driver: inference.model is empty: driver-vllm sends \
                                the model id to the server unchanged, so it must be an id the \
                                server serves (its GET /models lists them)";
 
@@ -1895,7 +1892,7 @@ mod tests {
         for config in [DriverConfig::default(), completions()] {
             assert_eq!(
                 refusal(&image_request(MODEL), &config),
-                "driver: driver-openai-compatible sends text only and refuses an image block"
+                "driver: driver-vllm sends text only and refuses an image block"
             );
         }
     }
@@ -2946,7 +2943,7 @@ mod tests {
     fn model_refusal(model: &str, status: u16, body: &str) -> String {
         format!(
             "driver: the server refused model '{model}': HTTP {status}: {body} — \
-             driver-openai-compatible sends inference.model unchanged; use an id the server's \
+             driver-vllm sends inference.model unchanged; use an id the server's \
              GET /models lists (vLLM: --served-model-name)"
         )
     }
@@ -3182,7 +3179,8 @@ mod tests {
             concat!("local", "host"),
             concat!("127.0", ".0.1"),
             concat!("0.0", ".0.0"),
-            concat!("vl", "lm"),
+            // A vLLM host as a URL authority; the bare word is this driver's own name.
+            concat!("://", "vl", "lm"),
             concat!(":80", "00"),
             concat!(":114", "34"),
             concat!("open", "ai.com"),
@@ -3375,7 +3373,7 @@ mod tests {
         ] {
             assert!(
                 !non_test.contains(needle),
-                "driver-openai-compatible: non-test source must not contain {needle}"
+                "driver-vllm: non-test source must not contain {needle}"
             );
         }
     }
@@ -3388,7 +3386,7 @@ mod tests {
         const BLOCK: &str = "upstream_auth:\n  header: Authorization\n  value: \"Bearer {key}\"\n";
         assert!(
             include_str!("../murmur.yaml").contains(BLOCK),
-            "drivers/driver-openai-compatible/murmur.yaml must contain verbatim:\n{BLOCK}"
+            "drivers/driver-vllm/murmur.yaml must contain verbatim:\n{BLOCK}"
         );
     }
 
@@ -3415,7 +3413,7 @@ mod tests {
         );
         assert_eq!(
             manifest.get("name").and_then(|v| v.as_str()),
-            Some("driver-openai-compatible")
+            Some("driver-vllm")
         );
         assert_eq!(
             manifest.get("runtime").and_then(|v| v.as_str()),
@@ -3428,7 +3426,7 @@ mod tests {
     fn readme_manifest_example_pins_the_version_in_murmur_yaml() {
         let readme = include_str!("../README.md");
         let pin = format!(
-            "  - name: murmur/driver-openai-compatible\n    version: \"{}\"\n",
+            "  - name: murmur/driver-vllm\n    version: \"{}\"\n",
             manifest_version()
         );
         assert!(

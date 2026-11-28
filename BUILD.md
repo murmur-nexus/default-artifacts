@@ -138,7 +138,7 @@ For a tool's write destinations (`format: murmur-destination`) and a driver's `u
 block, see murmur's [manifest reference](https://docs.murmur.nexus/reference/manifest/).
 
 An HTTP driver also declares a top-level `models:` block in its `murmur.yaml` — every one but
-`driver-openai-compatible`, which serves whatever model the operator's server serves: one entry per
+`driver-vllm`, which serves whatever model the operator's server serves: one entry per
 exact model id, holding `max_output_tokens` and `context_window`, and `max_input_tokens` when the
 provider documents an input ceiling below the window. Each is an integer from 1 to 4294967295, and
 `max_input_tokens` is below `context_window`. The README's "Model limits" table carries all three,
@@ -153,7 +153,7 @@ agrees with the driver's README and with any `SUPPORTED_MODELS` or `MODEL_ROUTES
 | `driver-openai` | a `MODEL_ROUTES` row with its endpoint, a `models:` entry, a "Model limits" row and an "Endpoints" row |
 | `driver-deepseek` | the id in `SUPPORTED_MODELS`, a `models:` entry and a "Model limits" row |
 | `driver-huggingface` | a `SUPPORTED_MODELS` entry with its limits, reasoning field, effort values and replay support, and a quoted `models:` entry; its README states the limits under "Model scope" |
-| `driver-openai-compatible` | nothing: it has no model table and passes any model id through to the server unchanged; the capsule sets `inference.max_tokens` and `context.max_tokens` |
+| `driver-vllm` | nothing: it has no model table and passes any model id through to the server unchanged; the capsule sets `inference.max_tokens` and `context.max_tokens` |
 | `driver-moonshotai` | a `SUPPORTED_MODELS` entry with its limits and its `ThinkingControl`, a `models:` entry and a "Model limits" row |
 | `driver-xai` | a `SUPPORTED_MODELS` entry with its limits and its `EffortRule` (`Effort { values, default }` or `NoEffort`, from the model's page at `https://docs.x.ai/developers/models/<id>.md`), a `models:` entry and a "Model limits" row citing the source and the date read |
 | `driver-zai` | a `SUPPORTED_MODELS` entry with its limits and a `models:` entry; its README states the limits under "Model scope" |

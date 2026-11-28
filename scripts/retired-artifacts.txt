@@ -1,0 +1,10 @@
+# Artifact names index-release.sh drops from the previous release's index before merging,
+# so no later release's artifacts-index.json lists them. One name per line; `#` starts a
+# comment. A retired name must not also be an artifact in this checkout.
+#
+# Retiring a name stops `mur install murmur/<name>@<version>` resolving it from the latest
+# release. A consumer whose store already holds the payload keeps it; the release that
+# published it still carries its assets.
+
+# Shipped once, in v0.47.0, and renamed driver-vllm in v0.48.0.
+driver-openai-compatible

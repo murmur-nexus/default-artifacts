@@ -9,7 +9,7 @@ members = [
   "drivers/driver-huggingface",
   "drivers/driver-moonshotai",
   "drivers/driver-openai",
-  "drivers/driver-openai-compatible",
+  "drivers/driver-vllm",
   "drivers/driver-xai",
   "drivers/driver-zai",
   "hooks/hook-command-guard",

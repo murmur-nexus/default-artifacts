@@ -1,8 +1,10 @@
-# driver-openai-compatible
+# driver-vllm
 
-Inference driver for Murmur agent capsules that run on a self-hosted OpenAI
-compatible server — vLLM, or anything else that speaks `/v1/chat/completions`
-and `/v1/completions` — with whatever model that server serves.
+Inference driver for Murmur agent capsules that run on a self-hosted vLLM
+server, with whatever model that server serves. It speaks the OpenAI-shaped
+`/v1/chat/completions` and `/v1/completions` APIs vLLM exposes, so another
+server that speaks them can work too, but `structured_outputs` is vLLM's own
+request field and another server may ignore or refuse it.
 
 WASM component (`runtime: driver`, world `driver`, exports `murmur:tool/run`).
 Translates between the Murmur canonical inference format and the OpenAI-shaped
@@ -30,7 +32,7 @@ set but empty`. Neither reaches the network. Requests go to
 
 ```yaml
 artifacts:
-  - name: murmur/driver-openai-compatible
+  - name: murmur/driver-vllm
     version: "0.1.0"
     runtime: driver
     gateway:
@@ -42,7 +44,7 @@ inference:
   model: llama31-8b-instruct               # whatever `GET /v1/models` lists; passed through unchanged
   max_tokens: 1024                         # required: the driver declares no model limits
   driver:
-    artifact: murmur/driver-openai-compatible
+    artifact: murmur/driver-vllm
     config:
       surface: chat                        # or completions
       temperature: 1
@@ -95,7 +97,7 @@ model allows.
 An empty or whitespace-only id is refused before any request is built:
 
 ```text
-driver: inference.model is empty: driver-openai-compatible sends the model id to the server unchanged, so it must be an id the server serves (its GET /models lists them)
+driver: inference.model is empty: driver-vllm sends the model id to the server unchanged, so it must be an id the server serves (its GET /models lists them)
 ```
 
 A current `mur` refuses a blank `inference.model` itself when it loads the
@@ -106,7 +108,7 @@ A server that refuses the model — its error's `param` is `"model"`, or it
 answers `404` with a message naming the id — fails the call with:
 
 ```text
-driver: the server refused model '<model>': HTTP <status>: <body> — driver-openai-compatible sends inference.model unchanged; use an id the server's GET /models lists (vLLM: --served-model-name)
+driver: the server refused model '<model>': HTTP <status>: <body> — driver-vllm sends inference.model unchanged; use an id the server's GET /models lists (vLLM: --served-model-name)
 ```
 
 Any other `404` means the request reached no route at all, which is almost
@@ -404,7 +406,7 @@ Other refusals before any request:
 
 | Request | Refused with |
 |---|---|
-| an `image` block in any message | `driver: driver-openai-compatible sends text only and refuses an image block` |
+| an `image` block in any message | `driver: driver-vllm sends text only and refuses an image block` |
 | a `tool` message with no `tool_call_id` (chat) | `driver: tool message is missing required field 'tool_call_id'` |
 | a message role other than `user`, `assistant` or `tool` | `driver: unsupported message role '<role>'` |
 

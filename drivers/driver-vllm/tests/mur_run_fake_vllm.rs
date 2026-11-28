@@ -1,4 +1,4 @@
-//! driver-openai-compatible proved in the component under a real `mur run`, against a loopback
+//! driver-vllm proved in the component under a real `mur run`, against a loopback
 //! fake OpenAI compatible server.
 //!
 //! The unit tests in `src/lib.rs` drive `process_sse_line` and the host-side body parser, neither
@@ -15,7 +15,7 @@
 //! or `PATH`, and a run that finds neither fails rather than skipping.
 //!
 //! They are `#[ignore]`d because the default `cargo test --workspace` has no `mur` to launch.
-//! `MUR_BIN=… cargo test -p driver-openai-compatible --test mur_run_fake_openai_compatible --
+//! `MUR_BIN=… cargo test -p driver-vllm --test mur_run_fake_vllm --
 //! --ignored` runs them.
 //!
 //! Unix only: it spawns a host `mur` and reads Unix permission bits, so a `wasm32-wasip2` build
@@ -37,14 +37,14 @@ use std::{
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
-const DRIVER_CRATE: &str = "drivers/driver-openai-compatible";
+const DRIVER_CRATE: &str = "drivers/driver-vllm";
 
 /// A served-model name with a `/` and a `:`; it must reach the server byte for byte.
 const MODEL: &str = "org/Llama-3.1-8B-Instruct:q4";
 
 /// The capsule's name and version. The host's `prompt_cache_key` opens with
 /// `<name>:<version>:`, so that prefix appearing anywhere on the wire means the key was sent.
-const CAPSULE_NAME: &str = "openai-compatible-fake-proof";
+const CAPSULE_NAME: &str = "vllm-fake-proof";
 const CAPSULE_VERSION: &str = "0.1.0";
 
 /// The key an `api_key` capsule hands the gateway; the fake must see it as the runtime's Bearer
@@ -132,17 +132,14 @@ fn build_driver() {
             .args([
                 "build",
                 "-p",
-                "driver-openai-compatible",
+                "driver-vllm",
                 "--target",
                 "wasm32-wasip2",
                 "--release",
             ])
             .status()
-            .expect("failed to spawn `cargo build` for driver-openai-compatible");
-        assert!(
-            status.success(),
-            "cargo build of driver-openai-compatible failed"
-        );
+            .expect("failed to spawn `cargo build` for driver-vllm");
+        assert!(status.success(), "cargo build of driver-vllm failed");
     });
 }
 
@@ -254,10 +251,10 @@ impl Staging {
             self.manifest(),
             format!(
                 "name: {CAPSULE_NAME}\nversion: {CAPSULE_VERSION}\nartifacts:\n\
-                 \x20 - name: local/driver-openai-compatible\n    version: {}\n    \
+                 \x20 - name: local/driver-vllm\n    version: {}\n    \
                  runtime: driver\n    gateway:\n      endpoint: {endpoint}\n      {auth}\n\
                  inference:\n  transport: http\n  model: \"{}\"\n  max_tokens: {OUTPUT_CAP}\n  \
-                 driver:\n    artifact: local/driver-openai-compatible\n    config:{config}\
+                 driver:\n    artifact: local/driver-vllm\n    config:{config}\
                  context:\n  max_tokens: {CONTEXT_WINDOW}\ntrace:\n  capture: content\n",
                 self.version, capsule.model
             ),
@@ -283,14 +280,14 @@ fn stage() -> Staging {
 
     let mut publish = mur(&staging.home);
     publish.arg("publish").arg(&zip);
-    run_to_success(publish, "publishing driver-openai-compatible");
+    run_to_success(publish, "publishing driver-vllm");
 
     let mut install = mur(&staging.home);
     install
         .current_dir(staging.project.path())
         .arg("install")
         .arg(&zip);
-    run_to_success(install, "installing driver-openai-compatible");
+    run_to_success(install, "installing driver-vllm");
     staging
 }
 

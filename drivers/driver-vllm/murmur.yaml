@@ -1,9 +1,9 @@
-name: driver-openai-compatible
+name: driver-vllm
 version: 0.1.0
 runtime: driver
-description: "Self-hosted OpenAI compatible server driver (vLLM and others) — any model the server serves, its id passed through unchanged, on chat completions with tool calls or plain completions, with surface, structured_outputs and temperature config keys"
+description: "Self-hosted vLLM server driver — any model the server serves, its id passed through unchanged, on chat completions with tool calls or plain completions, with surface, structured_outputs and temperature config keys"
 requires_files:
-  - driver_openai_compatible.wasm
+  - driver_vllm.wasm
 
 # How this provider expects the inference credential to be presented; the runtime substitutes {key}.
 upstream_auth:
